@@ -1816,6 +1816,15 @@ impl<'a> Lexer<'a> {
     /// (parallel to the token vec, including the trailing `Eof`). Used to thread
     /// real line numbers into Lua error messages. (frankenredis-m7oy8)
     fn tokenize_all_with_lines(&mut self) -> Result<(Vec<Token>, Vec<u32>), String> {
+        // Bare-message form — preserves the contract tokenize_all / loadstring
+        // assert on. (frankenredis-5qhz7)
+        self.tokenize_all_located().map_err(|(_, msg)| msg)
+    }
+
+    /// Like `tokenize_all_with_lines`, but a lexer error carries the 1-based
+    /// line where it occurred so callers can render `user_script:N`.
+    /// (frankenredis-5qhz7)
+    fn tokenize_all_located(&mut self) -> Result<(Vec<Token>, Vec<u32>), (u32, String)> {
         let mut tokens = Vec::new();
         let mut lines = Vec::new();
         let mut cur_line: u32 = 1;
@@ -1823,14 +1832,19 @@ impl<'a> Lexer<'a> {
         loop {
             // Position at the next token's first byte, then count newlines in
             // the gap since the previous token (O(n) total, not O(n^2)).
-            self.skip_whitespace_and_comments()?;
+            self.skip_whitespace_and_comments().map_err(|e| {
+                let upto = self.pos.min(self.src.len());
+                let ln = cur_line
+                    + self.src[counted..upto].iter().filter(|&&b| b == b'\n').count() as u32;
+                (ln, e)
+            })?;
             let start = self.pos.min(self.src.len());
             cur_line += self.src[counted..start]
                 .iter()
                 .filter(|&&b| b == b'\n')
                 .count() as u32;
             counted = start;
-            let tok = self.next_token()?;
+            let tok = self.next_token().map_err(|e| (cur_line, e))?;
             let is_eof = tok == Token::Eof;
             tokens.push(tok);
             lines.push(cur_line);
@@ -1953,6 +1967,14 @@ impl Parser {
     /// 1-based source line of the token at the parser cursor. (m7oy8)
     fn cur_line(&self) -> u32 {
         self.lines.get(self.pos).copied().unwrap_or(1)
+    }
+
+    /// 1-based line of the parse-error position, clamped to the last real token
+    /// so an error at `<eof>` reports the final line rather than 1. Used to
+    /// surface the true compile-error line in `user_script:N`. (frankenredis-5qhz7)
+    fn error_line(&self) -> u32 {
+        let idx = self.pos.min(self.lines.len().saturating_sub(1));
+        self.lines.get(idx).copied().unwrap_or(1)
     }
 
     fn peek(&self) -> &Token {
@@ -12768,19 +12790,45 @@ fn lua_execution_source(script: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
-fn parse_lua_chunk(source: &[u8]) -> Result<Block, String> {
+/// Compile a chunk, returning the parse error as `(1-based line, bare message)`
+/// on failure. The line comes from the parser's per-token line map (with_lines).
+/// (frankenredis-5qhz7)
+fn parse_lua_chunk_located(source: &[u8]) -> Result<Block, (u32, String)> {
     let mut lexer = Lexer::new(source);
-    let (tokens, lines) = lexer.tokenize_all_with_lines()?;
+    let (tokens, lines) = lexer.tokenize_all_located()?;
     let mut parser = Parser::with_lines(tokens, lines);
-    let mut stmts = parser.parse_block()?;
+    let mut stmts = parser
+        .parse_block()
+        .map_err(|m| (parser.error_line(), m))?;
     if !parser.check(&Token::Eof) {
-        return Err(format!(
-            "'<eof>' expected near '{}'",
-            token_display(parser.peek())
+        return Err((
+            parser.error_line(),
+            format!("'<eof>' expected near '{}'", token_display(parser.peek())),
         ));
     }
     resolve_lua_local_slots(&mut stmts);
     Ok(stmts)
+}
+
+fn parse_lua_chunk(source: &[u8]) -> Result<Block, String> {
+    // Bare-message form (no line prefix) — preserves the contract that
+    // compile_check / loadstring assert on. Use compile_error_line() when the
+    // caller needs the `user_script:N` line. (frankenredis-5qhz7)
+    parse_lua_chunk_located(source).map_err(|(_, msg)| msg)
+}
+
+/// The compile error for `source` formatted as `N: <message>` with the true
+/// 1-based error line — for callers that render `user_script:N: <message>`
+/// (EVAL/EVALSHA/SCRIPT LOAD). Returns the same bare message parse_lua_chunk
+/// produces, prefixed with the actual line. (frankenredis-5qhz7)
+pub(crate) fn compile_error_line(source: &[u8]) -> String {
+    let resolved = lua_execution_source(source);
+    match parse_lua_chunk_located(resolved.as_ref()) {
+        Err((line, msg)) => format!("{line}: {msg}"),
+        // Only called on the error path; if it unexpectedly compiles, fall back
+        // to the line-1 form so the envelope stays well-formed.
+        Ok(_) => "1: ".to_string(),
+    }
 }
 
 pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, String> {

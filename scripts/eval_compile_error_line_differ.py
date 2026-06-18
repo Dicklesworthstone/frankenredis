@@ -1,50 +1,53 @@
 #!/usr/bin/env python3
 """Differential gate for Lua compile-error LINE numbers, fr vs vendored redis 7.2.4.
 
-A Lua parse error reports `user_script:<line>:` with the actual error line. fr's
-parser tracks per-token lines (Parser::with_lines) but every caller hardcodes
-`:1:`, so multi-line scripts report the wrong line (frankenredis-5qhz7).
-
-HARD checks: single-line compile errors (line == 1, already byte-exact).
-DOCUMENTED divergence (NOTE, gate stays green; auto-promotes once 5qhz7 lands):
-multi-line scripts whose syntax error is on line > 1.
+A Lua parse/lex error reports `user_script:<line>:` with the actual error line.
+fr previously hardcoded `:1:` at every caller (frankenredis-5qhz7); the fix
+threads the parser's per-token line map (and the lexer's line) through a located
+compile path so EVAL/EVALSHA/SCRIPT LOAD render the true line. This gate now HARD-
+checks every case byte-exact: single-line (line 1), multi-line parser errors, the
+`<eof>` case, multi-line LEXER errors (malformed number / unfinished string /
+unexpected symbol / unterminated block comment), and a valid script.
 
 Usage: eval_compile_error_line_differ.py <oracle_port> <fr_port>
-       Exit 0 = parity (modulo documented 5qhz7 divergence), 1 = NEW divergence.
+       Exit 0 = every case byte-exact, 1 = divergence.
 """
 import socket
 import sys
 import time
-import re
 
 
 def conn(p):
     return socket.create_connection(("127.0.0.1", p), timeout=5)
 
 
-def evalerr(s, script):
-    a = ("EVAL", script, "0")
+def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x.encode()
+        x = x.encode() if isinstance(x, str) else x
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
     time.sleep(0.03)
     return s.recv(1 << 20)
 
 
-def line_of(reply):
-    m = re.search(rb"user_script:(\d+):", reply)
-    return int(m.group(1)) if m else None
-
-
-# (label, script, kind) — "hard" must match byte-exact; "multiline" is 5qhz7.
+# (label, argv) — each must be byte-exact vs redis 7.2.4.
 CASES = [
-    ("single_line", "syntax error here", "hard"),
-    ("single_line_paren", ")bad", "hard"),
-    ("multiline_l3", "local x=1\nlocal y=2\nsyntax error here", "multiline"),
-    ("multiline_l4", "local a=1\nlocal b=2\nlocal c=3\n)bad", "multiline"),
-    ("multiline_l2", "local ok=1\nreturn return", "multiline"),
+    ("eval_single_line", ("EVAL", "syntax error here", "0")),
+    ("eval_paren_l1", ("EVAL", ")bad", "0")),
+    ("eval_parse_err_l3", ("EVAL", "local x=1\nlocal y=2\nsyntax error here", "0")),
+    ("eval_parse_err_l4", ("EVAL", "local a=1\nlocal b=2\nlocal c=3\n)bad", "0")),
+    ("eval_parse_err_l2", ("EVAL", "local ok=1\nreturn return", "0")),
+    ("eval_eof_err_l2", ("EVAL", "local x=1\nreturn 1 +", "0")),
+    ("eval_eof_err_l1", ("EVAL", "return 1 +", "0")),
+    ("eval_lex_badnum_l2", ("EVAL", "local x=1\nlocal y=0x", "0")),
+    ("eval_lex_unfinished_str_l2", ("EVAL", "local a=1\nlocal s='unterminated", "0")),
+    ("eval_lex_unfinished_str_l4",
+     ("EVAL", "local a=1\nlocal b=2\nlocal c=3\nlocal s='x", "0")),
+    ("eval_lex_unterm_comment_l2", ("EVAL", "local x=1\n--[[ unterminated", "0")),
+    ("scriptload_single_line", ("SCRIPT", "LOAD", "@@@")),
+    ("scriptload_lex_err_l3", ("SCRIPT", "LOAD", "local x=1\nlocal y=2\n!!bad")),
+    ("eval_valid", ("EVAL", "return 1+1", "0")),
 ]
 
 
@@ -52,36 +55,20 @@ def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
-    fails, notes = [], []
-    for label, script, kind in CASES:
-        ro, rf = evalerr(od, script), evalerr(fr, script)
-        if kind == "hard":
-            if ro != rf:
-                fails.append(f"{label}: redis={ro!r} fr={rf!r}")
-        else:  # multiline
-            ol, fl = line_of(ro), line_of(rf)
-            if ol is None:
-                fails.append(f"{label}: redis reply has no user_script:<line>: {ro!r}")
-            elif ro == rf:
-                notes.append(f"{label} now MATCHES (frankenredis-5qhz7 fixed?) — promote to HARD")
-            elif fl == 1 and ol > 1:
-                notes.append(
-                    f"{label} KNOWN DIVERGENCE (frankenredis-5qhz7): redis line={ol} fr line={fl} "
-                    f"(redis={ro!r} fr={rf!r})"
-                )
-            else:
-                fails.append(f"{label} UNEXPECTED: redis={ro!r} fr={rf!r}")
+    fails = []
+    for label, argv in CASES:
+        ro, rf = cmd(od, *argv), cmd(fr, *argv)
+        if ro != rf:
+            fails.append(f"{label}: redis={ro!r} fr={rf!r}")
     print("=" * 60)
-    for n in notes:
-        print(f"NOTE  {n}")
     if fails:
-        print(f"FAIL — {len(fails)} NEW compile-error-line divergence(s) vs redis 7.2.4:")
+        print(f"FAIL — {len(fails)} compile-error-line divergence(s) vs redis 7.2.4:")
         for x in fails:
             print(f"  {x}")
         sys.exit(1)
     print(
-        "PASS — Lua compile-error reporting matches redis 7.2.4 "
-        f"(single-line hard; {len(notes)} documented 5qhz7 multi-line divergence(s))"
+        "PASS — Lua compile-error line reporting byte-exact vs redis 7.2.4 "
+        f"({len(CASES)} cases: parser/lexer/eof, single+multi-line) [frankenredis-5qhz7 fixed]"
     )
 
 

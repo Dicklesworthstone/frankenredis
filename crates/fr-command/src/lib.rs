@@ -23820,9 +23820,11 @@ fn eval_cmd(
     // "malformed number near …", etc. that previously fell through.
     let compiled = match lua_eval::compile_lua_chunk_cached(script) {
         Ok(compiled) => compiled,
-        Err(parse_err) => {
+        Err(_) => {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
             return Ok(RespFrame::Error(format!(
-                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(script)
             )));
         }
     };
@@ -23883,9 +23885,11 @@ fn evalsha_cmd(
     };
     let compiled = match lua_eval::compile_lua_chunk_cached(&script) {
         Ok(compiled) => compiled,
-        Err(parse_err) => {
+        Err(_) => {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
             return Ok(RespFrame::Error(format!(
-                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(&script)
             )));
         }
     };
@@ -24018,9 +24022,11 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         // hashing first and only failing later at EVAL time, so callers
         // got a SHA back for unparseable Lua. Pre-validate via the same
         // lex+parse path EVAL uses so the rejection happens at LOAD time.
-        if let Err(parse_err) = lua_eval::compile_check(&argv[2]) {
+        if lua_eval::compile_check(&argv[2]).is_err() {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
             return Err(CommandError::Custom(format!(
-                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(&argv[2])
             )));
         }
         let sha1 = store.script_load(&argv[2]);
