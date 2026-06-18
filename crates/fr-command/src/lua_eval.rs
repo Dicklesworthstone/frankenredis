@@ -9230,16 +9230,6 @@ impl<'a> LuaState<'a> {
                     // existing prefix and avoids double-stamping.
                     // (br-frankenredis-fo1s, br-frankenredis-fdys,
                     // br-frankenredis-pcallerr)
-                    let err_msg = if err_msg.starts_with("ERR unknown command ") {
-                        "ERR Unknown Redis command called from script".to_string()
-                    } else if err_msg.starts_with("ERR wrong number of arguments")
-                        || err_msg
-                            .starts_with("ERR Unknown subcommand or wrong number of arguments")
-                    {
-                        "ERR Wrong number of args calling Redis command from script".to_string()
-                    } else {
-                        err_msg
-                    };
                     Err(err_msg)
                 }
             }
@@ -9277,7 +9267,13 @@ impl<'a> LuaState<'a> {
                 // "script: <sha>" context suffix. Route Error reply-frames through the
                 // same path as a dispatch Err so both behaviors match upstream.
                 if let RespFrame::Error(msg) = &frame {
-                    let err_msg = msg.clone();
+                    // (frankenredis-0czgc) redis resolves a container command's
+                    // subcommand at the script command-lookup stage, so an
+                    // unresolvable subcommand surfaces as "Unknown Redis command
+                    // called from script" — not the command's own
+                    // "unknown subcommand '<x>'. Try <CMD> HELP." reply (which is the
+                    // byte-exact DIRECT wording). Rewrite uniformly for all containers.
+                    let err_msg = script_context_rewrite_error(msg.clone());
                     return if is_pcall {
                         let t = LuaTable::new();
                         t.set(
@@ -9296,6 +9292,10 @@ impl<'a> LuaState<'a> {
                 )])
             }
             Err(err_msg) => {
+                // (frankenredis-0czgc) apply the script command-lookup rewrites
+                // uniformly — intercepted paths (e.g. acl_script_result) produce the
+                // raw command error, bypassing the dispatch-Err branch's rewrite.
+                let err_msg = script_context_rewrite_error(err_msg);
                 if is_pcall {
                     let t = LuaTable::new();
                     t.set(
@@ -9308,6 +9308,29 @@ impl<'a> LuaState<'a> {
                 }
             }
         }
+    }
+}
+
+/// (frankenredis-0czgc) Mirror redis's script command-lookup error rewrites that
+/// happen before/around luaRedisGenericCommand: an unresolvable command OR container
+/// subcommand becomes "Unknown Redis command called from script", and an arity failure
+/// becomes "Wrong number of args calling Redis command from script". Applied uniformly
+/// to every command error surfaced from redis.call/redis.pcall — whether it came from
+/// dispatch (Err) or an intercepted path (acl_script_result, etc.) or a command reply
+/// frame (Ok(Error)). The verbatim "unknown subcommand '<x>'. Try <CMD> HELP." /
+/// "wrong number of arguments for '<cmd>'" wording is the DIRECT (non-script) reply.
+/// Idempotent: the rewritten strings don't match the input prefixes.
+fn script_context_rewrite_error(err_msg: String) -> String {
+    if err_msg.starts_with("ERR unknown command ")
+        || err_msg.starts_with("ERR unknown subcommand ")
+    {
+        "ERR Unknown Redis command called from script".to_string()
+    } else if err_msg.starts_with("ERR wrong number of arguments")
+        || err_msg.starts_with("ERR Unknown subcommand or wrong number of arguments")
+    {
+        "ERR Wrong number of args calling Redis command from script".to_string()
+    } else {
+        err_msg
     }
 }
 
