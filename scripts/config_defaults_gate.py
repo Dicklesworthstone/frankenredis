@@ -3,17 +3,15 @@
 
 A config-less redis and a freshly-started frankenredis both expose their
 COMPILED-IN defaults, so `CONFIG GET *` should agree on (a) the full set of
-parameter names and (b) every default value — except parameters whose value is
-legitimately host/runtime specific (paths, bind/port, cpulists, run-id, …).
+parameter names and (b) every default value except parameters whose value is
+legitimately host/runtime specific (paths, bind/port, cpulists, run-id, ...).
 
 This gate launches its own clean fr instance (so prior CONFIG SETs from other
-probes can't pollute it) and diffs it against a config-less redis oracle. It
-allowlists any parameters that are currently known-divergent (each tracked by a
-bead) so the gate stays green today and goes fully green the moment those land,
-while failing on any NEW default drift or missing/extra parameter.
+probes can't pollute it) and diffs it against a config-less redis oracle. Every
+non-host-specific default drift or missing/extra parameter is a hard failure.
 
-KNOWN ISSUES (allowlisted): none — the two former entries both landed and are
-re-verified byte-exact, so EVERY parameter is now checked directly:
+Former allowlist entries both landed and are re-verified byte-exact, so every
+non-host-specific parameter is checked directly:
   - always-show-logo            frankenredis-zbpg6 (fixed: fr now 'no') CLOSED
   - client-output-buffer-limit  frankenredis-8sb0l (fixed: per-class spec) CLOSED
 
@@ -21,7 +19,7 @@ Both servers are launched fresh by the gate (config-less) so a stray CONFIG SET
 from another probe can never pollute the comparison.
 
 Usage: config_defaults_gate.py [--bin PATH] [--redis-bin PATH]
-Exit 0 if defaults match (modulo host-specific + known-issues), else 1.
+Exit 0 if defaults match (modulo host-specific fields), else 1.
 """
 import argparse
 import os
@@ -100,14 +98,6 @@ HOST_SPECIFIC = {
     "watchdog-period",
 }
 
-# Currently-known divergences, each tracked by a bead; allowlisted so the gate
-# stays green until the bead lands, then the entry is removed to restore full
-# coverage of that parameter. (Empty now: always-show-logo (zbpg6) and
-# client-output-buffer-limit (8sb0l) both landed and are verified byte-exact vs
-# config-less redis 7.2.4, so they are once again checked directly — a regression
-# of either default now fails the gate.)
-KNOWN_ISSUES = {}
-
 # fr-specific knobs with no upstream equivalent.
 FR_ONLY = {"active-expire-enabled"}
 
@@ -161,7 +151,7 @@ def main():
         print("FAIL: redis-server not found (pass --redis-bin PATH)", file=sys.stderr)
         sys.exit(2)
 
-    failures, known = [], []
+    failures = []
     rproc, fproc = None, None
     try:
         rproc, rc = launch([redispath, "--port", "21814", "--save", ""], 21814)
@@ -179,10 +169,7 @@ def main():
         for k in sorted(set(oracle) & set(fr)):
             if k in HOST_SPECIFIC or oracle[k] == fr[k]:
                 continue
-            if k in KNOWN_ISSUES:
-                known.append(f"{k}: redis={oracle[k]!r} fr={fr[k]!r} ({KNOWN_ISSUES[k]})")
-            else:
-                failures.append(f"{k}: redis={oracle[k]!r} fr={fr[k]!r}")
+            failures.append(f"{k}: redis={oracle[k]!r} fr={fr[k]!r}")
     finally:
         for p in (fproc, rproc):
             if p is None:
@@ -198,10 +185,8 @@ def main():
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    for k in known:
-        print(f"KNOWN-ISSUE {k}")
     print(f"OK: {len(set(oracle) & set(fr))} CONFIG parameters match redis 7.2.4 "
-          "compiled defaults (host-specific + known-issues excluded)")
+          "compiled defaults (host-specific excluded)")
 
 
 if __name__ == "__main__":
