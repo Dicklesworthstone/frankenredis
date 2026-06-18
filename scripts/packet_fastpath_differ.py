@@ -247,11 +247,46 @@ def run_pass(od, fr, proto):
     return fails
 
 
+# Inside MULTI, every command — including ones with a byte-prefix fast path — must
+# be QUEUED (+QUEUED), not executed. This guards that the fast-path dispatch is
+# gated behind non-transaction state (a packet that executed mid-MULTI would
+# corrupt the transaction). (frankenredis-u7r1s)
+MULTI_SEQ = [
+    ["MULTI"],
+    ["INCR", "ctr"],
+    ["INCRBY", "ctr", "4"],
+    ["GET", "ctr"],
+    ["EXISTS", "ctr", "nope"],
+    ["LPUSH", "mlk", "a", "b"],
+    ["LRANGE", "mlk", "0", "-1"],
+    ["HGETALL", "h"],
+    ["ZSCORE", "z", "x"],
+    ["EXPIRE", "ctr", "1000"],
+    ["EXEC"],
+    ["GET", "ctr"],  # confirm executed exactly once (not also during queue)
+]
+
+
+def run_multi_exec(od, fr, proto):
+    if proto == 3:
+        call(od, "HELLO", "3")
+        call(fr, "HELLO", "3")
+    setup(od)
+    setup(fr)
+    fails = []
+    for args in MULTI_SEQ:
+        ro, rf = call(od, *args), call(fr, *args)
+        if ro != rf:
+            fails.append(f"[RESP{proto} MULTI] {' '.join(args)}: redis={ro!r} fr={rf!r}")
+    return fails
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     fails = run_pass(od, fr, 2) + run_pass(od, fr, 3)
+    fails += run_multi_exec(od, fr, 2) + run_multi_exec(od, fr, 3)
     print("=" * 60)
     if fails:
         print(f"FAIL — {len(fails)} fast-path packet divergence(s) vs redis 7.2.4:")
@@ -260,7 +295,7 @@ def main():
         sys.exit(1)
     print(
         f"PASS — all {len(CASES)} byte-prefix fast-path packets byte-exact vs "
-        "redis 7.2.4 under both RESP2 and RESP3"
+        "redis 7.2.4 under both RESP2 and RESP3 (+ MULTI/EXEC queueing)"
     )
 
 
