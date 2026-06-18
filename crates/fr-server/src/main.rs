@@ -3038,6 +3038,42 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_incr_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_decr_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4220,6 +4256,60 @@ fn parse_borrowed_plain_get_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainGetPacket { consumed, key })
+}
+
+struct BorrowedPlainIncrPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-5z119) Byte-prefix fast path for single-key INCR, mirroring the
+// GET packet: skips the generic multibulk parse for the exact `*2 $4 INCR <key>`
+// shape and reuses the verified execute_plain_incr_borrowed write path.
+fn parse_borrowed_plain_incr_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainIncrPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"INCR".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"INCR"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainIncrPacket { consumed, key })
+}
+
+struct BorrowedPlainDecrPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-5z119) Byte-prefix fast path for single-key DECR (twin of INCR).
+fn parse_borrowed_plain_decr_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainDecrPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"DECR".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"DECR"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainDecrPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
