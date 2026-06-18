@@ -35,7 +35,15 @@ enum Workload {
     Hset,
     Hget,
     Mixed,
+    // (frankenredis-n2u1g) ZRANGE key 0 -1 WITHSCORES against a prefilled zset —
+    // exercises the per-score reply path (redis_score_to_string + bulk encode) so the
+    // batch can quantify the zset-score allocation lever vs redis.
+    ZrangeWithscores,
 }
+
+/// (frankenredis-n2u1g) Members ZADD'd into each benchmarked zset during prefill, so a
+/// single ZRANGE WITHSCORES reply formats this many scores.
+const ZSET_BENCH_MEMBERS: usize = 64;
 
 impl Workload {
     fn parse(value: &str) -> Option<Self> {
@@ -63,6 +71,11 @@ impl Workload {
         if value.eq_ignore_ascii_case("mixed") {
             return Some(Self::Mixed);
         }
+        if value.eq_ignore_ascii_case("zrange-withscores")
+            || value.eq_ignore_ascii_case("zrangewithscores")
+        {
+            return Some(Self::ZrangeWithscores);
+        }
         None
     }
 
@@ -76,6 +89,7 @@ impl Workload {
             Self::Hset => "hset",
             Self::Hget => "hget",
             Self::Mixed => "mixed",
+            Self::ZrangeWithscores => "zrange-withscores",
         }
     }
 }
@@ -89,6 +103,7 @@ enum CommandKind {
     Lpop,
     Hset,
     Hget,
+    ZrangeWithscores,
 }
 
 #[derive(Debug, Clone)]
@@ -622,7 +637,9 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
 
 fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
     let prep_count = match config.workload {
-        Workload::Get | Workload::Mixed | Workload::Hget => config.keyspace,
+        Workload::Get | Workload::Mixed | Workload::Hget | Workload::ZrangeWithscores => {
+            config.keyspace
+        }
         Workload::Lpop => list_prefill_per_key(config.requests, config.keyspace, config.pipeline)
             .saturating_mul(config.keyspace),
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => 0,
@@ -675,6 +692,25 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
                     ));
                     flush_prepare_batch(&mut client, &mut batch)?;
                 }
+            }
+        }
+        Workload::ZrangeWithscores => {
+            // (frankenredis-n2u1g) ZADD ZSET_BENCH_MEMBERS integer-scored members per key
+            // so each later ZRANGE ... WITHSCORES reply formats that many scores.
+            for key_index in 0..config.keyspace {
+                let key = benchmark_key(&config.key_prefix, CommandKind::ZrangeWithscores, key_index);
+                let mut argv = Vec::with_capacity(2 + ZSET_BENCH_MEMBERS * 2);
+                argv.push(b"ZADD".to_vec());
+                argv.push(key);
+                for m in 0..ZSET_BENCH_MEMBERS {
+                    argv.push(m.to_string().into_bytes());
+                    argv.push(format!("m{m}").into_bytes());
+                }
+                batch.push(PreparedCommand {
+                    frame: argv_frame(argv),
+                    expectation: ResponseExpectation::INTEGER,
+                });
+                flush_prepare_batch(&mut client, &mut batch)?;
             }
         }
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => {}
@@ -747,6 +783,7 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Lpop => CommandKind::Lpop,
         Workload::Hset => CommandKind::Hset,
         Workload::Hget => CommandKind::Hget,
+        Workload::ZrangeWithscores => CommandKind::ZrangeWithscores,
         Workload::Mixed => {
             if rng.pick_percent() < read_percent {
                 CommandKind::Get
@@ -772,6 +809,7 @@ fn build_command(
         CommandKind::Lpop => ResponseExpectation::NON_ERROR,
         CommandKind::Hset => ResponseExpectation::INTEGER,
         CommandKind::Hget => ResponseExpectation::NON_ERROR,
+        CommandKind::ZrangeWithscores => ResponseExpectation::NON_ERROR,
     };
 
     let key = benchmark_key(&config.key_prefix, kind, key_index);
@@ -802,6 +840,15 @@ fn build_command(
                 .unwrap_or_else(|| value_template.to_vec()),
         ],
         CommandKind::Hget => vec![b"HGET".to_vec(), key, b"field".to_vec()],
+        // (frankenredis-n2u1g) full-range WITHSCORES read; the prefill ZADDs
+        // ZSET_BENCH_MEMBERS integer-scored members per key.
+        CommandKind::ZrangeWithscores => vec![
+            b"ZRANGE".to_vec(),
+            key,
+            b"0".to_vec(),
+            b"-1".to_vec(),
+            b"WITHSCORES".to_vec(),
+        ],
     };
 
     PreparedCommand {
@@ -824,6 +871,7 @@ fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
         CommandKind::Incr => "counter",
         CommandKind::Lpush | CommandKind::Lpop => "list",
         CommandKind::Hset | CommandKind::Hget => "hash",
+        CommandKind::ZrangeWithscores => "zset",
     };
     format!("{prefix}:{family}:{key_index}").into_bytes()
 }
@@ -915,7 +963,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed (default: set)\n\
+  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
