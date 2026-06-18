@@ -146,6 +146,11 @@ CASES = [
     # sorted order, so byte-exact vs redis (large hashtable/set order is a
     # separate dict-order WONTFIX, not exercised here).
     ["HGETALL", "h"],
+    ["HKEYS", "h"],
+    ["HKEYS", "nope"],
+    ["HKEYS", "str"],
+    ["HVALS", "h"],
+    ["HVALS", "nope"],
     ["HGETALL", "nope"],
     ["HGETALL", "str"],
     ["SMEMBERS", "s"],
