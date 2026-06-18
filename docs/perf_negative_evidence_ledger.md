@@ -136,5 +136,15 @@ turns). Keep claims honest — mark which.
   condition if rejected: only revisit with a fresh mixed-score compact-zset
   DUMP/RDB profile naming listpack construction or score formatting, not as
   generic vector cleanup.
+- frankenredis-hash-listpack-direct-emit-dv9n5 / cod-a: `fr-persist`
+  compact hash listpack encode now streams field/value entries directly into
+  the listpack payload instead of allocating a `Vec<&[u8]>` staging array before
+  calling `encode_listpack_strings_blob` — CODED (reasoned; batch benchmark
+  pending). The shared listpack finalizer keeps header/terminator/count behavior
+  identical for normal listpacks and the existing zset direct encoder. Guard
+  compares direct hash listpack bytes against the old flat-entry reference and
+  decodes integer/string/null-byte field-value pairs. Retry condition if
+  rejected: only revisit with a fresh compact-hash DUMP/RDB profile naming
+  listpack construction, not as generic vector-elision cleanup.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

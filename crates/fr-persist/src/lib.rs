@@ -1738,12 +1738,7 @@ fn encode_compact_hash_listpack(
     }) {
         return None;
     }
-    let mut flat: Vec<&[u8]> = Vec::with_capacity(fields.len() * 2);
-    for (f, v) in fields {
-        flat.push(f.as_slice());
-        flat.push(v.as_slice());
-    }
-    let lp = encode_listpack_strings_blob(&flat)?;
+    let lp = encode_hash_listpack_blob(fields)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
     // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
     // compresses it when it is large enough to beat the wire overhead (>20 bytes
@@ -1752,6 +1747,15 @@ fn encode_compact_hash_listpack(
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
     rdb_encode_string(&mut out, &lp);
     Some(out)
+}
+
+fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
+    let mut encoded = Vec::new();
+    for (field, value) in fields {
+        encode_listpack_entry(&mut encoded, field);
+        encode_listpack_entry(&mut encoded, value);
+    }
+    finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
 fn encode_compact_zset_listpack(
@@ -1807,16 +1811,7 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
             encode_listpack_entry(&mut encoded, score.as_bytes());
         }
     }
-    let total_bytes = 6usize.checked_add(encoded.len())?.checked_add(1)?;
-    let total_bytes = u32::try_from(total_bytes).ok()?;
-    let mut listpack = Vec::with_capacity(total_bytes as usize);
-    listpack.extend_from_slice(&total_bytes.to_le_bytes());
-    let entry_count = sorted_members.len().saturating_mul(2);
-    let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
-    listpack.extend_from_slice(&entry_count.to_le_bytes());
-    listpack.extend_from_slice(&encoded);
-    listpack.push(0xFF);
-    Some(listpack)
+    finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
 
 fn zset_listpack_integer_score(score: f64) -> Option<i64> {
@@ -2368,11 +2363,15 @@ pub fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
     for entry in entries {
         encode_listpack_entry(&mut encoded, entry);
     }
+    finish_listpack_blob(encoded, entries.len())
+}
+
+fn finish_listpack_blob(encoded: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
     let total_bytes = 6usize.checked_add(encoded.len())?.checked_add(1)?;
     let total_bytes = u32::try_from(total_bytes).ok()?;
     let mut listpack = Vec::with_capacity(total_bytes as usize);
     listpack.extend_from_slice(&total_bytes.to_le_bytes());
-    let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+    let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
     listpack.extend_from_slice(&entry_count.to_le_bytes());
     listpack.extend_from_slice(&encoded);
     listpack.push(0xFF);
@@ -4624,9 +4623,9 @@ mod tests {
         RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
         RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
         RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members,
-        decode_rdb, decode_rdb_prefix, encode_listpack_strings_blob, encode_rdb,
-        encode_rdb_with_functions, encode_rdb_with_options, lzf_compress, lzf_decompress,
-        rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        decode_rdb, decode_rdb_prefix, encode_hash_listpack_blob, encode_listpack_strings_blob,
+        encode_rdb, encode_rdb_with_functions, encode_rdb_with_options, lzf_compress,
+        lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -6051,6 +6050,43 @@ mod tests {
                 crate::listpack::ListpackEntry::String(b"3.5".to_vec()),
                 crate::listpack::ListpackEntry::String(b"int-high".to_vec()),
                 crate::listpack::ListpackEntry::Integer(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_hash_listpack_direct_emit_matches_flat_reference() {
+        let fields = vec![
+            (b"field".to_vec(), b"127".to_vec()),
+            (b"4095".to_vec(), b"value".to_vec()),
+            (b"neg".to_vec(), b"-2".to_vec()),
+            (b"bytes".to_vec(), b"hello\0world".to_vec()),
+        ];
+        let direct = encode_hash_listpack_blob(&fields).expect("direct hash listpack");
+        let flat: Vec<&[u8]> = fields
+            .iter()
+            .flat_map(|(field, value)| [field.as_slice(), value.as_slice()])
+            .collect();
+        let reference = encode_listpack_strings_blob(&flat).expect("flat hash listpack reference");
+
+        assert_eq!(direct, reference);
+        assert_eq!(
+            u16::from_le_bytes(direct[4..6].try_into().expect("listpack count")),
+            flat.len() as u16
+        );
+
+        let decoded = crate::listpack::decode_listpack(&direct).expect("decode direct hash lp");
+        assert_eq!(
+            decoded,
+            vec![
+                crate::listpack::ListpackEntry::String(b"field".to_vec()),
+                crate::listpack::ListpackEntry::Integer(127),
+                crate::listpack::ListpackEntry::Integer(4095),
+                crate::listpack::ListpackEntry::String(b"value".to_vec()),
+                crate::listpack::ListpackEntry::String(b"neg".to_vec()),
+                crate::listpack::ListpackEntry::Integer(-2),
+                crate::listpack::ListpackEntry::String(b"bytes".to_vec()),
+                crate::listpack::ListpackEntry::String(b"hello\0world".to_vec()),
             ]
         );
     }
