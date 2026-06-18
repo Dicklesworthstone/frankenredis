@@ -101,23 +101,30 @@ def main():
     build(f)
 
     diffs = 0
-    for k in KEYS:
-        # Original-encoding parity.
-        oo, of = o.cmd("OBJECT", "ENCODING", k), f.cmd("OBJECT", "ENCODING", k)
-        if oo != of:
-            diffs += 1
-            print(f"ORIG-ENC DIVERGE {k}: oracle={oo!r} fr={of!r}")
-        # DUMP + RESTORE on each server, then compare the RESTORE'd encoding.
+    try:
+        for k in KEYS:
+            # Original-encoding parity.
+            oo, of = o.cmd("OBJECT", "ENCODING", k), f.cmd("OBJECT", "ENCODING", k)
+            if oo != of:
+                diffs += 1
+                print(f"ORIG-ENC DIVERGE {k}: oracle={oo!r} fr={of!r}")
+            # DUMP + RESTORE on each server, then compare the RESTORE'd encoding.
+            for c in (o, f):
+                payload = c.cmd("DUMP", k)
+                c.cmd("DEL", k + "_r")
+                resp = c.cmd("RESTORE", k + "_r", "0", payload)
+                if not resp.startswith(b"+OK"):
+                    print(f"RESTORE failed for {k}: {resp!r}")
+            eo, ef = o.cmd("OBJECT", "ENCODING", k + "_r"), f.cmd("OBJECT", "ENCODING", k + "_r")
+            if eo != ef:
+                diffs += 1
+                print(f"RESTORE-ENC DIVERGE {k}: oracle={eo!r} fr={ef!r}")
+    finally:
         for c in (o, f):
-            payload = c.cmd("DUMP", k)
-            c.cmd("DEL", k + "_r")
-            resp = c.cmd("RESTORE", k + "_r", "0", payload)
-            if not resp.startswith(b"+OK"):
-                print(f"RESTORE failed for {k}: {resp!r}")
-        eo, ef = o.cmd("OBJECT", "ENCODING", k + "_r"), f.cmd("OBJECT", "ENCODING", k + "_r")
-        if eo != ef:
-            diffs += 1
-            print(f"RESTORE-ENC DIVERGE {k}: oracle={eo!r} fr={ef!r}")
+            try:
+                c.cmd("FLUSHALL")
+            except Exception:
+                pass
 
     if diffs:
         print(f"\nFAIL: {diffs} encoding divergence(s) (original and/or post-RESTORE)")
