@@ -141,6 +141,7 @@ PORT_BASED = [
     ("string_growth_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("in_command_dup_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("store_dest_aliasing_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("mpop_family_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitfield_differ.py", [str(ORACLE_PORT), str(FR_PORT), "1", "1200"]),
     # self-heals encoding thresholds on both servers before comparing, so it is
     # immune to a stray CONFIG SET left by an earlier gate on the shared oracle.
