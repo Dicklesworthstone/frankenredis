@@ -39,11 +39,19 @@ enum Workload {
     // exercises the per-score reply path (redis_score_to_string + bulk encode) so the
     // batch can quantify the zset-score allocation lever vs redis.
     ZrangeWithscores,
+    // (frankenredis-n2u1g) LRANGE key 0 -1 against a prefilled list — exercises the
+    // multi-element array-reply encode path (per-element bulk framing + decimal length
+    // headers), a read-heavy reply baseline for the reply-encode levers.
+    Lrange,
 }
 
 /// (frankenredis-n2u1g) Members ZADD'd into each benchmarked zset during prefill, so a
 /// single ZRANGE WITHSCORES reply formats this many scores.
 const ZSET_BENCH_MEMBERS: usize = 64;
+
+/// (frankenredis-n2u1g) Elements LPUSH'd into each benchmarked list during prefill, so a
+/// single LRANGE 0 -1 reply frames this many bulk elements (non-draining read).
+const LIST_BENCH_ELEMENTS: usize = 64;
 
 impl Workload {
     fn parse(value: &str) -> Option<Self> {
@@ -76,6 +84,9 @@ impl Workload {
         {
             return Some(Self::ZrangeWithscores);
         }
+        if value.eq_ignore_ascii_case("lrange") {
+            return Some(Self::Lrange);
+        }
         None
     }
 
@@ -90,6 +101,7 @@ impl Workload {
             Self::Hget => "hget",
             Self::Mixed => "mixed",
             Self::ZrangeWithscores => "zrange-withscores",
+            Self::Lrange => "lrange",
         }
     }
 }
@@ -104,6 +116,7 @@ enum CommandKind {
     Hset,
     Hget,
     ZrangeWithscores,
+    Lrange,
 }
 
 #[derive(Debug, Clone)]
@@ -642,6 +655,7 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
         }
         Workload::Lpop => list_prefill_per_key(config.requests, config.keyspace, config.pipeline)
             .saturating_mul(config.keyspace),
+        Workload::Lrange => LIST_BENCH_ELEMENTS.saturating_mul(config.keyspace),
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => 0,
     };
 
@@ -682,6 +696,23 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
             let per_key = list_prefill_per_key(config.requests, config.keyspace, config.pipeline);
             for key_index in 0..config.keyspace {
                 for item_index in 0..per_key {
+                    let list_value = value_for_list_item(&value, item_index);
+                    batch.push(build_command(
+                        config,
+                        CommandKind::Lpush,
+                        key_index,
+                        &list_value,
+                        None,
+                    ));
+                    flush_prepare_batch(&mut client, &mut batch)?;
+                }
+            }
+        }
+        Workload::Lrange => {
+            // (frankenredis-n2u1g) LPUSH a fixed LIST_BENCH_ELEMENTS items per key so each
+            // LRANGE 0 -1 returns a multi-element array (non-draining read).
+            for key_index in 0..config.keyspace {
+                for item_index in 0..LIST_BENCH_ELEMENTS {
                     let list_value = value_for_list_item(&value, item_index);
                     batch.push(build_command(
                         config,
@@ -784,6 +815,7 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Hset => CommandKind::Hset,
         Workload::Hget => CommandKind::Hget,
         Workload::ZrangeWithscores => CommandKind::ZrangeWithscores,
+        Workload::Lrange => CommandKind::Lrange,
         Workload::Mixed => {
             if rng.pick_percent() < read_percent {
                 CommandKind::Get
@@ -810,6 +842,7 @@ fn build_command(
         CommandKind::Hset => ResponseExpectation::INTEGER,
         CommandKind::Hget => ResponseExpectation::NON_ERROR,
         CommandKind::ZrangeWithscores => ResponseExpectation::NON_ERROR,
+        CommandKind::Lrange => ResponseExpectation::NON_ERROR,
     };
 
     let key = benchmark_key(&config.key_prefix, kind, key_index);
@@ -849,6 +882,8 @@ fn build_command(
             b"-1".to_vec(),
             b"WITHSCORES".to_vec(),
         ],
+        // (frankenredis-n2u1g) full-range list read; prefill LPUSHes the list like Lpop.
+        CommandKind::Lrange => vec![b"LRANGE".to_vec(), key, b"0".to_vec(), b"-1".to_vec()],
     };
 
     PreparedCommand {
@@ -869,7 +904,7 @@ fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
     let family = match kind {
         CommandKind::Set | CommandKind::Get => "string",
         CommandKind::Incr => "counter",
-        CommandKind::Lpush | CommandKind::Lpop => "list",
+        CommandKind::Lpush | CommandKind::Lpop | CommandKind::Lrange => "list",
         CommandKind::Hset | CommandKind::Hget => "hash",
         CommandKind::ZrangeWithscores => "zset",
     };
@@ -963,7 +998,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores (default: set)\n\
+  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
