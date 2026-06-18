@@ -21471,7 +21471,11 @@ fn encode_dump_quicklist2(
         buf,
         quicklist_fallback_node_count(list, list_max_listpack_size),
     );
-    let mut packed_entries = Vec::new();
+    // Pre-size the first node's listpack buffer to the per-node byte budget (SIZE_SAFETY_LIMIT,
+    // 8 KiB) so the common 1-2 node quicklist DUMP is built without realloc churn from empty.
+    // Under-reserve is harmless (Vec grows); capacity never affects content => byte-identical.
+    // (frankenredis perf: presize quicklist node buffer, code-first batch-test pending)
+    let mut packed_entries = Vec::with_capacity(8192);
     let mut packed_len = 0usize;
     let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
     let flush_packed =

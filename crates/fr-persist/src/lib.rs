@@ -1863,7 +1863,12 @@ fn encode_compact_list_quicklist2(
     let budget = thresholds.list_max_listpack_size;
     let mut buf = Vec::new();
     rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
-    let mut packed_encoded = Vec::new();
+    // Pre-size the first node's listpack buffer to (a cap of) the per-node byte budget so the
+    // common 1-2 node quicklist is built without realloc churn from empty. Capped at 8 KiB
+    // (a node's listpack is SIZE_SAFETY_LIMIT-bounded); under-reserve is harmless (Vec grows)
+    // and capacity never affects content => byte-identical.
+    // (frankenredis perf: presize quicklist node buffer, code-first batch-test pending)
+    let mut packed_encoded = Vec::with_capacity(budget.min(8192));
     let mut packed_count = 0usize;
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
     let flush =
