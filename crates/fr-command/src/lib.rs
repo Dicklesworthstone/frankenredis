@@ -21364,6 +21364,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     || kind.eq_ignore_ascii_case("REPLICA")
                     || kind.eq_ignore_ascii_case("NORMAL")
                     || kind.eq_ignore_ascii_case("PUBSUB")
+                    || kind.eq_ignore_ascii_case("SLAVE")
                 {
                     Vec::new()
                 } else {
@@ -21539,15 +21540,16 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     let kind = std::str::from_utf8(&argv[i + 1])
                         .map_err(|_| CommandError::InvalidUtf8Argument)?
                         .to_string();
-                    if !matches!(
-                        kind.to_ascii_lowercase().as_str(),
-                        "normal" | "master" | "replica" | "pubsub"
-                    ) {
-                        return Err(CommandError::Custom(format!(
-                            "ERR Unknown client type '{kind}'"
-                        )));
-                    }
-                    filter_type = Some(kind);
+                    let canonical = match kind.to_ascii_lowercase().as_str() {
+                        "normal" | "master" | "replica" | "pubsub" => kind.clone(),
+                        "slave" => "replica".to_string(),
+                        _ => {
+                            return Err(CommandError::Custom(format!(
+                                "ERR Unknown client type '{kind}'"
+                            )));
+                        }
+                    };
+                    filter_type = Some(canonical);
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
                     let user_arg = &argv[i + 1];
@@ -60966,6 +60968,19 @@ mod tests {
             &[
                 b"CLIENT".to_vec(),
                 b"KILL".to_vec(),
+                b"TYPE".to_vec(),
+                b"slave".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
                 b"SKIPME".to_vec(),
                 b"no".to_vec(),
             ],
@@ -68246,6 +68261,19 @@ mod tests {
                 b"LIST".to_vec(),
                 b"TYPE".to_vec(),
                 b"REPLICA".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"TYPE".to_vec(),
+                b"SLAVE".to_vec(),
             ],
             &mut store,
             0,
