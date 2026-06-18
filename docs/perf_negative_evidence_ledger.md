@@ -180,6 +180,14 @@ turns). Keep claims honest — mark which.
   decodes node containers/listpack entries. Retry condition if rejected: only
   revisit with a fresh mixed list DUMP/RDB profile naming packed-node listpack
   construction, not as generic Vec cleanup.
+- frankenredis-k1wcp / cod-a: `fr-store::encode_dump_quicklist2` fallback now
+  counts quicklist2 nodes in a cheap pass and emits PLAIN/PACKED records
+  directly while scanning instead of building a `Vec<Node>` plus per-node
+  `Vec<&[u8]>` staging — CODED (reasoned; batch benchmark pending). Guard pins
+  mixed PACKED/PLAIN/PACKED DUMP output with old-reference listpack bytes for
+  both packed nodes and decoded PLAIN content. Retry condition if rejected: do
+  not retry quicklist fallback node-vector removal unless a fresh list DUMP
+  profile names fallback node construction.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;

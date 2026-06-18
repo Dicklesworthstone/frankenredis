@@ -21463,11 +21463,6 @@ fn encode_dump_quicklist2(
         return Some(());
     }
 
-    enum Node<'a> {
-        Plain(&'a [u8]),
-        Packed(Vec<&'a [u8]>),
-    }
-
     // Build PACKED quicklist nodes while tracking the current node's listpack
     // byte size INCREMENTALLY. The previous form called
     // quicklist_packed_node_allows_append per item, which cloned the whole
@@ -21478,53 +21473,90 @@ fn encode_dump_quicklist2(
     // count. Admission still mirrors Redis quicklist's conservative
     // raw-value-len + 8 estimate rather than using the exact next entry length.
     // (frankenredis-list-dump-quicklist-reencode-q5ody, frankenredis-s36di)
-    let mut nodes = Vec::new();
-    let mut packed: Vec<&[u8]> = Vec::new();
+    encode_length(
+        buf,
+        quicklist_fallback_node_count(list, list_max_listpack_size),
+    );
+    let mut packed_entries = Vec::new();
+    let mut packed_len = 0usize;
     let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
+    let flush_packed =
+        |packed_entries: &mut Vec<u8>, packed_len: &mut usize, buf: &mut Vec<u8>| -> Option<()> {
+            if *packed_len == 0 {
+                return Some(());
+            }
+            let listpack = finish_listpack_entries(std::mem::take(packed_entries), *packed_len)?;
+            encode_length(buf, 2);
+            encode_rdb_string(buf, &listpack);
+            *packed_len = 0;
+            Some(())
+        };
     for item in list.iter() {
         if quicklist_plain_node_required(item, list_max_listpack_size) {
-            if !packed.is_empty() {
-                nodes.push(Node::Packed(std::mem::take(&mut packed)));
+            if packed_len != 0 {
+                flush_packed(&mut packed_entries, &mut packed_len, buf)?;
                 packed_bytes = LISTPACK_FRAME_OVERHEAD;
             }
-            nodes.push(Node::Plain(item));
+            encode_length(buf, 1);
+            encode_rdb_string(buf, item);
             continue;
         }
 
         let entry_bytes = listpack_entry_encoded_len(item);
-        if !packed.is_empty()
+        if packed_len != 0
             && !quicklist_packed_node_accepts(
-                packed.len(),
+                packed_len,
                 packed_bytes,
                 item.len(),
                 list_max_listpack_size,
             )
         {
-            nodes.push(Node::Packed(std::mem::take(&mut packed)));
+            flush_packed(&mut packed_entries, &mut packed_len, buf)?;
             packed_bytes = LISTPACK_FRAME_OVERHEAD;
         }
-        packed.push(item);
+        encode_listpack_entry(&mut packed_entries, item);
+        packed_len += 1;
         packed_bytes += entry_bytes;
     }
-    if !packed.is_empty() {
-        nodes.push(Node::Packed(packed));
-    }
-
-    encode_length(buf, nodes.len());
-    for node in nodes {
-        match node {
-            Node::Plain(item) => {
-                encode_length(buf, 1);
-                encode_rdb_string(buf, item);
-            }
-            Node::Packed(items) => {
-                let listpack = encode_listpack_strings(&items)?;
-                encode_length(buf, 2);
-                encode_rdb_string(buf, &listpack);
-            }
-        }
-    }
+    flush_packed(&mut packed_entries, &mut packed_len, buf)?;
     Some(())
+}
+
+fn quicklist_fallback_node_count(list: &ListValue, list_max_listpack_size: i64) -> usize {
+    let mut nodes = 0usize;
+    let mut packed_len = 0usize;
+    let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
+    for item in list.iter() {
+        if quicklist_plain_node_required(item, list_max_listpack_size) {
+            if packed_len != 0 {
+                nodes += 1;
+                packed_len = 0;
+                packed_bytes = LISTPACK_FRAME_OVERHEAD;
+            }
+            nodes += 1;
+            continue;
+        }
+
+        let entry_bytes = listpack_entry_encoded_len(item);
+        if packed_len != 0
+            && !quicklist_packed_node_accepts(
+                packed_len,
+                packed_bytes,
+                item.len(),
+                list_max_listpack_size,
+            )
+        {
+            nodes += 1;
+            packed_len = 0;
+            packed_bytes = LISTPACK_FRAME_OVERHEAD;
+        }
+        packed_len += 1;
+        packed_bytes += entry_bytes;
+    }
+    if packed_len != 0 {
+        nodes += 1;
+    }
+    nodes
 }
 
 /// (frankenredis DEBUG OBJECT quicklist fields) Count the synthesized
@@ -22100,6 +22132,10 @@ fn encode_listpack_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
     for entry in entries {
         encode_listpack_entry(&mut encoded_entries, entry);
     }
+    finish_listpack_entries(encoded_entries, entries.len())
+}
+
+fn finish_listpack_entries(encoded_entries: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
     let total_bytes = 6usize
         .checked_add(encoded_entries.len())
         .and_then(|len| len.checked_add(1))?;
@@ -22107,7 +22143,7 @@ fn encode_listpack_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
     let capacity = usize::try_from(total_bytes).ok()?;
     let mut listpack = Vec::with_capacity(capacity);
     listpack.extend_from_slice(&total_bytes.to_le_bytes());
-    let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+    let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
     listpack.extend_from_slice(&entry_count.to_le_bytes());
     listpack.extend_from_slice(&encoded_entries);
     listpack.push(0xFF);
@@ -42001,7 +42037,7 @@ mod tests {
     fn dump_mixed_list_keeps_small_items_packed_before_plain_big_item() {
         let mut store = Store::new();
         let big = vec![b'x'; 9_000];
-        let items = vec![b"a".to_vec(), b"b".to_vec(), big.clone()];
+        let items = vec![b"a".to_vec(), b"b".to_vec(), big.clone(), b"c".to_vec()];
         store.rpush(b"l", &items, 100).unwrap();
 
         let payload = store.dump_key(b"l", 100).unwrap();
@@ -42010,13 +42046,16 @@ mod tests {
         let mut cursor = 1;
         let (node_count, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
-        assert_eq!(node_count, 2);
+        assert_eq!(node_count, 3);
 
         let (container, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
         assert_eq!(container, 2);
         let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
         cursor += consumed;
+        let first_reference = encode_listpack_strings(&[b"a".as_slice(), b"b".as_slice()])
+            .expect("first reference listpack");
+        assert_eq!(listpack, first_reference);
         assert_eq!(
             decode_listpack_strings(&listpack).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec()]
@@ -42028,6 +42067,16 @@ mod tests {
         let (decoded_big, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
         cursor += consumed;
         assert_eq!(decoded_big, big);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        let last_reference =
+            encode_listpack_strings(&[b"c".as_slice()]).expect("last reference listpack");
+        assert_eq!(listpack, last_reference);
+        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![b"c".to_vec()]);
         assert_eq!(cursor, data_end);
 
         let mut restored = Store::new();
