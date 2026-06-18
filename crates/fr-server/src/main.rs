@@ -3299,6 +3299,25 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
+                {
+                    let tail = [packet.numkeys, packet.k1, packet.k2];
+                    if let Some(response) = runtime.execute_plain_sintercard_borrowed(&tail, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
@@ -5984,6 +6003,45 @@ fn parse_borrowed_plain_scard_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainScardPacket { consumed, key })
+}
+
+struct BorrowedPlainSintercard2Packet<'a> {
+    consumed: usize,
+    numkeys: &'a [u8],
+    k1: &'a [u8],
+    k2: &'a [u8],
+}
+
+// (frankenredis-nri5j) Byte-prefix fast path for `SINTERCARD 2 key key`.
+// LIMIT and other arities remain on generic borrowed dispatch.
+fn parse_borrowed_plain_sintercard2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainSintercard2Packet<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SINTERCARD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"SINTERCARD"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (numkeys, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    if numkeys != b"2" {
+        return None;
+    }
+    let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (k2, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainSintercard2Packet {
+        consumed,
+        numkeys,
+        k1,
+        k2,
+    })
 }
 
 struct BorrowedPlainHlenPacket<'a> {
@@ -15735,6 +15793,71 @@ mod tests {
             )
             .is_none(),
             "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_sintercard2_packet_parser_accepts_canonical_two_key() {
+        let input =
+            b"*4\r\n$10\r\nsInTeRcArD\r\n$1\r\n2\r\n$2\r\ns1\r\n$2\r\ns2\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_sintercard2_packet(input, &ParserConfig::default())
+                .expect("canonical two-key SINTERCARD packet should parse");
+
+        assert_eq!(parsed.numkeys, b"2");
+        assert_eq!(parsed.k1, b"s1");
+        assert_eq!(parsed.k2, b"s2");
+        assert_eq!(
+            parsed.consumed,
+            b"*4\r\n$10\r\nsInTeRcArD\r\n$1\r\n2\r\n$2\r\ns1\r\n$2\r\ns2\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_sintercard2_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_sintercard2_packet(
+                b"*04\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_sintercard2_packet(
+                b"*5\r\n$10\r\nSINTERCARD\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_none(),
+            "other numkey arities stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_sintercard2_packet(
+                b"*6\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\nb\r\n$5\r\nLIMIT\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "LIMIT form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_sintercard2_packet(
+                b"*4\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_sintercard2_packet(
+                b"*4\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$2\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed first-key bulk bodies stay on the generic parser"
         );
     }
 
