@@ -137,6 +137,7 @@ PORT_BASED = [
     ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("resp3_nested_aggregate_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("geo_precision_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("scan_encoding_cursor_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitfield_differ.py", [str(ORACLE_PORT), str(FR_PORT), "1", "1200"]),
     # self-heals encoding thresholds on both servers before comparing, so it is
     # immune to a stray CONFIG SET left by an earlier gate on the shared oracle.
