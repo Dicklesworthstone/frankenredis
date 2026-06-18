@@ -3651,6 +3651,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrange_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zrange_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -6356,6 +6379,35 @@ struct BorrowedPlainKeyRangePacket<'a> {
     key: &'a [u8],
     start: &'a [u8],
     end: &'a [u8],
+}
+
+// (frankenredis-8jcit) Byte-prefix fast path for `ZRANGE key start stop`.
+// Option-bearing ZRANGE forms remain on generic borrowed dispatch.
+fn parse_borrowed_plain_zrange_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZRANGE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANGE"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
 }
 
 // (frankenredis-zarlk) keyless `COMMAND COUNT` (`*2 $7 COMMAND $5 COUNT`); returns
@@ -15396,6 +15448,61 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_object_stat_packet(
                 b"*3\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrange_packet_parser_accepts_canonical_plain_range() {
+        let input = b"*4\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_zrange_packet(input, &ParserConfig::default())
+            .expect("canonical ZRANGE key start stop packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.start, b"0");
+        assert_eq!(parsed.end, b"-1");
+        assert_eq!(
+            parsed.consumed,
+            b"*4\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrange_packet_parser_defers_options_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_zrange_packet(
+                b"*04\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrange_packet(
+                b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n",
+                &cfg
+            )
+            .is_none(),
+            "option-bearing ZRANGE stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrange_packet(
+                b"*4\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrange_packet(
+                b"*4\r\n$6\r\nZRANGE\r\n$2\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n",
                 &cfg
             )
             .is_none(),
