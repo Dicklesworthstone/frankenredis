@@ -92,6 +92,19 @@ def main():
     for k, e in REPORTED.items():
         run(k, e, known)
 
+    # (frankenredis-1z4ba) The DUMP command uses encode_dump_quicklist2; the RDB-save path
+    # uses the SEPARATE encode_compact_list_quicklist2 — both were fixed to mark PLAIN only at
+    # >=1 GiB. Exercise the RDB-save encoder via DEBUG RELOAD on the large-element list and
+    # assert its DUMP still matches redis afterward (the two encoders must agree on node
+    # structure). Conditional: skip cleanly if DEBUG is disabled, so the gate stays portable.
+    if "ql_largeelem" in ASSERTED:
+        reload_reply = cmd(f, "DEBUG", "RELOAD")
+        if reload_reply.startswith(b"+OK"):
+            do, df = dump(o, "ql_largeelem"), dump(f, "ql_largeelem")
+            if do != df:
+                fails.append(f"ql_largeelem: DUMP after fr DEBUG RELOAD redis={len(do)}b "
+                             f"fr={len(df)}b (RDB-save encoder diverged)")
+
     if known:
         print("KNOWN (frankenredis-1z4ba, not asserted): " + "; ".join(known))
     if fails:
@@ -100,7 +113,7 @@ def main():
             print(f"  {x}")
         sys.exit(1)
     print("PASS — multi-node quicklist (all-PACKED-node) DUMP/RESTORE byte-exact vs redis 7.2.4 "
-          "[guards g7ag5 + 1z4ba large-element PACKED-node fix]")
+          "[guards g7ag5 + 1z4ba large-element PACKED-node fix, DUMP + RDB-save encoders]")
 
 
 if __name__ == "__main__":
