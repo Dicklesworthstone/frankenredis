@@ -37,15 +37,17 @@ def main():
         args=["HSET",f"h{n}"]
         for i in range(n): args += [f"f{i}",f"val{i:03d}"]
         chk(f"hset_{n}p", enc(*args)+enc("HGETALL",f"h{n}")+enc("HLEN",f"h{n}")+enc("OBJECT","ENCODING",f"h{n}"))
-    # LPUSH/RPUSH/SADD/ZADD N-value keyed-write packets (same bnrnp..w0i5z series)
-    for n in range(4,17):
+    # LPUSH/RPUSH/SADD/ZADD N-value keyed-write packets (same bnrnp..w0i5z series).
+    # Range extended to 19 to cover the ohsk5 17- and 18-value fast-path arities
+    # (the parser series grew past 16); 19 exercises the generic fallback just above them.
+    for n in range(4,20):
         chk(f"rpush_{n}p", enc("RPUSH",f"l{n}",*[f"v{i}" for i in range(n)])+enc("LRANGE",f"l{n}","0","-1")+enc("LLEN",f"l{n}"))
         chk(f"lpush_{n}p", enc("LPUSH",f"lp{n}",*[f"v{i}" for i in range(n)])+enc("LRANGE",f"lp{n}","0","-1"))
         chk_sorted(f"sadd_{n}p", enc("SADD",f"s{n}",*[f"m{i}" for i in range(n)])+enc("SMEMBERS",f"s{n}"))
         chk(f"sadd_int_{n}p", enc("SADD",f"si{n}",*[str(i) for i in range(n)])+enc("OBJECT","ENCODING",f"si{n}")+enc("SCARD",f"si{n}"))
         zargs=["ZADD",f"z{n}"]+sum([[str(i),f"m{i}"] for i in range(n)],[])
         chk(f"zadd_{n}p", enc(*zargs)+enc("ZRANGE",f"z{n}","0","-1","WITHSCORES")+enc("ZCARD",f"z{n}"))
-    for n in [4,8,12,16,17,20]:
+    for n in [4,8,12,16,17,18,20]:
         args=["MSET"]
         for i in range(n): args += [f"mk{n}_{i}",f"mv{i}"]
         chk(f"mset_{n}p", enc(*args)+enc("MGET",*[f"mk{n}_{i}" for i in range(n)]))
@@ -76,5 +78,6 @@ def main():
         print(f"FAIL — {len(fails)} keyed-write-packet divergence(s) vs redis 7.2.4:")
         for x in fails[:14]: print(f"  {x}")
         sys.exit(1)
-    print("PASS — keyed-write fast-path packets (HSET/MSET N=4..16 + fallback) byte-exact vs redis 7.2.4")
+    print("PASS — keyed-write fast-path packets byte-exact vs redis 7.2.4 "
+          "(LPUSH/RPUSH/SADD/ZADD N=4..19, HSET N=4..20, MSET incl 17/18 + fallback)")
 if __name__=="__main__": main()
