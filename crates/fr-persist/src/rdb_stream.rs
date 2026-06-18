@@ -917,8 +917,7 @@ fn take_string(lp: &[ListpackEntry], idx: &mut usize) -> Result<Vec<u8>, Upstrea
         .get(*idx)
         .ok_or(UpstreamStreamError::ShortListpackEntries)?;
     *idx += 1;
-    match v {
-        ListpackEntry::String(bytes) => Ok(bytes.clone()),
+    if matches!(v, ListpackEntry::Integer(_)) {
         // Upstream writes field names + values via lpAppend; integer values
         // get packed as LP_ENCODING_*_INT but were byte-strings on the
         // write side (stream arg processing calls lpAppend, not
@@ -926,8 +925,8 @@ fn take_string(lp: &[ListpackEntry], idx: &mut usize) -> Result<Vec<u8>, Upstrea
         // should not occur for user-visible fields — but in practice an
         // integer-looking value CAN be packed as an int. Match upstream's
         // listpackGetValue which returns a decimal-stringified integer.
-        ListpackEntry::Integer(n) => Ok(n.to_string().into_bytes()),
     }
+    Ok(v.to_bytes())
 }
 
 /// Apply a signed delta to an unsigned 64-bit base, wrapping on overflow.

@@ -101,7 +101,7 @@ pub fn decode_ziplist(data: &[u8]) -> Option<Vec<Vec<u8>>> {
                     _ => return None, // invalid encoding byte
                 };
                 i += adv;
-                out.push(val.to_string().into_bytes());
+                out.push(crate::decimal_i64_bytes(val));
             }
         }
     }
@@ -238,6 +238,28 @@ mod tests {
         );
         assert_eq!(entries[5], b"0");
         assert_eq!(entries[6], b"12");
+    }
+
+    #[test]
+    fn ziplist_integer_decimal_rendering_matches_std_edges_cod_a_packed_int_itoa_tgr69() {
+        let zl = assemble_ziplist(&[
+            vec![0xE0, 0, 0, 0, 0, 0, 0, 0, 0x80], // i64::MIN LE
+            vec![0xE0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F], // i64::MAX LE
+            vec![0xFE, 0x80],                       // i8::MIN
+            vec![0xC0, 0x00, 0x80],                 // i16::MIN
+            vec![0xD0, 0x00, 0x00, 0x00, 0x80],     // i32::MIN
+        ]);
+        let entries = decode_ziplist(&zl).expect("decode");
+        assert_eq!(
+            entries,
+            vec![
+                b"-9223372036854775808".to_vec(),
+                b"9223372036854775807".to_vec(),
+                b"-128".to_vec(),
+                b"-32768".to_vec(),
+                b"-2147483648".to_vec(),
+            ]
+        );
     }
 
     #[test]

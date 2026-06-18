@@ -14,6 +14,22 @@ pub mod listpack;
 pub(crate) mod rdb_stream;
 pub mod ziplist;
 
+pub(crate) fn decimal_i64_scratch(value: i64) -> ([u8; 20], usize) {
+    let mut scratch = [0u8; 20];
+    let end = scratch.len();
+    let mut start = fr_protocol::write_u64_digits(&mut scratch, end, value.unsigned_abs());
+    if value < 0 {
+        start -= 1;
+        scratch[start] = b'-';
+    }
+    (scratch, start)
+}
+
+pub(crate) fn decimal_i64_bytes(value: i64) -> Vec<u8> {
+    let (scratch, start) = decimal_i64_scratch(value);
+    scratch[start..].to_vec()
+}
+
 thread_local! {
     static LZF_SCRATCH: RefCell<LzfScratch> = const { RefCell::new(LzfScratch::new()) };
 }
@@ -2077,7 +2093,7 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
             }
             _ => unreachable!("width is one of 2, 4, 8"),
         };
-        members.push(value.to_string().into_bytes());
+        members.push(decimal_i64_bytes(value));
     }
     Some(members)
 }
@@ -2805,7 +2821,7 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
             0 => {
                 // 8-bit integer
                 let val = *data.get(1)? as i8;
-                Some((val.to_string().into_bytes(), 2))
+                Some((decimal_i64_bytes(i64::from(val)), 2))
             }
             1 => {
                 // 16-bit integer
@@ -2813,7 +2829,7 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
                     return None;
                 }
                 let val = i16::from_le_bytes([data[1], data[2]]);
-                Some((val.to_string().into_bytes(), 3))
+                Some((decimal_i64_bytes(i64::from(val)), 3))
             }
             2 => {
                 // 32-bit integer
@@ -2821,7 +2837,7 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
                     return None;
                 }
                 let val = i32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                Some((val.to_string().into_bytes(), 5))
+                Some((decimal_i64_bytes(i64::from(val)), 5))
             }
             3 => {
                 let (compressed_len, compressed_hdr) = rdb_decode_length(&data[1..])?;

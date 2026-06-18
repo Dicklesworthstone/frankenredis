@@ -32,7 +32,7 @@ impl ListpackEntry {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            ListpackEntry::Integer(n) => n.to_string().into_bytes(),
+            ListpackEntry::Integer(n) => crate::decimal_i64_bytes(*n),
             ListpackEntry::String(bytes) => bytes.clone(),
         }
     }
@@ -43,7 +43,7 @@ impl ListpackEntry {
     #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            ListpackEntry::Integer(n) => n.to_string().into_bytes(),
+            ListpackEntry::Integer(n) => crate::decimal_i64_bytes(n),
             ListpackEntry::String(bytes) => bytes,
         }
     }
@@ -72,14 +72,7 @@ impl ListpackIntegerBytes {
         // `% 10` / `/= 10` loop — halves the divisions per integer entry on the
         // listpack decode path (RESTORE / DEBUG RELOAD). Byte-identical output
         // (i64::MIN magnitude is 19 digits, +sign = 20, fits scratch[20]).
-        let mut scratch = [0u8; 20];
-        let end = scratch.len();
-        let mut start = fr_protocol::write_u64_digits(&mut scratch, end, value.unsigned_abs());
-        if value < 0 {
-            start -= 1;
-            scratch[start] = b'-';
-        }
-
+        let (scratch, start) = crate::decimal_i64_scratch(value);
         let len = scratch.len() - start;
         let mut bytes = [0u8; 20];
         bytes[..len].copy_from_slice(&scratch[start..]);
@@ -1029,6 +1022,14 @@ mod tests {
         assert_eq!(ListpackEntry::Integer(42).to_bytes(), b"42".to_vec());
         assert_eq!(ListpackEntry::Integer(-1).to_bytes(), b"-1".to_vec());
         assert_eq!(
+            ListpackEntry::Integer(i64::MIN).to_bytes(),
+            b"-9223372036854775808".to_vec()
+        );
+        assert_eq!(
+            ListpackEntry::Integer(i64::MAX).to_bytes(),
+            b"9223372036854775807".to_vec()
+        );
+        assert_eq!(
             ListpackEntry::String(b"hello".to_vec()).to_bytes(),
             b"hello".to_vec()
         );
@@ -1037,6 +1038,10 @@ mod tests {
     #[test]
     fn into_bytes_moves_string_payload_and_formats_ints() {
         assert_eq!(ListpackEntry::Integer(42).into_bytes(), b"42".to_vec());
+        assert_eq!(
+            ListpackEntry::Integer(i64::MIN).into_bytes(),
+            b"-9223372036854775808".to_vec()
+        );
         assert_eq!(
             ListpackEntry::String(b"hello".to_vec()).into_bytes(),
             b"hello".to_vec()

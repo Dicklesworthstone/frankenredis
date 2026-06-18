@@ -57,6 +57,14 @@ turns). Keep claims honest — mark which.
   A/B pending batch. NOTE: write_u64_digits is now the shared canonical itoa — other
   int-renderers (redis_score_to_string, RESP2 zset scores) could reuse it, but their
   callers live in contended fr-runtime/fr-store; coordinate before wiring.
+- frankenredis-cod-a-packed-int-itoa-tgr69 / cod-a: fr-persist packed/RDB integer
+  decode materialization now reuses the shared itoa2 helper for listpack entry
+  `to_bytes` / `into_bytes`, stream listpack integer fields, legacy ziplist
+  integer entries, intset members, and RDB integer-encoded strings — CODED
+  (reasoned; batch benchmark pending). Guard covers i64 sign/edge bytes and
+  packed integer decode output. Retry condition if rejected: only revisit with a
+  fresh RESTORE / DEBUG RELOAD / RDB-load profile where decimal integer
+  materialization is named, not as generic formatting cleanup.
 - 17-value LPUSH/RPUSH/SADD exact borrowed packet parser — CODED in `fr-server`
   under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
   keep only if the next release A/B for keyed-values packets shows a stable win;
