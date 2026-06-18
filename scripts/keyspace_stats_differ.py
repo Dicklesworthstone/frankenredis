@@ -105,28 +105,16 @@ def run(oport, fport):
     return diverged
 
 
-# (frankenredis-6f2f5, frankenredis-u2r0c.1) The set/zset algebra
-# keyspace_hits/misses gaps are fixed. Keep this allowlist empty so any future
-# Redis-vs-fr stats drift fails the gate immediately.
-KNOWN_DIVERGENCES = set()
-
-
 def main():
     oport, fport = int(sys.argv[1]), int(sys.argv[2])
     d = run(oport, fport)
-    new = [x for x in d if x[0] not in KNOWN_DIVERGENCES]
-    fixed = KNOWN_DIVERGENCES - {x[0] for x in d}
     for label, ored, fred in d:
-        tag = "NEW" if label not in KNOWN_DIVERGENCES else "known(6f2f5)"
-        print(f"  [{tag}] {label:28s} redis={ored} fr={fred}")
-    if fixed:
-        print(f"NOTE: {len(fixed)} previously-known divergence(s) now MATCH — "
-              f"remove from KNOWN_DIVERGENCES: {sorted(fixed)}")
-    if new:
-        print(f"FAIL — {len(new)} NEW keyspace-stats divergence(s) vs redis 7.2.4")
+        print(f"  {label:28s} redis={ored} fr={fred}")
+    if d:
+        print(f"FAIL — {len(d)} keyspace-stats divergence(s) vs redis 7.2.4")
         return 1
     print(f"PASS — keyspace_hits/misses match redis 7.2.4 across {len(CASES)} "
-          f"commands ({len(d)} known 6f2f5 divergences tracked)")
+          "commands")
     return 0
 
 
