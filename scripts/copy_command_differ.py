@@ -50,6 +50,14 @@ def main():
     chk("ttl-preserved",["set","a","x","EX","500"],["copy","a","b"],["ttl","b"])
     chk("self",["set","a","x"],["copy","a","a"])
     chk("cross-db",["set","a","x"],["copy","a","b","DB","1"],["select","1"],["get","b"],["select","0"])
+    chk("cross-db-existing-noreplace",
+        ["select","0"],["flushall"],["set","src","new"],
+        ["select","1"],["set","dst","old"],["select","0"],
+        ["copy","src","dst","DB","1"],["select","1"],["get","dst"],["select","0"])
+    chk("cross-db-existing-replace",
+        ["select","0"],["flushall"],["set","src","new"],
+        ["select","1"],["set","dst","old"],["select","0"],
+        ["copy","src","dst","DB","1","REPLACE"],["select","1"],["get","dst"],["select","0"])
     chk("list-enc",["rpush","l","1","2","3"],["copy","l","l2"],["object","encoding","l2"],["lrange","l2","0","-1"])
     chk("hash-enc",["hset","h","f","v"],["copy","h","h2"],["object","encoding","h2"],["hgetall","h2"])
     chk("set-intset",["sadd","s","1","2","3"],["copy","s","s2"],["object","encoding","s2"])
