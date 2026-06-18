@@ -172,6 +172,14 @@ turns). Keep claims honest — mark which.
   and decodes string, positive-integer, negative-integer, and null-byte members.
   Retry condition if rejected: only revisit with a fresh compact-set DUMP/RDB
   profile naming listpack construction, not as generic vector-elision cleanup.
+- frankenredis-g5o8d / cod-a: `fr-persist` compact list QUICKLIST_2 PACKED
+  nodes now encode listpack entries directly into the node payload while
+  scanning instead of retaining a per-node `Vec<&[u8]>` and re-encoding on
+  flush — CODED (reasoned; batch benchmark pending). Guard compares mixed
+  PACKED/PLAIN/PACKED quicklist2 bytes against the old flat-entry reference and
+  decodes node containers/listpack entries. Retry condition if rejected: only
+  revisit with a fresh mixed list DUMP/RDB profile naming packed-node listpack
+  construction, not as generic Vec cleanup.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;

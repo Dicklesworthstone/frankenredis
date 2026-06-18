@@ -1846,35 +1846,39 @@ fn encode_compact_list_quicklist2(
     let budget = thresholds.list_max_listpack_size;
     let mut buf = Vec::new();
     rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
-    let mut packed: Vec<&[u8]> = Vec::new();
+    let mut packed_encoded = Vec::new();
+    let mut packed_count = 0usize;
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
-    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>| -> Option<()> {
-        if !packed.is_empty() {
-            let lp = encode_listpack_strings_blob(packed)?;
+    let flush =
+        |packed_encoded: &mut Vec<u8>, packed_count: &mut usize, buf: &mut Vec<u8>| -> Option<()> {
+            if *packed_count == 0 {
+                return Some(());
+            }
+            let lp = finish_listpack_blob(std::mem::take(packed_encoded), *packed_count)?;
             rdb_encode_length(buf, 2); // PACKED
             rdb_encode_string(buf, &lp);
-            packed.clear();
-        }
-        Some(())
-    };
+            *packed_count = 0;
+            Some(())
+        };
     for item in items {
         if item.len() > budget {
             // Over-budget single element → its own PLAIN node.
-            flush(&mut packed, &mut buf)?;
+            flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
             rdb_encode_length(&mut buf, 1); // PLAIN
             rdb_encode_string(&mut buf, item);
             continue;
         }
         let entry_bytes = listpack_entry_encoded_len(item);
-        if !packed.is_empty() && packed_bytes + entry_bytes > budget {
-            flush(&mut packed, &mut buf)?;
+        if packed_count != 0 && packed_bytes + entry_bytes > budget {
+            flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
         }
-        packed.push(item.as_slice());
+        encode_listpack_entry(&mut packed_encoded, item);
+        packed_count += 1;
         packed_bytes += entry_bytes;
     }
-    flush(&mut packed, &mut buf)?;
+    flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
     Some(buf)
 }
 
@@ -4957,7 +4961,10 @@ mod tests {
 
     #[test]
     fn large_list_rdb_uses_multinode_quicklist2_not_legacy() {
-        use super::{CompactRdbThresholds, encode_compact_list_quicklist2, rdb_decode_length};
+        use super::{
+            CompactRdbThresholds, encode_compact_list_quicklist2, encode_listpack_strings_blob,
+            rdb_decode_length, rdb_encode_length, rdb_encode_string,
+        };
         let th = CompactRdbThresholds::default();
         // > one 8 KiB listpack node, no single oversized element.
         let items: Vec<Vec<u8>> = (0..10000).map(|i| format!("e{i}").into_bytes()).collect();
@@ -4989,6 +4996,19 @@ mod tests {
             &mixed_thresholds,
         )
         .expect("mixed quicklist2 encodes");
+        let first_reference =
+            encode_listpack_strings_blob(&[b"a".as_slice(), b"b".as_slice()]).unwrap();
+        let last_reference = encode_listpack_strings_blob(&[b"c".as_slice()]).unwrap();
+        let mut expected = Vec::new();
+        rdb_encode_length(&mut expected, 3);
+        rdb_encode_length(&mut expected, 2);
+        rdb_encode_string(&mut expected, &first_reference);
+        rdb_encode_length(&mut expected, 1);
+        rdb_encode_string(&mut expected, &plain);
+        rdb_encode_length(&mut expected, 2);
+        rdb_encode_string(&mut expected, &last_reference);
+        assert_eq!(mixed, expected);
+
         let (node_count, mut cursor) = rdb_decode_length(&mixed).expect("mixed node count");
         assert_eq!(node_count, 3);
         let (first_container, consumed) =
