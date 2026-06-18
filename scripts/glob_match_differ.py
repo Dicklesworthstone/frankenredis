@@ -8,13 +8,12 @@ surface with no prior dedicated gate. This gate builds a rich keyspace and compa
 the MATCHED key SET (order-insensitive — KEYS order is unspecified) for a broad
 battery of adversarial patterns against vendored redis 7.2.4.
 
-KNOWN BUG, deliberately avoided here (frankenredis-z9dc3): a multi-star pattern
-(`**`, `***`, ...) matches the EMPTY string on fr but not on redis (redis's
+Includes the empty-string key, which exercises frankenredis-z9dc3 (FIXED): a
+multi-star pattern (`**`, `***`, ...) must NOT match the empty string (redis's
 stringmatchlen never enters its loop for an empty string, so only an empty pattern
-matches; single `*` matches the empty key via KEYS' separate allkeys shortcut).
-To keep this gate a clean regression lock of the otherwise byte-exact matcher, the
-keyspace contains NO empty-string key, so the bug is not exercised. Add an empty
-key + multi-star patterns here once z9dc3 is fixed.
+matches; single `*` matches the empty key via the KEYS/SCAN `allkeys` shortcut, not
+the matcher). The fix lives in fr-store glob_match (empty string matches only the
+empty pattern); this gate's `**`/`***` patterns over the empty key lock it.
 
 Usage: glob_match_differ.py <oracle_port> <fr_port>
        Exit 0 = matched-key sets identical, 1 = divergence.
@@ -23,8 +22,9 @@ import socket
 import sys
 import time
 
-# Rich keyspace (NO empty-string key — see z9dc3 note above).
+# Rich keyspace, including the empty-string key (exercises z9dc3, now fixed).
 KEYS = [
+    "",  # empty key: `*` matches it (allkeys shortcut), `**`/`***`/`?` do not.
     "hello", "hallo", "hxllo", "hllo", "heello", "HELLO", "h-llo", "hbllo",
     "hcllo", "hzllo", "h*llo", "h?llo", "h[llo", "h]llo", "ha", "abc", "a]c",
     "a-c", "a^c", "x", "\xff\xfe", "[abc]", "a\\b", "key:1", "key:2", "foo",
@@ -92,8 +92,8 @@ def main():
         sys.exit(1)
     print(
         f"PASS — glob (KEYS) matching byte-exact vs redis 7.2.4 "
-        f"({len(PATTERNS)} patterns x {len(KEYS)} keys: stars/?/classes/ranges/negation/escapes) "
-        "[multi-star-vs-empty edge = z9dc3]"
+        f"({len(PATTERNS)} patterns x {len(KEYS)} keys incl. empty: stars/?/classes/ranges/negation/escapes) "
+        "[z9dc3 multi-star-vs-empty FIXED]"
     )
 
 
