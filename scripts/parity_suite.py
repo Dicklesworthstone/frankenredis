@@ -135,6 +135,8 @@ PORT_BASED = [
     # ZPOPMIN/...) byte-exact under RESP2+RESP3 — guards the whole fast-path surface
     # so a dispatch-chain regression is caught in the suite.
     ("packet_fastpath_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # fast-path WRITES must emit the same keyspace events as the generic path.
+    ("fastpath_keyspace_events_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
