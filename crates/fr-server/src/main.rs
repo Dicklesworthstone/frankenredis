@@ -2639,7 +2639,33 @@ fn process_buffered_frames(
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = runtime.parser_config();
-                if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
+                if let Some(consumed) =
+                    parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_ping_borrowed_into(
+                            None,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_ping_packet(unparsed, &parser_config)
+                {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_ping_borrowed_into(
@@ -6078,12 +6104,32 @@ struct BorrowedPlainPingPacket<'a> {
     message: Option<&'a [u8]>,
 }
 
+const UPPER_NOARG_MULTIBULK_PING: &[u8] = b"*1\r\n$4\r\nPING\r\n";
+
+fn parse_borrowed_plain_ping_upper_noarg_packet(
+    input: &[u8],
+    config: &ParserConfig,
+) -> Option<usize> {
+    if config.max_array_len < 1 || config.max_bulk_len < b"PING".len() {
+        return None;
+    }
+    input
+        .starts_with(UPPER_NOARG_MULTIBULK_PING)
+        .then_some(UPPER_NOARG_MULTIBULK_PING.len())
+}
+
 fn parse_borrowed_plain_ping_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
 ) -> Option<BorrowedPlainPingPacket<'a>> {
     if config.max_array_len < 1 || config.max_bulk_len < b"PING".len() {
         return None;
+    }
+    if let Some(consumed) = parse_borrowed_plain_ping_upper_noarg_packet(input, config) {
+        return Some(BorrowedPlainPingPacket {
+            consumed,
+            message: None,
+        });
     }
     if let Some(cursor) = input.strip_prefix(b"*1\r\n$4\r\n").and_then(|rest| {
         rest.get(..4)
@@ -17428,6 +17474,43 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_ping_upper_noarg_packet_parser_accepts_only_hot_shape() {
+        let input = b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
+        assert_eq!(
+            crate::parse_borrowed_plain_ping_upper_noarg_packet(input, &ParserConfig::default()),
+            Some(b"*1\r\n$4\r\nPING\r\n".len())
+        );
+
+        assert!(
+            crate::parse_borrowed_plain_ping_upper_noarg_packet(
+                input,
+                &ParserConfig {
+                    max_bulk_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ping_upper_noarg_packet(
+                b"*1\r\n$4\r\npInG\r\n",
+                &ParserConfig::default()
+            )
+            .is_none(),
+            "mixed-case PING stays on the case-insensitive parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ping_upper_noarg_packet(
+                b"*2\r\n$4\r\nPING\r\n$1\r\nx\r\n",
+                &ParserConfig::default()
+            )
+            .is_none(),
+            "message PING stays on the borrowed message parser"
         );
     }
 

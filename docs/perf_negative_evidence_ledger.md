@@ -88,6 +88,15 @@ turns). Keep claims honest — mark which.
   and malformed inputs still fall through to generic parsing. Retry condition if
   rejected: do not add more MSET exact arities unless a profile names the MSET
   parser probe chain or a release A/B isolates MSET arity-mix pipelines.
+- frankenredis-15lug / cod-b: uppercase no-arg multibulk `PING` literal parser
+  fast path — CODED in `fr-server` (reasoned; batch benchmark pending). Target:
+  pass195 residual `ping_mbulk` (~0.94x) where inline PING is already fr-faster.
+  The hot Redis-benchmark shape `*1\r\n$4\r\nPING\r\n` now bypasses the
+  case-insensitive borrowed parser while parser limits, mixed-case PING, message
+  PING, noncanonical packets, subscriber mode, and transactional cases keep the
+  existing fallback behavior. Retry condition if rejected: do not add more PING
+  parser literals unless `perf_baseline_capture.py --trials` confirms
+  `ping_mbulk` as a low-CV residual and a profile names this parser branch.
 - frankenredis-h6ppr / cod-a: `fr-protocol` CRLF line scan via locked
   `memchr::memchr` — CODED (reasoned; batch benchmark pending). Guard covers
   CR-not-LF scanning plus exact `MAX_LINE_LENGTH` `Incomplete`/`LineTooLong`
