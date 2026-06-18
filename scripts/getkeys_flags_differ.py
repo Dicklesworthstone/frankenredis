@@ -74,6 +74,7 @@ class R:
 PROBES = [
     ["set", "k", "v"], ["get", "k"], ["getex", "k"], ["getdel", "k"],
     ["mset", "k1", "v1", "k2", "v2"], ["mget", "k1", "k2", "k3"],
+    ["exists", "k1", "k2"], ["unlink", "k1", "k2"],
     ["expire", "k", "100"], ["copy", "src", "dst"], ["copy", "src", "dst", "REPLACE"],
     ["copy", "src", "dst", "DB", "1"], ["copy", "src", "dst", "DB", "1", "REPLACE"],
     ["move", "src", "1"],
@@ -102,6 +103,7 @@ PROBES = [
     ["xreadgroup", "GROUP", "g", "c", "STREAMS", "s1", "0"],
     ["xadd", "s", "*", "f", "v"], ["xlen", "s"],
     ["object", "encoding", "k"], ["memory", "usage", "k"],
+    ["ttl", "k"], ["pttl", "k"], ["persist", "k"], ["touch", "k1", "k2"], ["type", "k"],
     ["getrange", "k", "0", "-1"], ["setrange", "k", "0", "x"],
     ["setbit", "k", "7", "1"], ["bitcount", "k"],
     ["lpush", "k", "a"], ["linsert", "k", "BEFORE", "a", "b"],

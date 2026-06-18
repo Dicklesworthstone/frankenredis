@@ -45,6 +45,7 @@ def cmd(port: int, *args) -> bytes:
 CASES = [
     ("GET", "k"), ("SET", "k", "v"), ("MSET", "k1", "v1", "k2", "v2"),
     ("MGET", "k1", "k2", "k3"), ("DEL", "k1", "k2"),
+    ("EXISTS", "k1", "k2"), ("UNLINK", "k1", "k2"),
     ("GETRANGE", "k", "0", "-1"), ("SETRANGE", "k", "0", "x"),
     ("ZADD", "z", "1", "a"), ("ZADD", "z", "GT", "CH", "1", "a"),
     ("GEORADIUS", "g", "0", "0", "1", "m", "STORE", "dest"),
@@ -76,6 +77,7 @@ CASES = [
     ("PFCOUNT", "h1", "h2"), ("PFADD", "h", "a"), ("PFMERGE", "dst", "h1", "h2"),
     ("MIGRATE", "host", "6379", "", "0", "1000", "KEYS", "k1", "k2"),
     ("GETEX", "k", "EX", "10"), ("GETDEL", "k"), ("APPEND", "k", "v"),
+    ("TTL", "k"), ("PTTL", "k"), ("PERSIST", "k"), ("TOUCH", "k1", "k2"), ("TYPE", "k"),
     ("SINTERSTORE", "d", "s1", "s2"), ("SINTER", "s1", "s2"),
     ("SDIFFSTORE", "d", "s1", "s2"),
     ("HSET", "h", "f", "v"), ("HRANDFIELD", "h", "2"),
