@@ -54,8 +54,8 @@ def main():
     # argument"; redis matches bytes and emits a syntax/option error (sometimes
     # ECHOING the raw bytes, which a String-based error can't reproduce).
     for s in (od,fr): cmd(s,"ZADD","z","1","a"); cmd(s,"RPUSH","l","a","b","c")
-    cmp("set_opt_nonutf8",[b"SET",b"e",b"v",NUTF],False)
-    cmp("set_after_valid_opt",[b"SET",b"e",b"v",b"EX",b"100",NUTF],False)
+    cmp("set_opt_nonutf8",[b"SET",b"e",b"v",NUTF],True)  # FIXED
+    cmp("set_after_valid_opt",[b"SET",b"e",b"v",b"EX",b"100",NUTF],True)  # FIXED
     cmp("restore_trailing_nonutf8",[b"RESTORE",b"f",b"0",pl,NUTF],False)
     cmp("restore_replace_then_nonutf8",[b"RESTORE",b"g",b"0",pl,b"REPLACE",NUTF],False)
     cmp("zadd_flag_nonutf8",[b"ZADD",b"z",NUTF,b"1",b"m"],True)  # FIXED 1d8233a9e
