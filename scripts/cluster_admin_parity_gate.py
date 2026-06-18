@@ -354,7 +354,6 @@ def main():
         f = Conn(fport)
         seed(o)
         seed(f)
-        known = []
         for cmd, tag in TESTS:
             try:
                 ro = o.cmd(*cmd)
@@ -364,13 +363,8 @@ def main():
                 rf = f.cmd(*cmd)
             except Exception as e:
                 rf = ('exc', str(e))
-            if tag.startswith("known_") and ro != rf:
-                known.append((cmd, ro, rf))
-                continue
             if not equivalent(tag, ro, rf):
                 failures.append((cmd, tag, ro, rf))
-        for cmd, ro, rf in known:
-            print(f"KNOWN-ISSUE {' '.join(cmd)}: redis={ro!r} fr={rf!r}")
         failures.extend(memusage_sweep(o, f))
     finally:
         for p in (fproc, rproc):
