@@ -10349,6 +10349,12 @@ fn cluster_subcommand_syntax_error(subcommand: &str) -> CommandError {
     ))
 }
 
+fn cluster_invalid_setslot_action_error() -> CommandError {
+    CommandError::Custom(
+        "ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP".to_string(),
+    )
+}
+
 fn cluster_reset_with_keys_error() -> CommandError {
     CommandError::Custom(
         "ERR CLUSTER RESET can't be called with master nodes containing keys".to_string(),
@@ -11173,9 +11179,6 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        if argv.len() != 4 && argv.len() != 5 {
-            return Err(cluster_wrong_subcommand_arity(sub));
-        }
         let slot = parse_i64_arg(&argv[2])?;
         if !(0..=16383).contains(&slot) {
             return Err(CommandError::Custom("ERR Invalid slot".to_string()));
@@ -11184,7 +11187,7 @@ fn cluster_cmd(
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if action.eq_ignore_ascii_case("STABLE") {
             if argv.len() != 4 {
-                return Err(cluster_wrong_subcommand_arity(sub));
+                return Err(cluster_invalid_setslot_action_error());
             }
             // STABLE clears any migration state — no-op in fr's stub.
             return Ok(RespFrame::SimpleString("OK".to_string()));
@@ -11194,7 +11197,7 @@ fn cluster_cmd(
             || action.eq_ignore_ascii_case("NODE")
         {
             if argv.len() != 5 {
-                return Err(cluster_wrong_subcommand_arity(sub));
+                return Err(cluster_invalid_setslot_action_error());
             }
             let node_id =
                 std::str::from_utf8(&argv[4]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -11212,7 +11215,7 @@ fn cluster_cmd(
             // Self node — accept the no-op (fr has no migration state).
             return Ok(RespFrame::SimpleString("OK".to_string()));
         }
-        return Err(CommandError::SyntaxError);
+        return Err(cluster_invalid_setslot_action_error());
     }
     if sub.eq_ignore_ascii_case("COUNT-FAILURE-REPORTS") {
         // Upstream cluster.c::clusterCommand: when cluster mode is on,
@@ -60112,15 +60115,15 @@ mod tests {
     /// (frankenredis-0pnd6) Upstream cluster.c::clusterCommand uses a
     /// loose `c->argc >= 4` guard at the top of the SETSLOT handler,
     /// then checks server.cluster_enabled, then enforces per-action
-    /// exact arity (STABLE=4, NODE/IMPORTING/MIGRATING=5). With
+    /// exact action shape (STABLE=4, NODE/IMPORTING/MIGRATING=5). With
     /// argc==6 (e.g. CLUSTER SETSLOT 0 NODE someid extra), upstream
     /// surfaces 'cluster support disabled' when cluster mode is off,
     /// because cluster_enabled is checked BEFORE the per-action
     /// exact-arity check. Pre-fix fr returned 'wrong number of
     /// arguments' here (over-strict top-level arity check). Pin the
     /// upstream order: <4 → wrong-arity; >=4 with cluster_disabled →
-    /// cluster-disabled; with cluster_enabled but odd shape → per-
-    /// action wrong-arity.
+    /// cluster-disabled; with cluster_enabled but odd shape → the
+    /// SETSLOT-specific action/argument help error.
     #[test]
     fn cluster_setslot_overarity_in_non_cluster_mode_returns_cluster_disabled() {
         // cluster_enabled defaults to false on a fresh Store.
@@ -60161,8 +60164,9 @@ mod tests {
             "<4 args must surface wrong-arity, got {arity_err:?}"
         );
 
-        // With cluster_enabled true, 6 args should fall through to
-        // the per-action exact-arity check (NODE expects exactly 5).
+        // With cluster_enabled true, 6 args reach the SETSLOT handler:
+        // Redis parses the slot, then emits the SETSLOT-specific
+        // action/argument help error.
         store.cluster_enabled = true;
         let action_err = dispatch_argv(
             &[
@@ -60177,10 +60181,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert!(
-            matches!(&action_err, CommandError::Custom(s) if s.contains("wrong number of arguments"))
-                || matches!(&action_err, CommandError::WrongSubcommandArity { .. }),
-            "6 args + cluster_enabled must surface per-action wrong-arity, got {action_err:?}"
+        assert_eq!(
+            action_err,
+            cluster_invalid_setslot_action_error(),
+            "6 args + cluster_enabled must surface SETSLOT action help"
         );
     }
 
@@ -60222,7 +60226,7 @@ mod tests {
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
-        // STABLE with extra arg → wrong arity.
+        // STABLE with extra arg → SETSLOT-specific action/arity help.
         assert_eq!(
             dispatch_argv(
                 &[
@@ -60236,7 +60240,22 @@ mod tests {
                 0,
             )
             .unwrap_err(),
-            cluster_wrong_subcommand_arity("SETSLOT")
+            cluster_invalid_setslot_action_error()
+        );
+        // NODE without node id reaches the same SETSLOT-specific help error.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"100".to_vec(),
+                    b"NODE".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            cluster_invalid_setslot_action_error()
         );
         // NODE with unknown peer → "Unknown node ...".
         assert_eq!(
@@ -60286,7 +60305,7 @@ mod tests {
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
-        // Bogus action → syntax error.
+        // Bogus action → SETSLOT-specific action/arity help.
         assert_eq!(
             dispatch_argv(
                 &[
@@ -60299,7 +60318,7 @@ mod tests {
                 0,
             )
             .unwrap_err(),
-            CommandError::SyntaxError
+            cluster_invalid_setslot_action_error()
         );
     }
 
