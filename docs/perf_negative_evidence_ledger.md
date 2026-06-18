@@ -217,5 +217,16 @@ turns). Keep claims honest — mark which.
   main-table-only KeyDict wiring; retry only with full side-index-removing
   Store integration (native SCAN/RANDOMKEY/eviction) or a focused KeyDict bench
   showing the arena primitive itself as the remaining bottleneck.
+- frankenredis-uhthd / cod-b: `fr-store` KeyDict primitive now supports
+  presized bulk builds (`with_capacity`/`reserve`) and grows before linking a
+  new node at load-factor overflow, avoiding repeated bucket rebuilds and the
+  insert-then-immediate-rehash path during future Store.entries migration —
+  CODED (reasoned from pass226's 1M-key load stall and the graveyard
+  resize/allocation-churn guidance; batch benchmark pending). Guard proves a
+  4096-key presized build does not resize, preserves get/SCAN/random_sample
+  semantics, and adds an ignored bulk-build timing hook for batch proof. Retry
+  condition if rejected: do not claim this as an end-user RAM win by itself;
+  only retry if focused KeyDict build benchmarks still name resize/allocation
+  churn, or with full side-index-removing Store integration.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

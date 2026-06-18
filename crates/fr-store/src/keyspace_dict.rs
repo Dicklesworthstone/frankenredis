@@ -80,17 +80,37 @@ impl<V> KeyDict<V> {
     const INITIAL_BUCKETS: usize = 4;
 
     pub fn new() -> Self {
-        let n = Self::INITIAL_BUCKETS;
+        Self::with_capacity(0)
+    }
+
+    /// Create a dict sized for `capacity` entries at load factor <= 1.
+    ///
+    /// This is the bulk-load path needed by the structural `Store.entries`
+    /// replacement: it avoids repeated bucket doublings and reserves node arena
+    /// slots up front while preserving the same hash, chain, SCAN, and
+    /// RANDOMKEY semantics as incremental growth.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let n = Self::bucket_count_for_capacity(capacity);
         let mut buckets = Vec::with_capacity(n);
         buckets.resize_with(n, || None);
         Self {
             buckets,
-            nodes: Vec::new(),
+            nodes: Vec::with_capacity(capacity),
             free: Vec::new(),
             mask: (n as u64) - 1,
             count: 0,
             hasher: foldhash::quality::RandomState::default(),
         }
+    }
+
+    /// Reserve room for at least `additional` more inserts without resizing the
+    /// bucket table or growing the live-node arena.
+    pub fn reserve(&mut self, additional: usize) {
+        let needed = self.count.saturating_add(additional);
+        if needed > self.buckets.len() {
+            self.resize_buckets(Self::bucket_count_for_capacity(needed));
+        }
+        self.nodes.reserve(additional.saturating_sub(self.free.len()));
     }
 
     #[inline]
@@ -189,6 +209,15 @@ impl<V> KeyDict<V> {
             }
             cur = node.next;
         }
+        // Grow before linking the new node when the insert would exceed load
+        // factor 1. That avoids writing a node into the old table only to
+        // immediately rebuild its chain in `grow`.
+        let b = if self.count == self.buckets.len() {
+            self.grow();
+            self.bucket_of(h)
+        } else {
+            b
+        };
         // Prepend a fresh node (head insertion; order within a bucket is not
         // observable — SCAN emits whole buckets).
         let head = self.buckets[b];
@@ -239,7 +268,21 @@ impl<V> KeyDict<V> {
     /// two growth keeps `hash & mask` stable modulo the new high bit, which is
     /// exactly what the reverse-binary [`scan`](Self::scan) cursor relies on.
     fn grow(&mut self) {
-        let new_len = self.buckets.len() * 2;
+        self.resize_buckets(self.buckets.len() * 2);
+    }
+
+    fn bucket_count_for_capacity(capacity: usize) -> usize {
+        capacity
+            .max(Self::INITIAL_BUCKETS)
+            .checked_next_power_of_two()
+            .expect("KeyDict capacity is too large")
+    }
+
+    fn resize_buckets(&mut self, new_len: usize) {
+        debug_assert!(new_len.is_power_of_two());
+        if new_len <= self.buckets.len() {
+            return;
+        }
         let new_mask = (new_len as u64) - 1;
         let mut buckets: Vec<Option<usize>> = Vec::with_capacity(new_len);
         buckets.resize_with(new_len, || None);
@@ -471,6 +514,99 @@ mod tests {
                 "key {i} after churn"
             );
         }
+    }
+
+    #[test]
+    fn presized_bulk_build_avoids_resize_and_preserves_semantics_uhthd() {
+        let n = 4096usize;
+        let mut d: KeyDict<usize> = KeyDict::with_capacity(n);
+        let initial_buckets = d.bucket_count();
+        assert!(initial_buckets >= n);
+        assert_eq!(d.storage_slots(), 0);
+
+        for i in 0..n {
+            assert_eq!(
+                d.insert(format!("bulk:{i:04}").into_bytes().into_boxed_slice(), i),
+                None
+            );
+        }
+        assert_eq!(d.len(), n);
+        assert_eq!(
+            d.bucket_count(),
+            initial_buckets,
+            "presized bulk build should not resize"
+        );
+        assert_eq!(d.storage_slots(), n);
+
+        for i in 0..n {
+            assert_eq!(d.get(format!("bulk:{i:04}").as_bytes()), Some(&i));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        loop {
+            cursor = d.scan(cursor, 64, |key, value| {
+                assert_eq!(d.get(key), Some(value));
+                seen.insert(key.to_vec());
+            });
+            if cursor == 0 {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), n);
+
+        let mut rng = Lcg(0x0123_4567_89ab_cdef);
+        for _ in 0..10_000 {
+            let (key, value) = d.random_sample(|| rng.next()).expect("non-empty");
+            assert_eq!(d.get(key), Some(value));
+        }
+
+        let mut reserved: KeyDict<usize> = KeyDict::new();
+        for i in 0..8usize {
+            reserved.insert(format!("warm:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        reserved.reserve(n);
+        let reserved_buckets = reserved.bucket_count();
+        for i in 8..(n + 8) {
+            reserved.insert(format!("warm:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        assert_eq!(reserved.bucket_count(), reserved_buckets);
+        assert_eq!(reserved.len(), n + 8);
+    }
+
+    // (frankenredis-uhthd) Concrete bulk-build timing hook for the KeyDict
+    // presize lever. `cargo test -p fr-store keydict_presized_build_bench_uhthd
+    // -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn keydict_presized_build_bench_uhthd() {
+        use std::time::Instant;
+
+        const N: usize = 200_000;
+
+        let t = Instant::now();
+        let mut incremental: KeyDict<usize> = KeyDict::new();
+        for i in 0..N {
+            incremental.insert(format!("key:{i:08}").into_bytes().into_boxed_slice(), i);
+        }
+        let incremental_us = t.elapsed().as_secs_f64() * 1e6;
+
+        let t = Instant::now();
+        let mut presized: KeyDict<usize> = KeyDict::with_capacity(N);
+        for i in 0..N {
+            presized.insert(format!("key:{i:08}").into_bytes().into_boxed_slice(), i);
+        }
+        let presized_us = t.elapsed().as_secs_f64() * 1e6;
+
+        assert_eq!(incremental.len(), N);
+        assert_eq!(presized.len(), N);
+        assert_eq!(incremental.get(b"key:00012345"), presized.get(b"key:00012345"));
+        eprintln!(
+            "KeyDict build {N} keys: incremental={incremental_us:.0}us presized={presized_us:.0}us speedup={:.2}x buckets={} storage_slots={}",
+            incremental_us / presized_us,
+            presized.bucket_count(),
+            presized.storage_slots()
+        );
     }
 
     #[test]
