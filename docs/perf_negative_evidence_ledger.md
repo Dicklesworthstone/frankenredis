@@ -230,3 +230,32 @@ turns). Keep claims honest — mark which.
   churn, or with full side-index-removing Store integration.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
+
+## cc session 2026-06-18 (cod-walled; cc-carries) — DEAD-ENDS + CONVERGENCE (Reasoned)
+- **DEBUG-build A/B is INVALID under cargo-check-only.** cc can build only debug binaries
+  (no `--release`, no rch per directive); a debug-fr-server vs release-redis bench is
+  apples-to-oranges (debug fr ~10-50x slower regardless of real perf). So cc CANNOT validly
+  quantify a perf lever this session. Conformance/byte-output probes ARE valid on a debug
+  build (output is build-profile-independent) — that is cc's productive lane. Retry condition:
+  only run a throughput A/B from a RELEASE build (rch/criterion); never trust a debug A/B.
+- **Conformance pillar has CONVERGED for cc.** Every surface probed this session came back
+  BOTH byte-exact AND already-gated (206 differ/gate scripts exist): RESP3 aggregate-type
+  emission (%map/~set/,double/=verbatim/*array — 5 resp3 gates), set encoding transitions
+  (intset/listpack/hashtable at 512/513, 128/129, val>64), string int/embstr/raw (44B boundary,
+  i64-overflow, force-raw — gated by n1i7i), string DUMP LZF (all sizes), cross-engine RESTORE
+  BOTH directions (redis DUMP->fr and fr DUMP->redis correct for all types incl tombstoned
+  stream + large-element quicklist). Retry condition: re-probe a surface only after a NEW lever
+  touches it; do not add a 207th redundant gate (CHECK-BEFORE-CREATE — the harness is dense).
+- **1z4ba (REAL bug, FIXED 83b9744b0):** quicklist element 8KiB..1GiB was emitted as a PLAIN
+  node (RDB container 0x01) vs redis PACKED (0x02). redis isLargeElement = sz>=packed_threshold
+  (1<<30, quicklist.c), NOT the per-node budget. Fixed both encoders (fr-store
+  quicklist_plain_node_required + fr-persist encode_compact_list_quicklist2); verified DUMP
+  byte-exact + RDB-save consistent. Both encoders now gated (dfce7321e + the collection family
+  71b258d53 closed the parallel RDB-save-encoder gate gap for hash/set/zset/intset). Retry: n/a (done).
+- **aapu4 = BY-DESIGN, NOT a bug (closed wontfix):** XDEL'd stream entries — redis retains
+  listpack tombstones, fr's arena PackedStreamLog eagerly compacts them, so the raw DUMP blob
+  differs in size. NON-CONTRACTUAL + NON-OBSERVABLE (XLEN/XINFO/XRANGE/DEBUG-DIGEST-VALUE all
+  match, RESTORE round-trips both directions); stream_dump_reload_fuzz already documents this and
+  asserts the contract not the bytes. Retry condition: do NOT re-file as a bug; only revisit if
+  a future requirement demands byte-equal stream DUMP with redis (would need retain-until-rewrite
+  semantics in PackedStreamLog = CoralOx fr-store structural, not a parity bug).
