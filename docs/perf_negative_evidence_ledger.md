@@ -50,6 +50,13 @@ turns). Keep claims honest — mark which.
 
 ## Open clean levers (unclaimed, reasoned-promising)
 - decimal_*_len branchless ilog10 — DONE (e4fu8, reasoned; criterion A/B pending batch).
+- listpack integer decode itoa2 — DONE (vqjz1, f5e835d45→2648d9e6f; reasoned). fr-persist
+  ListpackIntegerBytes::new now reuses fr-protocol write_u64_digits (now `pub`) instead of
+  a single-digit div-by-10 loop. Path: RESTORE / DEBUG RELOAD / RDB-load of int-bearing
+  listpack collections. Byte-identical (boundary + i64-extreme test). Criterion RESTORE
+  A/B pending batch. NOTE: write_u64_digits is now the shared canonical itoa — other
+  int-renderers (redis_score_to_string, RESP2 zset scores) could reuse it, but their
+  callers live in contended fr-runtime/fr-store; coordinate before wiring.
 - 17-value LPUSH/RPUSH/SADD exact borrowed packet parser — CODED in `fr-server`
   under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
   keep only if the next release A/B for keyed-values packets shows a stable win;
