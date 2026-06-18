@@ -7209,9 +7209,16 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
-        if needed_bytes > 512 * 1024 * 1024 {
+        // (frankenredis-g3ioa) redis bounds BITFIELD by the OFFSET byte-index, NOT
+        // the final string length, so a field at the highest addressable offset may
+        // grow the string a few bytes past proto-max-bulk-len (e.g. u8 @ offset
+        // 4294967295 -> 536870913 bytes is accepted). The command layer already
+        // enforces bit_offset < 2^32 (== this guard for the default 512 MiB), so
+        // the prior `needed_bytes > 512MiB` length check wrongly rejected the top
+        // few offsets that redis accepts.
+        if (bit_offset >> 3) as usize >= 512 * 1024 * 1024 {
             return Err(StoreError::GenericError(
-                "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                "ERR bit offset is not an integer or out of range".to_string(),
             ));
         }
         if let Some(entry) = self.entries.get_mut(key) {
@@ -7255,12 +7262,16 @@ impl Store {
 
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
-        if needed_bytes > 512 * 1024 * 1024 {
-            // (frankenredis-ga4j1) Mirror upstream
-            // t_string.c::checkStringLength wording — names the
-            // proto_max_bulk_len config knob, not a fixed byte size.
+        // (frankenredis-g3ioa) redis bounds BITFIELD by the OFFSET byte-index, not
+        // the final string length (a top-offset field may grow the string a few
+        // bytes past proto-max-bulk-len; e.g. u8 @ 4294967295 -> 536870913 bytes is
+        // accepted). The command layer enforces bit_offset < 2^32 (== this guard for
+        // the default 512 MiB), so the prior length check wrongly rejected the top
+        // few offsets redis accepts. Supersedes the ga4j1 checkStringLength wording
+        // here (that wording is correct for SET/APPEND/SETRANGE, not BITFIELD).
+        if (bit_offset >> 3) as usize >= 512 * 1024 * 1024 {
             return Err(StoreError::GenericError(
-                "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                "ERR bit offset is not an integer or out of range".to_string(),
             ));
         }
 
