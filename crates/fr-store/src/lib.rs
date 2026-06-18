@@ -20654,7 +20654,9 @@ impl Store {
         let mut restored_stream_max_deleted_id = None;
         let mut restored_stream_groups = None;
         let mut force_set_listpack_encoding = false;
-        let mut force_set_hashtable_encoding = false;
+        // (frankenredis-bbyfz) No longer force-set on the RDB_TYPE_SET arm — the
+        // set encoding is now re-derived by refresh_set_encoding_flags below.
+        let force_set_hashtable_encoding = false;
         let value = match type_byte {
             RDB_TYPE_STRING => {
                 let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -20691,8 +20693,18 @@ impl Store {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
-                force_set_hashtable_encoding = true;
-                Value::Set(Box::new(SetValue::Generic(set)))
+                // (frankenredis-bbyfz) Re-derive the optimal encoding from content,
+                // like redis rdbLoadObject — a RESTORE'd small RDB_TYPE_SET becomes
+                // intset/listpack, NOT a forced hashtable. from_index_set rebuilds
+                // intset for all-integer content; refresh_set_encoding_flags (now
+                // also invoked for Value::Set in the post-build match below) then
+                // picks listpack vs hashtable by the configured thresholds. Completes
+                // nom8d on the RESTORE path; the old 39is8 force-hashtable premise
+                // ("sets keep the type-byte mapping") was wrong vs redis 7.2.4.
+                Value::Set(Box::new(SetValue::from_index_set(
+                    set,
+                    self.set_max_intset_entries,
+                )))
             }
             RDB_TYPE_HASH => {
                 // Hash
@@ -21005,9 +21017,10 @@ impl Store {
         // threshold UP to hashtable/skiplist on load). Without this, post-a0p5p
         // OBJECT ENCODING reads the force flag only — never set on this direct-
         // deserialize path — so an over-threshold restored hash/zset wrongly
-        // reported `listpack`. (Sets keep the type-byte mapping: their reload
-        // encoding follows the intset-overflow rule that the replay/sadd path
-        // models; see fr-runtime RdbValue::SetHashtable.)
+        // reported `listpack`. (frankenredis-bbyfz) SETS now re-derive here too —
+        // the old "sets keep the type-byte mapping" premise was wrong vs redis
+        // rdbLoadObject, which re-derives a RESTORE'd RDB_TYPE_SET to intset/
+        // listpack/hashtable from content under the current config.
         match &entry.value {
             Value::Hash(_) => Self::refresh_hash_encoding_flag(
                 &mut entry,
@@ -21018,6 +21031,12 @@ impl Store {
                 &mut entry,
                 self.zset_max_listpack_entries,
                 self.zset_max_listpack_value,
+            ),
+            Value::Set(_) => Self::refresh_set_encoding_flags(
+                &mut entry,
+                self.set_max_intset_entries,
+                self.set_max_listpack_entries,
+                self.set_max_listpack_value,
             ),
             _ => {}
         }
