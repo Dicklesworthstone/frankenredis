@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Regression gate: SETRANGE/APPEND proto-max-bulk-len boundary (frankenredis-...).
+"""Regression gate: SETRANGE/APPEND/SETBIT proto-max-bulk-len boundary (frankenredis-vkl1p).
 
 Unlike BITFIELD (which redis bounds by offset byte-index — see g3ioa), SET/APPEND/
-SETRANGE are bounded by the RESULTING STRING LENGTH against proto-max-bulk-len: a
-result of exactly 512 MiB is allowed, one byte more errors "string exceeds maximum
-allowed size (proto-max-bulk-len)". fr is byte-exact here; this pins the boundary so
-the g3ioa BITFIELD fix doesn't accidentally get mis-applied to these length-checked
-commands. NOTE: allocates ~512 MiB per OK case (then DELs) -> HEAVY, intentionally
-NOT registered in parity_suite.
+SETRANGE are bounded by the RESULTING STRING LENGTH against proto-max-bulk-len (a
+result of exactly 512 MiB is allowed, one byte more errors). SETBIT is bounded by
+its bit offset (max bit 4294967295 -> 512 MiB string OK; >= 2^32 errors "bit
+offset...out of range"). fr is byte-exact at the DEFAULT 512 MiB config; this pins
+those boundaries so the g3ioa BITFIELD fix isn't mis-applied to length-checked cmds.
+
+KNOWN, NOT asserted here (frankenredis-uwhyl): fr HARDCODES 512 MiB in all these size
+checks instead of the proto-max-bulk-len config, so a non-default (e.g. 1 MiB)
+proto-max-bulk-len makes fr accept oversized writes redis rejects — an architectural
+config-plumbing fix. This gate runs at the default config, where fr is correct.
+
+NOTE: allocates ~512 MiB per OK case (then DELs) -> HEAVY, intentionally NOT
+registered in parity_suite.
 
 Usage: string_size_limit_differ.py <oracle_port> <fr_port>
 """
@@ -36,6 +43,10 @@ def main():
     chk("setrange_off_at_limit","SETRANGE","k",str(LIM),"x")
     chk("setrange_off_over","SETRANGE","k",str(LIM+1),"x")
     chk("setrange_off_huge","SETRANGE","k","9999999999","x")
+    # SETBIT bit-offset boundary (max bit 4294967295 -> 512 MiB string OK; >=2^32 errors)
+    chk("setbit_max_bit","SETBIT","k","4294967295","1")
+    chk("setbit_over_2p32","SETBIT","k","4294967296","1")
+    chk("setbit_huge","SETBIT","k","99999999999999","1")
     # APPEND near the limit
     for s in (od,fr): cmd(s,"DEL","ak"); cmd(s,"SETRANGE","ak",str(LIM-3),"ab")
     ro,rf=short(cmd(od,"APPEND","ak","c")),short(cmd(fr,"APPEND","ak","c"))
