@@ -10,6 +10,7 @@ that the single-connection scripts/differential_probe.sh cannot reach:
                cross-connection WATCH dirty edges (concurrent write, expiry,
                FLUSHALL, same-value SET, nonexistent-key creation) that decide
                whether EXEC commits or aborts (nil).
+  * client introspection edge cases that depend on live session state.
   * subscribe-mode command gating (RESP2) and RESP3 push-frame framing.
 
 This is the harness pattern that found frankenredis-8ypwc (non-BCAST tracking
@@ -145,6 +146,15 @@ def run(port):
         c = Conn(port)
         c.cmd_read("FLUSHALL")
         c.close()
+
+    # ---------------- client introspection ----------------
+    fresh()
+    c = Conn(port)
+    R["client_list_id_zero"] = N(c.cmd_read("CLIENT", "LIST", "ID", "0"))
+    R["client_list_id_negative"] = N(c.cmd_read("CLIENT", "LIST", "ID", "-1"))
+    R["client_list_id_absent"] = N(c.cmd_read("CLIENT", "LIST", "ID", "999999"))
+    R["client_list_id_nonnumeric"] = N(c.cmd_read("CLIENT", "LIST", "ID", "abc"))
+    c.close()
 
     # ---------------- pub/sub: regular ----------------
     fresh()
