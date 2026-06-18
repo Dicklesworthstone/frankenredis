@@ -153,6 +153,9 @@ CASES = [
     ["HGET", "nh", "ff"],
     ["MSET", "ma", "1", "mb", "2"],
     ["MGET", "ma", "mb", "nope"],
+    ["DBSIZE"],
+    ["ECHO", "hello"],
+    ["ECHO", ""],
 ]
 
 
