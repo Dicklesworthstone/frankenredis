@@ -3223,14 +3223,12 @@ fn i64_text_len(value: i64) -> usize {
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
     value: Value,
+    /// Monotonic modification counter (bumped on every write, used by WATCH).
+    modification_count: u64,
     /// Last access timestamp in milliseconds, stored in the low 32 bits.
     /// This keeps OBJECT IDLETIME's elapsed-second floor behavior while avoiding
     /// a per-key u64 for the hot keyspace entry.
     last_access_ms: u32,
-    /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
-    lfu_freq: u8,
-    /// Last LFU access/decrement timestamp in whole minutes.
-    lfu_last_touch_min: u32,
     /// Index of this key inside its db's `random_key_slots` Vec — the RANDOMKEY
     /// sampling back-index. Replaces the separate `random_key_positions`
     /// HashMap<Arc<[u8]>, (db, slot)>, which kept a full second copy of every
@@ -3239,12 +3237,12 @@ struct Entry {
     /// same job; the db is recovered from the key's db-encoded prefix on removal,
     /// so only the in-Vec slot needs storing. Maintained exclusively at the
     /// `internal_entries_insert`/`_remove` choke points; RANDOMKEY/DEL/SCAN
-    /// behaviour is byte-identical. (A follow-up can shrink `lfu_last_touch_min`
-    /// to `u32` so this `u32` rides in the existing alignment slot for free — see
-    /// bead frankenredis-uhthd.) (frankenredis-uhthd)
+    /// behaviour is byte-identical. (frankenredis-uhthd)
     random_slot: u32,
-    /// Monotonic modification counter (bumped on every write, used by WATCH).
-    modification_count: u64,
+    /// Last LFU access/decrement timestamp in Redis's 16-bit minute clock.
+    lfu_last_touch_min: u16,
+    /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
+    lfu_freq: u8,
     /// Upstream Redis 7.2 promotes a String value's encoding from
     /// embstr to raw on the first in-place mutation (APPEND,
     /// SETRANGE, GETSET-with-overwrite). The encoding is sticky —
@@ -3256,6 +3254,8 @@ struct Entry {
     /// while keeping the hot keyspace entry at Redis-like density.
     entry_flags: u8,
 }
+
+const _: () = assert!(std::mem::size_of::<Entry>() <= 64);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestoreMetadata {
@@ -3301,21 +3301,30 @@ fn redis_lru_clock(now_ms: u64) -> u32 {
 }
 
 #[inline]
-fn lfu_access_minutes(now_ms: u64) -> u32 {
-    u32::try_from(now_ms / 60_000).unwrap_or(u32::MAX)
+fn lfu_access_minutes(now_ms: u64) -> u16 {
+    (now_ms / 60_000) as u16
+}
+
+#[inline]
+fn lfu_elapsed_minutes(now_min: u16, last_touch_min: u16) -> u64 {
+    if now_min >= last_touch_min {
+        u64::from(now_min - last_touch_min)
+    } else {
+        u64::from(u16::MAX - last_touch_min) + u64::from(now_min)
+    }
 }
 
 impl Entry {
     fn new(value: Value, now_ms: u64) -> Self {
         Self {
             value,
+            modification_count: 0,
             last_access_ms: lru_access_millis(now_ms),
-            lfu_freq: LFU_INIT_VAL,
-            lfu_last_touch_min: lfu_access_minutes(now_ms),
             // Assigned at the `internal_entries_insert` choke point once the key
             // is placed in its db's `random_key_slots` Vec. (frankenredis-uhthd)
             random_slot: 0,
-            modification_count: 0,
+            lfu_last_touch_min: lfu_access_minutes(now_ms),
+            lfu_freq: LFU_INIT_VAL,
             entry_flags: 0,
         }
     }
@@ -3349,7 +3358,7 @@ impl Entry {
     }
 
     fn redis_lfu_clock_field(&self) -> u32 {
-        ((self.lfu_last_touch_min & 0xFFFF) << 8) | u32::from(self.lfu_freq)
+        (u32::from(self.lfu_last_touch_min) << 8) | u32::from(self.lfu_freq)
     }
 
     fn redis_lfu_as_idle_seconds(&self, now_ms: u64) -> u64 {
@@ -3398,7 +3407,7 @@ impl Entry {
             return self.lfu_freq;
         }
         let now_min = lfu_access_minutes(now_ms);
-        let elapsed = u64::from(now_min.saturating_sub(self.lfu_last_touch_min));
+        let elapsed = lfu_elapsed_minutes(now_min, self.lfu_last_touch_min);
         let periods = elapsed / decay_time;
         self.lfu_freq
             .saturating_sub(u8::try_from(periods).unwrap_or(u8::MAX))
@@ -25826,6 +25835,21 @@ mod tests {
             &format!("alpha_{seed:04x}"),
             &format!("beta_{seed:04x}"),
         )
+    }
+
+    #[test]
+    fn entry_layout_packs_lfu_clock_and_random_slot_tail_metadata() {
+        assert!(
+            std::mem::size_of::<Entry>() <= 64,
+            "Entry grew past the packed keyspace metadata budget"
+        );
+        assert_eq!(std::mem::align_of::<Entry>(), 8);
+    }
+
+    #[test]
+    fn lfu_clock_elapsed_matches_redis_wrapping_minutes() {
+        assert_eq!(lfu_access_minutes(65_536 * 60_000), 0);
+        assert_eq!(lfu_elapsed_minutes(5, u16::MAX - 5), 10);
     }
 
     fn sample_replacement_function_library_from_seed(seed: u16) -> Vec<u8> {
