@@ -26976,14 +26976,15 @@ fn restore_cmd(
     let mut lfu_freq = None;
     let mut i = 4;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("REPLACE") {
+        // (frankenredis-44iva) byte-match RESTORE options; non-UTF8 -> syntax error
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"REPLACE") {
             replace = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("ABSTTL") {
+        } else if opt.eq_ignore_ascii_case(b"ABSTTL") {
             absttl = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("IDLETIME") {
+        } else if opt.eq_ignore_ascii_case(b"IDLETIME") {
             // Upstream requires an additional arg AND that FREQ
             // hasn't been seen yet; without those, falls through
             // to the catch-all 'syntax error'.
@@ -27003,7 +27004,7 @@ fn restore_cmd(
             };
             idletime_secs = Some(v);
             i += 2;
-        } else if opt.eq_ignore_ascii_case("FREQ") {
+        } else if opt.eq_ignore_ascii_case(b"FREQ") {
             if idletime_secs.is_some() || i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
