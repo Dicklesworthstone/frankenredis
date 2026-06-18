@@ -8,12 +8,10 @@ genuinely > 8 KB (multi-node, OBJECT ENCODING == quicklist), the surface the g7a
 "quicklist2 direct emit" lever rewrote.
 
 ASSERTED (byte-exact, verified): multi-node quicklists whose nodes are all PACKED listpacks
-(plain small/medium elements, and a mixed int+string list).
-
-REPORTED known divergence (frankenredis-1z4ba, NOT asserted): a list containing a large
-element (~8 KB..1 GB) — redis keeps it a PACKED/listpack node (RDB container 0x02,
-LZF-compressed), fr emits a PLAIN node (container 0x01), so DUMP bytes diverge (data still
-RESTOREs identically). Flip to asserted once 1z4ba is fixed.
+(plain small/medium elements, a mixed int+string list, AND — since frankenredis-1z4ba was
+fixed in 83b9744b0 — lists with an 8 KiB..1 GiB element, which now DUMP as a PACKED
+1-element listpack node (container 0x02) matching redis rather than a PLAIN node (0x01)).
+A node is PLAIN only for a >=1 GiB element (redis isLargeElement / packed_threshold=1<<30).
 
 Resets list-max-listpack-size to the true default -2 first (config-pollution trap).
 
