@@ -80,47 +80,59 @@ def main():
         ("127.0.0.1", fp), timeout=10
     ) as fr_sock:
         od, fr = R(od_sock), R(fr_sock)
-        # Preflight: OBJECT IDLETIME needs neither DEBUG nor RESP3, but a server
-        # that rejects CONFIG SET maxmemory-policy would invalidate the probe.
-        for nm, d in (("oracle", od), ("fr", fr)):
-            rep = d.cmd("config", "set", "maxmemory-policy", "noeviction")
-            if "OK" not in rep:
-                print(f"SETUP ERROR: {nm} CONFIG SET maxmemory-policy failed: {rep!r}")
-                sys.exit(2)
-
-        fails = []
-
-        def write_reaccess(label, *write_cmd):
+        def restore_defaults():
             for d in (od, fr):
-                d.cmd("config", "set", "maxmemory-policy", "allkeys-lfu")
-                d.cmd("flushall")
-            for d in (od, fr):
-                d.cmd("set", "k", "v")
-                d.cmd("get", "k")  # LFU access -> marks the LFU clock field
-                d.cmd("config", "set", "maxmemory-policy", "noeviction")
-                d.cmd(*write_cmd)  # in-place write under non-LFU policy
-            o, f = od.cmd("object", "idletime", "k"), fr.cmd("object", "idletime", "k")
-            if not (small(o) and small(f)):
-                fails.append(
-                    f"{label}: cmd={list(write_cmd)} redis={o!r} fr={f!r} "
-                    "(non-LFU in-place write must clear the LFU-bits reinterpretation)"
-                )
+                try:
+                    d.cmd("config", "set", "maxmemory-policy", "noeviction")
+                    d.cmd("flushall")
+                except Exception:
+                    pass
 
-        write_reaccess("append_reaccess", "append", "k", "x")
-        write_reaccess("setrange_reaccess", "setrange", "k", "0", "Z")
-        write_reaccess("setbit_reaccess", "setbit", "k", "0", "1")
+        try:
+            # Preflight: OBJECT IDLETIME needs neither DEBUG nor RESP3, but a server
+            # that rejects CONFIG SET maxmemory-policy would invalidate the probe.
+            for nm, d in (("oracle", od), ("fr", fr)):
+                rep = d.cmd("config", "set", "maxmemory-policy", "noeviction")
+                if "OK" not in rep:
+                    print(f"SETUP ERROR: {nm} CONFIG SET maxmemory-policy failed: {rep!r}")
+                    return 2
 
-        print("=" * 60)
-        if fails:
-            print(f"FAIL — {len(fails)} LFU->LRU write-reaccess divergence(s):")
-            for x in fails:
-                print(f"  {x}")
-            sys.exit(1)
-        print(
-            "PASS — LFU->LRU write-reaccess IDLETIME vs redis 7.2.4 "
-            "(hard APPEND/SETRANGE/SETBIT checks)"
-        )
+            fails = []
+
+            def write_reaccess(label, *write_cmd):
+                for d in (od, fr):
+                    d.cmd("config", "set", "maxmemory-policy", "allkeys-lfu")
+                    d.cmd("flushall")
+                for d in (od, fr):
+                    d.cmd("set", "k", "v")
+                    d.cmd("get", "k")  # LFU access -> marks the LFU clock field
+                    d.cmd("config", "set", "maxmemory-policy", "noeviction")
+                    d.cmd(*write_cmd)  # in-place write under non-LFU policy
+                o, f = od.cmd("object", "idletime", "k"), fr.cmd("object", "idletime", "k")
+                if not (small(o) and small(f)):
+                    fails.append(
+                        f"{label}: cmd={list(write_cmd)} redis={o!r} fr={f!r} "
+                        "(non-LFU in-place write must clear the LFU-bits reinterpretation)"
+                    )
+
+            write_reaccess("append_reaccess", "append", "k", "x")
+            write_reaccess("setrange_reaccess", "setrange", "k", "0", "Z")
+            write_reaccess("setbit_reaccess", "setbit", "k", "0", "1")
+
+            print("=" * 60)
+            if fails:
+                print(f"FAIL — {len(fails)} LFU->LRU write-reaccess divergence(s):")
+                for x in fails:
+                    print(f"  {x}")
+                return 1
+            print(
+                "PASS — LFU->LRU write-reaccess IDLETIME vs redis 7.2.4 "
+                "(hard APPEND/SETRANGE/SETBIT checks)"
+            )
+            return 0
+        finally:
+            restore_defaults()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

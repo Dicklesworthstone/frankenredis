@@ -158,6 +158,7 @@ PORT_BASED = [
     # encoding boundary — guards the RAM-compaction save/load paths (61e3p class).
     ("encoding_reload_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("object_policy_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("lfu_idletime_write_reaccess_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # RESP3 (HELLO 3) reply-TYPE markers (maps/sets/doubles/nulls) across the
     # collection + introspection commands that change shape under RESP3.
     ("resp3_reply_type_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
