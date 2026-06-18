@@ -21375,17 +21375,14 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             } else if argv.len() >= 4 && argv[2].eq_ignore_ascii_case(b"ID") {
                 let mut payload = Vec::new();
                 for id_arg in &argv[3..] {
-                    // (br-frankenredis-lkoh) — upstream wording for
-                    // both CLIENT LIST ID and CLIENT KILL ID.
+                    // CLIENT LIST ID differs from CLIENT KILL ID: upstream only
+                    // errors on nonnumeric IDs ("Invalid client ID"). Numeric
+                    // nonpositive IDs are valid filters that simply match no
+                    // clients. (frankenredis-q3rts)
                     let parsed_id = parse_i64_arg(id_arg).map_err(|_| {
-                        CommandError::Custom("ERR client-id should be greater than 0".to_string())
+                        CommandError::Custom("ERR Invalid client ID".to_string())
                     })?;
-                    if parsed_id <= 0 {
-                        return Err(CommandError::Custom(
-                            "ERR client-id should be greater than 0".to_string(),
-                        ));
-                    }
-                    if parsed_id as u64 == store.dispatch_client_ctx.client_id {
+                    if parsed_id > 0 && parsed_id as u64 == store.dispatch_client_ctx.client_id {
                         payload.extend_from_slice(&info_line);
                     }
                 }
@@ -68330,7 +68327,7 @@ mod tests {
             CommandError::Custom("ERR Unknown client type 'BOGUS'".to_string())
         );
 
-        let err = dispatch_argv(
+        let out = dispatch_argv(
             &[
                 b"CLIENT".to_vec(),
                 b"LIST".to_vec(),
@@ -68340,11 +68337,53 @@ mod tests {
             &mut store,
             0,
         )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"-1".to_vec(),
+                b"77".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(payload)) = out else {
+            panic!("expected bulk string"); // ubs:ignore — AI triage
+        };
+        assert!(String::from_utf8_lossy(&payload).contains("id=77 "));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"not-an-id".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
         .unwrap_err();
-        // (br-frankenredis-lkoh)
         assert_eq!(
             err,
-            CommandError::Custom("ERR client-id should be greater than 0".to_string())
+            CommandError::Custom("ERR Invalid client ID".to_string())
         );
     }
 
