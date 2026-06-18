@@ -27763,7 +27763,7 @@ mod tests {
     use std::net::TcpStream;
     use std::time::Instant;
 
-    use super::{posix_locale_to_bcp47, sort_alpha_compare};
+    use super::{cluster_invalid_setslot_action_error, posix_locale_to_bcp47, sort_alpha_compare};
     use fr_protocol::RespFrame;
     use icu_collator::{Collator, options::AlternateHandling, options::CollatorOptions};
     use icu_locale_core::Locale;
