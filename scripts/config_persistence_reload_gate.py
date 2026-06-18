@@ -68,9 +68,6 @@ PARAMS = [
     ("proto-max-bulk-len", "1234567"),
 ]
 
-KNOWN_RESET_ON_FR = set()
-
-
 def probe(port):
     c = Conn(port)
     for k, v in PARAMS:
@@ -128,26 +125,19 @@ def main():
         shutil.rmtree(rdir, ignore_errors=True)
 
     setv = dict(PARAMS)
-    new_fr, fixed_fr, redis_reset = [], [], []
+    fr_reset, redis_reset = [], []
     for k, v in PARAMS:
         if rafter.get(k) != v:
             # redis must preserve every config across reload.
             redis_reset.append((k, v, rafter.get(k)))
         if fafter.get(k) != v:
-            if k in KNOWN_RESET_ON_FR:
-                print(f"  [known(hpfey)] {k}: set={v} after_reload={fafter.get(k)}")
-            else:
-                print(f"  [NEW] {k}: set={v} after_reload={fafter.get(k)}")
-                new_fr.append(k)
-        elif k in KNOWN_RESET_ON_FR:
-            fixed_fr.append(k)
+            print(f"  [FR-RESET] {k}: set={v} after_reload={fafter.get(k)}")
+            fr_reset.append(k)
 
     for k, v, g in redis_reset:
         print(f"  [REDIS-UNEXPECTED] {k}: set={v} after_reload={g} (oracle should preserve)")
-    if fixed_fr:
-        print(f"NOTE: {sorted(fixed_fr)} now PERSIST on fr — prune KNOWN_RESET_ON_FR")
-    if new_fr or redis_reset:
-        print(f"FAIL — {len(new_fr)} NEW fr config reset(s), "
+    if fr_reset or redis_reset:
+        print(f"FAIL — {len(fr_reset)} fr config reset(s), "
               f"{len(redis_reset)} oracle anomaly(ies)")
         return 1
     print(f"PASS — CONFIG SET reload-persistence parity vs redis 7.2.4 "
