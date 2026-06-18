@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Curated edge-case differential probe for still-unfuzzed option parsers,
 targeting validation-ORDER (type-check vs arg-validation precedence) and
-reply-shape bugs. fr=:18391 oracle=:18390.
+reply-shape bugs. Defaults: oracle=:18390, fr=:18391.
 
 For sampling commands (HRANDFIELD/ZRANDMEMBER/SRANDMEMBER) only the error class
 and reply *length* are compared (element identity is randomized).
