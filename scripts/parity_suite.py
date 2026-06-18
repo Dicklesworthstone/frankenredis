@@ -254,7 +254,8 @@ PORT_BASED = [
 # Older differs use argparse flags: --oracle <port> --fr <port>
 ARGPARSE_BASED = [
     "client_kill_differ.py",
-    "option_order_differ.py", "edge_sweep_differ.py", "edge_sweep2_differ.py",
+    "option_order_differ.py", "option_fuzz_differ.py",
+    "edge_sweep_differ.py", "edge_sweep2_differ.py",
     "float_format_differ.py", "zset_differ.py", "hash_differ.py", "set_differ.py",
     "list_differ.py", "geo_differ.py", "arity_error_differ.py", "bitmap_differ.py",
     "sort_differ.py", "scan_differ.py", "hexfloat_incr_differ.py",

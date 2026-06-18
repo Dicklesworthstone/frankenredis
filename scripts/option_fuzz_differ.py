@@ -119,5 +119,10 @@ def fuzz(seeds, per):
 
 seeds = [int(x) for x in (_args.seeds or ["1","2","3","4","5","6"])]
 d = fuzz(seeds, 1500)
+for s in (R, F):
+    try:
+        cmd(s, "FLUSHALL")
+    except Exception:
+        pass
 print(f"\n==== TOTAL DIFFS: {len(d)} over {len(seeds)*1500} ops ====")
 sys.exit(1 if d else 0)
