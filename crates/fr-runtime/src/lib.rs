@@ -23338,15 +23338,17 @@ impl Runtime {
         let mut type_filter: Option<&[u8]> = None;
         let mut i = 2;
         while i < argv.len() {
-            let keyword =
-                std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if keyword.eq_ignore_ascii_case("MATCH") {
+            // (frankenredis-44iva) Match the option keyword on RAW BYTES — redis
+            // scanGenericCommand emits "syntax error" for an unrecognized (incl.
+            // non-UTF8) option, not "invalid UTF-8 argument".
+            let keyword = &argv[i];
+            if keyword.eq_ignore_ascii_case(b"MATCH") {
                 if i + 1 >= argv.len() {
                     return Err(CommandError::SyntaxError);
                 }
                 pattern = Some(argv[i + 1].as_slice());
                 i += 2;
-            } else if keyword.eq_ignore_ascii_case("COUNT") {
+            } else if keyword.eq_ignore_ascii_case(b"COUNT") {
                 if i + 1 >= argv.len() {
                     return Err(CommandError::SyntaxError);
                 }
@@ -23358,7 +23360,7 @@ impl Runtime {
                 }
                 count = parsed as usize;
                 i += 2;
-            } else if keyword.eq_ignore_ascii_case("TYPE") {
+            } else if keyword.eq_ignore_ascii_case(b"TYPE") {
                 if i + 1 >= argv.len() {
                     return Err(CommandError::SyntaxError);
                 }

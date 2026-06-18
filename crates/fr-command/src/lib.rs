@@ -21977,14 +21977,18 @@ fn parse_scan_args_with_novalues(
     let mut novalues = false;
     let mut i = start_idx;
     while i < argv.len() {
-        let kw = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if kw.eq_ignore_ascii_case("MATCH") {
+        // (frankenredis-44iva) Match the option keyword on RAW BYTES, not via
+        // str::from_utf8 — redis db.c::scanGenericCommand works on bytes and emits
+        // "syntax error" for an unrecognized option, including a non-UTF8 one. The
+        // prior from_utf8 surfaced "invalid UTF-8 argument" for a non-UTF8 token.
+        let kw = &argv[i];
+        if kw.eq_ignore_ascii_case(b"MATCH") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             pattern = Some(argv[i + 1].clone());
             i += 2;
-        } else if kw.eq_ignore_ascii_case("COUNT") {
+        } else if kw.eq_ignore_ascii_case(b"COUNT") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -21995,13 +21999,13 @@ fn parse_scan_args_with_novalues(
             }
             count = usize::try_from(c).map_err(|_| CommandError::InvalidInteger)?;
             i += 2;
-        } else if kw.eq_ignore_ascii_case("TYPE") {
+        } else if kw.eq_ignore_ascii_case(b"TYPE") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             type_filter = Some(argv[i + 1].clone());
             i += 2;
-        } else if accept_novalues && kw.eq_ignore_ascii_case("NOVALUES") {
+        } else if accept_novalues && kw.eq_ignore_ascii_case(b"NOVALUES") {
             novalues = true;
             i += 1;
         } else {
