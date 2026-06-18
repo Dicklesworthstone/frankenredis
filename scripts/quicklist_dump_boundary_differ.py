@@ -22,13 +22,13 @@ Usage:
     legacy_redis_code/redis/src/redis-server --port 16399 --save '' --appendonly no \
         --daemonize yes --enable-debug-command yes
     frankenredis --port 16400 --mode strict --enable-debug-command yes
-    scripts/quicklist_dump_boundary_differ.py --oracle 16399 --fr 16400 [--seed N] [--trials N] [--strict]
+    scripts/quicklist_dump_boundary_differ.py --oracle 16399 --fr 16400 [--seed N] [--trials N] [--diagnostic]
     scripts/quicklist_dump_boundary_differ.py 16399 16400 [seed] [trials]   # positional form
 
-By DEFAULT this is a NON-FATAL diagnostic (always exits 0, prints a WARNING +
-the bead id on divergence) so the auto-discovering scripts/run_parity_differs.sh
-suite is not broken while frankenredis-s36di is open. Pass --strict to make it a
-hard regression gate (exit 1 on any divergence) once the fix has landed.
+By default this is a hard regression gate: frankenredis-s36di is closed, so any
+DUMP or serializedlength divergence exits 1 and fails the auto-discovering
+scripts/run_parity_differs.sh suite. Pass --diagnostic for exploratory sweeps
+that should print divergences without failing the process.
 """
 import argparse
 import re
@@ -105,8 +105,11 @@ def parse_args(argv):
     ap.add_argument("--fr", type=int, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--trials", type=int, default=None)
-    ap.add_argument("--strict", action="store_true",
-                    help="exit 1 on divergence (hard gate); default is non-fatal diagnostic")
+    ap.add_argument("--diagnostic", action="store_true",
+                    help="exit 0 on divergence for exploratory sweeps; default is a hard gate")
+    # Backward-compatible no-op for old command lines. The default is already
+    # strict, but accepting this avoids turning stale docs into infra failures.
+    ap.add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("rest", nargs="*", type=int)
     a = ap.parse_args(argv)
     pos = a.rest
@@ -114,11 +117,12 @@ def parse_args(argv):
     fr = a.fr if a.fr is not None else (pos[1] if len(pos) > 1 else FR_DEFAULT)
     seed = a.seed if a.seed is not None else (pos[2] if len(pos) > 2 else 2026)
     trials = a.trials if a.trials is not None else (pos[3] if len(pos) > 3 else 600)
-    return oracle, fr, seed, trials, a.strict
+    hard_gate = a.strict or not a.diagnostic
+    return oracle, fr, seed, trials, hard_gate
 
 
 def main():
-    oracle, fr, seed, trials, strict = parse_args(sys.argv[1:])
+    oracle, fr, seed, trials, hard_gate = parse_args(sys.argv[1:])
 
     nxt = rng(seed)
     alphabet = "abcXYZ0123456789"
@@ -169,11 +173,11 @@ def main():
         f"serializedlength divergences={slen_div}"
     )
     if dump_div or slen_div:
-        if strict:
+        if hard_gate:
             print("FAIL — quicklist DUMP node boundaries differ from redis 7.2.4 (see frankenredis-s36di)")
             return 1
         print("WARNING — quicklist DUMP node boundaries differ from redis 7.2.4 "
-              "(open: frankenredis-s36di; rerun with --strict to gate)")
+              "(diagnostic mode; frankenredis-s36di is closed, omit --diagnostic to gate)")
         return 0
     print("PASS — quicklist DUMP node boundaries byte-exact vs redis 7.2.4")
     return 0
