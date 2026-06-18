@@ -21515,6 +21515,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         let mut filter_type: Option<String> = None;
         let mut filter_user: Option<Vec<u8>> = None;
         let mut filter_addr = legacy_addr.map(str::to_owned);
+        let mut filter_laddr: Option<String> = None;
 
         if legacy_addr.is_none() {
             let mut i = 2;
@@ -21559,12 +21560,16 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("LADDR") && i + 1 < argv.len() {
                     // CLIENT KILL LADDR <ip:port> filters by the local
-                    // (server-side) socket address. We don't track a
-                    // distinct laddr per client at the dispatch layer,
-                    // so the filter never matches our single dispatch
-                    // session; return 0 like upstream does when no
-                    // clients match. (br-frankenredis-lkoh)
-                    return Ok(RespFrame::Integer(0));
+                    // (server-side) socket address. Direct dispatch has
+                    // one synthetic client and reports its laddr as
+                    // 127.0.0.1:<server_port> in CLIENT INFO/LIST, so
+                    // use the same advertised value for kill filtering.
+                    // (frankenredis-61iis)
+                    let laddr = std::str::from_utf8(&argv[i + 1])
+                        .map_err(|_| CommandError::InvalidUtf8Argument)?
+                        .to_string();
+                    filter_laddr = Some(laddr);
+                    i += 2;
                 } else if opt.eq_ignore_ascii_case("SKIPME") && i + 1 < argv.len() {
                     let val = std::str::from_utf8(&argv[i + 1])
                         .map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -21598,7 +21603,11 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 .is_none_or(|user| &store.dispatch_client_ctx.authenticated_user == user)
             && filter_addr
                 .as_ref()
-                .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr);
+                .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr)
+            && filter_laddr.as_ref().is_none_or(|laddr| {
+                let reported = format!("127.0.0.1:{}", store.server_port);
+                laddr == &reported
+            });
 
         if legacy_addr.is_some() {
             if matches_current_client {
@@ -60956,6 +60965,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Integer(1));
+
+        let current_laddr = format!("127.0.0.1:{}", store.server_port).into_bytes();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                current_laddr.clone(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                current_laddr,
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                b"127.0.0.1:1".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
     }
 
     #[test]
