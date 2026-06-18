@@ -3128,6 +3128,68 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_scard_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                        PlainCardinalityCmd::Hlen,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                        PlainCardinalityCmd::Zcard,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4445,6 +4507,87 @@ fn parse_borrowed_plain_getdel_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainGetdelPacket { consumed, key })
+}
+
+struct BorrowedPlainScardPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-ldpk9) Byte-prefix fast path for single-key SCARD; reuses the
+// verified live execute_plain_scard_borrowed.
+fn parse_borrowed_plain_scard_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainScardPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"SCARD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"SCARD"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainScardPacket { consumed, key })
+}
+
+struct BorrowedPlainHlenPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-ldpk9) Byte-prefix fast path for single-key HLEN; reuses
+// execute_plain_cardinality_borrowed(Hlen).
+fn parse_borrowed_plain_hlen_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHlenPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"HLEN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"HLEN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainHlenPacket { consumed, key })
+}
+
+struct BorrowedPlainZcardPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-ldpk9) Byte-prefix fast path for single-key ZCARD; reuses
+// execute_plain_cardinality_borrowed(Zcard).
+fn parse_borrowed_plain_zcard_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZcardPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"ZCARD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZCARD"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainZcardPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
