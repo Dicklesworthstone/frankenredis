@@ -184,6 +184,7 @@ PORT_BASED = [
     ("float_input_acceptance_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("smove_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("lmove_rpoplpush_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("rename_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
