@@ -6196,7 +6196,7 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         match geo_unit_to_meters(&argv[4]) {
             Some(unit) => unit,
             None => {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                 ));
             }
@@ -6678,7 +6678,7 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let unit_mult = match geo_unit_to_meters(&argv[5]) {
         Some(m) => m,
         None => {
-            return Ok(RespFrame::Error(
+            return Err(CommandError::Custom(
                 "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
             ));
         }
@@ -6773,7 +6773,7 @@ fn georadiusbymember(
     let unit_mult = match geo_unit_to_meters(&argv[4]) {
         Some(m) => m,
         None => {
-            return Ok(RespFrame::Error(
+            return Err(CommandError::Custom(
                 "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
             ));
         }
@@ -6925,7 +6925,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             let um = match geo_unit_to_meters(&argv[i + 2]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -6961,7 +6961,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             let um = match geo_unit_to_meters(&argv[i + 3]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -7226,7 +7226,7 @@ fn geosearchstore(
             let um = match geo_unit_to_meters(&synth[i + 2]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -7261,7 +7261,7 @@ fn geosearchstore(
             let um = match geo_unit_to_meters(&synth[i + 3]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
