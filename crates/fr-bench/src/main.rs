@@ -43,6 +43,12 @@ enum Workload {
     // multi-element array-reply encode path (per-element bulk framing + decimal length
     // headers), a read-heavy reply baseline for the reply-encode levers.
     Lrange,
+    // (frankenredis-n2u1g) HGETALL against a prefilled multi-field hash — exercises the
+    // field+value interleaved (RESP2) / map (RESP3) reply encode path.
+    Hgetall,
+    // (frankenredis-n2u1g) SMEMBERS against a prefilled set — exercises the set
+    // multi-element array-reply encode path + set iteration.
+    Smembers,
 }
 
 /// (frankenredis-n2u1g) Members ZADD'd into each benchmarked zset during prefill, so a
@@ -52,6 +58,14 @@ const ZSET_BENCH_MEMBERS: usize = 64;
 /// (frankenredis-n2u1g) Elements LPUSH'd into each benchmarked list during prefill, so a
 /// single LRANGE 0 -1 reply frames this many bulk elements (non-draining read).
 const LIST_BENCH_ELEMENTS: usize = 64;
+
+/// (frankenredis-n2u1g) Field/value pairs HSET into each benchmarked hash during prefill,
+/// so a single HGETALL reply frames this many field+value bulks.
+const HASH_BENCH_FIELDS: usize = 64;
+
+/// (frankenredis-n2u1g) Members SADD'd into each benchmarked set during prefill, so a
+/// single SMEMBERS reply frames this many bulk members.
+const SET_BENCH_MEMBERS: usize = 64;
 
 impl Workload {
     fn parse(value: &str) -> Option<Self> {
@@ -87,6 +101,12 @@ impl Workload {
         if value.eq_ignore_ascii_case("lrange") {
             return Some(Self::Lrange);
         }
+        if value.eq_ignore_ascii_case("hgetall") {
+            return Some(Self::Hgetall);
+        }
+        if value.eq_ignore_ascii_case("smembers") {
+            return Some(Self::Smembers);
+        }
         None
     }
 
@@ -102,6 +122,8 @@ impl Workload {
             Self::Mixed => "mixed",
             Self::ZrangeWithscores => "zrange-withscores",
             Self::Lrange => "lrange",
+            Self::Hgetall => "hgetall",
+            Self::Smembers => "smembers",
         }
     }
 }
@@ -117,6 +139,8 @@ enum CommandKind {
     Hget,
     ZrangeWithscores,
     Lrange,
+    Hgetall,
+    Smembers,
 }
 
 #[derive(Debug, Clone)]
@@ -656,6 +680,8 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
         Workload::Lpop => list_prefill_per_key(config.requests, config.keyspace, config.pipeline)
             .saturating_mul(config.keyspace),
         Workload::Lrange => LIST_BENCH_ELEMENTS.saturating_mul(config.keyspace),
+        Workload::Hgetall => HASH_BENCH_FIELDS.saturating_mul(config.keyspace),
+        Workload::Smembers => SET_BENCH_MEMBERS.saturating_mul(config.keyspace),
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => 0,
     };
 
@@ -744,6 +770,43 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
                 flush_prepare_batch(&mut client, &mut batch)?;
             }
         }
+        Workload::Hgetall => {
+            // (frankenredis-n2u1g) HSET HASH_BENCH_FIELDS field/value pairs per key so each
+            // later HGETALL reply frames that many field+value bulks.
+            for key_index in 0..config.keyspace {
+                let key = benchmark_key(&config.key_prefix, CommandKind::Hgetall, key_index);
+                let mut argv = Vec::with_capacity(2 + HASH_BENCH_FIELDS * 2);
+                argv.push(b"HSET".to_vec());
+                argv.push(key);
+                for fld in 0..HASH_BENCH_FIELDS {
+                    argv.push(format!("f{fld}").into_bytes());
+                    argv.push(value_for_list_item(&value, fld));
+                }
+                batch.push(PreparedCommand {
+                    frame: argv_frame(argv),
+                    expectation: ResponseExpectation::INTEGER,
+                });
+                flush_prepare_batch(&mut client, &mut batch)?;
+            }
+        }
+        Workload::Smembers => {
+            // (frankenredis-n2u1g) SADD SET_BENCH_MEMBERS members per key so each later
+            // SMEMBERS reply frames that many bulk members.
+            for key_index in 0..config.keyspace {
+                let key = benchmark_key(&config.key_prefix, CommandKind::Smembers, key_index);
+                let mut argv = Vec::with_capacity(2 + SET_BENCH_MEMBERS);
+                argv.push(b"SADD".to_vec());
+                argv.push(key);
+                for m in 0..SET_BENCH_MEMBERS {
+                    argv.push(format!("m{m}").into_bytes());
+                }
+                batch.push(PreparedCommand {
+                    frame: argv_frame(argv),
+                    expectation: ResponseExpectation::INTEGER,
+                });
+                flush_prepare_batch(&mut client, &mut batch)?;
+            }
+        }
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => {}
     }
 
@@ -816,6 +879,8 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Hget => CommandKind::Hget,
         Workload::ZrangeWithscores => CommandKind::ZrangeWithscores,
         Workload::Lrange => CommandKind::Lrange,
+        Workload::Hgetall => CommandKind::Hgetall,
+        Workload::Smembers => CommandKind::Smembers,
         Workload::Mixed => {
             if rng.pick_percent() < read_percent {
                 CommandKind::Get
@@ -843,6 +908,8 @@ fn build_command(
         CommandKind::Hget => ResponseExpectation::NON_ERROR,
         CommandKind::ZrangeWithscores => ResponseExpectation::NON_ERROR,
         CommandKind::Lrange => ResponseExpectation::NON_ERROR,
+        CommandKind::Hgetall => ResponseExpectation::NON_ERROR,
+        CommandKind::Smembers => ResponseExpectation::NON_ERROR,
     };
 
     let key = benchmark_key(&config.key_prefix, kind, key_index);
@@ -884,6 +951,9 @@ fn build_command(
         ],
         // (frankenredis-n2u1g) full-range list read; prefill LPUSHes the list like Lpop.
         CommandKind::Lrange => vec![b"LRANGE".to_vec(), key, b"0".to_vec(), b"-1".to_vec()],
+        // (frankenredis-n2u1g) hash/set multi-element reads; prefill seeds the collection.
+        CommandKind::Hgetall => vec![b"HGETALL".to_vec(), key],
+        CommandKind::Smembers => vec![b"SMEMBERS".to_vec(), key],
     };
 
     PreparedCommand {
@@ -905,8 +975,9 @@ fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
         CommandKind::Set | CommandKind::Get => "string",
         CommandKind::Incr => "counter",
         CommandKind::Lpush | CommandKind::Lpop | CommandKind::Lrange => "list",
-        CommandKind::Hset | CommandKind::Hget => "hash",
+        CommandKind::Hset | CommandKind::Hget | CommandKind::Hgetall => "hash",
         CommandKind::ZrangeWithscores => "zset",
+        CommandKind::Smembers => "set",
     };
     format!("{prefix}:{family}:{key_index}").into_bytes()
 }
@@ -998,7 +1069,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange (default: set)\n\
+  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
