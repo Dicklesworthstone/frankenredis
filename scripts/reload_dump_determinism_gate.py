@@ -51,25 +51,13 @@ def stable(r,kind,n):
     build(r,kind,n); d1=r.cmd("dump","k"); r.cmd("debug","reload"); d2=r.cmd("dump","k")
     return d1==d2
 CASES=[(k,n) for k in ("hash","list","zset","set-lp","set-int") for n in (5,50,200)]
-# frankenredis-2j9wz is FIXED (commit thread on the bead): the SAVE path no longer
-# sorts listpack hash/set fields (it preserves native insertion order, matching
-# redis) and now encodes against LIVE thresholds (a listpack set above the default
-# limit saves as SET_LISTPACK, not the hashtable-pinned plain SET). This set is now
-# empty so ANY reload-DUMP instability vs redis is a hard FAIL/regression.
-KNOWN_2J9WZ=set()
 def main():
-    od=R(int(sys.argv[1])); fr=R(int(sys.argv[2])); bad=0; known=0; fixed=[]
+    od=R(int(sys.argv[1])); fr=R(int(sys.argv[2])); bad=0
     for kind,n in CASES:
         os_=stable(od,kind,n); fs=stable(fr,kind,n)
         if os_ and not fs:
-            if (kind,n) in KNOWN_2J9WZ:
-                known+=1; print(f"KNOWN-2j9wz {kind}/{n}: fr DUMP unstable across reload (tracked)")
-            else:
-                bad+=1; print(f"DIVERGE {kind}/{n}: redis DUMP stable across reload but fr's is NOT")
-        elif (kind,n) in KNOWN_2J9WZ and fs:
-            fixed.append(f"{kind}/{n}")
-    if fixed: print(f"NOTE: 2j9wz appears FIXED for {fixed} — drop them from KNOWN_2J9WZ")
+            bad+=1; print(f"DIVERGE {kind}/{n}: redis DUMP stable across reload but fr's is NOT")
     print("-"*60)
     if bad: print(f"FAIL — {bad} NEW reload-DUMP-determinism regression(s) vs redis 7.2.4"); return 1
-    print(f"PASS — fr DUMP reload-stability matches redis ({known} known-2j9wz tracked)"); return 0
+    print("PASS — fr DUMP reload-stability matches redis"); return 0
 if __name__=="__main__": sys.exit(main())
