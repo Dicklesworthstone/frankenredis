@@ -27206,19 +27206,19 @@ fn sort_generic(
         let arg = &argv[i];
         if arg.eq_ignore_ascii_case(b"BY") {
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             by_pattern = Some(argv[i].clone());
         } else if arg.eq_ignore_ascii_case(b"GET") {
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             get_patterns.push(argv[i].clone());
         } else if arg.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             limit_offset = parse_i64_arg(&argv[i])?;
@@ -27237,12 +27237,12 @@ fn sort_generic(
             // can land in a GET/BY pattern slot without being
             // misclassified as a flag.
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             store_dest = Some(argv[i].clone());
         } else {
-            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
         }
         i += 1;
     }
