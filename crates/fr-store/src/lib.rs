@@ -3441,8 +3441,12 @@ impl Entry {
         self.modification_count = self.modification_count.wrapping_add(1);
     }
 
-    fn touch_write(&mut self, now_ms: u64) {
-        self.touch(now_ms);
+    fn touch_write(&mut self, now_ms: u64, lfu_tracking_enabled: bool) {
+        if lfu_tracking_enabled {
+            self.touch(now_ms);
+        } else {
+            self.touch_lru(now_ms);
+        }
         self.bump_mod_count();
     }
 
@@ -6589,7 +6593,7 @@ impl Store {
             };
             v.extend_from_slice(value);
             let len = v.len();
-            entry.touch_write(now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
             // (br-frankenredis-84bv)
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Ok(len)
@@ -6960,7 +6964,7 @@ impl Store {
             }
             v[offset..offset + value.len()].copy_from_slice(value);
             let len = v.len();
-            entry.touch_write(now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
             // (br-frankenredis-84bv)
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Ok(len)
@@ -7023,7 +7027,7 @@ impl Store {
                 v[byte_idx] &= !(1 << bit_idx);
             }
             let changed = old_len != v.len() || old_bit != value;
-            entry.touch_write(now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
             // Upstream bitops.c::setbitCommand calls
             // dbUnshareStringValue which always converts the
             // value to raw, regardless of length.
@@ -9538,7 +9542,7 @@ impl Store {
             Value::Hash(m) => {
                 let is_new = !m.contains_key(&field);
                 m.insert(field, value);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Lock the encoding into hashtable
                 // once the hash crosses either listpack threshold.
                 Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -9619,7 +9623,7 @@ impl Store {
                 m.insert(field, value);
             }
         }
-        entry.touch(now_ms);
+        entry.touch_lru(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
         Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -9655,7 +9659,7 @@ impl Store {
         let result = match &mut entry.value {
             Value::Hash(m) => {
                 let is_new = m.insert_borrowed(field, value);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Lock the encoding into hashtable
                 // once the hash crosses either listpack threshold.
                 Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -9733,7 +9737,7 @@ impl Store {
             }
             let is_empty = m.is_empty();
             if removed > 0 {
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
             Ok((removed, is_empty))
         }) else {
@@ -10096,7 +10100,7 @@ impl Store {
                 };
                 let is_empty = m.is_empty();
                 if touched {
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                     // (frankenredis-yp503) Crossing the entries count via
                     // hincrby on a new field can promote to hashtable.
                     Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -10139,7 +10143,7 @@ impl Store {
                 };
                 if !m.contains_key(&field) {
                     m.insert(field, value);
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                     // (frankenredis-yp503) Lock hashtable encoding if
                     // threshold crossed.
                     Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -10236,7 +10240,7 @@ impl Store {
                 };
                 let is_empty = m.is_empty();
                 if touched {
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                     // (frankenredis-yp503) Float result text may exceed
                     // hash-max-listpack-value, promoting to hashtable.
                     Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -10412,7 +10416,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(values.len() as u64);
                         Ok(len)
                     }
@@ -10482,7 +10486,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(values.len() as u64);
                         Ok(len)
                     }
@@ -10543,7 +10547,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                         Ok(val)
                     }
@@ -10595,7 +10599,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                         Ok(Some(result))
                     }
@@ -10636,7 +10640,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                         Ok(val)
                     }
@@ -10688,7 +10692,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                         Ok(Some(result))
                     }
@@ -10940,7 +10944,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(1);
                         Ok(())
                     }
@@ -11111,7 +11115,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                             self.dirty = self.dirty.saturating_add(1);
                             Ok(len as i64)
                         } else {
@@ -11158,7 +11162,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                             self.dirty = self.dirty.saturating_add(1);
                             Ok(len as i64)
                         } else {
@@ -11283,7 +11287,7 @@ impl Store {
                                     &mut self.digest_stale,
                                     &mut self.digest_mutations,
                                 );
-                                entry.touch_write(now_ms);
+                                entry.touch_write(now_ms, lfu_tracking_enabled);
                             }
                         }
                         Ok(removed)
@@ -11318,6 +11322,7 @@ impl Store {
         {
             return Err(StoreError::WrongType);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
 
         // Pop from source
         let popped = match self.entries.get_mut(source) {
@@ -11329,7 +11334,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                     }
                     val
                 }
@@ -11367,7 +11372,7 @@ impl Store {
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
                     );
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -11445,7 +11450,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         } else {
                             noop_ltrim_on_list = true;
                         }
@@ -11509,7 +11514,7 @@ impl Store {
                             // dirty — otherwise the push is invisible to
                             // RDB/AOF persistence, replication, and keyspace
                             // notifications (all gate on dirty changing).
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                             self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
                         Ok(len)
@@ -11561,7 +11566,7 @@ impl Store {
                             // dirty — otherwise the push is invisible to
                             // RDB/AOF persistence, replication, and keyspace
                             // notifications (all gate on dirty changing).
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                             self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
                         Ok(len)
@@ -11626,7 +11631,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                         val
                     }
@@ -11677,7 +11682,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                     }
                     _ => return Err(StoreError::WrongType),
                 }
@@ -12616,7 +12621,7 @@ impl Store {
                     );
                 }
                 if result.is_ok() {
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                 }
                 result
             }
@@ -12858,7 +12863,7 @@ impl Store {
                         &mut self.digest_mutations,
                     );
                 }
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
                 self.dirty = self.dirty.saturating_add(1);
             }
             r
@@ -12998,6 +13003,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         if !self.entries.contains_key(key) {
             let zset_max_entries = self.zset_max_listpack_entries;
             let zset_max_value = self.zset_max_listpack_value;
@@ -13029,7 +13035,7 @@ impl Store {
                 zset_max_value,
             );
             let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
-            entry.touch_write(now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
             self.internal_entries_insert(key.to_vec(), entry);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -13062,6 +13068,7 @@ impl Store {
 
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let (added, changed, is_empty, touched) = {
             let entry =
                 self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
@@ -13123,7 +13130,7 @@ impl Store {
             let is_empty = zs.is_empty();
             let touched = added > 0 || changed > 0;
             if touched {
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Lock skiplist encoding once a
                 // zset crosses zset-max-listpack-{entries,value}.
                 Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
@@ -13176,7 +13183,7 @@ impl Store {
         if removed > 0 {
             if !is_empty {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
             self.dirty = self.dirty.saturating_add(removed);
         }
@@ -13978,7 +13985,7 @@ impl Store {
             let is_empty = zs.is_empty();
             let touched = matches!(&res, Ok(Some(_)));
             if touched {
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Crossing the entries count via
                 // zincrby on a new member can promote to skiplist.
                 Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
@@ -14039,7 +14046,7 @@ impl Store {
                 self.stream_last_ids.remove(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
         }
         Ok(result)
@@ -14084,7 +14091,7 @@ impl Store {
                 self.stream_last_ids.remove(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
         }
         Ok(result)
@@ -14136,7 +14143,7 @@ impl Store {
                 self.stream_last_ids.remove(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
         }
         Ok(result)
@@ -14186,7 +14193,7 @@ impl Store {
                 self.stream_last_ids.remove(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                entry.touch_write(now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
             }
         }
         Ok(result)
@@ -14713,6 +14720,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
@@ -14754,7 +14762,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                     }
                     Ok(removed_count)
@@ -14773,6 +14781,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
@@ -14793,7 +14802,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                     }
                     Ok(removed_count)
@@ -14813,6 +14822,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         validate_lex_range_bounds(min, max)?;
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
@@ -14844,7 +14854,7 @@ impl Store {
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
-                            entry.touch_write(now_ms);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
                     }
                     Ok(removed_count)
@@ -15172,6 +15182,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -15184,7 +15195,7 @@ impl Store {
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
                     );
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                     // Track high watermark so IDs stay monotonic after XDEL
                     let wm = self.stream_last_ids.entry(key.to_vec()).or_insert((0, 0));
                     if id > *wm {
@@ -15404,6 +15415,7 @@ impl Store {
 
     pub fn xdel(&mut self, key: &[u8], ids: &[StreamId], now_ms: u64) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let mut max_deleted = None;
         let result = match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -15429,7 +15441,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(removed as u64);
                     }
                     Ok(removed)
@@ -15452,6 +15464,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -15479,7 +15492,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(to_remove as u64);
                     }
                     Ok(to_remove)
@@ -15501,6 +15514,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -15526,7 +15540,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(removed as u64);
                     }
                     Ok(removed)
@@ -15558,6 +15572,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -15585,7 +15600,7 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(removed as u64);
                     }
                     Ok(removed)
@@ -16809,6 +16824,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -16826,7 +16842,7 @@ impl Store {
                             }
                         }
                     }
-                    entry.touch_write(now_ms);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
                     self.dirty = self.dirty.saturating_add(1);
                     Ok(true)
                 }
@@ -16856,6 +16872,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let (mut registers, encoding, existed) = match self.entries.get(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
@@ -16909,7 +16926,7 @@ impl Store {
             // regardless of the payload size — a low-cardinality sparse HLL
             // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            entry.touch_write(now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
             self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at);
             self.hll_register_cache_store(key, registers);
             let updated = u64::from(created).saturating_add(register_updates);
@@ -17048,6 +17065,7 @@ impl Store {
         sources: &[&[u8]],
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let mut merged = vec![0u8; HLL_REGISTERS];
         let mut saw_dense_input = false;
 
@@ -17088,7 +17106,7 @@ impl Store {
         let mut entry = Entry::new(Value::String(data.into()), now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-        entry.touch_write(now_ms);
+        entry.touch_write(now_ms, lfu_tracking_enabled);
         self.internal_entries_insert_with_expiry(dest.to_vec(), entry, existing_ttl);
         self.hll_register_cache_store(dest, merged);
         self.dirty = self.dirty.saturating_add(1);
@@ -17101,6 +17119,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => {
                 // PFDEBUG GETREG converts to dense via hllSparseToDense, which
@@ -17117,7 +17136,7 @@ impl Store {
                     HllEncoding::Sparse => {
                         entry.value =
                             Value::String(hll_encode(&registers, HllEncoding::Dense).into());
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(1);
                     }
                     HllEncoding::Dense => entry.touch(now_ms),
@@ -17199,6 +17218,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<bool>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => {
                 // PFDEBUG TODENSE is a direct hllSparseToDense, which tolerates
@@ -17215,7 +17235,7 @@ impl Store {
                     HllEncoding::Sparse => {
                         entry.value =
                             Value::String(hll_encode(&registers, HllEncoding::Dense).into());
-                        entry.touch_write(now_ms);
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(1);
                         Ok(Some(true))
                     }
@@ -28557,6 +28577,68 @@ mod tests {
         );
         assert_eq!(entry.last_access_ms, super::lru_access_millis(120_000));
         assert_eq!(store.object_idletime(b"k", 120_500), Some(0));
+    }
+
+    fn assert_lru_write_after_lfu_switch_clears_stale_lfu_clock_marker(
+        key: &[u8],
+        initial: &[u8],
+        write: impl FnOnce(&mut Store, &[u8], u64),
+    ) {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(key.to_vec(), initial.to_vec(), None, 0);
+
+        assert_eq!(store.get(key, 60_000).unwrap(), Some(initial.to_vec()));
+        assert!(
+            store
+                .entries
+                .get(key)
+                .expect("lfu-touched write entry")
+                .redis_lfu_clock_field_active(),
+            "LFU access should leave the Redis LFU clock marker active"
+        );
+
+        store.maxmemory_policy = MaxmemoryPolicy::Noeviction;
+        assert!(
+            store.object_idletime(key, 120_000).unwrap() > 1,
+            "stale LFU metadata is interpreted as a Redis LRU clock before reaccess"
+        );
+
+        write(&mut store, key, 120_000);
+
+        let entry = store.entries.get(key).expect("write-reaccessed entry");
+        assert!(
+            !entry.redis_lfu_clock_field_active(),
+            "non-LFU write must overwrite stale LFU clock metadata with LRU access time"
+        );
+        assert_eq!(entry.last_access_ms, super::lru_access_millis(120_000));
+        assert_eq!(store.object_idletime(key, 120_500), Some(0));
+    }
+
+    #[test]
+    fn lru_write_after_lfu_policy_switch_clears_stale_lfu_clock_marker_qwqln() {
+        assert_lru_write_after_lfu_switch_clears_stale_lfu_clock_marker(
+            b"append",
+            b"v",
+            |store, key, now_ms| {
+                assert_eq!(store.append(key, b"x", now_ms).unwrap(), 2);
+            },
+        );
+        assert_lru_write_after_lfu_switch_clears_stale_lfu_clock_marker(
+            b"setrange",
+            b"v",
+            |store, key, now_ms| {
+                assert_eq!(store.setrange(key, 0, b"Z", now_ms).unwrap(), 1);
+            },
+        );
+        assert_lru_write_after_lfu_switch_clears_stale_lfu_clock_marker(
+            b"setbit",
+            b"\x00",
+            |store, key, now_ms| {
+                assert!(!store.setbit(key, 0, true, now_ms).unwrap());
+            },
+        );
     }
 
     #[test]

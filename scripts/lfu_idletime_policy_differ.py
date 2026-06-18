@@ -66,6 +66,7 @@ od = None
 fr = None
 
 fails = []
+notes = []
 
 
 def both(*cmd):
@@ -159,8 +160,32 @@ with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.
             "(both should reinterpret stale LFU bits to a non-zero idle)"
         )
 
+    # --- G/H (frankenredis-qwqln): LFU access, switch to non-LFU, in-place write,
+    #     then IDLETIME. Before the store fix, fr kept the stale LFU marker through
+    #     APPEND/SETRANGE while redis reset robj.lru on lookupKeyWrite. Keep these
+    #     documented until the guard is promoted to a hard parity check. ---
+    def write_reaccess(label, *write_cmd):
+        reset("allkeys-lfu")
+        both("set", "k", "v")
+        both("get", "k")
+        for d in (od, fr):
+            d.cmd("config", "set", "maxmemory-policy", "noeviction")
+        both(*write_cmd)
+        o, f = both("object", "idletime", "k")
+        if small_int(o) and small_int(f):
+            notes.append(f"{label} now MATCHES (qwqln fixed?) — promote to HARD")
+        elif small_int(o) and big_int(f):
+            notes.append(f"{label} KNOWN DIVERGENCE (frankenredis-qwqln): redis={o} fr={f}")
+        else:
+            fails.append(f"{label} UNEXPECTED: redis={o!r} fr={f!r}")
+
+    write_reaccess("G_append_reaccess", "append", "k", "x")
+    write_reaccess("H_setrange_reaccess", "setrange", "k", "0", "Z")
+
     print("=" * 60)
     exit_code = 0
+    for x in notes:
+        print(f"NOTE — {x}")
     if fails:
         print(
             f"FAIL — {len(fails)} NEW divergence(s) in OBJECT IDLETIME/FREQ vs redis 7.2.4:"
