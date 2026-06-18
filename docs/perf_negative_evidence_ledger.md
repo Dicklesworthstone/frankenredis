@@ -120,5 +120,15 @@ turns). Keep claims honest — mark which.
   `ZRANGEBYSCORE WITHSCORES`, or `ZRANGE ... LIMIT` direct encoders unless the
   focused zrange-withscores bench or a release profile isolates those exact
   option shapes as score-format/allocation bottlenecks.
+- frankenredis-mixed-zset-listpack-direct-emit-vly2n / cod-a: `fr-persist`
+  compact zset listpack encode now streams member/score entries directly for
+  mixed integer/fractional score sets instead of building `score_bytes` and
+  `flat` temporary vectors — CODED (reasoned; batch benchmark pending).
+  Integer-valued scores use the stack `decimal_i64_scratch` path; fractional
+  score formatting remains unchanged. Guard pins mixed-score ordering,
+  same-score member tie ordering, and decoded listpack entry bytes. Retry
+  condition if rejected: only revisit with a fresh mixed-score compact-zset
+  DUMP/RDB profile naming listpack construction or score formatting, not as
+  generic vector cleanup.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

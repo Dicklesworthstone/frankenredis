@@ -1784,18 +1784,7 @@ fn encode_compact_zset_listpack(
             .then_with(|| left.0.cmp(right.0))
     });
 
-    let lp = encode_zset_integer_score_listpack_blob(&sorted_members).or_else(|| {
-        let mut score_bytes = Vec::with_capacity(sorted_members.len());
-        for (_, score) in &sorted_members {
-            score_bytes.push(zset_listpack_score_bytes(*score));
-        }
-        let mut flat = Vec::with_capacity(sorted_members.len() * 2);
-        for (index, (member, _)) in sorted_members.iter().enumerate() {
-            flat.push(*member);
-            flat.push(score_bytes[index].as_slice());
-        }
-        encode_listpack_strings_blob(&flat)
-    })?;
+    let lp = encode_zset_score_listpack_blob(&sorted_members)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
     // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
     // compresses it when it is large enough to beat the wire overhead (>20 bytes
@@ -1806,13 +1795,17 @@ fn encode_compact_zset_listpack(
     Some(out)
 }
 
-fn encode_zset_integer_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Vec<u8>> {
+fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     for (member, score) in sorted_members {
-        let score = zset_listpack_integer_score(*score)?;
         encode_listpack_entry(&mut encoded, member);
-        let (scratch, start) = decimal_i64_scratch(score);
-        encode_listpack_entry(&mut encoded, &scratch[start..]);
+        if let Some(score) = zset_listpack_integer_score(*score) {
+            let (scratch, start) = decimal_i64_scratch(score);
+            encode_listpack_entry(&mut encoded, &scratch[start..]);
+        } else {
+            let score = format!("{score}");
+            encode_listpack_entry(&mut encoded, score.as_bytes());
+        }
     }
     let total_bytes = 6usize.checked_add(encoded.len())?.checked_add(1)?;
     let total_bytes = u32::try_from(total_bytes).ok()?;
@@ -1824,14 +1817,6 @@ fn encode_zset_integer_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> O
     listpack.extend_from_slice(&encoded);
     listpack.push(0xFF);
     Some(listpack)
-}
-
-fn zset_listpack_score_bytes(score: f64) -> Vec<u8> {
-    if let Some(score) = zset_listpack_integer_score(score) {
-        decimal_i64_bytes(score)
-    } else {
-        format!("{score}").into_bytes()
-    }
 }
 
 fn zset_listpack_integer_score(score: f64) -> Option<i64> {
@@ -5956,6 +5941,17 @@ mod tests {
                 ]),
                 expire_ms: None,
             },
+            RdbEntry {
+                db: 0,
+                key: b"z_mixed_listpack".to_vec(),
+                value: RdbValue::SortedSet(vec![
+                    (b"frac-b".to_vec(), 3.5),
+                    (b"int-high".to_vec(), 4.0),
+                    (b"frac-a".to_vec(), 3.5),
+                    (b"neg".to_vec(), -2.0),
+                ]),
+                expire_ms: None,
+            },
         ];
 
         let encoded = encode_rdb(&entries, &[]);
@@ -5973,6 +5969,10 @@ mod tests {
         );
         assert_eq!(
             type_byte_for_key(&encoded, b"z_int_listpack"),
+            Some(RDB_TYPE_ZSET_LISTPACK)
+        );
+        assert_eq!(
+            type_byte_for_key(&encoded, b"z_mixed_listpack"),
             Some(RDB_TYPE_ZSET_LISTPACK)
         );
 
@@ -6033,6 +6033,24 @@ mod tests {
                 crate::listpack::ListpackEntry::Integer(2),
                 crate::listpack::ListpackEntry::String(b"large".to_vec()),
                 crate::listpack::ListpackEntry::Integer(4095),
+            ]
+        );
+
+        let zset_mixed_payload = compact_listpack_payload_for_key(&encoded, b"z_mixed_listpack")
+            .expect("mixed-score zset listpack payload");
+        let zset_mixed_entries =
+            crate::listpack::decode_listpack(&zset_mixed_payload).expect("decode mixed zset lp");
+        assert_eq!(
+            zset_mixed_entries,
+            vec![
+                crate::listpack::ListpackEntry::String(b"neg".to_vec()),
+                crate::listpack::ListpackEntry::Integer(-2),
+                crate::listpack::ListpackEntry::String(b"frac-a".to_vec()),
+                crate::listpack::ListpackEntry::String(b"3.5".to_vec()),
+                crate::listpack::ListpackEntry::String(b"frac-b".to_vec()),
+                crate::listpack::ListpackEntry::String(b"3.5".to_vec()),
+                crate::listpack::ListpackEntry::String(b"int-high".to_vec()),
+                crate::listpack::ListpackEntry::Integer(4),
             ]
         );
     }
