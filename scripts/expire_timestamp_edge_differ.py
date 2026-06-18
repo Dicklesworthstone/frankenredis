@@ -30,6 +30,10 @@ def main():
     def chk(label,*c):
         ro,rf=cmd(od,*c),cmd(fr,*c)
         if ro!=rf: fails.append(f"{label}: redis={ro[:70]!r} fr={rf[:70]!r}")
+    def cleanup():
+        for s in (od,fr):
+            try: cmd(s,"FLUSHALL")
+            except Exception: pass
     each("FLUSHALL")
     each("DEL","k"); chk("set_exat_past","SET","k","v","EXAT","1"); chk("exists_exat_past","EXISTS","k"); chk("get_exat_past","GET","k")
     each("DEL","k"); chk("set_pxat_past","SET","k","v","PXAT","1"); chk("exists_pxat_past","EXISTS","k")
@@ -48,6 +52,8 @@ def main():
     if fails:
         print(f"FAIL — {len(fails)} expire timestamp-edge divergence(s) vs redis 7.2.4:")
         for x in fails[:14]: print(f"  {x}")
+        cleanup()
         sys.exit(1)
+    cleanup()
     print("PASS — expire timestamp edges byte-exact vs redis 7.2.4 (EXAT/PXAT past-delete, invalid-expire per-cmd wording, GETEX-past, EXPIRE neg/flags, PEXPIRE/EXPIRE overflow asymmetry)")
 if __name__=="__main__": main()

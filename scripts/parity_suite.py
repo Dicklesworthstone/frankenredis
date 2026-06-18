@@ -176,6 +176,7 @@ PORT_BASED = [
     ("sort_alpha_collation_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("msetnx_atomicity_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("expire_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("expire_timestamp_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("sticky_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("inline_command_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("client_subcommand_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
