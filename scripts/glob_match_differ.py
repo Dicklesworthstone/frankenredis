@@ -29,6 +29,8 @@ KEYS = [
     "hcllo", "hzllo", "h*llo", "h?llo", "h[llo", "h]llo", "ha", "abc", "a]c",
     "a-c", "a^c", "x", "\xff\xfe", "[abc]", "a\\b", "key:1", "key:2", "foo",
     "bar", "FOO", "a.b", "123", "A", "z", "aa", "bb", "a1c", "a2c", "azc",
+    # single special-byte keys for char-class edge matching (frankenredis-jz... char-class)
+    "a", "b", "0", "9", "-", "]", "\\", "^", "m",
 ]
 
 PATTERNS = [
@@ -37,6 +39,11 @@ PATTERNS = [
     "h\\*llo", "h\\?llo", "\\\\", "h[a-c]*", "[a-z]*", "[A-Z]*", "[0-9]*",
     "[", "[]", "[a", "[a-", "h[]llo", "[*]", "[?]", "[][]", "[-a]", "[a-]",
     "[\\]]", "key:*", "key:?", "a[b-d]c", "a]c", "a\\]c", "[!a]", "a^c",
+    # char-class edges (cross-checked against stringmatchlen by inspection):
+    # escape-at-end, escaped-range-break, escaped endpoints, empty/]-first class,
+    # reversed range, negated range, dash placements, unterminated negated class.
+    "[\\]", "[\\a-z]", "[]a]", "[^]", "[a\\-z]", "[\\\\]", "[\\^]", "[^a-z]",
+    "[-]", "[--/]", "[\\]a]", "[a-z-]", "[z-a]", "[^abc", "[\\", "[0-9-]",
 ]
 
 
