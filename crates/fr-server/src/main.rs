@@ -3787,6 +3787,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some((cmd, packet)) =
+                    parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime
+                        .execute_plain_keyed_values_write_borrowed(cmd, packet.key, &[packet.member], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -6105,6 +6125,56 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         f2,
         f3,
     })
+}
+
+// (frankenredis-ken99) single-value LPUSH/RPUSH/SADD (`*3 $len CMD key value`),
+// reusing the verified-live execute_plain_keyed_values_write_borrowed with a
+// 1-element value slice. Multi-value forms (arity > 3) fall through to the generic
+// path. LPUSHX/RPUSHX are NOT matched (distinct commands).
+fn parse_borrowed_plain_keyed_values1_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(PlainKeyedValuesCmd, BorrowedPlainKeyMemberPacket<'a>)> {
+    if config.max_array_len < 3 {
+        return None;
+    }
+    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*3\r\n$5\r\n") {
+        let name = rest.get(..5)?;
+        if name.eq_ignore_ascii_case(b"LPUSH") {
+            (PlainKeyedValuesCmd::Lpush, 5usize)
+        } else if name.eq_ignore_ascii_case(b"RPUSH") {
+            (PlainKeyedValuesCmd::Rpush, 5)
+        } else {
+            return None;
+        }
+    } else if let Some(rest) = input.strip_prefix(b"*3\r\n$4\r\n") {
+        let name = rest.get(..4)?;
+        if name.eq_ignore_ascii_case(b"SADD") {
+            (PlainKeyedValuesCmd::Sadd, 4)
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    if config.max_bulk_len < cmdlen {
+        return None;
+    }
+    let mut cursor = 8 + cmdlen; // past `*3\r\n$N\r\n<CMD>`
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some((
+        cmd,
+        BorrowedPlainKeyMemberPacket {
+            consumed,
+            key,
+            member,
+        },
+    ))
 }
 
 // (frankenredis-t9w2a) no-count single-key pops LPOP/RPOP/ZPOPMIN/ZPOPMAX
