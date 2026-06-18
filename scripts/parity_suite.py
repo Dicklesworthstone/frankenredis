@@ -199,6 +199,12 @@ PORT_BASED = [
     ("strlist_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("keyspace_stats_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("info_stats_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("encoding_config_lower_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("lua_load_func_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("lua_coroutine_yield_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("packed_collection_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("keyspace_notification_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("hll_corrupt_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
