@@ -1,0 +1,2 @@
+	#!lua name=repy
+recers.register_function('fst', function('

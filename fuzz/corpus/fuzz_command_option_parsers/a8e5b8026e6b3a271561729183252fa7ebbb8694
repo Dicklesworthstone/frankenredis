@@ -1,0 +1,8 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#K;for,#ARG<==V= 0 a1
+Purn{#K;EYS,#ARG<==V= 1 a1
+PT|EVAL erturnuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuS,#ARG<==V= 0 a1
+PT|EVALR_OPTION_SEED
+ACCEPT|EVAL return{#K;for,#ARG<==V= 0 a1
+Purn{#K;EYS,#ARG<==V= 1 a1
+PT|EVAL erturnuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuS,#ARG<==V= 0 erturn{#K;EYS;EYS,#ARG<==V= 0 a

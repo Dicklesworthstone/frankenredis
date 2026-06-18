@@ -1,0 +1,2 @@
+	#!lua name=replaceempty
+redis.register name=replacempty?redis.'first', funn 0register_function('first'() retur

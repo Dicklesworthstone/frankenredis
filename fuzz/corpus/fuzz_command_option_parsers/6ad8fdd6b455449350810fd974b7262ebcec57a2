@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCFR_OSEED
+ACCEPT|EVAL r======== 1 a1
+EPT|EVAL return{#KEY====== 0 a1

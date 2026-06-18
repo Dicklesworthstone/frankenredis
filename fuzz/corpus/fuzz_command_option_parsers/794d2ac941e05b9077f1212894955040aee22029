@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+
+ACCEPT|EVAL return{#KEYS,#else} 1 L1ACCE|1 k1
+ACCEPT|EVAL return{#KEYS,#else} 1 k1 a1

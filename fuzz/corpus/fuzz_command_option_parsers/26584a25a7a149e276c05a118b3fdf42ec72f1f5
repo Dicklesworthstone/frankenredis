@@ -1,0 +1,15 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#K;EN_SEED
+ACCEPT|EVAL return{#K;EYS,#ARG<#K;EYS,#ARG<=n{#K;EYS,#ARG<#K;EYS,#ARG<==V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 1 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL retu=V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 1 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EV0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 1 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL retAL return{#K;EYS,#ARG<==V= 0 a

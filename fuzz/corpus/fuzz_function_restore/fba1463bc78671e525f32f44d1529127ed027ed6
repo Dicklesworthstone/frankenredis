@@ -1,0 +1,2 @@
+	#!lua name=rty
+redis.register_function('first', function() return_funce=on{funcn_?na

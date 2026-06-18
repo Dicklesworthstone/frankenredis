@@ -1,0 +1,3 @@
+0#!lua name=seedlib
+redks.register_function('alpha', function(keys, Anction_name='bib
+redis.register_function

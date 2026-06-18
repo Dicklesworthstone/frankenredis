@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#KEYS,#AIGV} 1 k1
+ACCEPT|EVAL elseizsef{#KEYS,YS,#AIGV} 0 k2 a1
+#AIGV} 1 k2 a1

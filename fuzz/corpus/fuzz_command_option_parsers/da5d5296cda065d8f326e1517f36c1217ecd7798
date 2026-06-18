@@ -1,0 +1,5 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#KEYSyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy,#AIGyyyyyyyyyyyyyyyyyyyyyyyyyyyyy,#AIGV} 1 k1
+ACCEPT|EVAL rscan:lV} 1 k1
+ACCEPT|EVAL rscan:leturn{#KEYS,YS,#AIGV}YS,#AIGV} 1 k1
+ACCEPzseVAL 1 k2 a

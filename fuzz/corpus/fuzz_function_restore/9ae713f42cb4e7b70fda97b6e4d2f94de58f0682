@@ -1,0 +1,2 @@
+	#!lua name=eempty
+rediregister_function('Tir;t',function(?et)1 end)

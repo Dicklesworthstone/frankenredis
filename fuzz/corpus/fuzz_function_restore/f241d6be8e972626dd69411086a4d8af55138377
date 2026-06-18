@@ -1,0 +1,3 @@
+	#!lua name=tabledesc
+redis.register_function{function_name='first', callback=function return  n descriptionme=tabledesc
+redis.register_function{function_name='first', callback=function return  n description=鍚

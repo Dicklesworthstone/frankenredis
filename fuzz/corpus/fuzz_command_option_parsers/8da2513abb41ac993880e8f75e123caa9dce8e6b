@@ -1,0 +1,3 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#,#AIGV} 1 k1
+ACCEPT|EVAL rscan:leturn{#KEYS,YS,#AIGV}YS,#AIGV} 1 k1 k2 a

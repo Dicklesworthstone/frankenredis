@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+s.7register_function('alph,a', function(edisame='beta', nction(keys, a

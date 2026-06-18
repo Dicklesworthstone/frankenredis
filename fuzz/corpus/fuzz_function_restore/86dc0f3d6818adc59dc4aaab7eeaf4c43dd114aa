@@ -1,0 +1,2 @@
+	#!lua name=lty
+dis.register_function('st', function() r=otio:_?naQction(e=d)

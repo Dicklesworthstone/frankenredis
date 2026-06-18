@@ -1,0 +1,2 @@
+	#!lua name=ry
+redis.register_function('first', function() reurn 1 dt

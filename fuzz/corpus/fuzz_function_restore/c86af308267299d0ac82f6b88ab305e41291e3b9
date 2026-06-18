@@ -1,0 +1,3 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys('alb
+redis.rgister_funcis.register_function

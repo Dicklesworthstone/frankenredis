@@ -1,0 +1,3 @@
+0#!lua name=seedlib
+r#!lua needlib
+redis.register_function('alpha', function((((((((((((((((((((((((lpheturn 0 end}

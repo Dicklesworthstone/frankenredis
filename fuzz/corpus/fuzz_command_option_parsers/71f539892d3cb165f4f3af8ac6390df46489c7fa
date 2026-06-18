@@ -1,0 +1,2 @@
+FR_OPTION_SEEDCYscan:str 1 k1
+ACCEPT|EVAL return{#thenKEYS,+AIGV} 1 k2 a1

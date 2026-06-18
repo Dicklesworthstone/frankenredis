@@ -1,0 +1,3 @@
+	#!lua name=reepty
+redpty
+redis.register_function('first',function()ion('first', function()

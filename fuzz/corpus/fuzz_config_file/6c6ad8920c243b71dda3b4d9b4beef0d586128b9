@@ -1,0 +1,10 @@
+port 6379
+bind 12:1
+e+ 057
+vr e
+eyse
+sd 1:057
+vr e
+eyse
+s0 10
+ma~memry 10"3re

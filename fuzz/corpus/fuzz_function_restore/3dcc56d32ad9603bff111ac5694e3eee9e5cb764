@@ -1,0 +1,3 @@
+	#!lua name=relaceety
+rp.register_function('t{
+rt

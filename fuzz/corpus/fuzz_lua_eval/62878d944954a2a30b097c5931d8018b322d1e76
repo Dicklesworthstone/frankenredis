@@ -1,0 +1,2 @@
+loca, err = pcal ok, err = pacll(redis.call, "SET(")
+if ok then retu

@@ -1,0 +1,2 @@
+0#!lua name=seedb
+redis.register_function('alpha', function(ks ye,a) !lua name=end ron g

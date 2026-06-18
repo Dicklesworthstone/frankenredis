@@ -1,0 +1,2 @@
+	#!lua name=ty
+reregister_function("""de""

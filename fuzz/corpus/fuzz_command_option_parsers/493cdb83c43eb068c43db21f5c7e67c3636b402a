@@ -1,0 +1,2 @@
+sqrt
+ACCEPT|EVAL return{#KEYS,#ARGV} 2 k1 kretur(0) 0

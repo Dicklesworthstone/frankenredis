@@ -1,0 +1,2 @@
+	#!lua name=ty
+eregister_function("""de""

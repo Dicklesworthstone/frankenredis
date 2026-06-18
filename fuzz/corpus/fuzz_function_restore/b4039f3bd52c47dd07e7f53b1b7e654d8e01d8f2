@@ -1,0 +1,2 @@
+	#!lua name=rey
+redis.reg.register_function{function_name='first',_fu callback=function() nc!rei

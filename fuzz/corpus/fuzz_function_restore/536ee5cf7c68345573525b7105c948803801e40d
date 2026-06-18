@@ -1,0 +1,2 @@
+	#!lua name=rempty
+redis.register_function('first', function()n 1ame=e

@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#K;EN_SK;EYS,#ARG<#K;EYS,#ARG<==V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVAL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 0 a1V= 0 a

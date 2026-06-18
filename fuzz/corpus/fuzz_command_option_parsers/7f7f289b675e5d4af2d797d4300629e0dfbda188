@@ -1,0 +1,18 @@
+FR_OPTION_SEED
+ACCEPT|EV_SEED
+ACCEPT|EVurn{#KEYS,#AIGV} 0 k1for
+ACCEPT|EVAL return{#KEYS,YS,#AIGV} 2 eturk1 aKnYES1
+#AIGV} 1 k2 a1
+
+ACCEPT|EVAL return{#KEYS,YS,#AIGV} 2 k1 AL return{#KEYS,#AIGV} 0 k1for
+ACCEPT|EVAL return{#KEYS,YS,#AIGV} 2 eturk1 aKnYES1
+#AIGV} 1 k2 a1
+
+ACCEPT|EVAL return{#KEYS,YS,#AIGV} 2 k1 a1
+#AAL returnE,YKS#{#AIGV} 1 k1_OPTION_SEED
+ACCEPT|EVAL return{#KEYS,#AIGV} 0 k1for
+ACCPT|EVAL return{#KEYS,YS,#AIGV} 2 eturk1 aKnYES1
+#AIGV} 1 k2 a1
+
+ACCEPT|EVAL return{#KEYS,YS,#AIGV} 2 k1 a1
+#AIGV} 1 k2 a1

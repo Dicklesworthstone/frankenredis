@@ -1,0 +1,7 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{} 2 k1 a1
+#AIGV} 1 k2 a1
+
+ACCEPT|EVAL retGV} 1 k2 a1
+
+ACCEPT|EVAL return{#} 1 k2 a1

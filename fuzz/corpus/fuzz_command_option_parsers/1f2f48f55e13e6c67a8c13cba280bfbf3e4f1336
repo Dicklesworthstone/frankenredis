@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCFR_OPTION_SEED
+ACCEPT|EVAL r======== 1 a1
+EPT|EVAL return{#KEYS,#ARG<============ 1 a1

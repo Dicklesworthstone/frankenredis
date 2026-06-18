@@ -1,0 +1,2 @@
+	#!lua name=replaceempty
+redis.ris.register name=replacibregister_function(e=d)

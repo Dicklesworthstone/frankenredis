@@ -1,0 +1,2 @@
+	#!lua name=replaeempty
+receredis.register_function('fst', function('

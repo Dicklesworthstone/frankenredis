@@ -1,0 +1,2 @@
+	#!lua name=y
+rp.register_function('t{

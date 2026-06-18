@@ -1,0 +1,2 @@
+	#!lua name=recib
+redis=.register_function(e=d

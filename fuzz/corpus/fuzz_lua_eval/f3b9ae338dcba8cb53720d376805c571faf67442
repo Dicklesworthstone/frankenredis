@@ -1,0 +1,4 @@
+local function f(x)
+  return x
+end
+urn f("ok")

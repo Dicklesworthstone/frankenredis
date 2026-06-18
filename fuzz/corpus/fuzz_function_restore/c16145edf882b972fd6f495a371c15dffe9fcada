@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys, cq) retqfrugiter_fu"on(ag

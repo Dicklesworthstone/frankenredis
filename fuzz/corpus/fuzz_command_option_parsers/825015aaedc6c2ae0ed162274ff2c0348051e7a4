@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCEPT|EVAL wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwreturn[#KEYS,#ARGV} 2 k1 k2FOPTION_SEED
+ACCEPT|EVAL retur[#KnYES,#ARGV} 3 k1 k2 a1
+!a1

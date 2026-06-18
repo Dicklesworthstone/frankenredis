@@ -1,0 +1,10 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#K;EN_SEED
+ACCEPT|EVAL return{#K;EYS,#ARG<#K;EYS,#ARG<==V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+PT|EVRG==V= 0 a1
+PT|EVAL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+@PT|EVAL return{#AL return{#K;EYS,#AYS,#ARG<#K;EYS,#ARG<==V= 0 a1
+PT|EVAL return{#K;EYS,#ARG==V= 0 a1
+@PT|EVAL return{#K;EYS,#ARG<==V= 0 a

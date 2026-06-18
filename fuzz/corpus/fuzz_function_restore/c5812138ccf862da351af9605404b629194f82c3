@@ -1,0 +1,2 @@
+	#!lua name=replaegmpty
+recers.register_function('fst', function('

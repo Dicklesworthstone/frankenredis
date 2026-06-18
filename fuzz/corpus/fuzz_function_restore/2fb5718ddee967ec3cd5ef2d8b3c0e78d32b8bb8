@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('', function(keysname=''aend}

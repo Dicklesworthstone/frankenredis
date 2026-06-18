@@ -1,0 +1,4 @@
+FR_OPTION_SEED
+ACCEPT|SCAN 0 MATCH strFEED
+,CCPT|EVAL resQrtturn(0) 0
+ng

@@ -1,0 +1,2 @@
+0#!lua name=ib
+register_function('	alpha', fun#

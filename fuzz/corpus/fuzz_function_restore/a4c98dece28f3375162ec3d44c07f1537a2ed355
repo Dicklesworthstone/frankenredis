@@ -1,0 +1,2 @@
+	#!lua name=rety
+rsdis.r namaceemp.register_function('a)

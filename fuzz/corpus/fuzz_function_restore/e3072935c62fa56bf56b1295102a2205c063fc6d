@@ -1,0 +1,2 @@
+	#!lua name=tabledesc
+redis.register_function{function_name='first', callback=function ron return  nback=function ron return  n description=鍚 description=鍚
