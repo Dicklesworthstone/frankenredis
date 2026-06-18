@@ -173,22 +173,29 @@ pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\r\n");
 }
 
-fn decimal_u64_len(mut n: u64) -> usize {
-    let mut len = 1;
-    while n >= 10 {
-        n /= 10;
-        len += 1;
+// (frankenredis-e4fu8) Branchless decimal digit count via ilog10. These run on the
+// reply hot path: every integer reply's size + every bulk-string/array/map header's
+// reserve sizing. `ilog10` lowers to a leading-zeros + tiny-table sequence (a handful
+// of instructions), replacing a data-dependent div-by-10 loop where each `/= 10` is
+// ~20-40 cycles and a u64 takes up to 19 iterations. Byte-identical to the old loops
+// for every input, including 0 (the loop returned 1; ilog10 is undefined at 0 so we
+// special-case it). Verified exhaustively at the digit boundaries by the test below.
+#[inline]
+fn decimal_u64_len(n: u64) -> usize {
+    if n == 0 {
+        1
+    } else {
+        n.ilog10() as usize + 1
     }
-    len
 }
 
-fn decimal_usize_len(mut n: usize) -> usize {
-    let mut len = 1;
-    while n >= 10 {
-        n /= 10;
-        len += 1;
+#[inline]
+fn decimal_usize_len(n: usize) -> usize {
+    if n == 0 {
+        1
+    } else {
+        n.ilog10() as usize + 1
     }
-    len
 }
 
 fn decimal_i64_len(n: i64) -> usize {
@@ -1659,9 +1666,42 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
-        parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64, push_usize,
+        RespParseError, decimal_u64_len, decimal_usize_len, format_redis_double,
+        parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
+        parse_frame, parse_frame_with_config, push_i64, push_usize,
     };
+
+    // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original
+    // div-by-10 reference for every input that crosses a digit boundary, plus extremes.
+    #[test]
+    fn decimal_len_matches_div_loop_reference() {
+        fn reference(mut n: u64) -> usize {
+            let mut len = 1;
+            while n >= 10 {
+                n /= 10;
+                len += 1;
+            }
+            len
+        }
+        let mut probes: Vec<u64> = vec![0, 1, 9, 10, 11, 99, 100, 101, u64::MAX, u64::MAX - 1];
+        // every power-of-ten boundary and its neighbours
+        let mut p: u64 = 1;
+        loop {
+            probes.push(p.saturating_sub(1));
+            probes.push(p);
+            probes.push(p.saturating_add(1));
+            match p.checked_mul(10) {
+                Some(next) => p = next,
+                None => break,
+            }
+        }
+        for &n in &probes {
+            assert_eq!(decimal_u64_len(n), reference(n), "u64 digit count for {n}");
+            if let Ok(u) = usize::try_from(n) {
+                assert_eq!(decimal_usize_len(u), reference(n), "usize digit count for {u}");
+            }
+        }
+    }
 
     // (frankenredis-432l0) Golden contract for how `parse_frame` NORMALIZES the
     // RESP3 reply wire types into the RESP2-shaped `RespFrame` the rest of fr
