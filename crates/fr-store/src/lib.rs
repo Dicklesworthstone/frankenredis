@@ -19699,8 +19699,12 @@ impl Store {
     /// compile, to decide whether a shebang-metadata error should take
     /// precedence over the compile error (matching upstream's order).
     pub fn function_validate_metadata(&self, code: &[u8]) -> Result<(), StoreError> {
-        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
-        Self::extract_lib_metadata(code_str).map(|_| ())
+        // (frankenredis-7qmmr) A library body is arbitrary bytes (upstream lexes
+        // it); only the ASCII metadata header matters here. Decode lossily so a
+        // non-UTF8 body doesn't spuriously surface WRONGTYPE — matches FCALL,
+        // which already uses from_utf8_lossy on the stored code.
+        let code_str = String::from_utf8_lossy(code);
+        Self::extract_lib_metadata(code_str.as_ref()).map(|_| ())
     }
 
     pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
