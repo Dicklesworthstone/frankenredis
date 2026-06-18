@@ -20484,9 +20484,7 @@ impl Store {
                     }
                 } else if entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING) {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                    encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
+                    encode_rdb_string(&mut buf, &encode_set_listpack_dump(s)?);
                 } else if s.len() <= self.set_max_intset_entries {
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
@@ -20496,9 +20494,7 @@ impl Store {
                         && s.iter().all(|member| member.len() <= 64)
                     {
                         buf.push(RDB_TYPE_SET_LISTPACK);
-                        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                        let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                        encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
+                        encode_rdb_string(&mut buf, &encode_set_listpack_dump(s)?);
                     } else {
                         buf.push(RDB_TYPE_SET);
                         encode_length(&mut buf, s.len());
@@ -20510,9 +20506,7 @@ impl Store {
                     && s.iter().all(|member| member.len() <= 64)
                 {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                    encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
+                    encode_rdb_string(&mut buf, &encode_set_listpack_dump(s)?);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
@@ -22148,6 +22142,33 @@ fn finish_listpack_entries(encoded_entries: Vec<u8>, entry_count: usize) -> Opti
     listpack.extend_from_slice(&encoded_entries);
     listpack.push(0xFF);
     Some(listpack)
+}
+
+fn encode_i64_decimal_listpack_entry(buf: &mut Vec<u8>, value: i64) {
+    let mut scratch = [0u8; 20];
+    let mut start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
+    if value < 0 {
+        start -= 1;
+        scratch[start] = b'-';
+    }
+    encode_listpack_entry(buf, &scratch[start..]);
+}
+
+fn encode_set_listpack_dump(set: &SetValue) -> Option<Vec<u8>> {
+    let mut encoded_entries = Vec::new();
+    let mut entry_count = 0usize;
+    if let Some(ints) = set.as_int_slice() {
+        for &value in ints {
+            encode_i64_decimal_listpack_entry(&mut encoded_entries, value);
+            entry_count += 1;
+        }
+    } else {
+        for member in set.iter() {
+            encode_listpack_entry(&mut encoded_entries, member.as_ref());
+            entry_count += 1;
+        }
+    }
+    finish_listpack_entries(encoded_entries, entry_count)
 }
 
 fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
@@ -25906,9 +25927,9 @@ mod tests {
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
         decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
-        estimate_listpack_entry_bytes, estimate_listpack_score_bytes, integer_decimal_bytes,
-        estimate_set_memory_usage_bytes, hll_sparse_decode, redis_allocation_size,
-        redis_score_to_string, ziplist_integer_bytes,
+        encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        integer_decimal_bytes, estimate_set_memory_usage_bytes, hll_sparse_decode,
+        redis_allocation_size, redis_score_to_string, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40779,6 +40800,31 @@ mod tests {
         assert_eq!(s[1], 1, "set member count");
         assert_eq!(s[2], 0xC1, "integer set member must use integer encoding");
         assert_eq!(&s[3..5], &12345i16.to_le_bytes());
+    }
+
+    #[test]
+    fn dump_set_listpack_direct_emit_matches_flat_reference_lbmk6() {
+        let mut generic = SetValue::new();
+        for member in [
+            b"alpha".as_slice(),
+            b"127".as_slice(),
+            b"-2".as_slice(),
+            b"hello\0world".as_slice(),
+        ] {
+            generic.insert_borrowed(member, 512);
+        }
+        let direct = encode_set_listpack_dump(&generic).expect("generic set listpack");
+        let owned: Vec<Vec<u8>> = generic.iter().map(|member| member.into_owned()).collect();
+        let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        assert_eq!(direct, encode_listpack_strings(&refs).unwrap());
+        assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
+
+        let intset = SetValue::Int(vec![-2, 0, 127, 4095]);
+        let direct = encode_set_listpack_dump(&intset).expect("intset listpack");
+        let owned: Vec<Vec<u8>> = intset.iter().map(|member| member.into_owned()).collect();
+        let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        assert_eq!(direct, encode_listpack_strings(&refs).unwrap());
+        assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
     }
 
     #[test]

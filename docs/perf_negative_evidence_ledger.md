@@ -188,6 +188,15 @@ turns). Keep claims honest — mark which.
   both packed nodes and decoded PLAIN content. Retry condition if rejected: do
   not retry quicklist fallback node-vector removal unless a fresh list DUMP
   profile names fallback node construction.
+- frankenredis-lbmk6 / cod-a: `fr-store::dump_key` set-listpack branches now
+  stream `SetValue` members directly into the store-local listpack finalizer
+  instead of cloning into `Vec<Vec<u8>>` and staging `Vec<&[u8]>` — CODED
+  (reasoned; batch benchmark pending). Generic sets borrow member bytes; intset
+  members use stack decimal bytes before `encode_listpack_entry`. Guard compares
+  generic and intset-backed set listpacks against the old flat-reference encoder
+  and decodes binary/integer-looking/signed members. Retry condition if
+  rejected: do not retry set-listpack vector cleanup unless a fresh SET
+  DUMP/RDB profile names listpack construction.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;
