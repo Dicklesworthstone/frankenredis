@@ -22136,7 +22136,13 @@ fn encode_intset(values: &[i64]) -> Option<Vec<u8>> {
 }
 
 fn encode_listpack_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
-    let mut encoded_entries = Vec::new();
+    // Pre-size the entry buffer to a safe upper bound (each listpack string entry is
+    // <= len + ~10 of type-header + backlen) so it is built in one allocation instead of
+    // growing from empty — this backs hash + zset listpack DUMP (and the encoding-size
+    // checks). Under-estimates are harmless (Vec grows); output byte-identical.
+    // (frankenredis perf: presize listpack entry buffer, code-first batch-test pending)
+    let cap = entries.iter().map(|e| e.len() + 11).sum::<usize>();
+    let mut encoded_entries = Vec::with_capacity(cap);
     for entry in entries {
         encode_listpack_entry(&mut encoded_entries, entry);
     }
@@ -22169,7 +22175,11 @@ fn encode_i64_decimal_listpack_entry(buf: &mut Vec<u8>, value: i64) {
 }
 
 fn encode_set_listpack_dump(set: &SetValue) -> Option<Vec<u8>> {
-    let mut encoded_entries = Vec::new();
+    // Pre-size to a rough safe upper bound (members are <= 64 bytes on the listpack-set path,
+    // ints encode to a short decimal) so the buffer is built in one allocation. Under-estimates
+    // are harmless (Vec grows); output byte-identical.
+    // (frankenredis perf: presize listpack entry buffer, code-first batch-test pending)
+    let mut encoded_entries = Vec::with_capacity(set.len().saturating_mul(16));
     let mut entry_count = 0usize;
     if let Some(ints) = set.as_int_slice() {
         for &value in ints {
