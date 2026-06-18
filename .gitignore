@@ -217,3 +217,12 @@ gemini.mcp.json
 
 # Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
 *.mcp.json
+
+# === Ephemeral build & scratch artifacts (multi-repo cleanup 2026-06-18) ===
+# Stray out-of-tree compile outputs (normal builds live under target/, already ignored).
+*.rlib
+rust_out
+# One-off local CARGO_TARGET_DIR override directories (e.g. criterion micro-benches).
+**/local-target/
+# Test-output RDB dumps (real .rdb fixtures stay tracked; dump.rdb already ignored).
+noexist_*.rdb
