@@ -24,6 +24,9 @@ import sys
 import time
 
 EXAT = "4102444800"  # 2100-01-01, stable absolute expire seconds
+BINKEY = b"bin\xff\r\n\x00k"
+BINVAL = b"\x00\xff\r\nval\xfe"
+BINFIELD = b"f\xff\x00"
 
 
 def conn(p):
@@ -57,6 +60,10 @@ def setup(s):
     call(s, "SET", "exk", "v", "EXAT", EXAT)
     call(s, "SET", "gd", "bye")
     call(s, "SET", "bk", "\xff")
+    # binary key/field/value (embedded \xff, CRLF, NUL) — fast paths parse
+    # length-prefixed bulks, so they must be binary-safe.
+    call(s, "SET", BINKEY, BINVAL)
+    call(s, "HSET", "bh", BINFIELD, BINVAL)
 
 
 # Each entry is a command sent as canonical RESP (fires the byte-prefix packet).
@@ -211,6 +218,15 @@ CASES = [
     ["LRANGE", "plk3", "0", "-1"],
     ["SADD", "psk3", "x", "y", "z"],
     ["SCARD", "psk3"],
+    # binary-safety: keys/fields/values with embedded \xff / CRLF / NUL through
+    # the fast paths (length-prefixed, so must round-trip exactly).
+    ["GET", BINKEY],
+    ["STRLEN", BINKEY],
+    ["EXISTS", BINKEY, "nope"],
+    ["TYPE", BINKEY],
+    ["GETRANGE", BINKEY, "0", "3"],
+    ["HGET", "bh", BINFIELD],
+    ["HEXISTS", "bh", BINFIELD],
 ]
 
 
