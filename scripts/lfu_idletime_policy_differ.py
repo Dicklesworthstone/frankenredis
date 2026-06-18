@@ -9,16 +9,11 @@ IDLETIME can still diverge). Covers the lfulog FREQ-init and the nro98
 LFU->LRU-switch reinterpretation paths.
 
 Byte-matchable HARD checks: policy-gated errors, fresh IDLETIME == 0, FREQ init,
-and the nro98 reinterpretation producing a non-zero idle on BOTH servers.
-
-DOCUMENTED known divergence (does NOT fail the gate): after a LFU->LRU policy
-switch AND a subsequent read, redis resets robj.lru on the non-LFU read so
-IDLETIME returns ~0, while fr keeps reinterpreting the stale LFU bits and
-returns a large value (frankenredis-97wc2). When 97wc2 is fixed this check
-flips to MATCH and should be promoted to a HARD assertion.
+LFU->LRU re-access clearing stale LFU metadata, and the nro98 reinterpretation
+producing a non-zero idle on BOTH servers when there is no re-access.
 
 Usage: lfu_idletime_policy_differ.py <oracle_port> <fr_port>
-       Exit 0 = parity (modulo documented known divergences),
+       Exit 0 = parity,
             1 = NEW divergence, 2 = setup error.
 """
 import socket, sys
@@ -74,7 +69,6 @@ od = R(OR)
 fr = R(FR)
 
 fails = []
-notes = []
 
 
 def both(*cmd):
@@ -133,9 +127,9 @@ reset("noeviction")
 both("set", "k", "v")
 hard("D_freq_under_nonlfu_err", "object", "freq", "k")
 
-# --- E (frankenredis-97wc2 KNOWN DIVERGENCE): LFU access, switch to non-LFU,
-#     re-access, then IDLETIME. redis resets robj.lru on the non-LFU read so
-#     idle ~0; fr keeps the stale LFU reinterpretation and returns a big value. ---
+# --- E (frankenredis-97wc2): LFU access, switch to non-LFU, re-access, then
+#     IDLETIME. redis resets robj.lru on the non-LFU read so idle is ~0; fr
+#     must also clear the stale LFU reinterpretation marker on that read. ---
 reset("allkeys-lfu")
 both("set", "k", "v")
 both("get", "k")
@@ -143,15 +137,11 @@ for d in (od, fr):
     d.cmd("config", "set", "maxmemory-policy", "noeviction")
 both("get", "k")
 o, f = both("object", "idletime", "k")
-if small_int(o) and small_int(f):
-    notes.append("E_reaccess_idletime now MATCHES (frankenredis-97wc2 fixed?) — promote to HARD")
-elif small_int(o) and big_int(f):
-    notes.append(
-        f"E_reaccess_idletime KNOWN DIVERGENCE (frankenredis-97wc2): redis={o} fr={f} "
+if not (small_int(o) and small_int(f)):
+    fails.append(
+        f"E_reaccess_idletime: redis={o!r} fr={f!r} "
         "(non-LFU read must clear the LFU-bits reinterpretation)"
     )
-else:
-    fails.append(f"E_reaccess_idletime UNEXPECTED: redis={o!r} fr={f!r}")
 
 # --- F: nro98 — LFU set, switch to non-LFU, NO re-access; both reinterpret the
 #     stale LFU bits into a non-zero idle (the bug nro98 fixed: fr used to be 0). ---
@@ -167,8 +157,6 @@ if not (big_int(o) and big_int(f)):
     )
 
 print("=" * 60)
-for n in notes:
-    print(f"NOTE  {n}")
 if fails:
     print(f"FAIL — {len(fails)} NEW divergence(s) in OBJECT IDLETIME/FREQ vs redis 7.2.4:")
     for x in fails:
@@ -176,5 +164,5 @@ if fails:
     sys.exit(1)
 print(
     "PASS — OBJECT IDLETIME/FREQ policy-switch behavior matches redis 7.2.4 "
-    f"(hard checks A-D,F; {len(notes)} documented known divergence)"
+    "(hard checks A-F)"
 )
