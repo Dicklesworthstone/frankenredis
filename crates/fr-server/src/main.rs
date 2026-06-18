@@ -3742,6 +3742,72 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hstrlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_hstrlen_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zrank_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_rank_borrowed(
+                        PlainRankCmd::Zrank,
+                        packet.key,
+                        packet.member,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zrevrank_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_rank_borrowed(
+                        PlainRankCmd::Zrevrank,
+                        packet.key,
+                        packet.member,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime
@@ -5865,6 +5931,85 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         f1,
         f2,
         f3,
+    })
+}
+
+// (frankenredis-yfe42) key+field read HSTRLEN; reuses execute_plain_hstrlen_borrowed.
+fn parse_borrowed_plain_hstrlen_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"HSTRLEN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$7\r\n").and_then(|rest| {
+        rest.get(..7)
+            .filter(|command| command.eq_ignore_ascii_case(b"HSTRLEN"))
+            .map(|_| input.len() - rest.len() + 7)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-yfe42) key+member read ZRANK (`ZRANK key member`, no WITHSCORE);
+// reuses execute_plain_rank_borrowed(Zrank). WITHSCORE form (arity 4) falls through.
+fn parse_borrowed_plain_zrank_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"ZRANK".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANK"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-yfe42) key+member read ZREVRANK; reuses execute_plain_rank_borrowed(Zrevrank).
+fn parse_borrowed_plain_zrevrank_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"ZREVRANK".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$8\r\n").and_then(|rest| {
+        rest.get(..8)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZREVRANK"))
+            .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
     })
 }
 
