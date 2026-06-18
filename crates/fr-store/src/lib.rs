@@ -4576,6 +4576,11 @@ pub struct Store {
     pub set_max_listpack_value: usize,
     pub zset_max_listpack_entries: usize,
     pub zset_max_listpack_value: usize,
+    /// (frankenredis-uwhyl) proto-max-bulk-len: the max string byte-length the
+    /// store enforces for APPEND/SETRANGE/SET-grow + the bit-offset ceiling for
+    /// SETBIT/BITFIELD/BITOP. Synced from the server config on CONFIG SET; default
+    /// 512 MiB. Previously hardcoded at every size-check site.
+    pub proto_max_bulk_len: usize,
     pub hll_sparse_max_bytes: usize,
 
     /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
@@ -5005,6 +5010,7 @@ impl Default for Store {
             set_max_listpack_value: 64,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
+            proto_max_bulk_len: 512 * 1024 * 1024, // (frankenredis-uwhyl) redis 7.2 default
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
@@ -7031,6 +7037,13 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        // (frankenredis-uwhyl) Mirror redis setbitCommand: reject when the byte
+        // index reaches proto-max-bulk-len (config knob, not a hardcoded 512 MiB).
+        if offset >> 3 >= self.proto_max_bulk_len {
+            return Err(StoreError::GenericError(
+                "ERR bit offset is not an integer or out of range".to_string(),
+            ));
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -7216,7 +7229,7 @@ impl Store {
         // enforces bit_offset < 2^32 (== this guard for the default 512 MiB), so
         // the prior `needed_bytes > 512MiB` length check wrongly rejected the top
         // few offsets that redis accepts.
-        if (bit_offset >> 3) as usize >= 512 * 1024 * 1024 {
+        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));
@@ -7269,7 +7282,7 @@ impl Store {
         // the default 512 MiB), so the prior length check wrongly rejected the top
         // few offsets redis accepts. Supersedes the ga4j1 checkStringLength wording
         // here (that wording is correct for SET/APPEND/SETRANGE, not BITFIELD).
-        if (bit_offset >> 3) as usize >= 512 * 1024 * 1024 {
+        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));

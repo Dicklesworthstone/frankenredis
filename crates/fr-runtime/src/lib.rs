@@ -4691,6 +4691,7 @@ fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.set_max_intset_entries = original.set_max_intset_entries;
     replacement.set_max_listpack_entries = original.set_max_listpack_entries;
     replacement.set_max_listpack_value = original.set_max_listpack_value;
+    replacement.proto_max_bulk_len = original.proto_max_bulk_len; // (frankenredis-uwhyl)
     replacement.zset_max_listpack_entries = original.zset_max_listpack_entries;
     replacement.zset_max_listpack_value = original.zset_max_listpack_value;
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
@@ -7784,7 +7785,7 @@ impl Runtime {
         // guard, then the append. (frankenredis-ga4j1 string-length cap = 512MiB)
         let reply = match self.server.store.string_len_no_stats(key, now_ms) {
             Ok(current_len) => {
-                if current_len.saturating_add(value.len()) > 536_870_912 {
+                if current_len.saturating_add(value.len()) > self.server.proto_max_bulk_len {
                     RespFrame::Error(
                         "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
                     )
@@ -7923,7 +7924,7 @@ impl Runtime {
             return None;
         }
         let offset_u64 = u64::try_from(offset).ok()?;
-        if offset_u64.saturating_add(value.len() as u64) > 536_870_912 {
+        if offset_u64.saturating_add(value.len() as u64) > self.server.proto_max_bulk_len as u64 {
             return None;
         }
         let offset_usize = usize::try_from(offset_u64).ok()?;
@@ -21479,6 +21480,9 @@ impl Runtime {
         }
         if let Some(proto_max_bulk_len) = next_proto_max_bulk_len {
             self.server.proto_max_bulk_len = proto_max_bulk_len;
+            // (frankenredis-uwhyl) keep the store's copy in sync so APPEND/SETRANGE/
+            // SETBIT/BITFIELD size checks honor the configured limit, not a hardcode.
+            self.server.store.proto_max_bulk_len = proto_max_bulk_len;
         }
         if let Some(limits) = next_client_output_buffer_limits {
             self.server.client_output_buffer_limits = limits;

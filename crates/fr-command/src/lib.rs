@@ -3975,7 +3975,7 @@ fn append(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // non-counting length read. (frankenredis-934ax)
     let current_len = store.string_len_no_stats(&argv[1], now_ms)?;
     let added_len = argv[2].len();
-    if current_len.saturating_add(added_len) > 536_870_912 {
+    if current_len.saturating_add(added_len) > store.proto_max_bulk_len {
         // (frankenredis-ga4j1) Upstream t_string.c::checkStringLength
         // line 48 names the *config knob* (proto_max_bulk_len), not a
         // fixed byte size. Matches SETRANGE wording at line 9422 above.
@@ -12688,7 +12688,7 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         let cur = store.strlen(&argv[1], now_ms)?;
         return Ok(RespFrame::Integer(i64::try_from(cur).unwrap_or(i64::MAX)));
     }
-    if offset_u64.saturating_add(added_len as u64) > 536_870_912 {
+    if offset_u64.saturating_add(added_len as u64) > store.proto_max_bulk_len as u64 {
         // Upstream reply: "string exceeds maximum allowed size
         // (proto-max-bulk-len)" (br-frankenredis-68ql).
         return Ok(RespFrame::Error(
