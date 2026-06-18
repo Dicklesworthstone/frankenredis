@@ -16,57 +16,54 @@ Usage: lfu_idletime_policy_differ.py <oracle_port> <fr_port>
        Exit 0 = parity,
             1 = NEW divergence, 2 = setup error.
 """
-import socket, sys
-
-
-def C(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=10)
+import socket
+import sys
 
 
 class R:
-    def __init__(s, p):
-        s.s = C(p)
-        s.buf = b""
+    def __init__(self, sock):
+        self.s = sock
+        self.buf = b""
 
-    def _l(s):
-        while b"\r\n" not in s.buf:
-            s.buf += s.s.recv(1 << 20)
-        l, s.buf = s.buf.split(b"\r\n", 1)
-        return l
+    def _l(self):
+        while b"\r\n" not in self.buf:
+            self.buf += self.s.recv(1 << 20)
+        line, self.buf = self.buf.split(b"\r\n", 1)
+        return line
 
-    def _n(s, n):
-        while len(s.buf) < n + 2:
-            s.buf += s.s.recv(1 << 20)
-        d = s.buf[:n]
-        s.buf = s.buf[n + 2:]
+    def _n(self, n):
+        while len(self.buf) < n + 2:
+            self.buf += self.s.recv(1 << 20)
+        d = self.buf[:n]
+        self.buf = self.buf[n + 2:]
         return d
 
-    def read(s):
-        l = s._l()
-        t = l[:1]
+    def read(self):
+        line = self._l()
+        t = line[:1]
         if t in (b"+", b":", b"-"):
-            return l.decode("latin1")
+            return line.decode("latin1")
         if t == b"$":
-            n = int(l[1:])
-            return None if n < 0 else s._n(n).decode("latin1")
+            n = int(line[1:])
+            return None if n < 0 else self._n(n).decode("latin1")
         if t == b"*":
-            n = int(l[1:])
-            return None if n < 0 else [s.read() for _ in range(n)]
-        return l.decode("latin1")
+            n = int(line[1:])
+            return None if n < 0 else [self.read() for _ in range(n)]
+        return line.decode("latin1")
 
-    def cmd(s, *a):
+    def cmd(self, *a):
         o = b"*%d\r\n" % len(a)
         for x in a:
             x = x.encode() if isinstance(x, str) else x
             o += b"$%d\r\n%s\r\n" % (len(x), x)
-        s.s.sendall(o)
-        return s.read()
+        self.s.sendall(o)
+        return self.read()
 
 
 OR = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
 FR = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
-od = R(OR)
-fr = R(FR)
+od = None
+fr = None
 
 fails = []
 
@@ -109,60 +106,71 @@ def big_int(x):
         return False
 
 
-# --- A: fresh IDLETIME under a non-LFU policy is 0 on both ---
-reset("noeviction")
-both("set", "k", "v")
-hard("A_fresh_idletime_zero", "object", "idletime", "k")
+with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.create_connection(
+    ("127.0.0.1", FR), timeout=10
+) as fr_sock:
+    od = R(od_sock)
+    fr = R(fr_sock)
 
-# --- B: OBJECT IDLETIME under an LFU policy errors identically ---
-reset("allkeys-lfu")
-both("set", "k", "v")
-hard("B_idletime_under_lfu_err", "object", "idletime", "k")
+    # --- A: fresh IDLETIME under a non-LFU policy equals zero on both ---
+    reset("noeviction")
+    both("set", "k", "v")
+    hard("A_fresh_idletime_zero", "object", "idletime", "k")
 
-# --- C: OBJECT FREQ init value under LFU (LFU_INIT_VAL) ---
-hard("C_freq_init", "object", "freq", "k")
+    # --- B: OBJECT IDLETIME under an LFU policy errors identically ---
+    reset("allkeys-lfu")
+    both("set", "k", "v")
+    hard("B_idletime_under_lfu_err", "object", "idletime", "k")
 
-# --- D: OBJECT FREQ under a non-LFU policy errors identically ---
-reset("noeviction")
-both("set", "k", "v")
-hard("D_freq_under_nonlfu_err", "object", "freq", "k")
+    # --- C: OBJECT FREQ init value under LFU (LFU_INIT_VAL) ---
+    hard("C_freq_init", "object", "freq", "k")
 
-# --- E (frankenredis-97wc2): LFU access, switch to non-LFU, re-access, then
-#     IDLETIME. redis resets robj.lru on the non-LFU read so idle is ~0; fr
-#     must also clear the stale LFU reinterpretation marker on that read. ---
-reset("allkeys-lfu")
-both("set", "k", "v")
-both("get", "k")
-for d in (od, fr):
-    d.cmd("config", "set", "maxmemory-policy", "noeviction")
-both("get", "k")
-o, f = both("object", "idletime", "k")
-if not (small_int(o) and small_int(f)):
-    fails.append(
-        f"E_reaccess_idletime: redis={o!r} fr={f!r} "
-        "(non-LFU read must clear the LFU-bits reinterpretation)"
-    )
+    # --- D: OBJECT FREQ under a non-LFU policy errors identically ---
+    reset("noeviction")
+    both("set", "k", "v")
+    hard("D_freq_under_nonlfu_err", "object", "freq", "k")
 
-# --- F: nro98 — LFU set, switch to non-LFU, NO re-access; both reinterpret the
-#     stale LFU bits into a non-zero idle (the bug nro98 fixed: fr used to be 0). ---
-reset("allkeys-lfu")
-both("set", "k", "v")
-for d in (od, fr):
-    d.cmd("config", "set", "maxmemory-policy", "noeviction")
-o, f = both("object", "idletime", "k")
-if not (big_int(o) and big_int(f)):
-    fails.append(
-        f"F_nro98_reinterpret_nonzero: redis={o!r} fr={f!r} "
-        "(both should reinterpret stale LFU bits to a non-zero idle)"
-    )
+    # --- E (frankenredis-97wc2): LFU access, switch to non-LFU, re-access, then
+    #     IDLETIME. redis resets robj.lru on the non-LFU read so idle is ~0; fr
+    #     must also clear the stale LFU reinterpretation marker on that read. ---
+    reset("allkeys-lfu")
+    both("set", "k", "v")
+    both("get", "k")
+    for d in (od, fr):
+        d.cmd("config", "set", "maxmemory-policy", "noeviction")
+    both("get", "k")
+    o, f = both("object", "idletime", "k")
+    if not (small_int(o) and small_int(f)):
+        fails.append(
+            f"E_reaccess_idletime: redis={o!r} fr={f!r} "
+            "(non-LFU read must clear the LFU-bits reinterpretation)"
+        )
 
-print("=" * 60)
-if fails:
-    print(f"FAIL — {len(fails)} NEW divergence(s) in OBJECT IDLETIME/FREQ vs redis 7.2.4:")
-    for x in fails:
-        print(f"  {x}")
-    sys.exit(1)
-print(
-    "PASS — OBJECT IDLETIME/FREQ policy-switch behavior matches redis 7.2.4 "
-    "(hard checks A-F)"
-)
+    # --- F: nro98 — LFU set, switch to non-LFU, NO re-access; both reinterpret the
+    #     stale LFU bits into a non-zero idle (the bug nro98 fixed: fr used to be 0). ---
+    reset("allkeys-lfu")
+    both("set", "k", "v")
+    for d in (od, fr):
+        d.cmd("config", "set", "maxmemory-policy", "noeviction")
+    o, f = both("object", "idletime", "k")
+    if not (big_int(o) and big_int(f)):
+        fails.append(
+            f"F_nro98_reinterpret_nonzero: redis={o!r} fr={f!r} "
+            "(both should reinterpret stale LFU bits to a non-zero idle)"
+        )
+
+    print("=" * 60)
+    exit_code = 0
+    if fails:
+        print(
+            f"FAIL — {len(fails)} NEW divergence(s) in OBJECT IDLETIME/FREQ vs redis 7.2.4:"
+        )
+        for x in fails:
+            print(f"  {x}")
+        exit_code = 1
+    else:
+        print(
+            "PASS — OBJECT IDLETIME/FREQ policy-switch behavior matches redis 7.2.4 "
+            "(hard checks A-F)"
+        )
+    sys.exit(exit_code)
