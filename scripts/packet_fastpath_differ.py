@@ -202,6 +202,11 @@ CASES = [
     ["SADD", "psk", "x"],
     ["SADD", "psk", "x"],
     ["SCARD", "psk"],
+    ["RPUSH", "plk2", "a", "b"],
+    ["LRANGE", "plk2", "0", "-1"],
+    ["SADD", "psk2", "x", "y"],
+    ["SADD", "psk2", "x", "z"],
+    ["SCARD", "psk2"],
 ]
 
 
