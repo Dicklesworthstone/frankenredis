@@ -107,5 +107,18 @@ turns). Keep claims honest — mark which.
   `RespFrame` score variant or option-bearing `ZRANGE WITHSCORES` direct path
   unless a release profile names score formatting/allocation in a zset
   WITHSCORES workload.
+- frankenredis-n2u1g / cod-b: direct encoder for canonical rank-form
+  `ZRANGE key start stop WITHSCORES` — CODED (reasoned after the dedicated
+  `fr-bench --workload zrange-withscores` harness landed; batch profile and
+  criterion vs Redis pending). RESP2 emits the flat upstream shape
+  `member,score,...`; RESP3 emits `[member,score]` pair subarrays and writes
+  score doubles through the existing direct Redis d2string encoder. Generic
+  `REV`/`BYSCORE`/`BYLEX`/`LIMIT` option shapes still fall through to canonical
+  dispatch. Guard compares raw wire bytes against generic dispatch for RESP2,
+  RESP3, missing-key empty arrays, WRONGTYPE errors, and bad-integer fallback.
+  Retry condition if rejected: do not expand to `ZREVRANGE`,
+  `ZRANGEBYSCORE WITHSCORES`, or `ZRANGE ... LIMIT` direct encoders unless the
+  focused zrange-withscores bench or a release profile isolates those exact
+  option shapes as score-format/allocation bottlenecks.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

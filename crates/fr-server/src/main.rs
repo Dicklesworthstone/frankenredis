@@ -3767,6 +3767,34 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrange_withscores_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zrange_withscores_borrowed_into(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -5931,6 +5959,27 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
+                        if let Some((key, start, stop)) =
+                            borrowed_plain_zrange_withscores_args(&borrowed_args)
+                        {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_zrange_withscores_borrowed_into(
+                                    key,
+                                    start,
+                                    stop,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                        }
                         if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
@@ -7170,7 +7219,7 @@ struct BorrowedPlainKeyRangePacket<'a> {
 }
 
 // (frankenredis-8jcit) Byte-prefix fast path for `ZRANGE key start stop`.
-// Option-bearing ZRANGE forms remain on generic borrowed dispatch.
+// Most option-bearing ZRANGE forms remain on generic borrowed dispatch.
 fn parse_borrowed_plain_zrange_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -7190,6 +7239,44 @@ fn parse_borrowed_plain_zrange_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
+// (frankenredis-n2u1g) Exact rank `ZRANGE key start stop WITHSCORES` gets a
+// direct score encoder. REV/BYSCORE/BYLEX/LIMIT and noncanonical arities stay on
+// generic dispatch for Redis-compatible validation ordering.
+fn parse_borrowed_plain_zrange_withscores_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"WITHSCORES".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANGE"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let rest = input.get(next..)?.strip_prefix(b"$10\r\n")?;
+    if !rest.get(..10)?.eq_ignore_ascii_case(b"WITHSCORES") {
+        return None;
+    }
+    let consumed = next + b"$10\r\n".len() + b"WITHSCORES".len() + b"\r\n".len();
+    if input.get(consumed - 2..consumed)? != b"\r\n" {
+        return None;
+    }
     Some(BorrowedPlainKeyRangePacket {
         consumed,
         key,
@@ -10892,6 +10979,20 @@ fn borrowed_plain_zrange_args<'a>(
 ) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, start, stop] if command.eq_ignore_ascii_case(b"ZRANGE") => {
+            Some((*key, *start, *stop))
+        }
+        _ => None,
+    }
+}
+
+fn borrowed_plain_zrange_withscores_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, start, stop, withscores]
+            if command.eq_ignore_ascii_case(b"ZRANGE")
+                && withscores.eq_ignore_ascii_case(b"WITHSCORES") =>
+        {
             Some((*key, *start, *stop))
         }
         _ => None,
@@ -19139,7 +19240,7 @@ mod tests {
                 &cfg
             )
             .is_none(),
-            "option-bearing ZRANGE stays on the generic borrowed parser"
+            "non-WITHSCORES option-bearing ZRANGE stays on the generic borrowed parser"
         );
         assert!(
             crate::parse_borrowed_plain_zrange_packet(
@@ -19159,6 +19260,55 @@ mod tests {
             )
             .is_none(),
             "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrange_withscores_packet_parser_accepts_canonical_rank_form() {
+        let input = b"*5\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n$10\r\nwItHsCoReS\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_zrange_withscores_packet(input, &ParserConfig::default())
+                .expect("canonical ZRANGE key start stop WITHSCORES packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.start, b"0");
+        assert_eq!(parsed.end, b"-1");
+        assert_eq!(
+            parsed.consumed,
+            b"*5\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n$10\r\nwItHsCoReS\r\n"
+                .len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrange_withscores_packet_parser_defers_other_options() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_zrange_withscores_packet(
+                b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n",
+                &cfg
+            )
+            .is_none(),
+            "REV stays on generic dispatch"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrange_withscores_packet(
+                b"*6\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$10\r\nWITHSCORES\r\n$5\r\nLIMIT\r\n",
+                &cfg
+            )
+            .is_none(),
+            "LIMIT stays on generic dispatch"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrange_withscores_packet(
+                b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$10\r\nWITHSCORES\r\n",
+                &ParserConfig {
+                    max_array_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
         );
     }
 

@@ -365,6 +365,16 @@ fn plain_zrange_owned_argv(key: &[u8], start: &[u8], stop: &[u8]) -> Vec<Vec<u8>
     ]
 }
 
+fn plain_zrange_withscores_owned_argv(key: &[u8], start: &[u8], stop: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"ZRANGE".to_vec(),
+        key.to_vec(),
+        start.to_vec(),
+        stop.to_vec(),
+        b"WITHSCORES".to_vec(),
+    ]
+}
+
 fn plain_hgetall_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HGETALL".to_vec(), key.to_vec()]
 }
@@ -14340,8 +14350,9 @@ impl Runtime {
     }
 
     /// Borrowed fast path for the plain rank form `ZRANGE key start stop`.
-    /// Every option-bearing shape stays on generic dispatch so REV, WITHSCORES,
+    /// Most option-bearing shapes stay on generic dispatch so REV,
     /// BYSCORE/BYLEX, LIMIT, and their exact validation order remain canonical.
+    /// The single hot rank `WITHSCORES` shape has its own direct encoder below.
     pub fn execute_plain_zrange_borrowed(
         &mut self,
         key: &[u8],
@@ -14410,6 +14421,116 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Direct-encoding twin for the hot rank form
+    /// `ZRANGE key start stop WITHSCORES`. It preserves rank-only validation and
+    /// store semantics while avoiding one score `String` / score `RespFrame` per
+    /// returned member-score pair on the network fast path.
+    pub fn execute_plain_zrange_withscores_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrange_borrowed(key, start_arg, stop_arg, now_ms)
+            || self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
+        {
+            return None;
+        }
+        let start_idx = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop_idx = fr_command::parse_i64_arg(stop_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrange");
+        self.session.last_argv_len_sum = b"ZRANGE".len()
+            + key.len()
+            + start_arg.len()
+            + stop_arg.len()
+            + b"WITHSCORES".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self
+            .server
+            .store
+            .zrange_withscores(key, start_idx, stop_idx, now_ms);
+        let elapsed_us = started.elapsed().as_micros() as u64;
+
+        let mut error_msg = None;
+        match result {
+            Ok(pairs) => {
+                if !suppress_reply {
+                    if resp3 {
+                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
+                        for (member, score) in pairs {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                            encode_bulk_string_slice(Some(&member), resp3, out);
+                            fr_protocol::encode_redis_double(score, resp3, out);
+                        }
+                    } else {
+                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
+                        for (member, score) in pairs {
+                            encode_bulk_string_slice(Some(&member), resp3, out);
+                            fr_protocol::encode_redis_double(score, resp3, out);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_zrange_withscores_borrowed_metrics(
+            key, start_arg, stop_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[allow(clippy::too_many_arguments)] // Mirrors the other borrowed range metrics helpers.
     fn record_plain_zrange_borrowed_metrics(
         &mut self,
@@ -14450,6 +14571,67 @@ impl Runtime {
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref = argv.get_or_insert_with(|| plain_zrange_owned_argv(key, start, stop));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ZRANGE' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors the plain ZRANGE metrics helper.
+    fn record_plain_zrange_withscores_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        start: &[u8],
+        stop: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrange_withscores_owned_argv(key, start, stop));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrange_withscores_owned_argv(key, start, stop));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("zrange", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrange_withscores_owned_argv(key, start, stop));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -28591,6 +28773,83 @@ mod tests {
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
         );
+    }
+
+    #[test]
+    fn plain_zrange_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                rt.execute_frame(
+                    command(&[
+                        b"ZADD", b"z", b"1.5", b"a", b"2", b"b", b"3.25", b"c",
+                    ]),
+                    1,
+                );
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            }
+
+            for (ts, (key, start, stop)) in (2..).zip([
+                (b"z".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+                (b"z".as_slice(), b"1".as_slice(), b"1".as_slice()),
+                (b"nokey".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+                (b"str".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+            ]) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_zrange_withscores_borrowed_into(
+                        key, start, stop, ts, resp3, &mut out,
+                    )
+                    .expect("rank ZRANGE WITHSCORES should take borrowed fast path");
+                let generic_reply = generic.execute_frame(
+                    command(&[b"ZRANGE".as_slice(), key, start, stop, b"WITHSCORES"]),
+                    ts,
+                );
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} start={start:?} stop={stop:?}"
+                );
+            }
+
+            assert!(
+                direct
+                    .execute_plain_zrange_withscores_borrowed_into(
+                        b"z",
+                        b"bad",
+                        b"-1",
+                        9,
+                        resp3,
+                        &mut Vec::new(),
+                    )
+                    .is_none(),
+                "bad integer args stay on generic dispatch for canonical error text"
+            );
+            assert_eq!(
+                direct.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_total_reads_processed,
+                generic.server.store.stat_total_reads_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
     }
 
     #[test]
