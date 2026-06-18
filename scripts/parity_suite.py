@@ -180,6 +180,7 @@ PORT_BASED = [
     ("debug_stringmatch_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("substr_getrange_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("zset_score_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("string_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
