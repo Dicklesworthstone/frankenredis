@@ -11613,7 +11613,28 @@ fn function_cmd(
         }
         match store.function_load(&argv[code_idx], replace) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
-            Err(e) => Err(CommandError::Store(e)),
+            Err(e) => {
+                // (frankenredis-mbyoe) Upstream functions.c compiles the library
+                // body as a Lua chunk; a syntax error surfaces as "Error
+                // compiling function: user_function:<line>: <msg>" BEFORE the
+                // empty-body "No functions registered" check. fr text-scans for
+                // register_function and never compiles, so a syntax-error body
+                // with no scannable register_function wrongly reported "No
+                // functions registered". Override ONLY that case, and ONLY when
+                // the body actually fails to compile (empty/valid bodies keep
+                // the no-functions error). lua_execution_source blanks the
+                // shebang to a same-width space run, so compile_error_line
+                // reports the true file line (shebang = line 1).
+                if matches!(&e, StoreError::GenericError(m) if m == "ERR No functions registered")
+                    && lua_eval::compile_check(&argv[code_idx]).is_err()
+                {
+                    return Err(CommandError::Custom(format!(
+                        "ERR Error compiling function: user_function:{}",
+                        lua_eval::compile_error_line(&argv[code_idx])
+                    )));
+                }
+                Err(CommandError::Store(e))
+            }
         }
     } else if sub.eq_ignore_ascii_case("LIST") {
         // FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE]

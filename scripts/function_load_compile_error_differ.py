@@ -2,25 +2,46 @@
 """Differential gate for FUNCTION LOAD error reporting, fr vs vendored redis 7.2.4.
 
 redis FUNCTION LOAD compiles the library body as a Lua chunk; a syntax error
-surfaces "Error compiling function: user_function:<line>: <msg>". fr text-scans
-the body for register_function calls and, finding none in a syntax-error body,
-reports "No functions registered" instead (frankenredis-mbyoe — fr never compiles
-the body; fr-store can't reach the Lua parser, and fr's parser doesn't track the
-error line). fr's loadstring DOES produce redis-identical messages, so the fix is
-feasible in fr-command's LOAD arm; until then this guards the surface.
-
-HARD checks: the FUNCTION LOAD error paths that already match (missing metadata,
-missing name, unknown engine, empty body -> No functions registered, dup names).
-DOCUMENTED divergence (NOTE, gate stays green; auto-promotes once mbyoe lands):
-a syntax-error body -> redis "Error compiling function" vs fr "No functions
-registered".
+surfaces "Error compiling function: user_function:<line>: <msg>" BEFORE the
+empty-body "No functions registered" check, but AFTER shebang-metadata validation
+(missing/invalid metadata, missing name, unknown engine). fr previously text-
+scanned for register_function and never compiled the body (frankenredis-mbyoe),
+reporting "No functions registered" for a syntax-error body. Fixed in fr-command's
+LOAD arm: on the no-functions path, compile-check the body (lua_execution_source
+blanks the shebang, so the reported line is the true file line) and surface the
+compile error. This gate HARD-checks the full surface byte-exact.
 
 Usage: function_load_compile_error_differ.py <oracle_port> <fr_port>
-       Exit 0 = parity (modulo documented mbyoe divergence), 1 = NEW divergence.
+       Exit 0 = byte-exact, 1 = divergence.
 """
 import socket
 import sys
 import time
+
+GOOD = "#!lua name=goodlib\nredis.register_function('gf', function(k,a) return a[1] end)"
+
+# (label, argv) — each byte-exact vs redis 7.2.4.
+CASES = [
+    # shebang-metadata errors fire FIRST (before compile) — order preserved
+    ("missing_shebang", ("FUNCTION", "LOAD", "no shebang here")),
+    ("invalid_metadata_no_nl", ("FUNCTION", "LOAD", "#!lua name=l1")),
+    ("unknown_engine", ("FUNCTION", "LOAD", "#!badengine name=x\n)syntax")),
+    ("missing_name", ("FUNCTION", "LOAD", "#!lua\n)syntax")),
+    # empty / valid-no-register bodies -> "No functions registered" (compile ok)
+    ("empty_body", ("FUNCTION", "LOAD", "#!lua name=e\n")),
+    ("valid_no_register", ("FUNCTION", "LOAD", "#!lua name=nr\nlocal x=1+1")),
+    ("comment_only", ("FUNCTION", "LOAD", "#!lua name=c\n-- just a comment")),
+    # syntax-error bodies -> "Error compiling function: user_function:<line>"
+    ("syntax_err_l2", ("FUNCTION", "LOAD", "#!lua name=bad\nsyntax error here")),
+    ("syntax_err_l3", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal x=1\n)bad")),
+    ("syntax_err_l4", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal a=1\nlocal b=2\nreturn return")),
+    ("lex_unfinished_str", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal s='nope")),
+    ("lex_badnum", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal n=0x")),
+    # valid library loads + is callable
+    ("valid_lib", ("FUNCTION", "LOAD", GOOD)),
+    ("valid_replace", ("FUNCTION", "LOAD", "REPLACE", GOOD)),
+    ("fcall_valid", ("FCALL", "gf", "0", "hello")),
+]
 
 
 def conn(p):
@@ -43,49 +64,20 @@ def main():
     od, fr = conn(op), conn(fp)
     for d in (od, fr):
         cmd(d, "FUNCTION", "FLUSH")
-
-    def both(*c):
-        return cmd(od, *c), cmd(fr, *c)
-
-    fails, notes = [], []
-
-    def hard(label, *c):
-        o, f = both(*c)
-        if o != f:
-            fails.append(f"{label}: redis={o!r} fr={f!r}")
-
-    # HARD: metadata/empty/dup error paths already byte-exact
-    hard("missing_shebang", "FUNCTION", "LOAD", "no shebang here")
-    hard("invalid_metadata_no_nl", "FUNCTION", "LOAD", "#!lua name=l1")
-    hard("empty_body_no_functions", "FUNCTION", "LOAD", "#!lua name=l1\n")
-    hard("unknown_engine", "FUNCTION", "LOAD", "#!badengine name=x\n")
-    hard("missing_name", "FUNCTION", "LOAD", "#!lua\nx")
-
-    # DOCUMENTED divergence (mbyoe): syntax-error body
-    o, f = both("FUNCTION", "LOAD", "#!lua name=bad\nsyntax error here")
-    o_compile = b"Error compiling function" in o
-    f_compile = b"Error compiling function" in f
-    if o_compile and f_compile:
-        notes.append("syntax_error_body now MATCHES (frankenredis-mbyoe fixed?) — promote to HARD")
-    elif o_compile and not f_compile:
-        notes.append(
-            f"syntax_error_body KNOWN DIVERGENCE (frankenredis-mbyoe): redis={o!r} fr={f!r} "
-            "(fr text-scans, does not compile the library body)"
-        )
-    else:
-        fails.append(f"syntax_error_body UNEXPECTED: redis={o!r} fr={f!r}")
-
+    fails = []
+    for label, argv in CASES:
+        ro, rf = cmd(od, *argv), cmd(fr, *argv)
+        if ro != rf:
+            fails.append(f"{label}: redis={ro!r} fr={rf!r}")
     print("=" * 60)
-    for n in notes:
-        print(f"NOTE  {n}")
     if fails:
-        print(f"FAIL — {len(fails)} NEW FUNCTION LOAD divergence(s) vs redis 7.2.4:")
+        print(f"FAIL — {len(fails)} FUNCTION LOAD divergence(s) vs redis 7.2.4:")
         for x in fails:
             print(f"  {x}")
         sys.exit(1)
     print(
-        "PASS — FUNCTION LOAD error paths match redis 7.2.4 "
-        f"({len(notes)} documented mbyoe compile-error divergence)"
+        "PASS — FUNCTION LOAD error reporting byte-exact vs redis 7.2.4 "
+        f"({len(CASES)} cases: metadata/empty/syntax/lexer/valid) [frankenredis-mbyoe fixed]"
     )
 
 
