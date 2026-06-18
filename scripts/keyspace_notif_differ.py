@@ -234,6 +234,14 @@ def main():
         lambda: ("BITFIELD", k(), "SET", "u8", "0", str(rng.randint(0, 255))),
     ]
 
+    def cleanup():
+        for c in (op, fp):
+            try:
+                c.cmd("CONFIG", "SET", "notify-keyspace-events", "")
+                c.cmd("FLUSHALL")
+            except Exception:
+                pass
+
     for it in range(args.iters):
         opv = tuple(str(x) for x in rng.choice(ops)())
         op.cmd(*opv)
@@ -259,8 +267,10 @@ def main():
             print("--- op log (last 30) ---")
             for line in log[-30:]:
                 print("  " + line)
+            cleanup()
             sys.exit(1)
 
+    cleanup()
     print("OK: %d iters, seed %d — no keyspace-notification divergence" % (args.iters, args.seed))
 
 
