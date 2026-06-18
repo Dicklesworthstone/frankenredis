@@ -6654,18 +6654,9 @@ impl<'a> LuaState<'a> {
                     }
                 };
                 let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
-                match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
-                    let mut parser = Parser::new(tokens);
-                    let mut stmts = parser.parse_block()?;
-                    if !parser.check(&Token::Eof) {
-                        return Err(format!(
-                            "'<eof>' expected near '{}'",
-                            token_display(parser.peek())
-                        ));
-                    }
-                    resolve_lua_local_slots(&mut stmts);
-                    Ok(stmts)
-                }) {
+                // (frankenredis-5qhz7) Use the located compile path so a
+                // multi-line chunk reports the true error line, not :1:.
+                match parse_lua_chunk_located(&src_bytes) {
                     Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
                         params: Vec::new(),
                         body,
@@ -6680,9 +6671,9 @@ impl<'a> LuaState<'a> {
                         source_label: Some(chunk_label),
                         identity: next_function_identity(),
                     })]),
-                    Err(msg) => Ok(vec![
+                    Err((line, msg)) => Ok(vec![
                         LuaValue::Nil,
-                        LuaValue::Str(format!("{chunk_label}:1: {msg}").into_bytes()),
+                        LuaValue::Str(format!("{chunk_label}:{line}: {msg}").into_bytes()),
                     ]),
                 }
             }
@@ -6765,19 +6756,15 @@ impl<'a> LuaState<'a> {
                                 ]);
                             }
                         }
-                        let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
-                        match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
-                            let mut parser = Parser::new(tokens);
-                            let mut stmts = parser.parse_block()?;
-                            if !parser.check(&Token::Eof) {
-                                return Err(format!(
-                                    "'<eof>' expected near '{}'",
-                                    token_display(parser.peek())
-                                ));
-                            }
-                            resolve_lua_local_slots(&mut stmts);
-                            Ok(stmts)
-                        }) {
+                        // (frankenredis-5qhz7) load(func) with no chunkname uses
+                        // the literal `(load)` label (vendored's `=(load)`), not a
+                        // source-derived `[string "..."]` label; and the located
+                        // compile path reports the true error line, not :1:.
+                        let chunk_label = match chunkname.as_deref() {
+                            Some(n) => format_lua_chunk_label(Some(n), &src_bytes),
+                            None => "(load)".to_string(),
+                        };
+                        match parse_lua_chunk_located(&src_bytes) {
                             Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
                                 params: Vec::new(),
                                 body,
@@ -6788,9 +6775,9 @@ impl<'a> LuaState<'a> {
                                 source_label: Some(chunk_label),
                                 identity: next_function_identity(),
                             })]),
-                            Err(msg) => Ok(vec![
+                            Err((line, msg)) => Ok(vec![
                                 LuaValue::Nil,
-                                LuaValue::Str(format!("{chunk_label}:1: {msg}").into_bytes()),
+                                LuaValue::Str(format!("{chunk_label}:{line}: {msg}").into_bytes()),
                             ]),
                         }
                     }

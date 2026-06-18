@@ -48,6 +48,18 @@ CASES = [
     ("scriptload_single_line", ("SCRIPT", "LOAD", "@@@")),
     ("scriptload_lex_err_l3", ("SCRIPT", "LOAD", "local x=1\nlocal y=2\n!!bad")),
     ("eval_valid", ("EVAL", "return 1+1", "0")),
+    # loadstring / load(func) compile errors also carry the true line + label
+    ("loadstring_ml2",
+     ("EVAL", "local f,e=loadstring('local x=1\\nbad syntax here') return tostring(e)", "0")),
+    ("loadstring_ml3",
+     ("EVAL", "local f,e=loadstring('local a=1\\nlocal b=2\\n)bad') return tostring(e)", "0")),
+    ("loadstring_chunkname_ml",
+     ("EVAL", "local f,e=loadstring('local x=1\\n)bad','mychunk') return tostring(e)", "0")),
+    ("loadstring_lex_ml",
+     ("EVAL", "local f,e=loadstring('local x=1\\nlocal n=0x') return tostring(e)", "0")),
+    ("load_func_ml_label_and_line",
+     ("EVAL", "local c=0 local f,e=load(function() c=c+1 if c==1 then "
+      "return 'local x=1\\nlocal y=2\\n)bad' end end) return tostring(e)", "0")),
 ]
 
 
