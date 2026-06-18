@@ -235,6 +235,19 @@ def _normalize(cmd: str, sub: str, reply: bytes) -> bytes:
     return reply
 
 
+def _cleanup(*sockets: socket.socket) -> None:
+    for s in sockets:
+        try:
+            send(s, "SELECT", "0")
+            send(s, "FLUSHALL")
+        except Exception:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def run(oracle_port: int, fr_port: int, seed: int, iters: int) -> int:
     random.seed(seed)
     o = socket.create_connection(("127.0.0.1", oracle_port)); o.settimeout(3)
@@ -258,6 +271,7 @@ def run(oracle_port: int, fr_port: int, seed: int, iters: int) -> int:
         divergences += 1
         if divergences <= 20:
             print(f"DIVERGE seed={seed} iter={i}: {args}\n  oracle: {ro!r}\n  fr    : {rf!r}")
+    _cleanup(o, f)
     return divergences
 
 
