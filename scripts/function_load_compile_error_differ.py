@@ -37,6 +37,15 @@ CASES = [
     ("syntax_err_l4", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal a=1\nlocal b=2\nreturn return")),
     ("lex_unfinished_str", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal s='nope")),
     ("lex_badnum", ("FUNCTION", "LOAD", "#!lua name=bad\nlocal n=0x")),
+    # (frankenredis-sg7b4) register_function present BUT a syntax error
+    # elsewhere -> compile error (non-REPLACE; lib must NOT register)
+    ("reg_plus_syntax_l3",
+     ("FUNCTION", "LOAD",
+      "#!lua name=rps\nredis.register_function('f',function() return 1 end)\n)syntaxerr")),
+    ("reg_plus_syntax_l4",
+     ("FUNCTION", "LOAD",
+      "#!lua name=rps2\nlocal q=1\nredis.register_function('f',function() return 1 end)\nbad bad")),
+    ("list_after_failed_loads", ("FUNCTION", "LIST")),
     # valid library loads + is callable
     ("valid_lib", ("FUNCTION", "LOAD", GOOD)),
     ("valid_replace", ("FUNCTION", "LOAD", "REPLACE", GOOD)),
