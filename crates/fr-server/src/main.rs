@@ -3496,6 +3496,21 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(consumed) =
+                    parse_borrowed_plain_command_count_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_command_count_borrowed(ts) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(consumed) =
                     parse_borrowed_plain_dbsize_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_dbsize_borrowed(ts) {
@@ -5394,6 +5409,26 @@ struct BorrowedPlainKeyRangePacket<'a> {
     key: &'a [u8],
     start: &'a [u8],
     end: &'a [u8],
+}
+
+// (frankenredis-zarlk) keyless `COMMAND COUNT` (`*2 $7 COMMAND $5 COUNT`); returns
+// the consumed length on an exact match. Reuses execute_plain_command_count_borrowed.
+// Other COMMAND subcommands (DOCS/INFO/LIST/GETKEYS/...) don't match and fall
+// through to the generic path.
+fn parse_borrowed_plain_command_count_packet(input: &[u8], config: &ParserConfig) -> Option<usize> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"COMMAND".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*2\r\n$7\r\n")?;
+    if !rest.get(..7)?.eq_ignore_ascii_case(b"COMMAND") {
+        return None;
+    }
+    let rest = rest.get(7..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$5\r\n")?;
+    if !rest.get(..5)?.eq_ignore_ascii_case(b"COUNT") {
+        return None;
+    }
+    let rest = rest.get(5..)?.strip_prefix(b"\r\n")?;
+    Some(input.len() - rest.len())
 }
 
 // (frankenredis-k0jtp) 0-arg DBSIZE (`*1 $6 DBSIZE`); returns the consumed byte
