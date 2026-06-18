@@ -177,6 +177,15 @@ CASES = [
     ["COMMAND", "COUNT"],
     ["ECHO", "hello"],
     ["ECHO", ""],
+    # writes (fresh keys, appended): SETRANGE/ZINCRBY/EXPIRE reuse verified write
+    # executes — propagation/events handled there.
+    ["SETRANGE", "srk", "2", "XYZ"],
+    ["GET", "srk"],
+    ["ZADD", "zk", "5", "m"],
+    ["ZINCRBY", "zk", "2.5", "m"],
+    ["ZINCRBY", "zk", "1", "newm"],
+    ["EXPIRE", "srk", "1000"],
+    ["EXPIRE", "nope", "100"],
 ]
 
 
