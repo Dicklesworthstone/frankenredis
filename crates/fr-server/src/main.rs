@@ -3100,6 +3100,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_bitpos_start_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                        packet.key,
+                        packet.bit,
+                        Some((packet.start, None, None)),
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_incr_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts) {
@@ -5497,6 +5520,42 @@ fn parse_borrowed_plain_bitpos_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (bit, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainBitposPacket { consumed, key, bit })
+}
+
+struct BorrowedPlainBitposStartPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    bit: &'a [u8],
+    start: &'a [u8],
+}
+
+// (frankenredis-2qjnz) Byte-prefix fast path for `BITPOS key bit start`.
+// End/unit forms remain on generic borrowed dispatch.
+fn parse_borrowed_plain_bitpos_start_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitposStartPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"BITPOS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"BITPOS"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (bit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (start, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainBitposStartPacket {
+        consumed,
+        key,
+        bit,
+        start,
+    })
 }
 
 struct BorrowedPlainDecrPacket<'a> {
@@ -11331,6 +11390,70 @@ mod tests {
             )
             .is_none(),
             "malformed bit bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitpos_start_packet_parser_accepts_canonical_start() {
+        let input = b"*4\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitpos_start_packet(input, &ParserConfig::default())
+                .expect("canonical BITPOS key bit start packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.bit, b"0");
+        assert_eq!(parsed.start, b"-1");
+        assert_eq!(
+            parsed.consumed,
+            b"*4\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitpos_start_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_bitpos_start_packet(
+                b"*04\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitpos_start_packet(
+                b"*3\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "key-bit BITPOS stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitpos_start_packet(
+                b"*5\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n3\r\n",
+                &cfg
+            )
+            .is_none(),
+            "end-range BITPOS stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitpos_start_packet(
+                b"*4\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n0\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitpos_start_packet(
+                b"*4\r\n$6\r\nBITPOS\r\n$2\r\nk\r\n$1\r\n1\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
         );
     }
 
