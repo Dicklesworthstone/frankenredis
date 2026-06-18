@@ -152,6 +152,13 @@ def main():
         except Exception:
             return False
 
+    def cleanup():
+        for conn in (R, F):
+            try:
+                conn.cmd("FLUSHALL")
+            except Exception:
+                pass
+
     for sd in range(args.seeds):
         seed = 4000 + sd
         attempt = 0
@@ -183,6 +190,7 @@ def main():
                         for kk in KEYS:
                             if sr[kk] != sf[kk]:
                                 print(f"  {kk}: redis={sr[kk]}\n      fr   ={sf[kk]}")
+                        cleanup()
                         sys.exit(1)
                     print(f"WARN: transient connection desync at seed={seed} iter={n} "
                           f"({argv}); reconnecting and retrying seed", file=sys.stderr)
@@ -195,7 +203,9 @@ def main():
             if attempt >= 5:
                 print(f"FAIL: seed={seed} kept desyncing after {attempt} attempts "
                       "(infra problem, not a parity result)", file=sys.stderr)
+                cleanup()
                 sys.exit(2)
+    cleanup()
     print(f"OK: {args.seeds} seeds x {args.iters} cmds — fr keyspace state matches "
           "redis 7.2.4 after every command")
 

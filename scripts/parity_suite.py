@@ -128,6 +128,8 @@ PORT_BASED = [
     ("digest_state_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "4", "1200"]),
     ("random_reply_differ.py", ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT),
                                 "--seeds", "2", "--iters", "1200"]),
+    ("random_state_differ.py", ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT),
+                                "--seeds", "2", "--iters", "1200"]),
     ("watch_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("reset_state_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
