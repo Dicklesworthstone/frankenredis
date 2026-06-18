@@ -9269,6 +9269,26 @@ impl<'a> LuaState<'a> {
                     .unwrap_or_else(|| argv.clone());
                     self.store.record_script_propagation(&effect);
                 }
+                // (frankenredis-0czgc) redis.call must RAISE a command error reply
+                // (aborting the script), not return it as a value; redis.pcall packages
+                // it as {err=...}. fr-command returns ~160 command errors as
+                // Ok(RespFrame::Error(..)) rather than Err, which previously let the
+                // script CONTINUE past a failed redis.call AND dropped redis's
+                // "script: <sha>" context suffix. Route Error reply-frames through the
+                // same path as a dispatch Err so both behaviors match upstream.
+                if let RespFrame::Error(msg) = &frame {
+                    let err_msg = msg.clone();
+                    return if is_pcall {
+                        let t = LuaTable::new();
+                        t.set(
+                            LuaValue::Str(b"err".to_vec()),
+                            LuaValue::Str(err_msg.into_bytes()),
+                        );
+                        Ok(vec![LuaValue::Table(t)])
+                    } else {
+                        Err(err_msg)
+                    };
+                }
                 Ok(vec![resp_to_lua_command_result(
                     &argv,
                     &frame,
