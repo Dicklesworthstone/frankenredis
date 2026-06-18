@@ -63,8 +63,8 @@ def main():
     cmp("scan_opt_nonutf8",[b"SCAN",b"0",NUTF],True)  # FIXED e3abc7c13 (44iva scan-family)
     cmp("hscan_opt_nonutf8",[b"HSCAN",b"h",b"0",NUTF],True)  # FIXED e3abc7c13
     cmp("sscan_opt_nonutf8",[b"SSCAN",b"st",b"0",NUTF],True)  # FIXED e3abc7c13
-    cmp("zrangebyscore_opt_nonutf8",[b"ZRANGEBYSCORE",b"z",b"0",b"1",NUTF],False)
-    cmp("sort_opt_nonutf8",[b"SORT",b"l",NUTF],False)
+    cmp("zrangebyscore_opt_nonutf8",[b"ZRANGEBYSCORE",b"z",b"0",b"1",NUTF],True)  # FIXED
+    cmp("sort_opt_nonutf8",[b"SORT",b"l",NUTF],True)  # FIXED
     cmp("expire_flag_nonutf8_echo",[b"EXPIRE",b"src",b"100",NUTF],False)  # redis ECHOES bytes
     cmp("object_sub_nonutf8_echo",[b"OBJECT",NUTF,b"src"],False)          # redis ECHOES bytes
     print("="*60)
