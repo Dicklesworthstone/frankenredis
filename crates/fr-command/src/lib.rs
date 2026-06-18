@@ -5852,11 +5852,12 @@ fn parse_zrangebyscore_opts(
     let mut limit_count = None;
     let mut i = start_idx;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("WITHSCORES") {
+        // (frankenredis-44iva) byte-match: non-UTF8/unrecognized option -> syntax error
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"WITHSCORES") {
             withscores = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("LIMIT") {
+        } else if opt.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -27195,20 +27196,21 @@ fn sort_generic(
 
     let mut i = 2;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("BY") {
+        // (frankenredis-44iva) byte-match SORT options; non-UTF8 -> syntax error
+        let arg = &argv[i];
+        if arg.eq_ignore_ascii_case(b"BY") {
             if i + 1 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
             i += 1;
             by_pattern = Some(argv[i].clone());
-        } else if arg.eq_ignore_ascii_case("GET") {
+        } else if arg.eq_ignore_ascii_case(b"GET") {
             if i + 1 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
             i += 1;
             get_patterns.push(argv[i].clone());
-        } else if arg.eq_ignore_ascii_case("LIMIT") {
+        } else if arg.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
@@ -27216,13 +27218,13 @@ fn sort_generic(
             limit_offset = parse_i64_arg(&argv[i])?;
             i += 1;
             limit_count = parse_i64_arg(&argv[i])?;
-        } else if arg.eq_ignore_ascii_case("ASC") {
+        } else if arg.eq_ignore_ascii_case(b"ASC") {
             desc = false;
-        } else if arg.eq_ignore_ascii_case("DESC") {
+        } else if arg.eq_ignore_ascii_case(b"DESC") {
             desc = true;
-        } else if arg.eq_ignore_ascii_case("ALPHA") {
+        } else if arg.eq_ignore_ascii_case(b"ALPHA") {
             alpha = true;
-        } else if !readonly && arg.eq_ignore_ascii_case("STORE") {
+        } else if !readonly && arg.eq_ignore_ascii_case(b"STORE") {
             // (frankenredis-lryev) Mirror upstream sort.c line 228:
             // STORE is gated on `readonly == 0`. Under SORT_RO the
             // STORE arm is unreachable, so a literal 'STORE' token
