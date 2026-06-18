@@ -39,11 +39,18 @@ def gen(rnd):
         lambda:["setex",k(),str(rnd.choice([100,500])),rnd.choice(SV)], lambda:["getex",k(),"EX","300"],
         lambda:["expire",k(),"400"], lambda:["pexpire",k(),"400000"], lambda:["persist",k()],
         lambda:["incr",k()], lambda:["incrbyfloat",k(),"1.5"], lambda:["append",k(),"z"],
+        # (frankenredis-2m09d) fast-path-write siblings whose master->replica
+        # propagation was not previously exercised here.
+        lambda:["incrby",k(),str(rnd.randint(-5,5))], lambda:["decr",k()],
+        lambda:["decrby",k(),str(rnd.randint(-5,5))], lambda:["setrange",k(),"2","ab"],
+        lambda:["getdel",k()],
         lambda:["sadd",k(),mb(),mb(),mb()], lambda:["spop",k()], lambda:["spop",k(),"2"],
         lambda:["srem",k(),mb()], lambda:["smove",k(),k(),mb()],
-        lambda:["rpush",k(),mb(),mb()], lambda:["lpop",k()], lambda:["lmove",k(),k(),"LEFT","RIGHT"],
+        lambda:["rpush",k(),mb(),mb()], lambda:["lpush",k(),mb(),mb()], lambda:["lpop",k()],
+        lambda:["rpop",k()], lambda:["lmove",k(),k(),"LEFT","RIGHT"],
         lambda:["hset",k(),mb(),rnd.choice(SV)], lambda:["hincrbyfloat",k(),mb(),"1.5"], lambda:["hdel",k(),mb()],
-        lambda:["zadd",k(),str(rnd.randint(-3,3)),mb()], lambda:["zpopmin",k()], lambda:["zincrby",k(),"1.5",mb()],
+        lambda:["zadd",k(),str(rnd.randint(-3,3)),mb()], lambda:["zpopmin",k()],
+        lambda:["zpopmax",k()], lambda:["zincrby",k(),"1.5",mb()],
         lambda:["copy",k(),k(),"REPLACE"], lambda:["move",k(),str(rnd.randint(0,2))], lambda:["del",k()],
         lambda:["xadd",k(),"*","f",rnd.choice(SV)],
     ])()]
