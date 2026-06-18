@@ -1691,7 +1691,7 @@ fn encode_compact_set_intset(
         let value = parse_listpack_integer(raw)?;
         values.push(value);
     }
-    let blob = encode_intset_blob(&values)?;
+    let blob = encode_intset_blob(values)?;
     let mut out = Vec::with_capacity(blob.len() + 4);
     rdb_encode_length(&mut out, blob.len());
     out.extend_from_slice(&blob);
@@ -2185,7 +2185,12 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// Encode a sorted-ascending intset blob (8-byte header + per-element
 /// little-endian fixed-width values). Returns `None` when any value
 /// exceeds the i64 range or `len > u32::MAX`.
-fn encode_intset_blob(values: &[i64]) -> Option<Vec<u8>> {
+fn encode_intset_blob(mut values: Vec<i64>) -> Option<Vec<u8>> {
+    // Take the parsed values by value and sort in place — the sole caller
+    // (encode_compact_set_intset) builds this Vec fresh and discards it, so owning it lets us
+    // skip the extra `to_vec()` allocation+copy per intset DUMP/RDB-save. Sorting the owned Vec
+    // vs a copy yields the identical canonical order => byte-identical output.
+    // (frankenredis perf: intset encode sorts in place, code-first batch-test pending)
     let width: u32 = if values.iter().all(|v| i16::try_from(*v).is_ok()) {
         2
     } else if values.iter().all(|v| i32::try_from(*v).is_ok()) {
@@ -2194,8 +2199,8 @@ fn encode_intset_blob(values: &[i64]) -> Option<Vec<u8>> {
         8
     };
     let len = u32::try_from(values.len()).ok()?;
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
+    values.sort_unstable();
+    let sorted = values;
     let mut out = Vec::with_capacity(8usize.saturating_add(sorted.len() * width as usize));
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
