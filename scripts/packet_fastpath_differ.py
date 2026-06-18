@@ -233,6 +233,10 @@ CASES = [
     ["ZSCORE", "pzk", "m"],
     ["ZADD", "pzk", "nan", "bad"],
     ["ZADD", "pzk", "NX", "m"],
+    ["ZADD", "pz2", "1", "a", "2", "b"],
+    ["ZADD", "pz2", "3", "a", "9", "c"],
+    ["ZSCORE", "pz2", "a"],
+    ["ZADD", "pz2", "1", "x", "nan", "y"],
 ]
 
 
