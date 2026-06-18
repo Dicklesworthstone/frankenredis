@@ -3509,6 +3509,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_object_stat_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -6172,6 +6192,51 @@ fn parse_borrowed_plain_object_refcount_packet<'a>(
     let cursor = input.len() - rest.len();
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainObjectRefcountPacket { consumed, key })
+}
+
+struct BorrowedPlainObjectStatPacket<'a> {
+    consumed: usize,
+    cmd: PlainObjectStatCmd,
+    key: &'a [u8],
+}
+
+// (frankenredis-2jasb) Byte-prefix fast path for
+// `OBJECT IDLETIME key` / `OBJECT FREQ key`.
+fn parse_borrowed_plain_object_stat_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainObjectStatPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"OBJECT".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*3\r\n$6\r\n")?;
+    if !rest.get(..6)?.eq_ignore_ascii_case(b"OBJECT") {
+        return None;
+    }
+    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?;
+    let (cmd, rest) = if let Some(rest) = rest.strip_prefix(b"$8\r\n") {
+        if config.max_bulk_len < b"IDLETIME".len() {
+            return None;
+        }
+        if !rest.get(..8)?.eq_ignore_ascii_case(b"IDLETIME") {
+            return None;
+        }
+        (PlainObjectStatCmd::Idletime, rest.get(8..)?)
+    } else if let Some(rest) = rest.strip_prefix(b"$4\r\n") {
+        if config.max_bulk_len < b"FREQ".len() {
+            return None;
+        }
+        if !rest.get(..4)?.eq_ignore_ascii_case(b"FREQ") {
+            return None;
+        }
+        (PlainObjectStatCmd::Freq, rest.get(4..)?)
+    } else {
+        return None;
+    };
+    let rest = rest.strip_prefix(b"\r\n")?;
+    let cursor = input.len() - rest.len();
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainObjectStatPacket { consumed, cmd, key })
 }
 
 struct BorrowedPlainMemoryUsagePacket<'a> {
@@ -15263,6 +15328,79 @@ mod tests {
             b"extra".as_slice(),
         ];
         assert_eq!(super::borrowed_plain_object_refcount_args(&trailing), None);
+    }
+
+    #[test]
+    fn borrowed_plain_object_stat_packet_parser_accepts_idletime_and_freq() {
+        let idletime =
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\niDlEtImE\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_object_stat_packet(idletime, &ParserConfig::default())
+                .expect("canonical OBJECT IDLETIME key packet should parse");
+        assert!(matches!(parsed.cmd, PlainObjectStatCmd::Idletime));
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\niDlEtImE\r\n$3\r\nkey\r\n".len()
+        );
+
+        let freq = b"*3\r\n$6\r\nOBJECT\r\n$4\r\nfReQ\r\n$1\r\nk\r\n";
+        let parsed = crate::parse_borrowed_plain_object_stat_packet(freq, &ParserConfig::default())
+            .expect("canonical OBJECT FREQ key packet should parse");
+        assert!(matches!(parsed.cmd, PlainObjectStatCmd::Freq));
+        assert_eq!(parsed.key, b"k");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$6\r\nOBJECT\r\n$4\r\nfReQ\r\n$1\r\nk\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_object_stat_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_object_stat_packet(
+                b"*03\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_stat_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "REFCOUNT stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_stat_packet(
+                b"*2\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n",
+                &cfg
+            )
+            .is_none(),
+            "wrong arities stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_stat_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_stat_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
     }
 
     #[test]
