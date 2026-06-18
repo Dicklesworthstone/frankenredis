@@ -3496,6 +3496,35 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_lrange_packet(unparsed, &parser_config)
+                {
+                    // (frankenredis-z7vzf) LRANGE encodes its multi-bulk reply
+                    // directly into the write buffer (like GET); None means it
+                    // wrote nothing and we re-dispatch via the generic path.
+                    if runtime
+                        .execute_plain_lrange_borrowed_into(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_getrange_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_getrange_borrowed(
@@ -5228,6 +5257,36 @@ struct BorrowedPlainKeyRangePacket<'a> {
     key: &'a [u8],
     start: &'a [u8],
     end: &'a [u8],
+}
+
+// (frankenredis-z7vzf) LRANGE key start stop (4-element); start/stop bulks passed
+// as bytes — execute_plain_lrange_borrowed_into parses/clamps them and encodes the
+// reply straight into the write buffer.
+fn parse_borrowed_plain_lrange_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"LRANGE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"LRANGE"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
 }
 
 // (frankenredis-au36f) GETRANGE key start end (4-element); start/end bulks passed
