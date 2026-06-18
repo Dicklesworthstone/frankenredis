@@ -45,6 +45,12 @@ CASES=[
 ]
 def main():
     od=R(int(sys.argv[1])); fr=R(int(sys.argv[2])); div=0
+    def cleanup():
+        for s in (od,fr):
+            try:
+                s.cmd("flushall")
+            except Exception:
+                pass
     for label,c in CASES:
         for s in (od,fr): s.cmd("flushall"); s.cmd("rpush","l","a","b","c","a","b","c","a")
         ro=od.cmd(*c); rf=fr.cmd(*c)
@@ -54,6 +60,7 @@ def main():
     ro=od.cmd("lpos","s","a"); rf=fr.cmd("lpos","s","a")
     if ro!=rf: div+=1; print(f"DIVERGE wrongtype\n  oracle:{ro}\n  fr:{rf}")
     print("-"*60)
+    cleanup()
     if div: print(f"FAIL — {div} divergence(s)"); return 1
     print(f"PASS — LPOS byte-exact vs redis 7.2.4 ({len(CASES)+1} cases)"); return 0
 if __name__=="__main__": sys.exit(main())
