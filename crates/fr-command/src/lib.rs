@@ -25970,13 +25970,15 @@ fn bitfield_cmd(
                 if j + 1 >= argv.len() {
                     return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
-                let mode = std::str::from_utf8(&argv[j + 1])
-                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
-                if !(mode.eq_ignore_ascii_case("WRAP")
-                    || mode.eq_ignore_ascii_case("SAT")
-                    || mode.eq_ignore_ascii_case("FAIL"))
+                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
+                // it carries redis's Lua script-context suffix.
+                let mode = &argv[j + 1];
+                if !(mode.eq_ignore_ascii_case(b"WRAP")
+                    || mode.eq_ignore_ascii_case(b"SAT")
+                    || mode.eq_ignore_ascii_case(b"FAIL"))
                 {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR Invalid OVERFLOW type specified".to_string(),
                     ));
                 }
@@ -26160,16 +26162,17 @@ fn bitfield_cmd(
             if i + 1 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let mode =
-                std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if mode.eq_ignore_ascii_case("WRAP") {
+            // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+            // "Invalid OVERFLOW type specified" via Err (Lua script-context suffix).
+            let mode = &argv[i + 1];
+            if mode.eq_ignore_ascii_case(b"WRAP") {
                 overflow_mode = BitfieldOverflow::Wrap;
-            } else if mode.eq_ignore_ascii_case("SAT") {
+            } else if mode.eq_ignore_ascii_case(b"SAT") {
                 overflow_mode = BitfieldOverflow::Sat;
-            } else if mode.eq_ignore_ascii_case("FAIL") {
+            } else if mode.eq_ignore_ascii_case(b"FAIL") {
                 overflow_mode = BitfieldOverflow::Fail;
             } else {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     // Upstream t_string.c bitfieldCommand: plain
                     // "ERR Invalid OVERFLOW type specified".
                     // (br-frankenredis-ugkf)
@@ -26241,13 +26244,15 @@ fn bitfield_ro_cmd(
                 if j + 1 >= argv.len() {
                     return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
-                let mode = std::str::from_utf8(&argv[j + 1])
-                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
-                if !(mode.eq_ignore_ascii_case("WRAP")
-                    || mode.eq_ignore_ascii_case("SAT")
-                    || mode.eq_ignore_ascii_case("FAIL"))
+                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
+                // it carries redis's Lua script-context suffix.
+                let mode = &argv[j + 1];
+                if !(mode.eq_ignore_ascii_case(b"WRAP")
+                    || mode.eq_ignore_ascii_case(b"SAT")
+                    || mode.eq_ignore_ascii_case(b"FAIL"))
                 {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR Invalid OVERFLOW type specified".to_string(),
                     ));
                 }
