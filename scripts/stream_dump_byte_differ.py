@@ -6,14 +6,17 @@ A clean stream (no consumer groups, no deletions) is fully deterministic and mus
 byte-for-byte identical to redis 7.2.4 — this gate ASSERTS that across single-node and
 multi-node (many-entry) shapes, plus RESTORE round-trip.
 
-NOT byte-asserted (legitimately non-deterministic / known):
+NOT byte-asserted (legitimately non-deterministic / BY DESIGN):
   - Consumer-group consumer seen/active-time + PEL delivery-time are wall-clock MS stamps
     that differ run-to-run, so a stream with a CG/PEL DUMPs different bytes on each server
     (timing, not a bug) — excluded.
-  - REPORTED (frankenredis-aapu4): a stream with XDEL'd entries — redis RETAINS them as
-    listpack tombstones (DUMP larger), fr COMPACTS them out (DUMP smaller). Data is
-    identical (XLEN/XRANGE/RESTORE match); only the DUMP bytes diverge. Flip to asserted
-    once aapu4 is fixed.
+  - REPORTED, BY DESIGN (closed wontfix aapu4; see stream_dump_reload_fuzz docstring): a
+    stream with XDEL'd entries — redis retains them as listpack tombstones (DUMP larger),
+    fr's arena+index PackedStreamLog eagerly compacts them (DUMP smaller). This is a
+    NON-CONTRACTUAL, NON-OBSERVABLE size difference: XLEN / XINFO / XRANGE / DEBUG
+    DIGEST-VALUE all match and RESTORE round-trips both directions, so the data contract
+    holds. This gate reports it (and asserts the live data still matches) but does NOT
+    treat it as a failure — do not "fix" it to byte-equal.
 
 Usage: stream_dump_byte_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = clean-stream DUMP byte-exact, 1 = a NEW (non-aapu4) divergence.
@@ -81,22 +84,25 @@ def main():
 
     for key in ("s_small", "s_big", "s_setid"):
         assert_exact(key)
-    # aapu4 reported case
+    # BY-DESIGN tombstone case (aapu4 closed wontfix): the raw DUMP legitimately differs in
+    # size (fr eagerly compacts XDEL'd entries) — report it, but the DATA contract must hold.
     if dump(o, "s_del") != dump(f, "s_del"):
-        known.append("s_del: XDEL tombstone retention (redis keeps, fr compacts)")
-    # data must still match for the reported case
+        known.append("s_del: XDEL tombstone compaction (by design — non-contractual size)")
     if cmd(o, "XRANGE", "s_del", "-", "+") != cmd(f, "XRANGE", "s_del", "-", "+"):
-        fails.append("s_del: live XRANGE differs (data!)")
+        fails.append("s_del: live XRANGE differs (DATA contract broken!)")
+    if cmd(o, "XLEN", "s_del") != cmd(f, "XLEN", "s_del"):
+        fails.append("s_del: XLEN differs (DATA contract broken!)")
 
     if known:
-        print("KNOWN (frankenredis-aapu4, not asserted): " + "; ".join(known))
+        print("KNOWN by-design (tombstone compaction, non-contractual; aapu4 wontfix): "
+              + "; ".join(known))
     if fails:
-        print(f"FAIL — {len(fails)} NEW stream DUMP divergence(s) vs redis 7.2.4:")
+        print(f"FAIL — {len(fails)} stream DUMP/data divergence(s) vs redis 7.2.4:")
         for x in fails[:15]:
             print(f"  {x}")
         sys.exit(1)
-    print("PASS — clean stream DUMP/RESTORE byte-exact vs redis 7.2.4 "
-          "(single-node, multi-node, explicit-last-id) [XDEL-tombstone reported as aapu4]")
+    print("PASS — clean stream DUMP/RESTORE byte-exact + tombstone-stream data contract "
+          "(XLEN/XRANGE) holds vs redis 7.2.4 (single-node, multi-node, explicit-last-id)")
 
 
 if __name__ == "__main__":
