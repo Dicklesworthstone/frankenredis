@@ -22090,12 +22090,16 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         logical_keys.retain(|k| fr_store::glob_match(pat, k));
     }
     if let Some(ref tf) = args.type_filter {
-        let tf_str = std::str::from_utf8(tf).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-re7sp) Compare the TYPE value as raw bytes — redis
+        // scanGenericCommand byte-compares, so a non-UTF8 type value matches nothing
+        // (empty result), it is NOT a "invalid UTF-8 argument" error. (fr-runtime
+        // handle_scan_command already does this; this path is hit via Lua/redis.call.)
+        let tf: &[u8] = tf;
         logical_keys.retain(|logical| {
             let physical = fr_store::encode_db_key(db, logical);
             store
                 .key_type(&physical, now_ms)
-                .is_some_and(|t| t.eq_ignore_ascii_case(tf_str))
+                .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
         });
     }
     logical_keys.sort();
