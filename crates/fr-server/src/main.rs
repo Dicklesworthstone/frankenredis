@@ -4219,6 +4219,33 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some((cmd, packet)) =
+                    parse_borrowed_plain_keyed_values16_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                        cmd,
+                        packet.key,
+                        &[
+                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
+                            packet.v7, packet.v8, packet.v9, packet.v10, packet.v11, packet.v12,
+                            packet.v13, packet.v14, packet.v15, packet.v16,
+                        ],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values15_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
@@ -7632,6 +7659,106 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         f2,
         f3,
     })
+}
+
+struct BorrowedPlainKeyedValues16Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    v1: &'a [u8],
+    v2: &'a [u8],
+    v3: &'a [u8],
+    v4: &'a [u8],
+    v5: &'a [u8],
+    v6: &'a [u8],
+    v7: &'a [u8],
+    v8: &'a [u8],
+    v9: &'a [u8],
+    v10: &'a [u8],
+    v11: &'a [u8],
+    v12: &'a [u8],
+    v13: &'a [u8],
+    v14: &'a [u8],
+    v15: &'a [u8],
+    v16: &'a [u8],
+}
+
+// (frankenredis-w0i5z) 16-value LPUSH/RPUSH/SADD (`*18 $len CMD key v1 ... v16`);
+// reuses execute_plain_keyed_values_write_borrowed with a 16-element slice.
+// 17+ value forms fall through to the generic path.
+fn parse_borrowed_plain_keyed_values16_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(PlainKeyedValuesCmd, BorrowedPlainKeyedValues16Packet<'a>)> {
+    if config.max_array_len < 18 {
+        return None;
+    }
+    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*18\r\n$5\r\n") {
+        let name = rest.get(..5)?;
+        if name.eq_ignore_ascii_case(b"LPUSH") {
+            (PlainKeyedValuesCmd::Lpush, 5usize)
+        } else if name.eq_ignore_ascii_case(b"RPUSH") {
+            (PlainKeyedValuesCmd::Rpush, 5)
+        } else {
+            return None;
+        }
+    } else if let Some(rest) = input.strip_prefix(b"*18\r\n$4\r\n") {
+        let name = rest.get(..4)?;
+        if name.eq_ignore_ascii_case(b"SADD") {
+            (PlainKeyedValuesCmd::Sadd, 4)
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    if config.max_bulk_len < cmdlen {
+        return None;
+    }
+    let mut cursor = 9 + cmdlen; // past `*18\r\n$N\r\n<CMD>`
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v3, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v4, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v5, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v6, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v7, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v8, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v9, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v10, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v11, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v12, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v13, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v14, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v15, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (v16, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some((
+        cmd,
+        BorrowedPlainKeyedValues16Packet {
+            consumed,
+            key,
+            v1,
+            v2,
+            v3,
+            v4,
+            v5,
+            v6,
+            v7,
+            v8,
+            v9,
+            v10,
+            v11,
+            v12,
+            v13,
+            v14,
+            v15,
+            v16,
+        },
+    ))
 }
 
 struct BorrowedPlainKeyedValues15Packet<'a> {
@@ -14482,6 +14609,113 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values16_packet_parser_accepts_canonical_write() {
+        let input =
+            b"*18\r\n$5\r\nlPuSh\r\n$4\r\nlist\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n*1\r\n$4\r\nPING\r\n";
+        let (cmd, parsed) =
+            crate::parse_borrowed_plain_keyed_values16_packet(input, &ParserConfig::default())
+                .expect("canonical sixteen-value LPUSH packet should parse");
+
+        assert_eq!(cmd, crate::PlainKeyedValuesCmd::Lpush);
+        assert_eq!(parsed.key, b"list");
+        assert_eq!(
+            [
+                parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
+                parsed.v14, parsed.v15, parsed.v16
+            ],
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice(),
+                b"e".as_slice(),
+                b"f".as_slice(),
+                b"g".as_slice(),
+                b"h".as_slice(),
+                b"i".as_slice(),
+                b"j".as_slice(),
+                b"k".as_slice(),
+                b"l".as_slice(),
+                b"m".as_slice(),
+                b"n".as_slice(),
+                b"o".as_slice(),
+                b"p".as_slice()
+            ]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*18\r\n$5\r\nlPuSh\r\n$4\r\nlist\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n"
+                .len()
+        );
+
+        let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values16_packet(
+            b"*18\r\n$4\r\nsAdD\r\n$3\r\nset\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n",
+            &ParserConfig::default(),
+        )
+        .expect("canonical sixteen-value SADD packet should parse");
+        assert_eq!(cmd, crate::PlainKeyedValuesCmd::Sadd);
+        assert_eq!(parsed.key, b"set");
+        assert_eq!(parsed.v16, b"p");
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values16_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*018\r\n$5\r\nLPUSH\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*17\r\n$5\r\nLPUSH\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n",
+                &cfg
+            )
+            .is_none(),
+            "fifteen-value writes stay on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*19\r\n$5\r\nLPUSH\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n$1\r\nq\r\n",
+                &cfg
+            )
+            .is_none(),
+            "larger writes stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*18\r\n$5\r\nLPUSH\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n",
+                &ParserConfig {
+                    max_array_len: 17,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*18\r\n$5\r\nLPUSH\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$2\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed value bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values16_packet(
+                b"*18\r\n$5\r\nPUSHX\r\n$1\r\nx\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n",
+                &cfg
+            )
+            .is_none(),
+            "distinct commands stay on the generic parser"
         );
     }
 
