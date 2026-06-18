@@ -212,6 +212,11 @@ PORT_BASED = [
     ("encoding_config_respect_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("config_alias_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("range_index_extreme_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("geo_boundary_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("dirty_accounting_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("scan_resume_keyset_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("reload_edge_value_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("xclaim_flags_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
