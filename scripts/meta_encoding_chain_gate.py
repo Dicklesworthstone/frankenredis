@@ -9,12 +9,11 @@ redis. Cross-feature state machines are where the a0p5p / 2j9wz / 0667f /
 39is8-revisit bugs hid.
 
 Found (and now regression-locks): frankenredis-0667f (DEBUG DIGEST-VALUE ignored
-the SELECTed DB). Currently-open frankenredis-nom8d divergences are tracked in
-KNOWN_NOM8D so the suite stays green and this gate hard-FAILs only on a NEW
-regression (and flags when nom8d is fixed — drop them then).
+the SELECTed DB). frankenredis-nom8d is fixed, so every encoding-state
+divergence is a hard regression.
 
 Usage: meta_encoding_chain_gate.py <oracle_port> <fr_port>
-Exit 0 = parity (modulo tracked nom8d); 1 = a NEW divergence.
+Exit 0 = parity; 1 = divergence.
 """
 import socket, sys
 
@@ -46,12 +45,6 @@ class R:
 OR=int(sys.argv[1]); FRp=int(sys.argv[2])
 od=R(OR); fd=R(FRp)
 DIV=[]
-
-# frankenredis-nom8d FIXED: RESTORE re-derives hash/zset encoding from content+
-# config (fr-store restore_key), and RDB_TYPE_SET reload re-derives via the
-# redis rdbLoadObject len>intset-max rule (fr-runtime). Empty so any NEW
-# divergence hard-fails.
-KNOWN_NOM8D = set()
 
 def reset():
     for d in (od,fd):
@@ -138,15 +131,8 @@ for typ in ["hash","set-str","zset"]:
     od.cmd("copy","k","k2"); fd.cmd("copy","k","k2"); check(f"C-shrink-copy/{typ}(k2)","k2")
     od.cmd("debug","reload"); fd.cmd("debug","reload"); check(f"C-shrink-reload/{typ}","k")
 
-new=[d for d in DIV if d[0] not in KNOWN_NOM8D]
-known=[d for d in DIV if d[0] in KNOWN_NOM8D]
-for tag,msg in known: print(f"KNOWN-nom8d {tag}: {msg}")
-for tag,msg in new: print(f"DIVERGE {tag}: {msg}")
-# flag any KNOWN tag that did NOT diverge this run (nom8d possibly fixed)
-seen={t for t,_ in DIV}
-fixed=[t for t in KNOWN_NOM8D if t not in seen]
-if fixed: print(f"NOTE: nom8d appears FIXED for {fixed} — drop from KNOWN_NOM8D")
+for tag,msg in DIV: print(f"DIVERGE {tag}: {msg}")
 print("-"*60)
-if new:
-    print(f"FAIL — {len(new)} NEW metamorphic encoding-state divergence(s)"); sys.exit(1)
-print(f"PASS — metamorphic encoding-state chains byte-exact vs redis 7.2.4 ({len(known)} known-nom8d tracked)")
+if DIV:
+    print(f"FAIL — {len(DIV)} metamorphic encoding-state divergence(s)"); sys.exit(1)
+print("PASS — metamorphic encoding-state chains byte-exact vs redis 7.2.4")
