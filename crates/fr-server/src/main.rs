@@ -3321,6 +3321,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hrandfield_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_rand_member_borrowed(
+                        PlainRandMemberCmd::Hrandfield,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
@@ -6071,6 +6093,33 @@ fn parse_borrowed_plain_srandmember_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainSrandmemberPacket { consumed, key })
+}
+
+struct BorrowedPlainHrandfieldPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-syqok) Byte-prefix fast path for `HRANDFIELD key`.
+// Count and WITHVALUES forms remain on generic borrowed dispatch.
+fn parse_borrowed_plain_hrandfield_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHrandfieldPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"HRANDFIELD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"HRANDFIELD"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainHrandfieldPacket { consumed, key })
 }
 
 struct BorrowedPlainSintercard2Packet<'a> {
@@ -15953,6 +16002,68 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_srandmember_packet(
                 b"*2\r\n$11\r\nSRANDMEMBER\r\n$2\r\ns\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hrandfield_packet_parser_accepts_canonical_key_only() {
+        let input = b"*2\r\n$10\r\nhRaNdFiElD\r\n$4\r\nhash\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_hrandfield_packet(input, &ParserConfig::default())
+                .expect("canonical HRANDFIELD key packet should parse");
+
+        assert_eq!(parsed.key, b"hash");
+        assert_eq!(
+            parsed.consumed,
+            b"*2\r\n$10\r\nhRaNdFiElD\r\n$4\r\nhash\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hrandfield_packet_parser_defers_count_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_packet(
+                b"*02\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_packet(
+                b"*3\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "count form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_packet(
+                b"*4\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n$10\r\nWITHVALUES\r\n",
+                &cfg
+            )
+            .is_none(),
+            "WITHVALUES form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_packet(
+                b"*2\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_packet(
+                b"*2\r\n$10\r\nHRANDFIELD\r\n$2\r\nh\r\n",
                 &cfg
             )
             .is_none(),
