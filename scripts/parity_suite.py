@@ -175,6 +175,7 @@ PORT_BASED = [
     ("client_subcommand_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("wait_waitaof_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitop_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("string_bit_growth_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
