@@ -3356,6 +3356,66 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hget_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_hget_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zscore_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_zscore_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4974,6 +5034,90 @@ fn parse_borrowed_plain_object_refcount_packet<'a>(
     let cursor = input.len() - rest.len();
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainObjectRefcountPacket { consumed, key })
+}
+
+struct BorrowedPlainKeyMemberPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    member: &'a [u8],
+}
+
+// (frankenredis-xymiw) Byte-prefix fast path for the key+member 3-element reads
+// HGET/SISMEMBER/ZSCORE (`*3 $len CMD <key> <member>`), reusing the verified-live
+// execute_plain_{hget,sismember,zscore}_borrowed.
+fn parse_borrowed_plain_hget_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"HGET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"HGET"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+fn parse_borrowed_plain_sismember_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"SISMEMBER".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$9\r\n").and_then(|rest| {
+        rest.get(..9)
+            .filter(|command| command.eq_ignore_ascii_case(b"SISMEMBER"))
+            .map(|_| input.len() - rest.len() + 9)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+fn parse_borrowed_plain_zscore_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"ZSCORE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZSCORE"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
 }
 
 struct BorrowedPlainSetPacket<'a> {
