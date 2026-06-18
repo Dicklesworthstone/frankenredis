@@ -3321,6 +3321,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_srandmember_count_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_rand_member_count_borrowed(
+                        PlainRandMemberCmd::Srandmember,
+                        packet.key,
+                        packet.count,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hrandfield_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_rand_member_borrowed(
@@ -6115,6 +6138,38 @@ fn parse_borrowed_plain_srandmember_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainSrandmemberPacket { consumed, key })
+}
+
+struct BorrowedPlainSrandmemberCountPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    count: &'a [u8],
+}
+
+// (frankenredis-q38ap) Byte-prefix fast path for `SRANDMEMBER key count`.
+fn parse_borrowed_plain_srandmember_count_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainSrandmemberCountPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"SRANDMEMBER".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$11\r\n").and_then(|rest| {
+        rest.get(..11)
+            .filter(|command| command.eq_ignore_ascii_case(b"SRANDMEMBER"))
+            .map(|_| input.len() - rest.len() + 11)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (count, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainSrandmemberCountPacket {
+        consumed,
+        key,
+        count,
+    })
 }
 
 struct BorrowedPlainHrandfieldPacket<'a> {
@@ -16055,6 +16110,69 @@ mod tests {
             )
             .is_none(),
             "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_srandmember_count_packet_parser_accepts_canonical_count() {
+        let input = b"*3\r\n$11\r\nsRaNdMeMbEr\r\n$3\r\nset\r\n$2\r\n-2\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_srandmember_count_packet(input, &ParserConfig::default())
+                .expect("canonical SRANDMEMBER key count packet should parse");
+
+        assert_eq!(parsed.key, b"set");
+        assert_eq!(parsed.count, b"-2");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$11\r\nsRaNdMeMbEr\r\n$3\r\nset\r\n$2\r\n-2\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_srandmember_count_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_srandmember_count_packet(
+                b"*03\r\n$11\r\nSRANDMEMBER\r\n$1\r\ns\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_srandmember_count_packet(
+                b"*2\r\n$11\r\nSRANDMEMBER\r\n$1\r\ns\r\n",
+                &cfg
+            )
+            .is_none(),
+            "key-only form stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_srandmember_count_packet(
+                b"*4\r\n$11\r\nSRANDMEMBER\r\n$1\r\ns\r\n$1\r\n2\r\n$5\r\nEXTRA\r\n",
+                &cfg
+            )
+            .is_none(),
+            "extra-argument form stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_srandmember_count_packet(
+                b"*3\r\n$11\r\nSRANDMEMBER\r\n$1\r\ns\r\n$1\r\n2\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_srandmember_count_packet(
+                b"*3\r\n$11\r\nSRANDMEMBER\r\n$1\r\ns\r\n$2\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed count bulk bodies stay on the generic parser"
         );
     }
 
