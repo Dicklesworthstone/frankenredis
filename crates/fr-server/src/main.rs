@@ -3250,6 +3250,72 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Expiretime,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Pexpiretime,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                        PlainCardinalityCmd::Xlen,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4729,6 +4795,87 @@ fn parse_borrowed_plain_type_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainTypePacket { consumed, key })
+}
+
+struct BorrowedPlainExpiretimePacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-hxlzr) Byte-prefix fast path for single-key EXPIRETIME; reuses
+// execute_plain_keymeta_borrowed(Expiretime).
+fn parse_borrowed_plain_expiretime_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainExpiretimePacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"EXPIRETIME".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"EXPIRETIME"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainExpiretimePacket { consumed, key })
+}
+
+struct BorrowedPlainPexpiretimePacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-hxlzr) Byte-prefix fast path for single-key PEXPIRETIME; reuses
+// execute_plain_keymeta_borrowed(Pexpiretime).
+fn parse_borrowed_plain_pexpiretime_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainPexpiretimePacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"PEXPIRETIME".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$11\r\n").and_then(|rest| {
+        rest.get(..11)
+            .filter(|command| command.eq_ignore_ascii_case(b"PEXPIRETIME"))
+            .map(|_| input.len() - rest.len() + 11)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainPexpiretimePacket { consumed, key })
+}
+
+struct BorrowedPlainXlenPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-hxlzr) Byte-prefix fast path for single-key XLEN; reuses
+// execute_plain_cardinality_borrowed(Xlen).
+fn parse_borrowed_plain_xlen_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXlenPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"XLEN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"XLEN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainXlenPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
