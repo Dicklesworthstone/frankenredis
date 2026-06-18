@@ -13383,11 +13383,12 @@ fn linsert(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() != 5 {
         return Err(CommandError::WrongArity("LINSERT"));
     }
-    let direction = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if direction.eq_ignore_ascii_case("BEFORE") {
+    // (frankenredis-re7sp) byte-match BEFORE/AFTER; non-UTF8 -> syntax error (else)
+    let direction = &argv[2];
+    if direction.eq_ignore_ascii_case(b"BEFORE") {
         let len = store.linsert_before(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
         Ok(RespFrame::Integer(len))
-    } else if direction.eq_ignore_ascii_case("AFTER") {
+    } else if direction.eq_ignore_ascii_case(b"AFTER") {
         let len = store.linsert_after(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
         Ok(RespFrame::Integer(len))
     } else {
@@ -27741,13 +27742,14 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     let mut replace = false;
     let mut i = 3;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("REPLACE") {
+        // (frankenredis-re7sp) byte-match COPY options; non-UTF8 -> syntax error
+        let arg = &argv[i];
+        if arg.eq_ignore_ascii_case(b"REPLACE") {
             replace = true;
             i += 1;
             continue;
         }
-        if arg.eq_ignore_ascii_case("DB") {
+        if arg.eq_ignore_ascii_case(b"DB") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
