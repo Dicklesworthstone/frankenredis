@@ -128,9 +128,18 @@ def main():
     args = ap.parse_args()
 
     o, f = Conn(args.oracle), Conn(args.fr)
+
+    def cleanup():
+        for c in (o, f):
+            try:
+                c.cmd("FLUSHALL")
+            except Exception:
+                pass
+
     for c in (o, f):
         if c.cmd("PING") != "PONG":
             print("server not responding", file=sys.stderr)
+            cleanup()
             sys.exit(2)
 
     rng = random.Random(args.seed)
@@ -154,7 +163,9 @@ def main():
     print(f"--- {len(operands)} operands x2 cmds x2 chained: {faults} divergences ---")
     if faults:
         print("FAIL: hex-float INCRBYFLOAT/HINCRBYFLOAT diverges")
+        cleanup()
         sys.exit(1)
+    cleanup()
     print("OK: hex-float INCRBYFLOAT/HINCRBYFLOAT byte-exact vs redis 7.2.4")
 
 
