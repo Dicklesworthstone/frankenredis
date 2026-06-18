@@ -3916,6 +3916,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                        packet.key,
+                        &[packet.s1, packet.m1, packet.s2, packet.m2],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_zadd_borrowed(
@@ -6447,6 +6469,58 @@ fn parse_borrowed_plain_setrange_packet<'a>(
         key,
         start,
         end,
+    })
+}
+
+struct BorrowedPlainZadd2Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    s1: &'a [u8],
+    m1: &'a [u8],
+    s2: &'a [u8],
+    m2: &'a [u8],
+}
+
+// (frankenredis-56nrn) 2-pair ZADD key s1 m1 s2 m2 (6-element). Same flag-exclusion
+// on the first score slot as the 1-pair packet, so option/INCR forms fall through.
+// Reuses execute_plain_zadd_borrowed with a 4-element pair slice.
+fn parse_borrowed_plain_zadd2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZadd2Packet<'a>> {
+    if config.max_array_len < 6 || config.max_bulk_len < b"ZADD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*6\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZADD"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (s1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if s1.eq_ignore_ascii_case(b"NX")
+        || s1.eq_ignore_ascii_case(b"XX")
+        || s1.eq_ignore_ascii_case(b"GT")
+        || s1.eq_ignore_ascii_case(b"LT")
+        || s1.eq_ignore_ascii_case(b"CH")
+        || s1.eq_ignore_ascii_case(b"INCR")
+    {
+        return None;
+    }
+    let (m1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (s2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (m2, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainZadd2Packet {
+        consumed,
+        key,
+        s1,
+        m1,
+        s2,
+        m2,
     })
 }
 
