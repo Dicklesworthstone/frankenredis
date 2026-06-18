@@ -159,6 +159,7 @@ PORT_BASED = [
     ("list_mutation_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitcount_bitpos_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("store_dest_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("store_enc_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("set_get_option_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("integer_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("lcs_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),

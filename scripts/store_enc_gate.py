@@ -44,6 +44,10 @@ for _nm,_p,_d in (("oracle",OR,od),("fr",FRp,fd)):
         print(f"SETUP ERROR: {_nm} (port {_p}) DEBUG DIGEST unavailable: {_pf}")
         print("  Launch both redis and fr with --enable-debug-command yes."); sys.exit(2)
 DIV=[]
+DEFAULT_CONFIG={"hash-max-listpack-entries":512,"hash-max-listpack-value":64,
+                "set-max-listpack-entries":128,"set-max-intset-entries":512,
+                "set-max-listpack-value":64,"zset-max-listpack-entries":128,
+                "zset-max-listpack-value":64,"list-max-listpack-size":-2}
 # frankenredis-v4ba8 is fully fixed for zset and set-algebra facets. Any
 # destination-encoding drift is now a hard regression.
 def norm(x):
@@ -117,6 +121,10 @@ run("sort-store-big",
 # --- SMOVE / LMOVE / RPOPLPUSH dest encoding ---
 run("lmove-newdest", [("rpush","l","a","b","c")], ("lmove","l","d","left","right"),"d")
 run("rpoplpush-newdest", [("rpush","l","a","b","c")], ("rpoplpush","l","d"),"d")
+
+for d in (od,fd):
+    d.cmd("flushall")
+    for k,v in DEFAULT_CONFIG.items(): d.cmd("config","set",k,str(v))
 
 for d in DIV: print("DIVERGE", d)
 print("="*60)
