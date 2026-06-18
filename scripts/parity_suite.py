@@ -209,6 +209,7 @@ PORT_BASED = [
     ("track_crosskey_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("hll_estimation_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitfield_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("encoding_config_respect_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
