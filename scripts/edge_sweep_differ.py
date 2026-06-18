@@ -233,19 +233,26 @@ def main():
     align_encoding_config(f)
 
     diffs = 0
-    for steps in SCENARIOS:
-        ro = run_scenario(o, steps)
-        rf = run_scenario(f, steps)
-        if ro != rf:
-            # find first diverging step
-            for i, (a, b) in enumerate(zip(ro, rf)):
-                if a != b:
-                    diffs += 1
-                    print(f"DIFF in {steps}")
-                    print(f"   step {i}: {steps[i]}")
-                    print(f"   oracle: {a!r}")
-                    print(f"   fr    : {b!r}")
-                    break
+    try:
+        for steps in SCENARIOS:
+            ro = run_scenario(o, steps)
+            rf = run_scenario(f, steps)
+            if ro != rf:
+                # find first diverging step
+                for i, (a, b) in enumerate(zip(ro, rf)):
+                    if a != b:
+                        diffs += 1
+                        print(f"DIFF in {steps}")
+                        print(f"   step {i}: {steps[i]}")
+                        print(f"   oracle: {a!r}")
+                        print(f"   fr    : {b!r}")
+                        break
+    finally:
+        for c in (o, f):
+            try:
+                c.cmd("FLUSHALL")
+            except Exception:
+                pass
     if diffs:
         print(f"\nFAIL: {diffs} divergences")
         sys.exit(1)
