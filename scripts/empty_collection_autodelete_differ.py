@@ -31,6 +31,30 @@ def cmd(s, *a):
     return s.recv(1 << 20)
 
 
+def reply_canon(b):
+    """Canonicalize a reply for order-insensitive comparison: a top-level array of
+    bulk strings is returned as a sorted tuple (SPOP/ZPOPMIN-with-count etc. return
+    elements in an unspecified / random order; this gate only cares about the
+    multiset + the post-state EXISTS/TYPE). Non-arrays compare as-is."""
+    if not b.startswith(b"*"):
+        return b
+    try:
+        i = b.index(b"\r\n")
+        n = int(b[1:i])
+        i += 2
+        out = []
+        for _ in range(n):
+            if b[i : i + 1] != b"$":
+                return b  # nested/non-bulk -> compare raw
+            ln = int(b[i + 1 : b.index(b"\r\n", i)])
+            i = b.index(b"\r\n", i) + 2
+            out.append(b[i : i + ln])
+            i += ln + 2
+        return tuple(sorted(out))
+    except Exception:
+        return b
+
+
 # (label, seed-commands, removal-command, key, expect_key_after)
 # seed-commands are run on a freshly-DEL'd key; then the removal command; then
 # EXISTS + TYPE on the key are compared. expect_key_after is documentation only.
@@ -71,7 +95,8 @@ def main():
         ro, rf = cmd(od, *removal), cmd(fr, *removal)
         eo, ef = cmd(od, "EXISTS", key), cmd(fr, "EXISTS", key)
         to, tf = cmd(od, "TYPE", key), cmd(fr, "TYPE", key)
-        if ro != rf:
+        # order-insensitive: SPOP/ZPOP-with-count reply element order is unspecified
+        if reply_canon(ro) != reply_canon(rf):
             fails.append(f"{label} reply: redis={ro!r} fr={rf!r}")
         if eo != ef:
             fails.append(f"{label} EXISTS: redis={eo!r} fr={ef!r}")
