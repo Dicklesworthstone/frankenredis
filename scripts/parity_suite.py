@@ -169,6 +169,7 @@ PORT_BASED = [
     ("lzf_dump_byte_equality_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("sort_alpha_collation_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("msetnx_atomicity_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("expire_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
