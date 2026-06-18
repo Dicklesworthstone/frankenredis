@@ -3786,6 +3786,26 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some((cmd, packet)) =
+                    parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_keyed_pop_borrowed(cmd, packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_expire_packet(unparsed, &parser_config)
                 {
@@ -6085,6 +6105,50 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         f2,
         f3,
     })
+}
+
+// (frankenredis-t9w2a) no-count single-key pops LPOP/RPOP/ZPOPMIN/ZPOPMAX
+// (`*2 $len CMD key`), reusing the verified-live execute_plain_keyed_pop_borrowed.
+// SPOP is excluded (returns a RANDOM member — not byte-exact verifiable). The
+// count form (arity 3) falls through to the generic path.
+fn parse_borrowed_plain_keyed_pop_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(PlainKeyedPopCmd, BorrowedPlainGetPacket<'a>)> {
+    if config.max_array_len < 2 {
+        return None;
+    }
+    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*2\r\n$4\r\n") {
+        let name = rest.get(..4)?;
+        if name.eq_ignore_ascii_case(b"LPOP") {
+            (PlainKeyedPopCmd::Lpop, 4usize)
+        } else if name.eq_ignore_ascii_case(b"RPOP") {
+            (PlainKeyedPopCmd::Rpop, 4)
+        } else {
+            return None;
+        }
+    } else if let Some(rest) = input.strip_prefix(b"*2\r\n$7\r\n") {
+        let name = rest.get(..7)?;
+        if name.eq_ignore_ascii_case(b"ZPOPMIN") {
+            (PlainKeyedPopCmd::Zpopmin, 7)
+        } else if name.eq_ignore_ascii_case(b"ZPOPMAX") {
+            (PlainKeyedPopCmd::Zpopmax, 7)
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    if config.max_bulk_len < cmdlen {
+        return None;
+    }
+    let mut cursor = 8 + cmdlen; // past `*2\r\n$N\r\n<CMD>`
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some((cmd, BorrowedPlainGetPacket { consumed, key }))
 }
 
 // (frankenredis-ljffq) EXPIRE key seconds (3-element, no option); seconds bulk
