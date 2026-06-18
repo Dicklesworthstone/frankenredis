@@ -29,11 +29,13 @@ ASSERTED = {
     "ql_multinode": [("v%03d" % i) + "x" * 96 for i in range(200)],
     # int + medium-string mix, > 8 KB => multi-node, PACKED nodes.
     "ql_mixed": [str(i * 7) for i in range(140)] + [f"s{i}-" + "z" * 80 for i in range(140)],
+    # (frankenredis-1z4ba FIXED 83b9744b0) an element above the per-node budget but < 1 GiB
+    # is now a PACKED 1-element listpack node (container 0x02), matching redis — DUMP
+    # byte-exact. Promoted from REPORTED to ASSERTED.
+    "ql_largeelem": ["small1", "P" * 10000, "small2", "Q" * 9000],
+    "ql_mixed_large": ["a", "b", "M" * 12000, "c", "N" * 20000] + [str(i) for i in range(50)],
 }
-# REPORTED (1z4ba): a >8KB single element forces redis PACKED+LZF vs fr PLAIN.
-REPORTED = {
-    "ql_plain": ["small1", "P" * 10000, "small2", "Q" * 9000],
-}
+REPORTED = {}
 
 
 def conn(p):
@@ -100,7 +102,7 @@ def main():
             print(f"  {x}")
         sys.exit(1)
     print("PASS — multi-node quicklist (all-PACKED-node) DUMP/RESTORE byte-exact vs redis 7.2.4 "
-          "[guards g7ag5; PLAIN-node case reported as 1z4ba]")
+          "[guards g7ag5 + 1z4ba large-element PACKED-node fix]")
 
 
 if __name__ == "__main__":
