@@ -20543,13 +20543,22 @@ impl Store {
                         .all(|member| member.len() <= self.zset_max_listpack_value)
                 {
                     buf.push(RDB_TYPE_ZSET_LISTPACK);
-                    let mut pairs = Vec::with_capacity(zs.len() * 2);
+                    // Direct-emit the listpack instead of materializing a Vec<Vec<u8>> that
+                    // COPIES every member (member.to_vec()) plus a second Vec<&[u8]> of refs.
+                    // The member bytes already live in the zset, so encode them by reference;
+                    // only the formatted score needs (transient) owned storage. Same
+                    // encode_listpack_entry(member, score) sequence + finish_listpack_entries as
+                    // encode_listpack_strings(pairs) produced => byte-identical. Mirrors the
+                    // RDB-save side (encode_zset_score_listpack_blob).
+                    // (frankenredis perf: zset DUMP direct-emit, code-first batch-test pending)
+                    let mut encoded = Vec::with_capacity(zs.len().saturating_mul(48));
+                    let mut entry_count = 0usize;
                     for (member, score) in zs.iter_asc() {
-                        pairs.push(member.to_vec());
-                        pairs.push(redis_score_to_string(score).into_bytes());
+                        encode_listpack_entry(&mut encoded, member);
+                        encode_listpack_entry(&mut encoded, redis_score_to_string(score).as_bytes());
+                        entry_count += 2;
                     }
-                    let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
-                    encode_rdb_string(&mut buf, &encode_listpack_strings(&pair_refs)?);
+                    encode_rdb_string(&mut buf, &finish_listpack_entries(encoded, entry_count)?);
                 } else {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
