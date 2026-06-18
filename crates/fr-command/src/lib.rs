@@ -21687,6 +21687,13 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             return Err(script_noscript_command_error());
         }
         let requested = parse_client_tracking_state(argv)?;
+        if let Some(target_id) = requested.redirect
+            && target_id != store.dispatch_client_ctx.client_id
+        {
+            return Err(CommandError::Custom(
+                CLIENT_TRACKING_REDIRECT_MISSING.to_string(),
+            ));
+        }
         let current = store.dispatch_client_ctx.client_tracking.clone();
         store.dispatch_client_ctx.client_tracking =
             apply_client_tracking_update(&current, requested)?;
@@ -67090,6 +67097,71 @@ mod tests {
             )
             .unwrap_err(),
             CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
+        );
+    }
+
+    #[test]
+    fn client_tracking_redirect_validates_direct_dispatch_target() {
+        let mut store = Store::new();
+        store.dispatch_client_ctx.client_id = 42;
+
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"42".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(42)
+        );
+
+        for mode in [b"ON".as_slice(), b"OFF".as_slice()] {
+            let err = dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    mode.to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"999".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom(CLIENT_TRACKING_REDIRECT_MISSING.to_string())
+            );
+        }
+
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"OFF".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"42".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(-1)
         );
     }
 
