@@ -356,6 +356,36 @@ struct LuaCoroutineInner {
     env: Option<Env>,
     varargs: Vec<LuaValue>,
     pc: usize,
+    continuation: Option<LuaCoroutineContinuation>,
+}
+
+#[derive(Clone, Debug)]
+enum LuaCoroutineContinuation {
+    Assign {
+        lhs: Vec<Expr>,
+        prefix: Vec<LuaValue>,
+        remaining: Vec<Expr>,
+        yield_was_last: bool,
+    },
+    LocalAssign {
+        names: Vec<String>,
+        prefix: Vec<LuaValue>,
+        remaining: Vec<Expr>,
+        yield_was_last: bool,
+    },
+    Return {
+        prefix: Vec<LuaValue>,
+        remaining: Vec<Expr>,
+        yield_was_last: bool,
+    },
+    NumericFor {
+        name: String,
+        stop: f64,
+        step: f64,
+        body: Block,
+        current: f64,
+        body_pc: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,6 +404,7 @@ impl LuaCoroutine {
                 env: None,
                 varargs: Vec::new(),
                 pc: 0,
+                continuation: None,
             })),
         }
     }
@@ -3745,6 +3776,139 @@ impl<'a> LuaState<'a> {
         outcome
     }
 
+    fn direct_coroutine_yield_args(expr: &Expr) -> Option<&[Expr]> {
+        let Expr::Call(func_expr, args) = expr else {
+            return None;
+        };
+        let Expr::Field(table_expr, method) = func_expr.as_ref() else {
+            return None;
+        };
+        if method == "yield" && matches!(table_expr.as_ref(), Expr::Name(name) if name == "coroutine")
+        {
+            Some(args)
+        } else {
+            None
+        }
+    }
+
+    fn split_direct_yield_exprs(
+        &mut self,
+        exprs: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Option<(Vec<LuaValue>, Vec<Expr>, Vec<Expr>, bool)>, String> {
+        for (idx, expr) in exprs.iter().enumerate() {
+            let Some(yield_args) = Self::direct_coroutine_yield_args(expr) else {
+                continue;
+            };
+            let mut prefix = Vec::with_capacity(idx);
+            for prefix_expr in &exprs[..idx] {
+                prefix.push(self.eval_expr(prefix_expr, env, varargs)?);
+            }
+            return Ok(Some((
+                prefix,
+                yield_args.to_vec(),
+                exprs[idx + 1..].to_vec(),
+                idx + 1 == exprs.len(),
+            )));
+        }
+        Ok(None)
+    }
+
+    fn complete_exprs_after_yield(
+        &mut self,
+        mut prefix: Vec<LuaValue>,
+        remaining: &[Expr],
+        yield_was_last: bool,
+        resume_args: &[LuaValue],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        if yield_was_last {
+            prefix.extend_from_slice(resume_args);
+        } else {
+            prefix.push(resume_args.first().cloned().unwrap_or(LuaValue::Nil));
+            prefix.extend(self.eval_call_args(remaining, env, varargs)?);
+        }
+        Ok(prefix)
+    }
+
+    fn start_coroutine_yield(
+        &mut self,
+        yield_args: &[Expr],
+        continuation: LuaCoroutineContinuation,
+        allow_nested: bool,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+        if self.current_coroutine.is_none()
+            || (self.nested_exec_stmts_depth > 0 && !allow_nested)
+        {
+            return Err("attempt to yield across metamethod/C-call boundary".to_string());
+        }
+        let values = self.eval_call_args(yield_args, env, varargs)?;
+        if let Some(coroutine) = &self.current_coroutine {
+            coroutine.inner.borrow_mut().continuation = Some(continuation);
+        }
+        self.pending_yield = Some(values);
+        Err(LUA_YIELD_SENTINEL.to_string())
+    }
+
+    fn exec_numeric_for_body_from(
+        &mut self,
+        name: &str,
+        stop: f64,
+        step: f64,
+        body: &[(u32, Stmt)],
+        current: f64,
+        start_pc: usize,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+        self.nested_exec_stmts_depth = self.nested_exec_stmts_depth.saturating_add(1);
+        let mut outcome = Ok(ControlFlow::None);
+        for (offset, (line, stmt)) in body.iter().enumerate().skip(start_pc) {
+            self.current_line = *line;
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                outcome = Err("script exceeded maximum iteration count".to_string());
+                break;
+            }
+            if let Stmt::Expression(expr) = stmt
+                && let Some(yield_args) = Self::direct_coroutine_yield_args(expr)
+            {
+                outcome = self.start_coroutine_yield(
+                    yield_args,
+                    LuaCoroutineContinuation::NumericFor {
+                        name: name.to_string(),
+                        stop,
+                        step,
+                        body: body.to_vec(),
+                        current,
+                        body_pc: offset + 1,
+                    },
+                    true,
+                    env,
+                    varargs,
+                );
+                break;
+            }
+            match self.exec_stmt(stmt, env, varargs) {
+                Ok(ControlFlow::None) => {}
+                Ok(other) => {
+                    outcome = Ok(other);
+                    break;
+                }
+                Err(err) => {
+                    outcome = Err(err);
+                    break;
+                }
+            }
+        }
+        self.nested_exec_stmts_depth = self.nested_exec_stmts_depth.saturating_sub(1);
+        outcome
+    }
+
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
@@ -3753,6 +3917,21 @@ impl<'a> LuaState<'a> {
     ) -> Result<ControlFlow, String> {
         match stmt {
             Stmt::Return(exprs) => {
+                if let Some((prefix, yield_args, remaining, yield_was_last)) =
+                    self.split_direct_yield_exprs(exprs, env, varargs)?
+                {
+                    return self.start_coroutine_yield(
+                        &yield_args,
+                        LuaCoroutineContinuation::Return {
+                            prefix,
+                            remaining,
+                            yield_was_last,
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
+                }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 Ok(ControlFlow::Return(vals))
             }
@@ -3771,6 +3950,22 @@ impl<'a> LuaState<'a> {
                 result
             }
             Stmt::LocalAssign(names, exprs) => {
+                if let Some((prefix, yield_args, remaining, yield_was_last)) =
+                    self.split_direct_yield_exprs(exprs, env, varargs)?
+                {
+                    return self.start_coroutine_yield(
+                        &yield_args,
+                        LuaCoroutineContinuation::LocalAssign {
+                            names: names.clone(),
+                            prefix,
+                            remaining,
+                            yield_was_last,
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
+                }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 for (i, name) in names.iter().enumerate() {
                     let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
@@ -3779,6 +3974,22 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::Assign(lhs_list, rhs_list) => {
+                if let Some((prefix, yield_args, remaining, yield_was_last)) =
+                    self.split_direct_yield_exprs(rhs_list, env, varargs)?
+                {
+                    return self.start_coroutine_yield(
+                        &yield_args,
+                        LuaCoroutineContinuation::Assign {
+                            lhs: lhs_list.clone(),
+                            prefix,
+                            remaining,
+                            yield_was_last,
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
+                }
                 let vals = self.eval_expr_list(rhs_list, env, varargs)?;
                 for (i, lhs) in lhs_list.iter().enumerate() {
                     let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
@@ -3872,7 +4083,7 @@ impl<'a> LuaState<'a> {
                     }
                     env.push_scope();
                     env.set_local(name, LuaValue::Number(i));
-                    let cf = self.exec_stmts(body, env, varargs)?;
+                    let cf = self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
                     env.pop_scope();
                     match cf {
                         ControlFlow::Break => break,
@@ -4987,12 +5198,149 @@ impl<'a> LuaState<'a> {
         Ok(CoroutineRun::Complete(Vec::new()))
     }
 
+    fn resume_numeric_for_continuation(
+        &mut self,
+        name: String,
+        stop: f64,
+        step: f64,
+        body: Block,
+        mut current: f64,
+        mut body_pc: usize,
+        outer_stmts: &[(u32, Stmt)],
+        outer_pc: usize,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<CoroutineRun, String> {
+        loop {
+            match self.exec_numeric_for_body_from(
+                &name, stop, step, &body, current, body_pc, env, varargs,
+            ) {
+                Ok(ControlFlow::None) => {}
+                Ok(ControlFlow::Break) => {
+                    env.pop_scope();
+                    break;
+                }
+                Ok(ControlFlow::Return(vals)) => {
+                    env.pop_scope();
+                    return Ok(CoroutineRun::Complete(vals));
+                }
+                Err(err) if is_lua_yield_signal(&err) && self.pending_yield.is_some() => {
+                    let values = self.pending_yield.take().unwrap_or_default();
+                    return Ok(CoroutineRun::Yield {
+                        values,
+                        next_pc: outer_pc,
+                    });
+                }
+                Err(err) => {
+                    env.pop_scope();
+                    return Err(err);
+                }
+            }
+            env.pop_scope();
+            current += step;
+            if (step > 0.0 && current > stop) || (step < 0.0 && current < stop) {
+                break;
+            }
+            env.push_scope();
+            env.set_local(&name, LuaValue::Number(current));
+            body_pc = 0;
+        }
+        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+    }
+
+    fn resume_coroutine_continuation(
+        &mut self,
+        continuation: LuaCoroutineContinuation,
+        resume_args: &[LuaValue],
+        outer_stmts: &[(u32, Stmt)],
+        outer_pc: usize,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<CoroutineRun, String> {
+        match continuation {
+            LuaCoroutineContinuation::Assign {
+                lhs,
+                prefix,
+                remaining,
+                yield_was_last,
+            } => {
+                let vals = self.complete_exprs_after_yield(
+                    prefix,
+                    &remaining,
+                    yield_was_last,
+                    resume_args,
+                    env,
+                    varargs,
+                )?;
+                for (i, lhs_expr) in lhs.iter().enumerate() {
+                    let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
+                    self.assign_to(lhs_expr, val, env, varargs)?;
+                }
+                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+            }
+            LuaCoroutineContinuation::LocalAssign {
+                names,
+                prefix,
+                remaining,
+                yield_was_last,
+            } => {
+                let vals = self.complete_exprs_after_yield(
+                    prefix,
+                    &remaining,
+                    yield_was_last,
+                    resume_args,
+                    env,
+                    varargs,
+                )?;
+                for (i, name) in names.iter().enumerate() {
+                    let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
+                    env.set_local(name, val);
+                }
+                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+            }
+            LuaCoroutineContinuation::Return {
+                prefix,
+                remaining,
+                yield_was_last,
+            } => {
+                let vals = self.complete_exprs_after_yield(
+                    prefix,
+                    &remaining,
+                    yield_was_last,
+                    resume_args,
+                    env,
+                    varargs,
+                )?;
+                Ok(CoroutineRun::Complete(vals))
+            }
+            LuaCoroutineContinuation::NumericFor {
+                name,
+                stop,
+                step,
+                body,
+                current,
+                body_pc,
+            } => self.resume_numeric_for_continuation(
+                name,
+                stop,
+                step,
+                body,
+                current,
+                body_pc,
+                outer_stmts,
+                outer_pc,
+                env,
+                varargs,
+            ),
+        }
+    }
+
     fn resume_coroutine(
         &mut self,
         coroutine: &LuaCoroutine,
         args: &[LuaValue],
     ) -> Result<Vec<LuaValue>, String> {
-        let (func, mut env, mut func_varargs, pc) = {
+        let (func, mut env, mut func_varargs, pc, continuation) = {
             let mut inner = coroutine.inner.borrow_mut();
             match inner.status {
                 LuaCoroutineStatus::Running => {
@@ -5012,12 +5360,19 @@ impl<'a> LuaState<'a> {
             inner.status = LuaCoroutineStatus::Running;
             let func = inner.func.clone();
             let pc = inner.pc;
+            let continuation = inner.continuation.take();
             if let Some(env) = inner.env.take() {
-                (func, env, std::mem::take(&mut inner.varargs), pc)
+                (
+                    func,
+                    env,
+                    std::mem::take(&mut inner.varargs),
+                    pc,
+                    continuation,
+                )
             } else {
                 let func_value = LuaValue::Function(func.clone());
                 let (env, func_varargs) = Self::prepare_lua_function_env(func_value, &func, args);
-                (func, env, func_varargs, pc)
+                (func, env, func_varargs, pc, continuation)
             }
         };
 
@@ -5041,7 +5396,18 @@ impl<'a> LuaState<'a> {
         // doesn't enter through call_function — push the kind frame here
         // so error()/assert() inside the body see a Lua frame at level 1.
         self.lua_frame_kinds.push(true);
-        let run_result = self.exec_coroutine_stmts(&func.body, pc, &mut env, &mut func_varargs);
+        let run_result = if let Some(continuation) = continuation {
+            self.resume_coroutine_continuation(
+                continuation,
+                args,
+                &func.body,
+                pc,
+                &mut env,
+                &mut func_varargs,
+            )
+        } else {
+            self.exec_coroutine_stmts(&func.body, pc, &mut env, &mut func_varargs)
+        };
         self.lua_frame_kinds.pop();
         self.inside_bare_expression_stmt = previous_bare_stmt;
         self.nested_exec_stmts_depth = previous_nested_depth;
@@ -17714,90 +18080,62 @@ end
     }
 
     #[test]
-    fn coroutine_yield_in_local_assign_errors_instead_of_returning_nil() {
-        // (frankenredis-gdbca) bw15's PC tracking advances next_pc
-        // past the whole containing stmt, so 'local v =
-        // coroutine.yield()' would have v unbound on resume —
-        // producing nil where upstream Lua passes the resume args.
-        // Until the resume mechanism captures yield-call return
-        // values, yield-as-non-bare-stmt is rejected with the
-        // upstream Lua 5.1 boundary wording.
+    fn coroutine_yield_in_local_assign_receives_resume_values() {
         let mut store = Store::new();
         let script = b"
-            local co = coroutine.create(function()
-                local v = coroutine.yield()
-                return v
+            local co = coroutine.create(function(a)
+                local b = coroutine.yield(a + 1)
+                return b * 2
             end)
-            local ok, err = coroutine.resume(co)
-            return {tostring(ok), err}
+            local ok1, v1 = coroutine.resume(co, 10)
+            local ok2, v2 = coroutine.resume(co, 5)
+            return v1 .. ':' .. v2
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(
             result,
-            Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"false".to_vec())),
-                RespFrame::BulkString(Some(
-                    b"attempt to yield across metamethod/C-call boundary".to_vec()
-                )),
-            ])))
+            Ok(RespFrame::BulkString(Some(b"11:10".to_vec())))
         );
     }
 
     #[test]
-    fn coroutine_yield_in_return_stmt_errors() {
-        // (frankenredis-gdbca) Same defensive gate covers
-        // 'return coroutine.yield()' — the return stmt's eval_expr
-        // would never reach the ControlFlow::Return on resume.
+    fn coroutine_yield_in_return_stmt_returns_resume_values() {
         let mut store = Store::new();
         let script = b"
             local co = coroutine.create(function()
                 return coroutine.yield()
             end)
-            local ok, err = coroutine.resume(co)
-            return {tostring(ok), err}
+            local ok1, first = coroutine.resume(co)
+            local ok2, second = coroutine.resume(co, 'done')
+            return {ok1, tostring(first), ok2, second}
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(
             result,
             Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"false".to_vec())),
-                RespFrame::BulkString(Some(
-                    b"attempt to yield across metamethod/C-call boundary".to_vec()
-                )),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"nil".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"done".to_vec())),
             ])))
         );
     }
 
     #[test]
-    fn coroutine_yield_inside_for_loop_errors_instead_of_silently_dropping_iterations() {
-        // (frankenredis-ztawj) bw15's resume_coroutine + exec_
-        // coroutine_stmts only track next_pc at the outer-stmt
-        // level, so a yield from inside a for-loop body cannot be
-        // resumed correctly — the loop would be skipped entirely
-        // on the next resume, silently dropping iterations 2..N.
-        // The fix detects this via nested_exec_stmts_depth > 0 at
-        // yield time and returns the upstream Lua 5.1 wording
-        // 'attempt to yield across metamethod/C-call boundary'
-        // instead of producing wrong results.
+    fn coroutine_yield_inside_for_loop_resumes_each_iteration() {
         let mut store = Store::new();
         let script = b"
-            local co = coroutine.create(function()
+            local co = coroutine.wrap(function()
                 for i = 1, 3 do
                     coroutine.yield(i)
                 end
             end)
-            local ok, err = coroutine.resume(co)
-            return {tostring(ok), err}
+            return co() .. co() .. co()
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(
             result,
-            Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"false".to_vec())),
-                RespFrame::BulkString(Some(
-                    b"attempt to yield across metamethod/C-call boundary".to_vec()
-                )),
-            ])))
+            Ok(RespFrame::BulkString(Some(b"123".to_vec())))
         );
     }
 
