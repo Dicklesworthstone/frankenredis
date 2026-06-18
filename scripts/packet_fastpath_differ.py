@@ -134,6 +134,17 @@ CASES = [
     ["APPEND", "ap", "there"],
     ["GETBIT", "bk", "0"],
     ["GETBIT", "bk", "100"],
+    # BITCOUNT key (no range) / BITPOS key bit (no range) — sibling packets
+    # qd9jd/ee5lb; range forms fall through to the generic path.
+    ["BITCOUNT", "str"],
+    ["BITCOUNT", "bk"],
+    ["BITCOUNT", "nope"],
+    ["BITCOUNT", "lst"],
+    ["BITPOS", "bk", "0"],
+    ["BITPOS", "bk", "1"],
+    ["BITPOS", "str", "1"],
+    ["BITPOS", "nope", "1"],
+    ["BITPOS", "lst", "0"],
     ["LINDEX", "lst", "0"],
     ["LINDEX", "lst", "-1"],
     ["LINDEX", "lst", "99"],
