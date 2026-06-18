@@ -11199,8 +11199,23 @@ fn cluster_cmd(
             if argv.len() != 5 {
                 return Err(cluster_invalid_setslot_action_error());
             }
+            let slot = slot as u16;
             let node_id =
                 std::str::from_utf8(&argv[4]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if action.eq_ignore_ascii_case("MIGRATING")
+                && !store.cluster_assigned_slots.contains(&slot)
+            {
+                return Err(CommandError::Custom(format!(
+                    "ERR I'm not the owner of hash slot {slot}"
+                )));
+            }
+            if action.eq_ignore_ascii_case("IMPORTING")
+                && store.cluster_assigned_slots.contains(&slot)
+            {
+                return Err(CommandError::Custom(format!(
+                    "ERR I'm already the owner of hash slot {slot}"
+                )));
+            }
             // fr models a single self node; any other id is unknown.
             // Upstream's NODE branch emits "Unknown node <id>", while
             // MIGRATING / IMPORTING emit "I don't know about node <id>".
@@ -60273,6 +60288,24 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR Unknown node deadbeef".to_string())
         );
+        let self_node_id = store.server_run_id.as_bytes().to_vec();
+        // MIGRATING first checks local ownership of the slot.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"100".to_vec(),
+                    b"MIGRATING".to_vec(),
+                    self_node_id.clone(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR I'm not the owner of hash slot 100".to_string())
+        );
+        store.cluster_assigned_slots.insert(100);
         // MIGRATING with unknown peer → "I don't know about node ...".
         assert_eq!(
             dispatch_argv(
@@ -60289,6 +60322,22 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR I don't know about node someid".to_string())
         );
+        // IMPORTING first rejects a slot already owned by this node.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"100".to_vec(),
+                    b"IMPORTING".to_vec(),
+                    self_node_id.clone(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR I'm already the owner of hash slot 100".to_string())
+        );
         // NODE pointing at self id → OK no-op.
         assert_eq!(
             dispatch_argv(
@@ -60297,7 +60346,7 @@ mod tests {
                     b"SETSLOT".to_vec(),
                     b"100".to_vec(),
                     b"NODE".to_vec(),
-                    store.server_run_id.as_bytes().to_vec(),
+                    self_node_id,
                 ],
                 &mut store,
                 0,
