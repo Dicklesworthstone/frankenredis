@@ -3509,6 +3509,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_memory_usage_borrowed(packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hmget2_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime
@@ -6152,6 +6172,34 @@ fn parse_borrowed_plain_object_refcount_packet<'a>(
     let cursor = input.len() - rest.len();
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainObjectRefcountPacket { consumed, key })
+}
+
+struct BorrowedPlainMemoryUsagePacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-3co91) Byte-prefix fast path for `MEMORY USAGE key`.
+// SAMPLES and other MEMORY subcommands remain on generic borrowed dispatch.
+fn parse_borrowed_plain_memory_usage_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainMemoryUsagePacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"MEMORY".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*3\r\n$6\r\n")?;
+    if !rest.get(..6)?.eq_ignore_ascii_case(b"MEMORY") {
+        return None;
+    }
+    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$5\r\n")?;
+    if !rest.get(..5)?.eq_ignore_ascii_case(b"USAGE") {
+        return None;
+    }
+    let rest = rest.get(5..)?.strip_prefix(b"\r\n")?;
+    let cursor = input.len() - rest.len();
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainMemoryUsagePacket { consumed, key })
 }
 
 struct BorrowedPlainKeyMemberPacket<'a> {
@@ -15215,6 +15263,68 @@ mod tests {
             b"extra".as_slice(),
         ];
         assert_eq!(super::borrowed_plain_object_refcount_args(&trailing), None);
+    }
+
+    #[test]
+    fn borrowed_plain_memory_usage_packet_parser_accepts_canonical_usage() {
+        let input = b"*3\r\n$6\r\nmEmOrY\r\n$5\r\nuSaGe\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_memory_usage_packet(input, &ParserConfig::default())
+                .expect("canonical MEMORY USAGE key packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$6\r\nmEmOrY\r\n$5\r\nuSaGe\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_memory_usage_packet_parser_defers_options_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_memory_usage_packet(
+                b"*03\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_memory_usage_packet(
+                b"*5\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$1\r\nk\r\n$7\r\nSAMPLES\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SAMPLES option stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_memory_usage_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$5\r\nSTATS\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "other MEMORY subcommands stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_memory_usage_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_memory_usage_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
     }
 
     #[test]
