@@ -25771,6 +25771,7 @@ mod tests {
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
         HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
         HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL,
+        RestoreMetadata, lfu_access_minutes, lfu_elapsed_minutes,
         LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
         NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2,
         RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
