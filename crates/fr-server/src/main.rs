@@ -3495,6 +3495,47 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(consumed) =
+                    parse_borrowed_plain_dbsize_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_dbsize_borrowed(ts) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_echo_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_echo_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
                 {
@@ -5353,6 +5394,42 @@ struct BorrowedPlainKeyRangePacket<'a> {
     key: &'a [u8],
     start: &'a [u8],
     end: &'a [u8],
+}
+
+// (frankenredis-k0jtp) 0-arg DBSIZE (`*1 $6 DBSIZE`); returns the consumed byte
+// length on an exact match. Reuses execute_plain_dbsize_borrowed.
+fn parse_borrowed_plain_dbsize_packet(input: &[u8], config: &ParserConfig) -> Option<usize> {
+    if config.max_array_len < 1 || config.max_bulk_len < b"DBSIZE".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*1\r\n$6\r\n")?;
+    if !rest.get(..6)?.eq_ignore_ascii_case(b"DBSIZE") {
+        return None;
+    }
+    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?;
+    Some(input.len() - rest.len())
+}
+
+// (frankenredis-k0jtp) single-arg ECHO (`ECHO msg`); the message bulk is echoed
+// back via execute_plain_echo_borrowed_into (RESP-version aware, _into form).
+fn parse_borrowed_plain_echo_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"ECHO".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"ECHO"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 // (frankenredis-5w5kb) key+delta write INCRBY (`INCRBY key delta`); delta bulk
