@@ -3343,6 +3343,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_rand_member_borrowed(
+                        PlainRandMemberCmd::Zrandmember,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
@@ -6120,6 +6142,33 @@ fn parse_borrowed_plain_hrandfield_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainHrandfieldPacket { consumed, key })
+}
+
+struct BorrowedPlainZrandmemberPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-9apgo) Byte-prefix fast path for `ZRANDMEMBER key`.
+// Count and WITHSCORES forms remain on generic borrowed dispatch.
+fn parse_borrowed_plain_zrandmember_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZrandmemberPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"ZRANDMEMBER".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$11\r\n").and_then(|rest| {
+        rest.get(..11)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANDMEMBER"))
+            .map(|_| input.len() - rest.len() + 11)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainZrandmemberPacket { consumed, key })
 }
 
 struct BorrowedPlainSintercard2Packet<'a> {
@@ -16064,6 +16113,68 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_hrandfield_packet(
                 b"*2\r\n$10\r\nHRANDFIELD\r\n$2\r\nh\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrandmember_packet_parser_accepts_canonical_key_only() {
+        let input = b"*2\r\n$11\r\nzRaNdMeMbEr\r\n$4\r\nzset\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_zrandmember_packet(input, &ParserConfig::default())
+                .expect("canonical ZRANDMEMBER key packet should parse");
+
+        assert_eq!(parsed.key, b"zset");
+        assert_eq!(
+            parsed.consumed,
+            b"*2\r\n$11\r\nzRaNdMeMbEr\r\n$4\r\nzset\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zrandmember_packet_parser_defers_count_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_zrandmember_packet(
+                b"*02\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrandmember_packet(
+                b"*3\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "count form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrandmember_packet(
+                b"*4\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n$1\r\n2\r\n$10\r\nWITHSCORES\r\n",
+                &cfg
+            )
+            .is_none(),
+            "WITHSCORES form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrandmember_packet(
+                b"*2\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrandmember_packet(
+                b"*2\r\n$11\r\nZRANDMEMBER\r\n$2\r\nz\r\n",
                 &cfg
             )
             .is_none(),
