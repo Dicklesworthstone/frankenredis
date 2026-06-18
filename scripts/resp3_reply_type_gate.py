@@ -84,6 +84,10 @@ def setup(s):
     send(s, "XADD", "st", "2-1", "b", "2")
     send(s, "PFADD", "hll", "x", "y", "z")
     send(s, "GEOADD", "geo", "13.361389", "38.115556", "P1", "15.087269", "37.502669", "P2")
+    # A consumer group with no reads -> deterministic XINFO GROUPS / empty XPENDING
+    # summary (lag/entries-read/last-delivered-id are fixed; nothing pending so no
+    # idle/inactive timing fields are emitted, unlike XINFO CONSUMERS).
+    send(s, "XGROUP", "CREATE", "st", "g1", "0")
 
 
 # Deterministic, RESP3-shape-sensitive probes (maps %, sets ~, doubles ,, nulls).
@@ -117,6 +121,16 @@ PROBES = [
     ["LMPOP", "1", "l", "LEFT", "COUNT", "2"],
     ["SINTERCARD", "1", "s"],
     ["DEBUG", "DIGEST-VALUE", "z"],
+    # Complex NESTED RESP3 maps (highest regression risk — a wrong inner type
+    # marker is easy to miss). All fields here are deterministic: fixed XADD ids,
+    # a freshly-created group with no reads, and static command/function metadata.
+    ["XINFO", "STREAM", "st"],
+    ["XINFO", "GROUPS", "st"],
+    ["XPENDING", "st", "g1"],
+    ["COMMAND", "INFO", "get"],
+    ["COMMAND", "DOCS", "GET"],
+    ["FUNCTION", "STATS"],
+    ["FUNCTION", "LIST"],
 ]
 
 
