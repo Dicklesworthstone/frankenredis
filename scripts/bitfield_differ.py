@@ -98,6 +98,14 @@ def main():
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     iters = int(sys.argv[4]) if len(sys.argv) > 4 else 5000
     O, F = Conn(op), Conn(fp)
+
+    def cleanup():
+        for c in (O, F):
+            try:
+                c.cmd("flushall")
+            except Exception:
+                pass
+
     O.cmd("flushall"); F.cmd("flushall")
     rng = random.Random(seed)
     div = 0
@@ -117,6 +125,7 @@ def main():
             O.cmd("del", key); F.cmd("del", key)
     print("-"*60)
     print(f"seed {seed} x {iters} iters; divergences: {div}")
+    cleanup()
     return 1 if div else 0
 
 if __name__ == "__main__":

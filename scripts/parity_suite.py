@@ -128,6 +128,7 @@ PORT_BASED = [
     ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("reset_state_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("bitfield_differ.py", [str(ORACLE_PORT), str(FR_PORT), "1", "1200"]),
     # self-heals encoding thresholds on both servers before comparing, so it is
     # immune to a stray CONFIG SET left by an earlier gate on the shared oracle.
     ("flag_error_edge_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
