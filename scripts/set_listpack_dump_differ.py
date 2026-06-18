@@ -75,6 +75,13 @@ def main():
         cmd(f, "RESTORE", key + "r", "0", pl_f)
         chk(f"redump_{key}", dump(o, key + "r"), dump(f, key + "r"))
 
+    # (RDB-save encoder coverage) DUMP exercises the fr-store command encoder; the RDB-save
+    # path uses a SEPARATE fr-persist encode_compact_set_listpack. Exercise it via DEBUG RELOAD
+    # on fr and assert each key's DUMP still matches redis. Conditional: skip if DEBUG disabled.
+    if cmd(f, "DEBUG", "RELOAD").startswith(b"+OK"):
+        for key in CASES:
+            chk(f"reload_dump_{key}", dump(o, key), dump(f, key))
+
     if fails:
         print(f"FAIL — {len(fails)} set listpack DUMP divergence(s) vs redis 7.2.4:")
         for x in fails[:15]:
