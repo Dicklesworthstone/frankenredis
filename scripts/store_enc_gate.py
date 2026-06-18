@@ -44,14 +44,8 @@ for _nm,_p,_d in (("oracle",OR,od),("fr",FRp,fd)):
         print(f"SETUP ERROR: {_nm} (port {_p}) DEBUG DIGEST unavailable: {_pf}")
         print("  Launch both redis and fr with --enable-debug-command yes."); sys.exit(2)
 DIV=[]
-# Open frankenredis-v4ba8 set facet: set-algebra rebuild of an ALL-INT result
-# whose cardinality overflows set-max-intset-entries must become hashtable
-# (redis builds incrementally -> intset overflow -> HT), but fr's bulk
-# set_value_entry re-derives via set_fits_* -> listpack. PATH-DEPENDENT: one-shot
-# SADD of the same content is listpack in redis too, so the fix must live in the
-# rebuild path, not the shared refresh. Tracked so this gate fails only on a NEW
-# (esp. zset) regression and flags when the set facet is fixed.
-KNOWN_V4BA8 = set()  # frankenredis-v4ba8 FULLY FIXED (zset + set-algebra facets)
+# frankenredis-v4ba8 is fully fixed for zset and set-algebra facets. Any
+# destination-encoding drift is now a hard regression.
 def norm(x):
     if isinstance(x,bytes): return x.decode("latin1")
     if isinstance(x,list): return tuple(norm(e) for e in x)
@@ -124,15 +118,8 @@ run("sort-store-big",
 run("lmove-newdest", [("rpush","l","a","b","c")], ("lmove","l","d","left","right"),"d")
 run("rpoplpush-newdest", [("rpush","l","a","b","c")], ("rpoplpush","l","d"),"d")
 
-def tag_of(line): return line.split(":",1)[0]
-new = [d for d in DIV if tag_of(d) not in KNOWN_V4BA8]
-known = [d for d in DIV if tag_of(d) in KNOWN_V4BA8]
-for d in known: print("KNOWN-v4ba8", d)
-for d in new: print("DIVERGE", d)
-seen = {tag_of(d) for d in DIV}
-fixed = [t for t in KNOWN_V4BA8 if t not in seen]
-if fixed: print(f"NOTE: v4ba8 set facet appears FIXED for {fixed} — drop from KNOWN_V4BA8")
+for d in DIV: print("DIVERGE", d)
 print("="*60)
-if new:
-    print(f"FAIL — {len(new)} NEW *STORE destination-encoding divergence(s)"); sys.exit(1)
-print(f"PASS — *STORE/cross-key destination encoding byte-exact vs redis 7.2.4 ({len(known)} known-v4ba8 tracked)")
+if DIV:
+    print(f"FAIL — {len(DIV)} *STORE destination-encoding divergence(s)"); sys.exit(1)
+print("PASS — *STORE/cross-key destination encoding byte-exact vs redis 7.2.4")
