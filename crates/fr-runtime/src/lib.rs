@@ -10622,6 +10622,97 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Direct-encoding twin of [`Self::execute_plain_zmscore_borrowed`]. It
+    /// preserves the same store calls and metrics while skipping one owned
+    /// score string / `RespFrame` per returned score on the network fast path.
+    pub fn execute_plain_zmscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zmscore_borrowed(key, members, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zmscore");
+        self.session.last_argv_len_sum =
+            b"ZMSCORE".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let _ = self.server.store.exists_no_touch(key, now_ms);
+        let result = self.server.store.zmscore(key, members, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        let mut error_msg = None;
+        match result {
+            Ok(scores) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(scores.len(), false, out);
+                    for score in scores {
+                        match score {
+                            Some(score) => fr_protocol::encode_redis_double(score, resp3, out),
+                            None => encode_bulk_string_slice(None, resp3, out),
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_zmscore_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_plain_zmscore_borrowed_metrics(
         &mut self,
@@ -14140,6 +14231,94 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    /// Direct-encoding twin of [`Self::execute_plain_zscore_borrowed`]. The
+    /// command semantics and counters are unchanged; present scores are written
+    /// straight to the network buffer as RESP3 Double / RESP2 bulk-string bytes.
+    pub fn execute_plain_zscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zscore");
+        self.session.last_argv_len_sum = b"ZSCORE".len() + key.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.zscore(key, member, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        let mut error_msg = None;
+        match result {
+            Ok(Some(score)) => {
+                if !suppress_reply {
+                    fr_protocol::encode_redis_double(score, resp3, out);
+                }
+            }
+            Ok(None) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(None, resp3, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_zscore_borrowed_metrics(
+            key, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
     }
 
     fn can_execute_plain_zrange_borrowed(
@@ -26173,6 +26352,16 @@ mod tests {
         ))
     }
 
+    fn frame_wire_bytes(frame: &RespFrame, resp3: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if resp3 {
+            frame.encode_into_resp3(&mut bytes);
+        } else {
+            frame.encode_into(&mut bytes);
+        }
+        bytes
+    }
+
     /// Remove every appendonlydir artifact for `basename` in `dir` (the single
     /// file, the manifest, and all `<basename>.<seq>.base.rdb`/`.incr.aof`), so a
     /// fixed-dir AOF test never inherits a prior run's files. The appendonlydir
@@ -28273,6 +28462,58 @@ mod tests {
     }
 
     #[test]
+    fn plain_zscore_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                rt.execute_frame(command(&[b"ZADD", b"z", b"1.5", b"a", b"3", b"b"]), 1);
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            }
+
+            let cases: [(&[u8], &[u8]); 4] =
+                [(b"z", b"a"), (b"z", b"nope"), (b"nokey", b"a"), (b"str", b"a")];
+            for (ts, (key, member)) in (2..).zip(cases) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_zscore_borrowed_into(key, member, ts, resp3, &mut out)
+                    .expect("zscore direct encoder should take borrowed fast path");
+                let generic_reply =
+                    generic.execute_frame(command(&[b"ZSCORE".as_slice(), key, member]), ts);
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} member={member:?}"
+                );
+            }
+
+            assert_eq!(
+                direct.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_total_reads_processed,
+                generic.server.store.stat_total_reads_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+    }
+
+    #[test]
     fn plain_zrange_borrowed_fast_path_matches_generic_and_defers_bad_int() {
         let mut fast = Runtime::default_strict();
         let mut generic = Runtime::default_strict();
@@ -29258,6 +29499,56 @@ mod tests {
             assert_eq!(
                 direct.server.store.stat_keyspace_misses,
                 generic.server.store.stat_keyspace_misses
+            );
+        }
+    }
+
+    #[test]
+    fn plain_zmscore_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                rt.execute_frame(command(&[b"ZADD", b"z", b"1.5", b"a", b"2", b"b"]), 1);
+                rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+            }
+
+            let cases: [(&[u8], &[&[u8]]); 4] = [
+                (b"z", &[b"a", b"x", b"b"]),
+                (b"z", &[b"a"]),
+                (b"missing", &[b"a", b"b"]),
+                (b"s", &[b"a"]),
+            ];
+            for (ts, (key, members)) in (2..).zip(cases) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_zmscore_borrowed_into(key, members, ts, resp3, &mut out)
+                    .expect("zmscore direct encoder should take borrowed fast path");
+                let g_argv: Vec<&[u8]> = std::iter::once(b"ZMSCORE".as_slice())
+                    .chain(std::iter::once(key))
+                    .chain(members.iter().copied())
+                    .collect();
+                let generic_reply = generic.execute_frame(command(&g_argv), ts);
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} members={members:?}"
+                );
+            }
+            assert_eq!(
+                direct.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
             );
         }
     }

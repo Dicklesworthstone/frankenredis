@@ -175,6 +175,72 @@ pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\r\n");
 }
 
+/// Append the Redis 7.2 `d2string` ASCII representation of `value` directly
+/// into `out`, byte-identical to [`format_redis_double`] but without building an
+/// intermediate `String`.
+pub fn push_redis_double_ascii(out: &mut Vec<u8>, value: f64) {
+    if value.is_nan() {
+        out.extend_from_slice(b"nan");
+        return;
+    }
+    if value.is_infinite() {
+        out.extend_from_slice(if value > 0.0 { b"inf" } else { b"-inf" });
+        return;
+    }
+    if value == 0.0 {
+        out.extend_from_slice(if value.is_sign_negative() {
+            b"-0"
+        } else {
+            b"0"
+        });
+        return;
+    }
+
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if value >= lo && value <= hi {
+        let truncated = value as i64;
+        if truncated as f64 == value {
+            push_i64(out, truncated);
+            return;
+        }
+    }
+
+    fpconv_dtoa_into(value, out);
+}
+
+/// Encode a Redis double reply directly into `out`: RESP3 Double when `resp3`
+/// is true, RESP2 bulk string otherwise. This is the allocation-free score
+/// reply primitive for hot zset paths.
+pub fn encode_redis_double(value: f64, resp3: bool, out: &mut Vec<u8>) {
+    if resp3 {
+        out.reserve(27);
+        out.extend_from_slice(b",");
+        push_redis_double_ascii(out, value);
+        out.extend_from_slice(b"\r\n");
+        return;
+    }
+
+    out.reserve(64);
+    let body_start = out.len();
+    push_redis_double_ascii(out, value);
+    let body_end = out.len();
+    let body_len = body_end - body_start;
+
+    let mut digits = [0u8; 20];
+    let digit_start = write_u64_digits(&mut digits, 20, body_len as u64);
+    let digit_len = 20 - digit_start;
+    let header_len = 1 + digit_len + 2;
+
+    out.resize(body_end + header_len + 2, 0);
+    out.copy_within(body_start..body_end, body_start + header_len);
+    out[body_start] = b'$';
+    out[body_start + 1..body_start + 1 + digit_len].copy_from_slice(&digits[digit_start..]);
+    out[body_start + 1 + digit_len..body_start + header_len].copy_from_slice(b"\r\n");
+    out[body_start + header_len + body_len..body_start + header_len + body_len + 2]
+        .copy_from_slice(b"\r\n");
+}
+
 // (frankenredis-e4fu8) Branchless decimal digit count via ilog10. These run on the
 // reply hot path: every integer reply's size + every bulk-string/array/map header's
 // reserve sizing. `ilog10` lowers to a leading-zeros + tiny-table sequence (a handful
@@ -491,33 +557,9 @@ pub fn format_redis_double(value: f64) -> String {
     // addReplyDouble take for RESP2 scores): special-case nan/inf/±0, take the
     // exact-integer ll2string fast path ONLY inside the ±2^52 window upstream
     // uses, otherwise grisu2 via fpconv_dtoa. (frankenredis-sk4ss)
-    if value.is_nan() {
-        return "nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
-    }
-
-    // Exact-integer fast path — faithful port of util.c::double2ll: take it iff
-    // `value` is in the safe range `[-LLONG_MAX/2, LLONG_MAX/2]` (≈ ±2^62) AND
-    // is an exact integer (`(i64)v == v`). Every integer-valued double in that
-    // range is losslessly an i64, so ll2string prints it exactly; ABOVE that
-    // (e.g. 6.30082e18) upstream falls to fpconv_dtoa, whose shortest decimal
-    // can drop trailing digits of the exact integer. The window is ±2^62, NOT
-    // ±2^52 — narrowing it wrongly routes values like 1.37e18 through grisu2.
-    let lo = (-i64::MAX / 2) as f64;
-    let hi = (i64::MAX / 2) as f64;
-    if value >= lo && value <= hi {
-        let truncated = value as i64;
-        if truncated as f64 == value {
-            return truncated.to_string();
-        }
-    }
-
-    fpconv_dtoa(value)
+    let mut out = Vec::with_capacity(24);
+    push_redis_double_ascii(&mut out, value);
+    String::from_utf8(out).expect("ascii")
 }
 
 // ───────────────────────── fpconv_dtoa (grisu2) ────────────────────────────
@@ -856,15 +898,21 @@ fn fpconv_grisu2(d: f64, digits: &mut [u8], k: &mut i32) -> usize {
     fpconv_generate_digits(&w, &upper, &lower, digits, k)
 }
 
-fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> String {
+fn fpconv_emit_digits_into(
+    digits: &[u8],
+    mut ndigits: usize,
+    k: i32,
+    neg: bool,
+    out: &mut Vec<u8>,
+) {
+    let start_len = out.len();
     let exp = (k + ndigits as i32 - 1).abs();
-    let mut out: Vec<u8> = Vec::with_capacity(24);
 
     // write plain integer
     if k >= 0 && exp < ndigits as i32 + 7 {
         out.extend_from_slice(&digits[..ndigits]);
-        out.resize(ndigits + k as usize, b'0');
-        return String::from_utf8(out).expect("ascii");
+        out.resize(start_len + ndigits + k as usize, b'0');
+        return;
     }
 
     // write decimal w/o scientific notation
@@ -874,7 +922,7 @@ fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> S
             let off = (-offset) as usize;
             out.push(b'0');
             out.push(b'.');
-            out.resize(2 + off, b'0');
+            out.resize(start_len + 2 + off, b'0');
             out.extend_from_slice(&digits[..ndigits]);
         } else {
             let off = offset as usize;
@@ -882,7 +930,7 @@ fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> S
             out.push(b'.');
             out.extend_from_slice(&digits[off..ndigits]);
         }
-        return String::from_utf8(out).expect("ascii");
+        return;
     }
 
     // write decimal w/ scientific notation
@@ -914,24 +962,17 @@ fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> S
         out.push(b'0');
     }
     out.push(((e % 10) as u8) + b'0');
-    String::from_utf8(out).expect("ascii")
 }
 
-/// `fpconv_dtoa` for a FINITE, NON-ZERO `d` (callers special-case nan/inf/0).
-fn fpconv_dtoa(d: f64) -> String {
+fn fpconv_dtoa_into(d: f64, out: &mut Vec<u8>) {
     let neg = d.to_bits() & FPCONV_SIGNMASK != 0;
     let mut digits = [0u8; 24];
     let mut k = 0i32;
     let ndigits = fpconv_grisu2(d, &mut digits, &mut k);
-    let body = fpconv_emit_digits(&digits, ndigits, k, neg);
     if neg {
-        let mut s = String::with_capacity(body.len() + 1);
-        s.push('-');
-        s.push_str(&body);
-        s
-    } else {
-        body
+        out.push(b'-');
     }
+    fpconv_emit_digits_into(&digits, ndigits, k, neg, out);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3209,6 +3250,46 @@ mod tests {
             );
         }
         assert_eq!(format_redis_double(f64::NAN), "nan");
+    }
+
+    #[test]
+    fn direct_redis_double_encoding_matches_existing_frames() {
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            (3.0, "3"),
+            (-42.0, "-42"),
+            (2.75, "2.75"),
+            (123.456, "123.456"),
+            (1e20, "1e+20"),
+            (1e-10, "1e-10"),
+            (6300820258065050624.0, "6300820258065051000"),
+            (9223372036854775807.0, "9223372036854776000"),
+        ];
+
+        for (value, expected) in cases {
+            let mut ascii = Vec::new();
+            push_redis_double_ascii(&mut ascii, *value);
+            assert_eq!(ascii, expected.as_bytes(), "ascii {value:?}");
+
+            let mut resp2 = Vec::new();
+            encode_redis_double(*value, false, &mut resp2);
+            assert_eq!(
+                resp2,
+                RespFrame::BulkString(Some(expected.as_bytes().to_vec())).to_bytes(),
+                "resp2 {value:?}"
+            );
+
+            let mut resp3 = Vec::new();
+            encode_redis_double(*value, true, &mut resp3);
+            assert_eq!(
+                resp3,
+                RespFrame::Double((*expected).to_string()).to_bytes(),
+                "resp3 {value:?}"
+            );
+        }
     }
 
     #[test]

@@ -97,5 +97,15 @@ turns). Keep claims honest — mark which.
   behavior across zero, `-0`, leading-zero, plus-sign, i64 min/max, overflow, and
   encoding-width boundaries. Retry condition if rejected: only revisit with a
   profile naming `list_lp_int`/listpack sizing, not as generic integer cleanup.
+- frankenredis-n2u1g / cod-b: zset score direct encoder for borrowed `ZSCORE`
+  and `ZMSCORE` network fast paths — CODED (reasoned; batch benchmark pending).
+  `fr-protocol::encode_redis_double` writes Redis d2string bytes directly into
+  RESP3 Double / RESP2 bulk-string frames, and fr-runtime/fr-server now use it
+  for score-read fast paths instead of allocating a `String`/score `RespFrame`.
+  Guard compares raw wire bytes against generic dispatch for RESP2, RESP3, nil,
+  and WRONGTYPE paths. Retry condition if rejected: do not add a wide
+  `RespFrame` score variant or option-bearing `ZRANGE WITHSCORES` direct path
+  unless a release profile names score formatting/allocation in a zset
+  WITHSCORES workload.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

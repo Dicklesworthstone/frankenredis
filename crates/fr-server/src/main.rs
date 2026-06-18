@@ -3719,12 +3719,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zscore_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_zscore_borrowed(packet.key, packet.member, ts)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zscore_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -4800,12 +4807,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zmscore2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_zmscore_borrowed(packet.key, &[packet.start, packet.end], ts)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zmscore_borrowed_into(
+                            packet.key,
+                            &[packet.start, packet.end],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -4820,14 +4834,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zmscore3_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zmscore_borrowed(
-                        packet.key,
-                        &[packet.f1, packet.f2, packet.f3],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zmscore_borrowed_into(
+                            packet.key,
+                            &[packet.f1, packet.f2, packet.f3],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5885,14 +5904,23 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_zscore_borrowed(key, member, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_zscore_borrowed_into(
+                                    key,
+                                    member,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
                             && let Some(response) =
@@ -5903,14 +5931,23 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_zmscore_borrowed(key, members, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_zmscore_borrowed_into(
+                                    key,
+                                    members,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                     }
                     _ => {}
