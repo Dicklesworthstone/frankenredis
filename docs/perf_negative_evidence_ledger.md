@@ -88,5 +88,14 @@ turns). Keep claims honest — mark which.
   boundaries. Retry condition if rejected: only revisit with a fresh parser
   self-time row or a benchmark that isolates line scanning from runtime/server
   packet-parser work.
+- frankenredis-bssrh / cod-a: `fr-store` listpack sizing canonical-integer
+  probe now avoids `value.to_string().as_bytes() == entry` and uses an
+  allocation-free canonical byte predicate before parsing — CODED (reasoned;
+  batch benchmark pending). Path: list/packed-list sizing and encoding decisions
+  for integer-looking members during SADD/LPUSH/RESTORE/DUMP workloads. Guard
+  compares the new predicate and listpack byte sizing against the old round-trip
+  behavior across zero, `-0`, leading-zero, plus-sign, i64 min/max, overflow, and
+  encoding-width boundaries. Retry condition if rejected: only revisit with a
+  profile naming `list_lp_int`/listpack sizing, not as generic integer cleanup.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

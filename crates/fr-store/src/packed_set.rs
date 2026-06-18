@@ -2793,12 +2793,32 @@ fn list_lp_int(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
-    let value: i64 = std::str::from_utf8(entry).ok()?.parse().ok()?;
-    if value.to_string().as_bytes() == entry {
-        Some(value)
-    } else {
+    if !list_lp_int_bytes_are_canonical(entry) {
         None
+    } else {
+        std::str::from_utf8(entry).ok()?.parse::<i64>().ok()
     }
+}
+
+/// True iff `entry` is the canonical base-10 text of an integer: optional '-',
+/// no '+', no redundant leading zero, and not "-0". Range is still enforced by
+/// the parse in `list_lp_int`.
+fn list_lp_int_bytes_are_canonical(entry: &[u8]) -> bool {
+    let digits = match entry.first() {
+        Some(b'-') => &entry[1..],
+        Some(_) => entry,
+        None => return false,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    if digits[0] == b'0' && digits.len() > 1 {
+        return false;
+    }
+    if entry[0] == b'-' && digits == b"0" {
+        return false;
+    }
+    true
 }
 
 /// Number of bytes `encode_listpack_backlen` emits for a `data_len`.
@@ -3648,6 +3668,100 @@ mod tests {
         ListValue, PACKED_MAX_ENTRIES, PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap,
         PackedStrSet, PackedStreamFields, PackedStreamLog, PackedZSet, zset_cmp,
     };
+
+    #[test]
+    fn list_lp_int_canonical_probe_matches_roundtrip_without_alloc_bssrh() {
+        fn old_roundtrip_int(entry: &[u8]) -> Option<i64> {
+            if entry.is_empty() || entry.len() >= 21 {
+                return None;
+            }
+            let value: i64 = std::str::from_utf8(entry).ok()?.parse().ok()?;
+            if value.to_string().as_bytes() == entry {
+                Some(value)
+            } else {
+                None
+            }
+        }
+
+        fn old_entry_bytes(elem: &[u8]) -> u64 {
+            let data_len: u64 = if let Some(v) = old_roundtrip_int(elem) {
+                if (0..=127).contains(&v) {
+                    1
+                } else if (-4096..=4095).contains(&v) {
+                    2
+                } else if i16::try_from(v).is_ok() {
+                    3
+                } else if (-8_388_608..=8_388_607).contains(&v) {
+                    4
+                } else if i32::try_from(v).is_ok() {
+                    5
+                } else {
+                    9
+                }
+            } else {
+                let header = if elem.len() < 64 {
+                    1
+                } else if elem.len() < 4096 {
+                    2
+                } else {
+                    5
+                };
+                header + elem.len() as u64
+            };
+            data_len + super::list_lp_backlen_bytes(data_len)
+        }
+
+        let cases: &[&[u8]] = &[
+            b"",
+            b"0",
+            b"-0",
+            b"00",
+            b"007",
+            b"+1",
+            b"1",
+            b"-1",
+            b"127",
+            b"128",
+            b"-4096",
+            b"4095",
+            b"32767",
+            b"32768",
+            b"-8388608",
+            b"8388607",
+            b"2147483647",
+            b"2147483648",
+            b"-9223372036854775808",
+            b"9223372036854775807",
+            b"9223372036854775808",
+            b"-9223372036854775809",
+            b"18446744073709551615",
+            b"1a",
+            b"-",
+            b"123456789012345678901",
+        ];
+
+        for case in cases {
+            assert_eq!(
+                super::list_lp_int(case),
+                old_roundtrip_int(case),
+                "canonical integer parse mismatch for {:?}",
+                std::str::from_utf8(case).unwrap_or("<non-utf8>")
+            );
+            assert_eq!(
+                super::list_lp_entry_bytes(case),
+                old_entry_bytes(case),
+                "listpack byte sizing changed for {:?}",
+                std::str::from_utf8(case).unwrap_or("<non-utf8>")
+            );
+        }
+
+        assert_eq!(super::list_lp_int(b"0"), Some(0));
+        assert_eq!(super::list_lp_int(b"-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(super::list_lp_int(b"9223372036854775807"), Some(i64::MAX));
+        assert_eq!(super::list_lp_int(b"-0"), None);
+        assert_eq!(super::list_lp_int(b"+1"), None);
+        assert_eq!(super::list_lp_int(b"9223372036854775808"), None);
+    }
 
     #[test]
     fn packed_stream_fields_round_trips_p8wd1() {
