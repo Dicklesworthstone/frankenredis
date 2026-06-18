@@ -138,6 +138,16 @@ CASES = [
     ("string_rep", "return string.rep('ab', 3)"),
     ("string_sub", "return string.sub('hello', 2, 4)"),
     ("table_concat", "return table.concat({'a','b','c'}, '-')"),
+    # table.concat / unpack must use raw signed-integer table lookups (lua_rawgeti)
+    # across negative/zero/sparse keys, not just the dense array vector
+    # (frankenredis-ozc36 / frankenredis-53i6p). These pin fr == redis 7.2.4 for
+    # the integer-key ranges those fixes touched, including the sparse-nil error.
+    ("table_concat_neg_start", "local t={'one'}; t[-1]='neg'; t[0]='zero'; return table.concat(t, ',', -1, 1)"),
+    ("table_concat_from_zero", "local t={'a','b'}; t[0]='z'; return table.concat(t, ',', 0, 2)"),
+    ("table_concat_sparse_nil_err", "local t={'a'}; t[3]='c'; return table.concat(t, ',', 1, 3)"),
+    ("unpack_signed_range", "local t={10}; t[-1]='neg'; t[0]='zero'; t[3]='three'; local a,b,c,d,e=unpack(t,-1,3); return tostring(a)..':'..tostring(b)..':'..tostring(c)..':'..tostring(d)..':'..tostring(e)"),
+    ("unpack_default_count", "return select('#', unpack({7,8,9}))"),
+    ("unpack_from_zero", "local t={1,2}; t[0]=0; local a,b,c=unpack(t,0,2); return tostring(a)..tostring(b)..tostring(c)"),
     ("math_huge", "return tostring(math.huge)"),
     ("math_floor", "return math.floor(3.7)"),
     ("type_check", "return type(redis.call)"),
