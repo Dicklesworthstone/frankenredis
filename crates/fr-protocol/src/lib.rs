@@ -78,7 +78,7 @@ const DIGIT_PAIRS: [u8; 200] = build_digit_pairs();
 /// Write the decimal ASCII of `val` into `buf` ending at `buf[end]`, returning
 /// the start index. `buf` must be at least 20 bytes and `end == buf.len()`.
 /// Two digits per step via [`DIGIT_PAIRS`]. (frankenredis-itoa2)
-fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut val: u64) -> usize {
+pub fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut val: u64) -> usize {
     let mut pos = end;
     while val >= 100 {
         let pair = (val % 100) as usize * 2;

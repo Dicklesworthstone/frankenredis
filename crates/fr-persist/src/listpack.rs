@@ -67,19 +67,14 @@ pub struct ListpackIntegerBytes {
 
 impl ListpackIntegerBytes {
     fn new(value: i64) -> Self {
+        // (frankenredis-vqjz1) Render the magnitude with fr-protocol's itoa2
+        // (two decimal digits per division via DIGIT_PAIRS) instead of a single-digit
+        // `% 10` / `/= 10` loop — halves the divisions per integer entry on the
+        // listpack decode path (RESTORE / DEBUG RELOAD). Byte-identical output
+        // (i64::MIN magnitude is 19 digits, +sign = 20, fits scratch[20]).
         let mut scratch = [0u8; 20];
-        let mut magnitude = value.unsigned_abs();
-        let mut start = scratch.len();
-        if magnitude == 0 {
-            start -= 1;
-            scratch[start] = b'0';
-        } else {
-            while magnitude != 0 {
-                start -= 1;
-                scratch[start] = b'0' + (magnitude % 10) as u8;
-                magnitude /= 10;
-            }
-        }
+        let end = scratch.len();
+        let mut start = fr_protocol::write_u64_digits(&mut scratch, end, value.unsigned_abs());
         if value < 0 {
             start -= 1;
             scratch[start] = b'-';
@@ -689,6 +684,47 @@ pub fn decode_value_spans(data: &[u8]) -> Result<Vec<ListpackValueSpan>, Listpac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // (frankenredis-vqjz1) Lock the itoa2 magnitude rendering against the original
+    // single-digit div-by-10 reference across digit boundaries + i64 extremes.
+    #[test]
+    fn listpack_integer_bytes_matches_single_digit_reference() {
+        fn reference(value: i64) -> Vec<u8> {
+            let mut scratch = [0u8; 20];
+            let mut magnitude = value.unsigned_abs();
+            let mut start = scratch.len();
+            if magnitude == 0 {
+                start -= 1;
+                scratch[start] = b'0';
+            } else {
+                while magnitude != 0 {
+                    start -= 1;
+                    scratch[start] = b'0' + (magnitude % 10) as u8;
+                    magnitude /= 10;
+                }
+            }
+            if value < 0 {
+                start -= 1;
+                scratch[start] = b'-';
+            }
+            scratch[start..].to_vec()
+        }
+        let mut probes: Vec<i64> = vec![0, 1, -1, 9, -9, 10, -10, 99, -99, 100, -100,
+            i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1];
+        let mut p: i64 = 1;
+        while let Some(next) = p.checked_mul(10) {
+            probes.push(p);
+            probes.push(-p);
+            p = next;
+        }
+        for &v in &probes {
+            assert_eq!(
+                ListpackIntegerBytes::new(v).as_slice(),
+                reference(v).as_slice(),
+                "decimal rendering of {v}"
+            );
+        }
+    }
 
     /// Builds a minimal listpack byte sequence from a set of pre-encoded
     /// entry byte strings (each including encoding + data + backlen).
