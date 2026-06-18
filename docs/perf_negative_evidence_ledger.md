@@ -69,6 +69,12 @@ turns). Keep claims honest — mark which.
   under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
   keep only if the next release A/B for keyed-values packets shows a stable win;
   otherwise move this row to rejected and stop extending exact arities.
+- 18-value LPUSH/RPUSH/SADD exact borrowed packet parser — CODED in `fr-server`
+  under `frankenredis-ohsk5` (reasoned; batch benchmark pending). It extends the
+  current contiguous exact-arity ladder by one realistic pipelined batch without
+  changing malformed/noncanonical fallback behavior. Retry condition: do not add
+  19+ keyed-values exact arities unless release A/B names this exact-parser family
+  as a stable keyed-values win.
 - two-field HSET exact borrowed packet parser — CODED in `fr-server` under
   `frankenredis-ohsk5` (reasoned; batch benchmark pending). Reuses the existing
   multi-pair borrowed HSET runtime path for canonical `HSET key f1 v1 f2 v2`;
