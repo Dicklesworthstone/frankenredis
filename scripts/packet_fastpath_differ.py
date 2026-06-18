@@ -111,6 +111,12 @@ CASES = [
     ["LINDEX", "lst", "0"],
     ["LINDEX", "lst", "-1"],
     ["LINDEX", "lst", "99"],
+    ["GETRANGE", "str", "0", "-1"],
+    ["GETRANGE", "str", "0", "4"],
+    ["GETRANGE", "str", "-5", "-1"],
+    ["GETRANGE", "str", "100", "200"],
+    ["GETRANGE", "nope", "0", "-1"],
+    ["GETRANGE", "lst", "0", "-1"],
     # wrong-type / error shapes through the fast path
     ["STRLEN", "lst"],
     ["HGET", "str", "f"],
