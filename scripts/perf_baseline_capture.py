@@ -13,7 +13,9 @@ keep-gate ratchet (per-cell regression > RATCHET_PCT on the fr/redis ratio fails
 This is a HEAVY pass (release build + servers + benches): run it in batch / via rch, NOT
 in an automated cargo-check session. cc authors it; the batch runs it.
 
-Usage: perf_baseline_capture.py <redis-server-bin> <fr-release-bin> [--trials N] [--quick]
+Usage: perf_baseline_capture.py <redis-server-bin> <fr-server-bin> [<fr-bench-bin>] [--trials N] [--quick]
+       The fr-bench CLIENT is a SEPARATE binary from the fr server; if the 3rd arg is
+       omitted it is auto-located next to the fr server binary / under the cc target.
        exit 0 = baseline captured / ratchet PASS; 1 = regression vs prior baseline.
 
 Reset note: forces list-max-listpack-size -2 (the true redis 7.2.4 default) on the oracle
@@ -90,11 +92,11 @@ def _config_set(port, key, value):
         pass
 
 
-def run_bench(fr_bin, port, workload, pipeline, requests, trials):
-    """Invoke fr-bench --json-out against `port`; return the parsed report dict or None."""
+def run_bench(bench_bin, port, workload, pipeline, requests, trials):
+    """Invoke the fr-bench CLIENT (--json-out) against `port`; return its report or None."""
     out = os.path.join("/tmp", f"frbench_{workload}_{port}_{pipeline}.json")
     cmd = [
-        fr_bin, "--host", "127.0.0.1", "--port", str(port),
+        bench_bin, "--host", "127.0.0.1", "--port", str(port),
         "--workload", workload, "--requests", str(requests),
         "--clients", "4", "--pipeline", str(pipeline),
         "--trials", str(trials), "--json-out", out,
@@ -115,6 +117,22 @@ def main():
         sys.exit(2)
     redis_bin = os.path.abspath(sys.argv[1])
     fr_bin = os.path.abspath(sys.argv[2])
+    # The fr-bench CLIENT is a separate binary from the fr SERVER. Take it as the 3rd
+    # positional arg, else auto-locate next to the fr server binary or under the cc target.
+    positional = [a for a in sys.argv[3:] if not a.startswith("--")]
+    if positional:
+        bench_bin = os.path.abspath(positional[0])
+    else:
+        candidates = [
+            os.path.join(os.path.dirname(fr_bin), "fr-bench"),
+            "/data/projects/.rch-targets/frankenredis-cc/release/fr-bench",
+            "/data/projects/.rch-targets/frankenredis-cc/debug/fr-bench",
+        ]
+        bench_bin = next((c for c in candidates if os.path.exists(c)), None)
+        if not bench_bin:
+            print("FAIL — fr-bench client binary not found; pass it as the 3rd argument "
+                  "(perf_baseline_capture.py <redis-server> <fr-server> <fr-bench>)")
+            sys.exit(2)
     trials = 5
     requests = 200_000
     if "--trials" in sys.argv:
@@ -143,8 +161,8 @@ def main():
         cells = {}
         for wl in WORKLOADS:
             for depth in PIPELINE_DEPTHS:
-                ro = run_bench(fr_bin, oracle_port, wl, depth, requests, trials)
-                rf = run_bench(fr_bin, fr_port, wl, depth, requests, trials)
+                ro = run_bench(bench_bin, oracle_port, wl, depth, requests, trials)
+                rf = run_bench(bench_bin, fr_port, wl, depth, requests, trials)
                 if not ro or not rf or ro["ops_per_sec"] <= 0:
                     cells[f"{wl}@p{depth}"] = {"status": "skipped"}
                     continue

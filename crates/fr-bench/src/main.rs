@@ -952,7 +952,9 @@ fn run_worker(
     let mut histogram = Histogram::<u64>::new_with_bounds(1, HISTOGRAM_MAX_US, 3)
         .map_err(|err| format!("failed to allocate worker histogram: {err}"))?;
     let mut batch = Vec::with_capacity(config.pipeline);
-    let mut rng = Lcg::new(unix_time_ms() ^ ((client_index as u64 + 1) * 0x9E37_79B9_7F4A_7C15));
+    let mut rng = Lcg::new(
+        unix_time_ms() ^ (client_index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    );
 
     for request_index in 0..requests {
         let kind = select_command_kind(config.workload, config.read_percent, &mut rng);
