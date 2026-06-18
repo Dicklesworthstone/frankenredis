@@ -231,6 +231,26 @@ turns). Keep claims honest — mark which.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
 
+## cc session 2026-06-18 (cod-walled; cc-carries) — PRESIZE LEVERS shipped + same-class status
+- **SHIPPED 71a908f75 (Reasoned):** presize the collection listpack-blob builders
+  (encode_set/hash/zset listpack blob) to one allocation (safe upper bound: Σ(len)+n·~11+hdr)
+  instead of growing from empty. Byte-identical (all 4 collection DUMP gates PASS, incl their
+  DEBUG-RELOAD RDB-save-encoder step). Win on bulk RDB-save + listpack-collection DUMP. Retry: n/a (done).
+- **SHIPPED c83e5e926 (Reasoned):** presize the quicklist node listpack buffer in BOTH encoders
+  (fr-persist encode_compact_list_quicklist2 RDB-save + fr-store encode_dump_quicklist2 DUMP) to
+  the per-node byte budget (cap 8 KiB = SIZE_SAFETY_LIMIT). Helps the common 1-2 node quicklist.
+  Byte-identical (list_quicklist_dump_differ PASS + multinode/large-elem DUMP exact pre+post RELOAD).
+- **ALREADY-OPTIMAL (do NOT re-examine):** (a) encode_intset_blob already `with_capacity(8+len*width)`
+  + encode_compact_set_intset pre-sizes values/out; (b) the RESP reply path is NOT a fresh-Vec-per-
+  reply churn target — fr-protocol `encode_into(out)` writes into the REUSED per-connection output
+  buffer, and `to_bytes` uses `encoded_len_hint` to pre-size. Reply encoding is already allocation-lean.
+- **DEAD-END (do NOT retry):** pre-sizing the OUTER multi-node accumulator `buf` in the quicklist
+  encoders. Each node is rdb_encode_string'd with LZF compression, so the per-node serialized size is
+  UNPREDICTABLE (compressible data → 10x smaller); reserving node_count·budget would massively
+  over-allocate transiently on compressible lists. The per-node buffers (pre-compression, known size)
+  were the only safe presize targets — done. Retry only with a measured node-size distribution.
+- The buffer-presize realloc-elimination class for the RDB-compact/DUMP encoders is now EXHAUSTED.
+
 ## cc session 2026-06-18 (cod-walled; cc-carries) — DEAD-ENDS + CONVERGENCE (Reasoned)
 - **DEBUG-build A/B is INVALID under cargo-check-only.** cc can build only debug binaries
   (no `--release`, no rch per directive); a debug-fr-server vs release-redis bench is
