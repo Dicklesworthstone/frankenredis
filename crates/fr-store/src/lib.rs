@@ -3220,6 +3220,17 @@ fn i64_text_len(value: i64) -> usize {
     digits
 }
 
+fn integer_decimal_bytes(value: i64) -> Vec<u8> {
+    let mut scratch = [0u8; 20];
+    let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
+    let mut out = Vec::with_capacity(i64_text_len(value));
+    if value.is_negative() {
+        out.push(b'-');
+    }
+    out.extend_from_slice(&scratch[start..]);
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
     value: Value,
@@ -21914,14 +21925,14 @@ fn decode_encoded_rdb_string(
                 .filter(|_| offset + 2 <= data_end)
                 .ok_or(StoreError::InvalidDumpPayload)?;
             let value = i8::from_le_bytes([raw]);
-            Ok((value.to_string().into_bytes(), 2))
+            Ok((integer_decimal_bytes(i64::from(value)), 2))
         }
         RDB_ENC_INT16 => {
             if offset + 3 > data_end {
                 return Err(StoreError::InvalidDumpPayload);
             }
             let value = i16::from_le_bytes([data[offset + 1], data[offset + 2]]);
-            Ok((value.to_string().into_bytes(), 3))
+            Ok((integer_decimal_bytes(i64::from(value)), 3))
         }
         RDB_ENC_INT32 => {
             if offset + 5 > data_end {
@@ -21933,7 +21944,7 @@ fn decode_encoded_rdb_string(
                 data[offset + 3],
                 data[offset + 4],
             ]);
-            Ok((value.to_string().into_bytes(), 5))
+            Ok((integer_decimal_bytes(i64::from(value)), 5))
         }
         RDB_ENC_LZF => decode_lzf_rdb_string(data, offset, data_end),
         _ => Err(StoreError::InvalidDumpPayload),
@@ -22556,7 +22567,7 @@ fn decode_ziplist_entry(
 }
 
 fn ziplist_integer_bytes(value: i64) -> Vec<u8> {
-    value.to_string().into_bytes()
+    integer_decimal_bytes(value)
 }
 
 fn ziplist_take<'a>(
@@ -25859,9 +25870,9 @@ mod tests {
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
         decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
-        estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        estimate_listpack_entry_bytes, estimate_listpack_score_bytes, integer_decimal_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, redis_allocation_size,
-        redis_score_to_string,
+        redis_score_to_string, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40763,6 +40774,60 @@ mod tests {
             store.get(b"i32", 100).unwrap(),
             Some(b"2147483647".to_vec())
         );
+    }
+
+    #[test]
+    fn rdb_and_ziplist_integer_restore_bytes_match_decimal_reference_edges() {
+        for value in [
+            0i64,
+            1,
+            -1,
+            i64::from(i8::MIN),
+            i64::from(i8::MAX),
+            i64::from(i16::MIN),
+            i64::from(i16::MAX),
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+            i64::MIN,
+            i64::MAX,
+        ] {
+            let expected = value.to_string().into_bytes();
+            assert_eq!(integer_decimal_bytes(value), expected);
+            assert_eq!(ziplist_integer_bytes(value), expected);
+        }
+    }
+
+    #[test]
+    fn rdb_integer_encoded_strings_decode_canonical_edge_bytes() {
+        let mut int16_min = vec![0xC1];
+        int16_min.extend_from_slice(&i16::MIN.to_le_bytes());
+        let mut int16_max = vec![0xC1];
+        int16_max.extend_from_slice(&i16::MAX.to_le_bytes());
+        let mut int32_min = vec![0xC2];
+        int32_min.extend_from_slice(&i32::MIN.to_le_bytes());
+        let mut int32_max = vec![0xC2];
+        int32_max.extend_from_slice(&i32::MAX.to_le_bytes());
+
+        for (body, value, consumed) in [
+            (
+                vec![0xC0, i8::MIN.to_le_bytes()[0]],
+                i64::from(i8::MIN),
+                2usize,
+            ),
+            (
+                vec![0xC0, i8::MAX.to_le_bytes()[0]],
+                i64::from(i8::MAX),
+                2,
+            ),
+            (int16_min, i64::from(i16::MIN), 3),
+            (int16_max, i64::from(i16::MAX), 3),
+            (int32_min, i64::from(i32::MIN), 5),
+            (int32_max, i64::from(i32::MAX), 5),
+        ] {
+            let (actual, actual_consumed) = decode_rdb_string(&body, 0, body.len()).unwrap();
+            assert_eq!(actual_consumed, consumed);
+            assert_eq!(actual, value.to_string().into_bytes());
+        }
     }
 
     #[test]
