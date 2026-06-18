@@ -592,10 +592,11 @@ impl HashFieldMap {
         }
         match self {
             HashFieldMap::Packed(p) => p.insert_borrowed(field, value),
-            // CompactFieldMap::insert keeps an existing field's position and
-            // returns its old value (Some) — so `is_none()` is exactly "newly
-            // added", matching the IndexMap get_mut/insert split byte-for-byte.
-            HashFieldMap::Hash(h) => h.insert(field, &value).is_none(),
+            // CompactFieldMap::insert_borrowed keeps an existing field's
+            // position and reports "newly added" directly, matching the IndexMap
+            // get_mut/insert split byte-for-byte while avoiding old-value
+            // allocation on duplicate-field HSET.
+            HashFieldMap::Hash(h) => h.insert_borrowed(field, &value),
         }
     }
 
@@ -809,7 +810,11 @@ impl CompactFieldMap {
         if let Some(pos) = self.lookup(field) {
             let old_off = self.order[pos];
             let (_, vr) = cfm_decode(&self.buf, old_off);
-            let old_value = self.buf[vr].to_vec();
+            let old_value = self.buf[vr.clone()].to_vec();
+            if value.len() == vr.len() {
+                self.buf[vr].copy_from_slice(value);
+                return Some(old_value);
+            }
             self.dead += self.entry_size(old_off);
             let new_off = self.append_entry(field, value);
             self.order[pos] = new_off;
@@ -846,6 +851,56 @@ impl CompactFieldMap {
         }
         self.maybe_compact();
         None
+    }
+
+    /// Borrowed-field upsert for callers that only need to know whether the
+    /// field was new. Existing-field updates avoid allocating the old value; if
+    /// the replacement value has the same byte length, the arena entry is
+    /// rewritten in place instead of appending a dead record.
+    pub(crate) fn insert_borrowed(&mut self, field: &[u8], value: &[u8]) -> bool {
+        if let Some(pos) = self.lookup(field) {
+            let old_off = self.order[pos];
+            let (_, vr) = cfm_decode(&self.buf, old_off);
+            if value.len() == vr.len() {
+                self.buf[vr].copy_from_slice(value);
+            } else {
+                self.dead += self.entry_size(old_off);
+                let new_off = self.append_entry(field, value);
+                self.order[pos] = new_off;
+                self.maybe_compact();
+            }
+            return false;
+        }
+
+        // New field. Ensure load factor < 0.75 (count slots used incl tombstones).
+        let used = self.order.len() + self.tombs + 1;
+        if self.slots.is_empty() || used * 4 >= self.slots.len() * 3 {
+            let target = (self.order.len() + 1) * 2;
+            self.rehash(target.max(self.slots.len()));
+        }
+        let new_off = self.append_entry(field, value);
+        let pos = self.order.len();
+        self.order.push(new_off);
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        let mut first_tomb: Option<usize> = None;
+        loop {
+            let s = self.slots[slot];
+            if s == CFM_EMPTY {
+                let target = first_tomb.unwrap_or(slot);
+                if self.slots[target] == CFM_TOMB {
+                    self.tombs -= 1;
+                }
+                self.slots[target] = (pos as u32) + 2;
+                break;
+            }
+            if s == CFM_TOMB && first_tomb.is_none() {
+                first_tomb = Some(slot);
+            }
+            slot = (slot + 1) & mask;
+        }
+        self.maybe_compact();
+        true
     }
 
     #[must_use]
@@ -3995,7 +4050,7 @@ mod tests {
         for _ in 0..20_000 {
             let r = next();
             let k = key(r);
-            match r % 10 {
+            match r % 11 {
                 0..=4 => {
                     let v = val(next());
                     assert_eq!(c.insert(&k, &v), o.insert(k.clone(), v.clone()), "insert");
@@ -4004,6 +4059,16 @@ mod tests {
                 6 => assert_eq!(c.contains_key(&k), o.contains_key(&k), "contains"),
                 7 => assert_eq!(c.shift_remove(&k), o.shift_remove(&k), "shift_remove"),
                 8 => assert_eq!(c.swap_remove(&k), o.swap_remove(&k), "swap_remove"),
+                9 => {
+                    let v = val(next());
+                    let was_new = !o.contains_key(&k);
+                    assert_eq!(
+                        c.insert_borrowed(&k, &v),
+                        was_new,
+                        "insert_borrowed"
+                    );
+                    o.insert(k.clone(), v);
+                }
                 _ => {
                     let idx = (next() as usize) % (o.len() + 1);
                     let cp = c.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec()));
@@ -4014,6 +4079,40 @@ mod tests {
             check(&c, &o);
         }
         assert!(!c.is_empty(), "expected a non-trivial residual map");
+    }
+
+    #[test]
+    fn compact_field_map_borrowed_overwrite_reuses_same_size_slot_ohsk5() {
+        let mut map = CompactFieldMap::new();
+        assert_eq!(map.insert(b"field", b"aaaa"), None);
+        let one_record_len = map.buf.len();
+
+        assert!(!map.insert_borrowed(b"field", b"bbbb"));
+        assert_eq!(map.get(b"field"), Some(&b"bbbb"[..]));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.buf.len(), one_record_len);
+        assert_eq!(map.dead, 0);
+
+        assert_eq!(map.insert(b"field", b"cccc"), Some(b"bbbb".to_vec()));
+        assert_eq!(map.get(b"field"), Some(&b"cccc"[..]));
+        assert_eq!(map.buf.len(), one_record_len);
+        assert_eq!(map.dead, 0);
+
+        assert!(!map.insert_borrowed(b"field", b"longer-value"));
+        assert_eq!(map.get(b"field"), Some(&b"longer-value"[..]));
+        assert_eq!(map.len(), 1);
+        assert!(map.buf.len() > one_record_len);
+
+        assert!(map.insert_borrowed(b"other", b"zzzz"));
+        let got: Vec<(Vec<u8>, Vec<u8>)> =
+            map.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (b"field".to_vec(), b"longer-value".to_vec()),
+                (b"other".to_vec(), b"zzzz".to_vec()),
+            ]
+        );
     }
 
     #[test]

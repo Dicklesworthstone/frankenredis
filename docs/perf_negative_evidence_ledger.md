@@ -172,5 +172,15 @@ turns). Keep claims honest — mark which.
   and decodes string, positive-integer, negative-integer, and null-byte members.
   Retry condition if rejected: only revisit with a fresh compact-set DUMP/RDB
   profile naming listpack construction, not as generic vector-elision cleanup.
+- frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
+  overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
+  hashtable-range hashes instead of allocating the old value only to discard it;
+  same-length value overwrites rewrite the arena slot in place instead of
+  appending dead record bytes — CODED (reasoned from prior HSET duplicate-field
+  residuals; batch benchmark pending). Guard extends the CompactFieldMap
+  IndexMap-equivalence stream with borrowed upserts and pins arena/no-dead-byte
+  behavior for same-sized overwrites. Retry condition if rejected: do not add
+  further HSET allocation micro-levers unless a focused HSET profile still names
+  compact-hash duplicate overwrite / arena churn after this path.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
