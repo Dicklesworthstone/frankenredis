@@ -198,5 +198,15 @@ turns). Keep claims honest — mark which.
   behavior for same-sized overwrites. Retry condition if rejected: do not add
   further HSET allocation micro-levers unless a focused HSET profile still names
   compact-hash duplicate overwrite / arena churn after this path.
+- frankenredis-uhthd / cod-b: `fr-store` KeyDict primitive now stores chaining
+  nodes in a safe arena (`Vec<Option<Node>>` + free-list indices) instead of one
+  `Box<Node>` allocation per key — CODED (reasoned from pass226 rejection, where
+  half-wired KeyDict was too slow while still preserving side indices; batch
+  benchmark pending). Guard keeps the existing insert/get/remove/SCAN/random
+  sampling equivalence tests and adds a churn test proving removed node slots are
+  reused without growing the arena. Retry condition if rejected: do not repeat
+  main-table-only KeyDict wiring; retry only with full side-index-removing
+  Store integration (native SCAN/RANDOMKEY/eviction) or a focused KeyDict bench
+  showing the arena primitive itself as the remaining bottleneck.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

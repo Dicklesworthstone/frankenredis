@@ -33,7 +33,7 @@
 //! it — the reverse-binary cursor handles size *changes*, and grow-only is the
 //! conservative subset that never drops a present-throughout key).
 //!
-//! `#![forbid(unsafe_code)]` holds: chaining uses `Option<Box<Node>>` links.
+//! `#![forbid(unsafe_code)]` holds: chaining uses arena indices, not raw links.
 
 use std::hash::BuildHasher;
 
@@ -42,14 +42,20 @@ struct Node<V> {
     hash: u64,
     key: Box<[u8]>,
     value: V,
-    next: Option<Box<Node<V>>>,
+    next: Option<usize>,
 }
 
 /// A chaining hash table keyed by raw bytes, sized to a power of two so the
 /// bucket index is `hash & mask` and the [`reverse-binary cursor`](KeyDict::scan)
 /// is well-defined.
 pub struct KeyDict<V> {
-    buckets: Vec<Option<Box<Node<V>>>>,
+    buckets: Vec<Option<usize>>,
+    /// Arena of key/value cells. Removed cells become `None` and their slot is
+    /// pushed into `free`, so high-churn workloads do not allocate a fresh node
+    /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
+    /// keeping key ownership and chain order semantics unchanged.
+    nodes: Vec<Option<Node<V>>>,
+    free: Vec<usize>,
     /// `buckets.len() - 1`; bucket index = `hash & mask`.
     mask: u64,
     count: usize,
@@ -79,6 +85,8 @@ impl<V> KeyDict<V> {
         buckets.resize_with(n, || None);
         Self {
             buckets,
+            nodes: Vec::new(),
+            free: Vec::new(),
             mask: (n as u64) - 1,
             count: 0,
             hasher: foldhash::quality::RandomState::default(),
@@ -101,6 +109,13 @@ impl<V> KeyDict<V> {
         self.buckets.len()
     }
 
+    /// Number of arena slots allocated for nodes, including free slots retained
+    /// for reuse. Exposed for the churn guard; not part of Redis-visible state.
+    #[inline]
+    pub fn storage_slots(&self) -> usize {
+        self.nodes.len()
+    }
+
     #[inline]
     fn hash_key(&self, key: &[u8]) -> u64 {
         self.hasher.hash_one(key)
@@ -111,15 +126,26 @@ impl<V> KeyDict<V> {
         (hash & self.mask) as usize
     }
 
+    fn alloc_node(&mut self, node: Node<V>) -> usize {
+        if let Some(idx) = self.free.pop() {
+            self.nodes[idx] = Some(node);
+            idx
+        } else {
+            self.nodes.push(Some(node));
+            self.nodes.len() - 1
+        }
+    }
+
     /// Borrow the value for `key`, or `None`.
     pub fn get(&self, key: &[u8]) -> Option<&V> {
         let h = self.hash_key(key);
-        let mut cur = self.buckets[self.bucket_of(h)].as_deref();
-        while let Some(node) = cur {
+        let mut cur = self.buckets[self.bucket_of(h)];
+        while let Some(idx) = cur {
+            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(&node.value);
             }
-            cur = node.next.as_deref();
+            cur = node.next;
         }
         None
     }
@@ -128,12 +154,18 @@ impl<V> KeyDict<V> {
     pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
-        let mut cur = self.buckets[b].as_deref_mut();
-        while let Some(node) = cur {
+        let mut cur = self.buckets[b];
+        while let Some(idx) = cur {
+            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
-                return Some(&mut node.value);
+                return Some(
+                    &mut self.nodes[idx]
+                        .as_mut()
+                        .expect("bucket chain points at live node")
+                        .value,
+                );
             }
-            cur = node.next.as_deref_mut();
+            cur = node.next;
         }
         None
     }
@@ -149,22 +181,24 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(&key);
         let b = self.bucket_of(h);
         // Overwrite in place if present.
-        let mut cur = self.buckets[b].as_deref_mut();
-        while let Some(node) = cur {
+        let mut cur = self.buckets[b];
+        while let Some(idx) = cur {
+            let node = self.nodes[idx].as_mut().expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(std::mem::replace(&mut node.value, value));
             }
-            cur = node.next.as_deref_mut();
+            cur = node.next;
         }
         // Prepend a fresh node (head insertion; order within a bucket is not
         // observable — SCAN emits whole buckets).
-        let head = self.buckets[b].take();
-        self.buckets[b] = Some(Box::new(Node {
+        let head = self.buckets[b];
+        let idx = self.alloc_node(Node {
             hash: h,
             key,
             value,
             next: head,
-        }));
+        });
+        self.buckets[b] = Some(idx);
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -176,21 +210,27 @@ impl<V> KeyDict<V> {
     pub fn remove(&mut self, key: &[u8]) -> Option<V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
-        // Walk the chain with an owned-link cursor so we can splice a node out.
-        let mut link = &mut self.buckets[b];
-        while link.is_some() {
-            // Does the node at `link` match?
-            let matches = {
-                let node = link.as_deref().unwrap();
-                node.hash == h && *node.key == *key
-            };
-            if matches {
-                let mut boxed = link.take().unwrap();
-                *link = boxed.next.take();
+        let mut prev: Option<usize> = None;
+        let mut cur = self.buckets[b];
+        while let Some(idx) = cur {
+            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
+            let next = node.next;
+            if node.hash == h && *node.key == *key {
+                let removed = self.nodes[idx].take().expect("bucket chain points at live node");
+                if let Some(prev_idx) = prev {
+                    self.nodes[prev_idx]
+                        .as_mut()
+                        .expect("bucket chain points at live node")
+                        .next = removed.next;
+                } else {
+                    self.buckets[b] = removed.next;
+                }
+                self.free.push(idx);
                 self.count -= 1;
-                return Some(boxed.value);
+                return Some(removed.value);
             }
-            link = &mut link.as_mut().unwrap().next;
+            prev = cur;
+            cur = next;
         }
         None
     }
@@ -199,18 +239,15 @@ impl<V> KeyDict<V> {
     /// two growth keeps `hash & mask` stable modulo the new high bit, which is
     /// exactly what the reverse-binary [`scan`](Self::scan) cursor relies on.
     fn grow(&mut self) {
-        let old = std::mem::take(&mut self.buckets);
-        let new_len = old.len() * 2;
+        let new_len = self.buckets.len() * 2;
         let new_mask = (new_len as u64) - 1;
-        let mut buckets: Vec<Option<Box<Node<V>>>> = Vec::with_capacity(new_len);
+        let mut buckets: Vec<Option<usize>> = Vec::with_capacity(new_len);
         buckets.resize_with(new_len, || None);
-        for mut head in old {
-            while let Some(mut node) = head {
-                head = node.next.take();
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if let Some(node) = node {
                 let b = (node.hash & new_mask) as usize;
-                let prev = buckets[b].take();
-                node.next = prev;
-                buckets[b] = Some(node);
+                node.next = buckets[b];
+                buckets[b] = Some(idx);
             }
         }
         self.buckets = buckets;
@@ -222,15 +259,18 @@ impl<V> KeyDict<V> {
         for b in &mut self.buckets {
             *b = None;
         }
+        self.nodes.clear();
+        self.free.clear();
         self.count = 0;
     }
 
     /// Iterate all (key, value) pairs in unspecified order.
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &V)> {
-        self.buckets.iter().flat_map(|head| {
-            std::iter::successors(head.as_deref(), |n| n.next.as_deref())
-                .map(|n| (&*n.key, &n.value))
-        })
+    pub fn iter(&self) -> KeyDictIter<'_, V> {
+        KeyDictIter {
+            dict: self,
+            bucket: 0,
+            current: None,
+        }
     }
 
     /// Iterate keys in unspecified order.
@@ -252,11 +292,12 @@ impl<V> KeyDict<V> {
         let mut emitted = 0usize;
         loop {
             let b = (v & self.mask) as usize;
-            let mut node = self.buckets[b].as_deref();
-            while let Some(n) = node {
+            let mut node = self.buckets[b];
+            while let Some(idx) = node {
+                let n = self.nodes[idx].as_ref().expect("bucket chain points at live node");
                 emit(&n.key, &n.value);
                 emitted += 1;
-                node = n.next.as_deref();
+                node = n.next;
             }
             // Reverse-binary increment within the current mask.
             v |= !self.mask;
@@ -290,12 +331,27 @@ impl<V> KeyDict<V> {
         // from a random origin so we always return in O(buckets) worst case.
         for _ in 0..64 {
             let b = reduce(next_rand(), nb);
-            if let Some(head) = self.buckets[b].as_deref() {
-                let chain_len = std::iter::successors(Some(head), |n| n.next.as_deref()).count();
+            if let Some(head) = self.buckets[b] {
+                let chain_len =
+                    std::iter::successors(Some(head), |&idx| {
+                        self.nodes[idx]
+                            .as_ref()
+                            .expect("bucket chain points at live node")
+                            .next
+                    })
+                    .count();
                 let pick = reduce(next_rand(), chain_len);
-                let chosen = std::iter::successors(Some(head), |n| n.next.as_deref())
+                let chosen = std::iter::successors(Some(head), |&idx| {
+                    self.nodes[idx]
+                        .as_ref()
+                        .expect("bucket chain points at live node")
+                        .next
+                })
                     .nth(pick)
                     .unwrap();
+                let chosen = self.nodes[chosen]
+                    .as_ref()
+                    .expect("bucket chain points at live node");
                 return Some((&chosen.key, &chosen.value));
             }
         }
@@ -303,11 +359,42 @@ impl<V> KeyDict<V> {
         let start = reduce(next_rand(), nb);
         for i in 0..self.buckets.len() {
             let b = (start + i) % self.buckets.len();
-            if let Some(head) = self.buckets[b].as_deref() {
+            if let Some(head) = self.buckets[b] {
+                let head = self.nodes[head]
+                    .as_ref()
+                    .expect("bucket chain points at live node");
                 return Some((&head.key, &head.value));
             }
         }
         None
+    }
+}
+
+/// Iterator over live `KeyDict` entries in bucket/chain order.
+pub struct KeyDictIter<'a, V> {
+    dict: &'a KeyDict<V>,
+    bucket: usize,
+    current: Option<usize>,
+}
+
+impl<'a, V> Iterator for KeyDictIter<'a, V> {
+    type Item = (&'a [u8], &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(idx) = self.current {
+                let node = self.dict.nodes[idx]
+                    .as_ref()
+                    .expect("bucket chain points at live node");
+                self.current = node.next;
+                return Some((&node.key, &node.value));
+            }
+            if self.bucket >= self.dict.buckets.len() {
+                return None;
+            }
+            self.current = self.dict.buckets[self.bucket];
+            self.bucket += 1;
+        }
     }
 }
 
@@ -383,6 +470,39 @@ mod tests {
                 want,
                 "key {i} after churn"
             );
+        }
+    }
+
+    #[test]
+    fn arena_slots_are_reused_after_removal_uhthd() {
+        let mut d: KeyDict<u32> = KeyDict::new();
+        for i in 0..1024u32 {
+            d.insert(format!("hot:{i:04}").into_bytes().into_boxed_slice(), i);
+        }
+        let high_water = d.storage_slots();
+        assert_eq!(high_water, 1024);
+
+        for i in 0..1024u32 {
+            assert_eq!(d.remove(format!("hot:{i:04}").as_bytes()), Some(i));
+        }
+        assert_eq!(d.len(), 0);
+        assert_eq!(
+            d.storage_slots(),
+            high_water,
+            "removing nodes should retain slots for reuse instead of freeing the arena"
+        );
+
+        for i in 0..1024u32 {
+            d.insert(format!("new:{i:04}").into_bytes().into_boxed_slice(), i + 1);
+        }
+        assert_eq!(d.len(), 1024);
+        assert_eq!(
+            d.storage_slots(),
+            high_water,
+            "re-inserting after churn should recycle free node slots"
+        );
+        for i in 0..1024u32 {
+            assert_eq!(d.get(format!("new:{i:04}").as_bytes()), Some(&(i + 1)));
         }
     }
 
