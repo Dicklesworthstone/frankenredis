@@ -164,5 +164,13 @@ turns). Keep claims honest — mark which.
   invalid-UTF8 members. Retry condition if rejected: only revisit with a fresh
   integer-heavy compact-set DUMP/RDB profile naming intset canonicalization, not
   as generic decimal-format cleanup.
+- frankenredis-set-listpack-direct-emit-tpans / cod-a: `fr-persist`
+  compact set listpack encode now streams set members directly into the shared
+  listpack finalizer instead of allocating a `Vec<&[u8]>` staging array before
+  `encode_listpack_strings_blob` — CODED (reasoned; batch benchmark pending).
+  Guard compares direct set listpack bytes against the old flat-entry reference
+  and decodes string, positive-integer, negative-integer, and null-byte members.
+  Retry condition if rejected: only revisit with a fresh compact-set DUMP/RDB
+  profile naming listpack construction, not as generic vector-elision cleanup.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

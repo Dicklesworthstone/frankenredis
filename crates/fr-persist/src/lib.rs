@@ -1711,8 +1711,7 @@ fn encode_compact_set_listpack(
     {
         return None;
     }
-    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-    let lp = encode_listpack_strings_blob(&refs)?;
+    let lp = encode_set_listpack_blob(members)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
     // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
     // compresses it when it is large enough to beat the wire overhead (>20 bytes
@@ -1721,6 +1720,14 @@ fn encode_compact_set_listpack(
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
     rdb_encode_string(&mut out, &lp);
     Some(out)
+}
+
+fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut encoded = Vec::new();
+    for member in members {
+        encode_listpack_entry(&mut encoded, member);
+    }
+    finish_listpack_blob(encoded, members.len())
 }
 
 fn encode_compact_hash_listpack(
@@ -4622,8 +4629,8 @@ mod tests {
         RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members,
         decode_rdb, decode_rdb_prefix, encode_compact_set_intset, encode_hash_listpack_blob,
         encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
-        encode_rdb_with_options, lzf_compress, lzf_decompress, rdb_decode_string,
-        rdb_encode_length, rdb_encode_string,
+        encode_rdb_with_options, encode_set_listpack_blob, lzf_compress, lzf_decompress,
+        rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -6084,6 +6091,38 @@ mod tests {
                 crate::listpack::ListpackEntry::String(b"neg".to_vec()),
                 crate::listpack::ListpackEntry::Integer(-2),
                 crate::listpack::ListpackEntry::String(b"bytes".to_vec()),
+                crate::listpack::ListpackEntry::String(b"hello\0world".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_set_listpack_direct_emit_matches_flat_reference() {
+        let members = vec![
+            b"alpha".to_vec(),
+            b"127".to_vec(),
+            b"4095".to_vec(),
+            b"-2".to_vec(),
+            b"hello\0world".to_vec(),
+        ];
+        let direct = encode_set_listpack_blob(&members).expect("direct set listpack");
+        let flat: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+        let reference = encode_listpack_strings_blob(&flat).expect("flat set listpack reference");
+
+        assert_eq!(direct, reference);
+        assert_eq!(
+            u16::from_le_bytes(direct[4..6].try_into().expect("listpack count")),
+            flat.len() as u16
+        );
+
+        let decoded = crate::listpack::decode_listpack(&direct).expect("decode direct set lp");
+        assert_eq!(
+            decoded,
+            vec![
+                crate::listpack::ListpackEntry::String(b"alpha".to_vec()),
+                crate::listpack::ListpackEntry::Integer(127),
+                crate::listpack::ListpackEntry::Integer(4095),
+                crate::listpack::ListpackEntry::Integer(-2),
                 crate::listpack::ListpackEntry::String(b"hello\0world".to_vec()),
             ]
         );
