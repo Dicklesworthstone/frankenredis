@@ -57,6 +57,20 @@ def main():
         a=["HSET",f"dp{n}"]+sum([[f"f{i}",f"v{i}"] for i in range(n)],[])
         batch+=enc(*a)
     chk("deep_mixed_N", batch+enc("DBSIZE"))
+    # EDGE cases: binary-safe (NUL/CRLF/0xff), empty, flags (-> generic fallback), alias
+    NUL=b"\x00"; CRLF=b"a\r\nb"
+    chk("hset_binary", enc("HSET","hb",NUL,b"v1",CRLF,b"v2",b"\xff\xfe",b"v3",b"f4",NUL)+enc("HGETALL","hb")+enc("HLEN","hb"))
+    chk("hset_empty", enc("HSET","he",b"",b"",b"f",b"")+enc("HGETALL","he"))
+    chk("rpush_binary", enc("RPUSH","lb",NUL,CRLF,b"\xff",b"")+enc("LRANGE","lb","0","-1"))
+    chk_sorted("sadd_binary", enc("SADD","sb",NUL,b"\xff\x00\xfe",b"")+enc("SMEMBERS","sb"))
+    chk("mset_binary", enc("MSET",NUL,b"v1",b"k2",b"\xff")+enc("GET",NUL)+enc("GET","k2"))
+    chk("zadd_ch", enc("ZADD","zc","CH","1","a","2","b","3","c","4","d")+enc("ZSCORE","zc","a"))
+    chk("zadd_gt", enc("ZADD","zg","GT","5","a","6","b")+enc("ZADD","zg","GT","3","a","9","b")+enc("ZRANGE","zg","0","-1","WITHSCORES"))
+    chk("zadd_nx", enc("ZADD","zn","NX","1","a","2","b")+enc("ZADD","zn","NX","9","a","3","c")+enc("ZRANGE","zn","0","-1","WITHSCORES"))
+    chk("zadd_incr", enc("ZADD","zi","INCR","5","m")+enc("ZADD","zi","INCR","3","m"))
+    chk("hmset_alias", enc("HMSET","hm","a","1","b","2","c","3","d","4")+enc("HGETALL","hm"))
+    chk("rpush_ints_enc", enc("RPUSH","li","1","2","3","4","5")+enc("OBJECT","ENCODING","li"))
+    chk("sadd_mixed_enc", enc("SADD","smix","1","2","abc","4","5")+enc("OBJECT","ENCODING","smix"))
     print("="*60)
     if fails:
         print(f"FAIL — {len(fails)} keyed-write-packet divergence(s) vs redis 7.2.4:")
