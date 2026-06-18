@@ -218,6 +218,7 @@ PORT_BASED = [
     ("reload_edge_value_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("xclaim_flags_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("restore_reoptimize_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("copy_rename_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("strict_limit_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("reload_dump_determinism_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
