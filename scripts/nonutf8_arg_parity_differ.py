@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Differential gate: non-UTF8 argument handling parity (frankenredis-44iva).
 
-redis works on raw bytes; many fr command paths convert args to &str. This gate locks
-the cases where fr ALREADY matches redis for a non-UTF8 (\xff\xfe) argument, and
-REPORTS (does not assert) the known 44iva divergence so it flips to a hard assertion
-once fixed:
-  MATCH (asserted): non-UTF8 in a numeric VALUE position -> "value is not an integer"
-  (RESTORE ttl, RESTORE IDLETIME value); GETEX with a non-UTF8 option -> "syntax
-  error"; trailing UTF-8 garbage option on RESTORE -> "syntax error"; SETRANGE/GETRANGE
-  numeric arg non-UTF8 -> not-integer.
-  KNOWN (44iva, reported): SET k v <non-UTF8> and RESTORE ... <non-UTF8 trailing> ->
-  redis "syntax error" but fr "invalid UTF-8 argument" (option loop UTF-8-validates
-  before the syntax check; GETEX matches bytes and is correct).
+redis works on raw bytes; many fr command paths convert args to &str. The 44iva
+OPTION-TOKEN portion is now FIXED across 11 commands (SCAN/HSCAN/SSCAN/ZSCAN, ZADD,
+LPOS, SORT, ZRANGEBYSCORE, ZREVRANGEBYSCORE, SET, RESTORE) — they byte-match option
+keywords, so a non-UTF8 option -> "syntax error" (asserted below).
+  ASSERTED (fixed/correct): non-UTF8 option on SCAN-family/ZADD/LPOS/SORT/ZRANGEBYSCORE/
+  SET/RESTORE -> "syntax error"; non-UTF8 in a numeric VALUE position -> "value is not
+  an integer"; GETEX option / trailing UTF-8 garbage -> "syntax error".
+  KNOWN residual (frankenredis-ynlg1, reported): EXPIRE-flag + OBJECT-subcommand ECHO
+  the raw non-UTF8 bytes ("Unsupported option <bytes>" / "unknown subcommand '<bytes>'")
+  — fr's RespFrame::Error(String) can't hold invalid UTF-8; needs a byte-capable error
+  frame. Architectural, distinct from the option-token byte-match.
 
 Usage: nonutf8_arg_parity_differ.py <oracle_port> <fr_port>
        Exit 0 = the asserted (correct) cases byte-exact, 1 = a NEW divergence.
@@ -65,8 +65,8 @@ def main():
     cmp("sscan_opt_nonutf8",[b"SSCAN",b"st",b"0",NUTF],True)  # FIXED e3abc7c13
     cmp("zrangebyscore_opt_nonutf8",[b"ZRANGEBYSCORE",b"z",b"0",b"1",NUTF],True)  # FIXED
     cmp("sort_opt_nonutf8",[b"SORT",b"l",NUTF],True)  # FIXED
-    cmp("expire_flag_nonutf8_echo",[b"EXPIRE",b"src",b"100",NUTF],False)  # redis ECHOES bytes
-    cmp("object_sub_nonutf8_echo",[b"OBJECT",NUTF,b"src"],False)          # redis ECHOES bytes
+    cmp("expire_flag_nonutf8_echo",[b"EXPIRE",b"src",b"100",NUTF],False)  # ynlg1: redis ECHOES raw bytes (byte-error-frame residual)
+    cmp("object_sub_nonutf8_echo",[b"OBJECT",NUTF,b"src"],False)          # ynlg1: redis ECHOES raw bytes
     print("="*60)
     if known:
         print("KNOWN (frankenredis-44iva, not asserted): "+"; ".join(known))
