@@ -215,21 +215,28 @@ def main():
     align_encoding_config(f)
 
     diffs = 0
-    for steps in SCENARIOS:
-        is_hello = any(s[0] == "HELLO" and len(s) <= 1 or (s[0] == "HELLO") for s in steps)
-        ro = run_scenario(o, steps)
-        rf = run_scenario(f, steps)
-        if is_hello:
-            continue  # HELLO maps carry version/id; skip value compare
-        if ro != rf:
-            for i, (a, b) in enumerate(zip(ro, rf)):
-                if a != b and not time_jitter_ok(steps[i], a, b):
-                    diffs += 1
-                    print(f"DIFF {steps}")
-                    print(f"   step {i} {steps[i]}")
-                    print(f"   oracle: {a!r}")
-                    print(f"   fr    : {b!r}")
-                    break
+    try:
+        for steps in SCENARIOS:
+            is_hello = any(s[0] == "HELLO" and len(s) <= 1 or (s[0] == "HELLO") for s in steps)
+            ro = run_scenario(o, steps)
+            rf = run_scenario(f, steps)
+            if is_hello:
+                continue  # HELLO maps carry version/id; skip value compare
+            if ro != rf:
+                for i, (a, b) in enumerate(zip(ro, rf)):
+                    if a != b and not time_jitter_ok(steps[i], a, b):
+                        diffs += 1
+                        print(f"DIFF {steps}")
+                        print(f"   step {i} {steps[i]}")
+                        print(f"   oracle: {a!r}")
+                        print(f"   fr    : {b!r}")
+                        break
+    finally:
+        for c in (o, f):
+            try:
+                c.cmd("FLUSHALL")
+            except Exception:
+                pass
     if diffs:
         print(f"\nFAIL: {diffs} divergences")
         sys.exit(1)
