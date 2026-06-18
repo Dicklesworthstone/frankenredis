@@ -253,7 +253,16 @@ turns). Keep claims honest — mark which.
   UNPREDICTABLE (compressible data → 10x smaller); reserving node_count·budget would massively
   over-allocate transiently on compressible lists. The per-node buffers (pre-compression, known size)
   were the only safe presize targets — done. Retry only with a measured node-size distribution.
-- The buffer-presize realloc-elimination class for the RDB-compact/DUMP encoders is now EXHAUSTED.
+- **SHIPPED ca61b6ca4 (Reasoned):** the DUMP-COMMAND side (fr-store) was NOT presized when the
+  prior row claimed the class "exhausted" — encode_listpack_strings (backs hash + zset listpack
+  DUMP) and encode_set_listpack_dump (set DUMP) built encoded_entries from empty. Now presized
+  (precise from the entries slice / rough safe bound). Byte-identical (hash/zset/set/intset DUMP
+  gates PASS). LESSON: there are TWO encoder sides per collection — fr-persist RDB-save
+  (encode_compact_*) AND fr-store DUMP-command (encode_*_dump / encode_listpack_strings); audit
+  BOTH, plus their intermediate buffers, before declaring a class done.
+- The buffer-presize realloc-elimination class is now done across BOTH encoder sides (RDB-save +
+  DUMP-command) for collection listpacks, quicklist nodes, and intset. Remaining same-class
+  candidates would need a measured hot-spot (release profile) to justify, not blind extension.
 
 ## cc session 2026-06-18 (cod-walled; cc-carries) — DEAD-ENDS + CONVERGENCE (Reasoned)
 - **DEBUG-build A/B is INVALID under cargo-check-only.** cc can build only debug binaries
