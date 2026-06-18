@@ -48,6 +48,14 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
 
+    def cleanup():
+        for d in (od, fr):
+            try:
+                cmd(d, "config", "set", "maxmemory-policy", "noeviction")
+                cmd(d, "flushall")
+            except Exception:
+                pass
+
     def both(*c):
         return cmd(od, *c), cmd(fr, *c)
 
@@ -58,6 +66,7 @@ def main():
     do, df = cmd(od, "DUMP", "src"), cmd(fr, "DUMP", "src")
     if payload(do) != payload(df):
         print(f"SETUP ERROR: DUMP payloads differ\n  redis={do!r}\n  fr={df!r}")
+        cleanup()
         sys.exit(2)
     p = payload(do)
 
@@ -115,7 +124,9 @@ def main():
         print(f"FAIL — {len(fails)} divergence(s) in RESTORE IDLETIME/FREQ vs redis 7.2.4:")
         for x in fails:
             print(f"  {x}")
+        cleanup()
         sys.exit(1)
+    cleanup()
     print("PASS — RESTORE IDLETIME/FREQ parity vs redis 7.2.4")
 
 
