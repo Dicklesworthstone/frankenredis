@@ -66,7 +66,6 @@ od = None
 fr = None
 
 fails = []
-notes = []
 
 
 def both(*cmd):
@@ -161,9 +160,8 @@ with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.
         )
 
     # --- G/H (frankenredis-qwqln): LFU access, switch to non-LFU, in-place write,
-    #     then IDLETIME. Before the store fix, fr kept the stale LFU marker through
-    #     APPEND/SETRANGE while redis reset robj.lru on lookupKeyWrite. Keep these
-    #     documented until the guard is promoted to a hard parity check. ---
+    #     then IDLETIME. redis resets robj.lru on lookupKeyWrite; fr must clear
+    #     the stale LFU reinterpretation marker on APPEND/SETRANGE too. ---
     def write_reaccess(label, *write_cmd):
         reset("allkeys-lfu")
         both("set", "k", "v")
@@ -172,20 +170,17 @@ with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.
             d.cmd("config", "set", "maxmemory-policy", "noeviction")
         both(*write_cmd)
         o, f = both("object", "idletime", "k")
-        if small_int(o) and small_int(f):
-            notes.append(f"{label} now MATCHES (qwqln fixed?) — promote to HARD")
-        elif small_int(o) and big_int(f):
-            notes.append(f"{label} KNOWN DIVERGENCE (frankenredis-qwqln): redis={o} fr={f}")
-        else:
-            fails.append(f"{label} UNEXPECTED: redis={o!r} fr={f!r}")
+        if not (small_int(o) and small_int(f)):
+            fails.append(
+                f"{label}: cmd={list(write_cmd)} redis={o!r} fr={f!r} "
+                "(non-LFU write must clear the LFU-bits reinterpretation)"
+            )
 
     write_reaccess("G_append_reaccess", "append", "k", "x")
     write_reaccess("H_setrange_reaccess", "setrange", "k", "0", "Z")
 
     print("=" * 60)
     exit_code = 0
-    for x in notes:
-        print(f"NOTE — {x}")
     if fails:
         print(
             f"FAIL — {len(fails)} NEW divergence(s) in OBJECT IDLETIME/FREQ vs redis 7.2.4:"
@@ -196,6 +191,6 @@ with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.
     else:
         print(
             "PASS — OBJECT IDLETIME/FREQ policy-switch behavior matches redis 7.2.4 "
-            "(hard checks A-F)"
+            "(hard checks A-H)"
         )
     sys.exit(exit_code)
