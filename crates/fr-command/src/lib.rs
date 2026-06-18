@@ -11227,7 +11227,10 @@ fn cluster_cmd(
                 };
                 return Err(CommandError::Custom(msg));
             }
-            // Self node — accept the no-op (fr has no migration state).
+            if action.eq_ignore_ascii_case("NODE") {
+                store.cluster_assigned_slots.insert(slot);
+            }
+            // Self MIGRATING/IMPORTING is accepted; fr has no migration state yet.
             return Ok(RespFrame::SimpleString("OK".to_string()));
         }
         return Err(cluster_invalid_setslot_action_error());
@@ -60338,13 +60341,14 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR I'm already the owner of hash slot 100".to_string())
         );
-        // NODE pointing at self id → OK no-op.
+        // NODE pointing at self id assigns the slot to this node.
+        assert!(!store.cluster_assigned_slots.contains(&101));
         assert_eq!(
             dispatch_argv(
                 &[
                     b"CLUSTER".to_vec(),
                     b"SETSLOT".to_vec(),
-                    b"100".to_vec(),
+                    b"101".to_vec(),
                     b"NODE".to_vec(),
                     self_node_id,
                 ],
@@ -60354,6 +60358,7 @@ mod tests {
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
+        assert!(store.cluster_assigned_slots.contains(&101));
         // Bogus action → SETSLOT-specific action/arity help.
         assert_eq!(
             dispatch_argv(
