@@ -17,6 +17,7 @@ when a baseline is missing, so it is safe to land before the first batch capture
 
 Usage: perf_domination_scorecard.py [--out <path.md>]
 """
+import glob
 import json
 import math
 import os
@@ -27,6 +28,29 @@ ROOT = os.path.dirname(HERE)
 BENCH = os.path.join(ROOT, ".bench-history")
 THRU = os.path.join(BENCH, "comprehensive_bench.latest.json")
 MEM = os.path.join(BENCH, "memory_baseline.latest.json")
+SWEEP_GLOB = os.path.join(ROOT, "artifacts", "optimization", "*", "standard_sweep*.txt")
+
+
+def _latest_sweep():
+    """Newest artifacts/optimization/*/standard_sweep*.txt (a real release sweep), or None."""
+    files = glob.glob(SWEEP_GLOB)
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def _parse_sweep(path):
+    """Parse a 'cmd  redis  fr  redis/fr  verdict' sweep into {cmd: fr_over_redis}."""
+    out = {}
+    for line in open(path):
+        parts = line.split()
+        if len(parts) < 3 or parts[0] in ("cmd", "==") or line.startswith("=="):
+            continue
+        try:
+            redis_ops, fr_ops = float(parts[1]), float(parts[2])
+        except ValueError:
+            continue
+        if redis_ops > 0:
+            out[parts[0]] = fr_ops / redis_ops
+    return out
 
 
 def _load(path):
@@ -51,15 +75,16 @@ def main():
 
     thru = _load(THRU)
     mem = _load(MEM)
+    sweep_path = _latest_sweep()
     lines = ["# FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)", ""]
 
-    if not thru and not mem:
+    if not thru and not mem and not sweep_path:
         lines += [
-            "_No baselines captured yet._ Run, in batch/rch (release fr binary):",
+            "_No baselines or release sweeps found yet._ Run, in batch/rch (release fr binary):",
             "",
             "```",
-            "scripts/perf_baseline_capture.py <redis-server> <fr-release-bin>",
-            "scripts/memory_baseline_capture.py <redis-server> <fr-release-bin>",
+            "scripts/perf_baseline_capture.py <redis-server> <fr-server> <fr-bench>",
+            "scripts/memory_baseline_capture.py <redis-server> <fr-server>",
             "```",
             "",
             "then re-run this scorecard.",
@@ -102,6 +127,30 @@ def main():
         lines.append("")
     else:
         lines += ["## Throughput", "", "_comprehensive_bench.latest.json missing — run perf_baseline_capture.py._", ""]
+
+    # ---- Throughput from the latest existing release sweep (no batch run needed) ----
+    if sweep_path:
+        sweep = _parse_sweep(sweep_path)
+        if sweep:
+            gm = _geomean(list(sweep.values()))
+            wins = sum(1 for v in sweep.values() if v >= 1.0)
+            rel = os.path.relpath(sweep_path, ROOT)
+            lines += [
+                f"## Throughput — latest release sweep (`{rel}`)", "",
+                f"- Commands: **{len(sweep)}**, fr faster on **{wins}/{len(sweep)}**",
+                f"- fr/redis geomean: **{gm:.3f}x**" if gm else "- geomean: n/a",
+                "",
+                "| command | fr/redis | verdict |", "|---|---|---|",
+            ]
+            for cmd in sorted(sweep):
+                v = "fr-faster" if sweep[cmd] >= 1.0 else "FR-SLOWER"
+                lines.append(f"| {cmd} | {sweep[cmd]:.3f} | {v} |")
+            slow = sorted((c for c, v in sweep.items() if v < 1.0), key=lambda c: sweep[c])
+            if slow:
+                lines += ["", "**Throughput gaps (fr slower in this sweep):** "
+                          + ", ".join(f"{c}={sweep[c]:.2f}x" for c in slow)]
+            lines += ["", "_Note: a point-in-time artifact sweep, not the ratcheted "
+                      ".bench-history baseline; run perf_baseline_capture.py for the keep-gated matrix._", ""]
 
     # ---- RAM pillar ----
     if mem:
