@@ -3080,6 +3080,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_bitcount_unit_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_bitcount_borrowed(
+                        packet.key,
+                        Some((packet.start, packet.end, Some(packet.unit))),
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_bitpos_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -5536,6 +5558,45 @@ fn parse_borrowed_plain_bitcount_range_packet<'a>(
         key,
         start,
         end,
+    })
+}
+
+struct BorrowedPlainBitcountUnitPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    start: &'a [u8],
+    end: &'a [u8],
+    unit: &'a [u8],
+}
+
+// (frankenredis-dp3bu) Byte-prefix fast path for
+// `BITCOUNT key start end BYTE|BIT`.
+fn parse_borrowed_plain_bitcount_unit_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitcountUnitPacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"BITCOUNT".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$8\r\n").and_then(|rest| {
+        rest.get(..8)
+            .filter(|command| command.eq_ignore_ascii_case(b"BITCOUNT"))
+            .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (unit, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainBitcountUnitPacket {
+        consumed,
+        key,
+        start,
+        end,
+        unit,
     })
 }
 
@@ -11455,6 +11516,72 @@ mod tests {
             )
             .is_none(),
             "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitcount_unit_packet_parser_accepts_canonical_unit() {
+        let input =
+            b"*5\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n$4\r\nBYTE\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitcount_unit_packet(input, &ParserConfig::default())
+                .expect("canonical BITCOUNT key start end unit packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.start, b"0");
+        assert_eq!(parsed.end, b"-1");
+        assert_eq!(parsed.unit, b"BYTE");
+        assert_eq!(
+            parsed.consumed,
+            b"*5\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n$4\r\nBYTE\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitcount_unit_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_bitcount_unit_packet(
+                b"*05\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n3\r\n$4\r\nBYTE\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitcount_unit_packet(
+                b"*4\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n3\r\n",
+                &cfg
+            )
+            .is_none(),
+            "start-end BITCOUNT stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitcount_unit_packet(
+                b"*5\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n3\r\n$4\r\nBYTE\r\n",
+                &ParserConfig {
+                    max_array_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitcount_unit_packet(
+                b"*5\r\n$8\r\nBITCOUNT\r\n$2\r\nk\r\n$1\r\n0\r\n$1\r\n3\r\n$4\r\nBYTE\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitcount_unit_packet(
+                b"*5\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n3\r\n$4\r\nBY\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed unit bulk bodies stay on the generic parser"
         );
     }
 
