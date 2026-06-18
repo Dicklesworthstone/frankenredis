@@ -54,5 +54,11 @@ turns). Keep claims honest — mark which.
   under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
   keep only if the next release A/B for keyed-values packets shows a stable win;
   otherwise move this row to rejected and stop extending exact arities.
+- frankenredis-h6ppr / cod-a: `fr-protocol` CRLF line scan via locked
+  `memchr::memchr` — CODED (reasoned; batch benchmark pending). Guard covers
+  CR-not-LF scanning plus exact `MAX_LINE_LENGTH` `Incomplete`/`LineTooLong`
+  boundaries. Retry condition if rejected: only revisit with a fresh parser
+  self-time row or a benchmark that isolates line scanning from runtime/server
+  packet-parser work.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

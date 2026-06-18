@@ -40,6 +40,7 @@ hex = "0.4.3"
 libc = "0.2.185"
 libfuzzer-sys = "0.4.12"
 mimalloc = "0.1.49"
+memchr = "2.8.0"
 mio = { version = "1.2.0", features = ["net", "os-poll"] }
 proptest = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }

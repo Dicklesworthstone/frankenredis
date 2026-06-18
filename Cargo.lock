@@ -262,6 +262,7 @@ dependencies = [
 name = "fr-protocol"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "proptest",
 ]
 
