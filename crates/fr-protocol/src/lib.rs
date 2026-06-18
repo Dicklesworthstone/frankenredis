@@ -1974,6 +1974,68 @@ mod tests {
         assert!(score >= 1.25, "two-digit LUT itoa regressed below floor; got {score:.2}x");
     }
 
+    // (frankenredis-e4fu8) Bench guard for the branchless ilog10 digit-count vs the
+    // original div-by-10 loop, on the same realistic reply-integer mix. Correctness is
+    // covered by decimal_len_matches_div_loop_reference; this asserts ilog10 stays a net
+    // win (conservative floor — timing-noise tolerant, real ratio in the eprintln). The
+    // batch release run records the true score; this only catches a real regression.
+    #[test]
+    fn decimal_len_ilog10_not_slower_than_div_loop() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        fn old_decimal_usize_len(mut n: usize) -> usize {
+            let mut len = 1;
+            while n >= 10 {
+                n /= 10;
+                len += 1;
+            }
+            len
+        }
+        let mut s: u64 = 0x2545F4914F6CDD1D;
+        let mut nx = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let nums: Vec<usize> = (0..4096)
+            .map(|i| {
+                let r = nx();
+                if i % 2 == 0 {
+                    (r % 10_000) as usize
+                } else {
+                    r as usize
+                }
+            })
+            .collect();
+        let reps = 50_000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            for &n in &nums {
+                acc = acc.wrapping_add(old_decimal_usize_len(n));
+            }
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            for &n in &nums {
+                acc2 = acc2.wrapping_add(decimal_usize_len(n));
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new digit-count disagree");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("ILOG10 decimal-len reply-int mix: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        // Conservative regression floor (not a speedup claim — ilog10 is reasoned-faster;
+        // the real ratio is in the eprintln). 0.85 only trips on a true regression.
+        assert!(score >= 0.85, "ilog10 decimal-len regressed; got {score:.2}x");
+    }
+
     #[test]
     fn parse_command_frame_requires_bulk_elements() {
         // (frankenredis-5qqv1) A command multibulk's elements must each be a
