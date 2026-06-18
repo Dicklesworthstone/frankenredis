@@ -160,6 +160,9 @@ struct BenchmarkConfig {
     timeout_ms: u64,
     json_out: Option<PathBuf>,
     key_prefix: String,
+    // (frankenredis keep-gate) Number of measured trials; >1 yields a run-to-run cv_pct
+    // so the batch ratchet can reject noisy results (cv_pct > 5 is not keep-eligible).
+    trials: usize,
 }
 
 impl Default for BenchmarkConfig {
@@ -180,6 +183,7 @@ impl Default for BenchmarkConfig {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             json_out: None,
             key_prefix: default_key_prefix(),
+            trials: 1,
         }
     }
 }
@@ -235,6 +239,9 @@ impl BenchmarkConfig {
                 "--json-out" => {
                     cfg.json_out = Some(PathBuf::from(next_arg(args, &mut index, flag)?));
                 }
+                "--trials" => {
+                    cfg.trials = parse_usize(&next_arg(args, &mut index, flag)?, flag)?.max(1);
+                }
                 "--key-prefix" => {
                     cfg.key_prefix = next_arg(args, &mut index, flag)?;
                 }
@@ -288,6 +295,11 @@ struct BenchmarkReport {
     key_prefix: String,
     total_time_ms: u64,
     ops_per_sec: f64,
+    // (frankenredis keep-gate) median ops/sec is reported above; these capture run-to-run
+    // stability so the ratchet can drop noisy results. cv_pct > 5 => not keep-eligible.
+    trials: usize,
+    cv_pct: f64,
+    ops_per_sec_samples: Vec<f64>,
     bytes_sent: u64,
     bytes_received: u64,
     latency_us: LatencySummary,
@@ -599,9 +611,39 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
-    prepare_workload(config)?;
+struct TrialResult {
+    ops_per_sec: f64,
+    aggregate: Histogram<u64>,
+    bytes_sent: u64,
+    bytes_received: u64,
+    total_time_ms: u64,
+}
 
+/// (frankenredis keep-gate) Run-to-run coefficient of variation as a percentage of the
+/// mean (sample stddev / mean * 100). 0 for <2 samples. The batch ratchet treats > 5% as
+/// noise (not keep-eligible).
+fn coefficient_of_variation_pct(samples: &[f64]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    if mean == 0.0 {
+        return 0.0;
+    }
+    let variance = samples
+        .iter()
+        .map(|x| {
+            let d = x - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (samples.len() as f64 - 1.0);
+    variance.sqrt() / mean * 100.0
+}
+
+/// One measured trial: spawn the client workers, merge their latency histograms, and
+/// compute ops/sec for this trial only. Prefill happens once in `run()`, not per trial.
+fn run_one_trial(config: &BenchmarkConfig) -> Result<TrialResult, String> {
     let start = Instant::now();
     let mut handles = Vec::with_capacity(config.clients);
     let per_client = config.requests / config.clients;
@@ -641,6 +683,43 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
         config.requests as f64 / total_time.as_secs_f64()
     };
 
+    Ok(TrialResult {
+        ops_per_sec,
+        aggregate,
+        bytes_sent,
+        bytes_received,
+        total_time_ms,
+    })
+}
+
+fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
+    prepare_workload(config)?;
+
+    let trials = config.trials.max(1);
+    let mut results: Vec<TrialResult> = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        results.push(run_one_trial(config)?);
+    }
+
+    let ops_per_sec_samples: Vec<f64> = results.iter().map(|r| r.ops_per_sec).collect();
+    let cv_pct = coefficient_of_variation_pct(&ops_per_sec_samples);
+
+    // Report the MEDIAN trial (by ops/sec) as representative — robust to a single
+    // cold-start or scheduling outlier, matching the ratchet's median+MAD discipline.
+    let mut order: Vec<usize> = (0..results.len()).collect();
+    order.sort_by(|&a, &b| {
+        results[a]
+            .ops_per_sec
+            .partial_cmp(&results[b].ops_per_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let median = &results[order[order.len() / 2]];
+    let aggregate = &median.aggregate;
+    let total_time_ms = median.total_time_ms;
+    let ops_per_sec = median.ops_per_sec;
+    let bytes_sent = median.bytes_sent;
+    let bytes_received = median.bytes_received;
+
     Ok(BenchmarkReport {
         schema_version: REPORT_SCHEMA_VERSION,
         generated_at_ms: unix_time_ms(),
@@ -657,6 +736,9 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
         key_prefix: config.key_prefix.clone(),
         total_time_ms,
         ops_per_sec,
+        trials,
+        cv_pct,
+        ops_per_sec_samples,
         bytes_sent,
         bytes_received,
         latency_us: LatencySummary {
@@ -1037,8 +1119,16 @@ fn print_summary(report: &BenchmarkReport) {
         report.clients, report.requests, report.pipeline, report.keyspace, report.datasize
     );
     println!(
-        "elapsed: {} ms  throughput: {:.2} ops/sec",
-        report.total_time_ms, report.ops_per_sec
+        "elapsed: {} ms  throughput: {:.2} ops/sec (median of {} trial(s), cv={:.2}%{})",
+        report.total_time_ms,
+        report.ops_per_sec,
+        report.trials,
+        report.cv_pct,
+        if report.trials > 1 && report.cv_pct > 5.0 {
+            " NOISY: not keep-eligible"
+        } else {
+            ""
+        }
     );
     println!(
         "latency(us): min={} p50={} p95={} p99={} p999={} max={} mean={:.2}",
@@ -1076,6 +1166,7 @@ OPTIONS:\n\
   --password <PASS>        Optional password for AUTH\n\
   --timeout-ms <MS>        Socket read/write timeout (default: {DEFAULT_TIMEOUT_MS})\n\
   --json-out <PATH>        Write the JSON report to this path\n\
+  --trials <N>             Measured trials; >1 reports run-to-run cv_pct (keep-gate: >5pct is noise) (default: 1)\n\
   --key-prefix <PREFIX>    Prefix used for benchmark keys (default: auto-generated)\n\
   --help, -h               Show this help\n"
     )
