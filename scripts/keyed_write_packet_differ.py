@@ -27,10 +27,24 @@ def main():
     def chk(label, frames):
         ro,rf=raw(od,frames),raw(fr,frames)
         if ro!=rf: fails.append(f"{label}: redis={ro[:90]!r} fr={rf[:90]!r}")
+    import re as _re
+    def chk_sorted(label, frames):  # set-order-insensitive (SADD/SMEMBERS)
+        ro,rf=raw(od,frames),raw(fr,frames)
+        a=tuple(sorted(_re.findall(rb"\$\d+\r\n([^\r]*)\r\n", ro)))
+        b=tuple(sorted(_re.findall(rb"\$\d+\r\n([^\r]*)\r\n", rf)))
+        if a!=b: fails.append(f"{label}: redis={ro[:90]!r} fr={rf[:90]!r}")
     for n in range(4,21):
         args=["HSET",f"h{n}"]
         for i in range(n): args += [f"f{i}",f"val{i:03d}"]
         chk(f"hset_{n}p", enc(*args)+enc("HGETALL",f"h{n}")+enc("HLEN",f"h{n}")+enc("OBJECT","ENCODING",f"h{n}"))
+    # LPUSH/RPUSH/SADD/ZADD N-value keyed-write packets (same bnrnp..w0i5z series)
+    for n in range(4,17):
+        chk(f"rpush_{n}p", enc("RPUSH",f"l{n}",*[f"v{i}" for i in range(n)])+enc("LRANGE",f"l{n}","0","-1")+enc("LLEN",f"l{n}"))
+        chk(f"lpush_{n}p", enc("LPUSH",f"lp{n}",*[f"v{i}" for i in range(n)])+enc("LRANGE",f"lp{n}","0","-1"))
+        chk_sorted(f"sadd_{n}p", enc("SADD",f"s{n}",*[f"m{i}" for i in range(n)])+enc("SMEMBERS",f"s{n}"))
+        chk(f"sadd_int_{n}p", enc("SADD",f"si{n}",*[str(i) for i in range(n)])+enc("OBJECT","ENCODING",f"si{n}")+enc("SCARD",f"si{n}"))
+        zargs=["ZADD",f"z{n}"]+sum([[str(i),f"m{i}"] for i in range(n)],[])
+        chk(f"zadd_{n}p", enc(*zargs)+enc("ZRANGE",f"z{n}","0","-1","WITHSCORES")+enc("ZCARD",f"z{n}"))
     for n in [4,8,12,16,17,20]:
         args=["MSET"]
         for i in range(n): args += [f"mk{n}_{i}",f"mv{i}"]
