@@ -194,6 +194,14 @@ CASES = [
     ["ZPOPMIN", "z"],
     ["ZPOPMAX", "z"],
     ["ZPOPMIN", "nope"],
+    # single-value writes (fresh keys, appended): LPUSH/RPUSH/SADD reuse verified
+    # keyed-values write execute.
+    ["LPUSH", "plk", "a"],
+    ["RPUSH", "plk", "b"],
+    ["LRANGE", "plk", "0", "-1"],
+    ["SADD", "psk", "x"],
+    ["SADD", "psk", "x"],
+    ["SCARD", "psk"],
 ]
 
 
