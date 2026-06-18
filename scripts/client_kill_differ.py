@@ -124,6 +124,7 @@ class Gate:
         R["addr_noval"] = err_class(c.cmd("CLIENT", "KILL", "ADDR"))
         R["user_nonexistent"] = err_class(c.cmd("CLIENT", "KILL", "USER", "ghost"))
         R["type_master"] = c.cmd("CLIENT", "KILL", "TYPE", "master")
+        R["type_slave_alias"] = c.cmd("CLIENT", "KILL", "TYPE", "slave")
         c.close()
 
         # single-target ID kill: count==1 AND that socket dies, sibling lives.
