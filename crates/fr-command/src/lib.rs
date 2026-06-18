@@ -3644,9 +3644,9 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
 
     let mut options = argv[3..].iter();
     while let Some(option_arg) = options.next() {
-        let option =
-            std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if option.eq_ignore_ascii_case("PX") {
+        // (frankenredis-44iva) byte-match SET options; non-UTF8 -> syntax error
+        let option = option_arg;
+        if option.eq_ignore_ascii_case(b"PX") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Px) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3655,7 +3655,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Px;
             expiry_raw = ttl_arg;
-        } else if option.eq_ignore_ascii_case("EX") {
+        } else if option.eq_ignore_ascii_case(b"EX") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Ex) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3664,7 +3664,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Ex;
             expiry_raw = seconds_arg;
-        } else if option.eq_ignore_ascii_case("PXAT") {
+        } else if option.eq_ignore_ascii_case(b"PXAT") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Pxat) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3673,7 +3673,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Pxat;
             expiry_raw = ts_arg;
-        } else if option.eq_ignore_ascii_case("EXAT") {
+        } else if option.eq_ignore_ascii_case(b"EXAT") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Exat) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3682,12 +3682,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Exat;
             expiry_raw = ts_arg;
-        } else if option.eq_ignore_ascii_case("KEEPTTL") {
+        } else if option.eq_ignore_ascii_case(b"KEEPTTL") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::KeepTtl) {
                 return Err(CommandError::SyntaxError);
             }
             expiry_kind = ExpiryKind::KeepTtl;
-        } else if option.eq_ignore_ascii_case("NX") {
+        } else if option.eq_ignore_ascii_case(b"NX") {
             // (frankenredis-24276) Upstream
             // parseExtendedStringArgumentsOrReply (t_string.c lines
             // 216-225) gates NX behind `!(*flags & OBJ_SET_XX)` and
@@ -3700,12 +3700,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
                 return Err(CommandError::SyntaxError);
             }
             nx = true;
-        } else if option.eq_ignore_ascii_case("XX") {
+        } else if option.eq_ignore_ascii_case(b"XX") {
             if nx {
                 return Err(CommandError::SyntaxError);
             }
             xx = true;
-        } else if option.eq_ignore_ascii_case("GET") {
+        } else if option.eq_ignore_ascii_case(b"GET") {
             get = true;
         } else {
             return Err(CommandError::SyntaxError);
