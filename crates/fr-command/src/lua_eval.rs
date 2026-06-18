@@ -6324,11 +6324,88 @@ impl<'a> LuaState<'a> {
                 match &raw {
                     LuaValue::Function(_)
                     | LuaValue::RustFunction(_)
-                    | LuaValue::WrappedCoroutine(_) => Err(
-                        "load with a chunk-generator function is not yet implemented in fr; \
-                         use loadstring(source) instead"
-                            .to_string(),
-                    ),
+                    | LuaValue::WrappedCoroutine(_) => {
+                        // (frankenredis-36wn7) Lua 5.1 load(func [, chunkname])
+                        // calls the reader function repeatedly; each call
+                        // returns a string piece and a nil/empty-string return
+                        // terminates. fr's tree-walking interpreter cannot
+                        // STREAM source, but it can EAGERLY collect every piece,
+                        // concatenate, and compile via the same path as
+                        // loadstring — the identical result Lua's load(func)
+                        // yields. Matches redis 7.2.4 (which supports load(func));
+                        // the prior fr build rejected it outright.
+                        let func = raw.clone();
+                        let chunkname = args.get(1).and_then(|v| match v {
+                            LuaValue::Str(s) => Some(s.clone()),
+                            _ => None,
+                        });
+                        // Defensive cap so a generator that never terminates
+                        // can't build an unbounded chunk (the per-script timeout
+                        // is the ultimate backstop).
+                        const MAX_LOAD_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+                        let mut src_bytes: Vec<u8> = Vec::new();
+                        loop {
+                            let mut call_args: Vec<LuaValue> = Vec::new();
+                            let piece =
+                                self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                            match piece.into_iter().next() {
+                                None | Some(LuaValue::Nil) => break,
+                                Some(LuaValue::Str(s)) => {
+                                    if s.is_empty() {
+                                        break;
+                                    }
+                                    src_bytes.extend_from_slice(&s);
+                                }
+                                // Lua's generic_reader accepts a number (lua_isstring
+                                // is true for numbers); coerce like loadstring does.
+                                Some(LuaValue::Number(n)) => {
+                                    src_bytes.extend_from_slice(n.to_string().as_bytes());
+                                }
+                                Some(_other) => {
+                                    return Ok(vec![
+                                        LuaValue::Nil,
+                                        LuaValue::Str(
+                                            b"reader function must return a string".to_vec(),
+                                        ),
+                                    ]);
+                                }
+                            }
+                            if src_bytes.len() > MAX_LOAD_SOURCE_BYTES {
+                                return Ok(vec![
+                                    LuaValue::Nil,
+                                    LuaValue::Str(b"too long".to_vec()),
+                                ]);
+                            }
+                        }
+                        let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
+                        match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
+                            let mut parser = Parser::new(tokens);
+                            let mut stmts = parser.parse_block()?;
+                            if !parser.check(&Token::Eof) {
+                                return Err(format!(
+                                    "'<eof>' expected near '{}'",
+                                    token_display(parser.peek())
+                                ));
+                            }
+                            resolve_lua_local_slots(&mut stmts);
+                            Ok(stmts)
+                        }) {
+                            Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
+                                params: Vec::new(),
+                                body,
+                                is_variadic: true,
+                                captured_env: Some(env.snapshot()),
+                                env_table: Rc::new(RefCell::new(env.current_global_env())),
+                                self_name: None,
+                                source_label: Some(chunk_label),
+                                identity: next_function_identity(),
+                            })]),
+                            Err(msg) => Ok(vec![
+                                LuaValue::Nil,
+                                LuaValue::Str(format!("{chunk_label}:1: {msg}").into_bytes()),
+                            ]),
+                        }
+                    }
                     _ => Err(lua_format_argerror(
                         self.current_invocation_name.as_deref(),
                         "load",
