@@ -69,10 +69,10 @@ def main():
     cmp("object_sub_nonutf8_echo",[b"OBJECT",NUTF,b"src"],False)          # ynlg1: redis ECHOES raw bytes
     print("="*60)
     if known:
-        print("KNOWN (frankenredis-44iva, not asserted): "+"; ".join(known))
+        print("KNOWN residual (frankenredis-ynlg1 byte-error-frame, not asserted): "+"; ".join(known))
     if fails:
         print(f"FAIL — {len(fails)} NEW non-UTF8 arg divergence(s) vs redis 7.2.4:")
         for x in fails[:10]: print(f"  {x}")
         sys.exit(1)
-    print("PASS — non-UTF8 numeric/value + GETEX-option handling byte-exact vs redis 7.2.4 (SET/RESTORE option-token divergence pending 44iva)")
+    print("PASS — non-UTF8 option-token handling byte-exact vs redis 7.2.4 across 11 commands (44iva fixed); only EXPIRE/OBJECT echo-bytes residual pending ynlg1")
 if __name__=="__main__": main()
