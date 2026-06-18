@@ -186,6 +186,14 @@ CASES = [
     ["ZINCRBY", "zk", "1", "newm"],
     ["EXPIRE", "srk", "1000"],
     ["EXPIRE", "nope", "100"],
+    # single-key pops (appended last so they don't disturb lst/z reads above)
+    ["LPOP", "lst"],
+    ["RPOP", "lst"],
+    ["LPOP", "nope"],
+    ["LPOP", "str"],
+    ["ZPOPMIN", "z"],
+    ["ZPOPMAX", "z"],
+    ["ZPOPMIN", "nope"],
 ]
 
 
