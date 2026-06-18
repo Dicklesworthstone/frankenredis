@@ -146,6 +146,28 @@ PORT_BASED = [
     ("packet_fastpath_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # fast-path WRITES must emit the same keyspace events as the generic path.
     ("fastpath_keyspace_events_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # command-semantics differential gates added 2026-06-18 (cc): subtle, previously
+    # standalone-only surfaces — glob matching (z9dc3 fix), zset lex ranges, GETEX TTL
+    # side-effects, RANDMEMBER count semantics, list mutations, BITCOUNT/BITPOS range,
+    # STORE-family dest semantics, SET..GET option matrix, integer/bit overflow errors,
+    # LCS edge/error cases, SINTERCARD/ZINTERCARD, empty-collection auto-delete, HLL
+    # core, list/LZF RDB byte-equality, SORT ALPHA collation.
+    ("glob_match_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("zset_lex_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("getex_ttl_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("randmember_count_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("list_mutation_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("bitcount_bitpos_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("store_dest_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("set_get_option_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("integer_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("lcs_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("intercard_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("empty_collection_autodelete_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("hll_core_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("list_rdb_roundtrip_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("lzf_dump_byte_equality_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("sort_alpha_collation_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
