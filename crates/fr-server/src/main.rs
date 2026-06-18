@@ -2749,126 +2749,13 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_mset_two_packet(unparsed, &parser_config)
+                    parse_borrowed_plain_mset_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
+                    let consumed = packet.consumed();
+                    if let Some(response) = runtime.execute_plain_mset_borrowed(packet.pairs(), ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_three_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_four_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_five_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_six_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_seven_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_mset_eight_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(&packet.pairs, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
+                            consumed,
                             response,
                         })
                     } else {
@@ -9918,6 +9805,70 @@ fn parse_borrowed_plain_mset_eight_packet<'a>(
     })
 }
 
+enum BorrowedPlainMsetPacket<'a> {
+    Two(BorrowedPlainMsetTwoPacket<'a>),
+    Three(BorrowedPlainMsetThreePacket<'a>),
+    Four(BorrowedPlainMsetFourPacket<'a>),
+    Five(BorrowedPlainMsetFivePacket<'a>),
+    Six(BorrowedPlainMsetSixPacket<'a>),
+    Seven(BorrowedPlainMsetSevenPacket<'a>),
+    Eight(BorrowedPlainMsetEightPacket<'a>),
+}
+
+impl<'a> BorrowedPlainMsetPacket<'a> {
+    fn consumed(&self) -> usize {
+        match self {
+            Self::Two(packet) => packet.consumed,
+            Self::Three(packet) => packet.consumed,
+            Self::Four(packet) => packet.consumed,
+            Self::Five(packet) => packet.consumed,
+            Self::Six(packet) => packet.consumed,
+            Self::Seven(packet) => packet.consumed,
+            Self::Eight(packet) => packet.consumed,
+        }
+    }
+
+    fn pairs(&self) -> &[(&'a [u8], &'a [u8])] {
+        match self {
+            Self::Two(packet) => &packet.pairs,
+            Self::Three(packet) => &packet.pairs,
+            Self::Four(packet) => &packet.pairs,
+            Self::Five(packet) => &packet.pairs,
+            Self::Six(packet) => &packet.pairs,
+            Self::Seven(packet) => &packet.pairs,
+            Self::Eight(packet) => &packet.pairs,
+        }
+    }
+}
+
+// (frankenredis-ohsk5) Jump directly to the exact MSET parser selected by the
+// canonical RESP array header. The previous call site probed 2,3,4,...,8-pair
+// parsers linearly, so an 8-pair packet paid six guaranteed failed prefix
+// checks before the real parse. Noncanonical and unsupported arities still fall
+// through to the generic borrowed parser.
+fn parse_borrowed_plain_mset_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainMsetPacket<'a>> {
+    if input.starts_with(b"*5\r\n") {
+        parse_borrowed_plain_mset_two_packet(input, config).map(BorrowedPlainMsetPacket::Two)
+    } else if input.starts_with(b"*7\r\n") {
+        parse_borrowed_plain_mset_three_packet(input, config).map(BorrowedPlainMsetPacket::Three)
+    } else if input.starts_with(b"*9\r\n") {
+        parse_borrowed_plain_mset_four_packet(input, config).map(BorrowedPlainMsetPacket::Four)
+    } else if input.starts_with(b"*11\r\n") {
+        parse_borrowed_plain_mset_five_packet(input, config).map(BorrowedPlainMsetPacket::Five)
+    } else if input.starts_with(b"*13\r\n") {
+        parse_borrowed_plain_mset_six_packet(input, config).map(BorrowedPlainMsetPacket::Six)
+    } else if input.starts_with(b"*15\r\n") {
+        parse_borrowed_plain_mset_seven_packet(input, config).map(BorrowedPlainMsetPacket::Seven)
+    } else if input.starts_with(b"*17\r\n") {
+        parse_borrowed_plain_mset_eight_packet(input, config).map(BorrowedPlainMsetPacket::Eight)
+    } else {
+        None
+    }
+}
+
 struct BorrowedPlainMgetTwoPacket<'a> {
     consumed: usize,
     keys: [&'a [u8]; 2],
@@ -14869,6 +14820,70 @@ mod tests {
         );
         assert!(
             crate::parse_borrowed_plain_mset_eight_packet(
+                b"*17\r\n$4\r\nMSET\r\n$2\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_mset_packet_dispatches_by_canonical_array_header() {
+        let input =
+            b"*17\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n$2\r\nk6\r\n$2\r\nv6\r\n$2\r\nk7\r\n$2\r\nv7\r\n$2\r\nk8\r\n$2\r\nv8\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_mset_packet(input, &ParserConfig::default())
+            .expect("canonical eight-pair MSET packet should dispatch");
+
+        assert!(matches!(parsed, crate::BorrowedPlainMsetPacket::Eight(_)));
+        assert_eq!(parsed.pairs().len(), 8);
+        assert_eq!(parsed.pairs()[7], (b"k8".as_slice(), b"v8".as_slice()));
+        assert_eq!(
+            parsed.consumed(),
+            b"*17\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n$2\r\nk6\r\n$2\r\nv6\r\n$2\r\nk7\r\n$2\r\nv7\r\n$2\r\nk8\r\n$2\r\nv8\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_mset_packet_dispatcher_defers_unsupported_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
+                b"*3\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "single-pair MSET stays on the generic wrong-arity path"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
+                b"*19\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n",
+                &cfg
+            )
+            .is_none(),
+            "nine-pair MSET stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
+                b"*017\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
+                b"*17\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
+                &ParserConfig {
+                    max_array_len: 16,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
                 b"*17\r\n$4\r\nMSET\r\n$2\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
                 &cfg
             )

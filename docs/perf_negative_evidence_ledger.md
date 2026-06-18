@@ -69,6 +69,19 @@ turns). Keep claims honest — mark which.
   under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
   keep only if the next release A/B for keyed-values packets shows a stable win;
   otherwise move this row to rejected and stop extending exact arities.
+- two-field HSET exact borrowed packet parser — CODED in `fr-server` under
+  `frankenredis-ohsk5` (reasoned; batch benchmark pending). Reuses the existing
+  multi-pair borrowed HSET runtime path for canonical `HSET key f1 v1 f2 v2`;
+  single-field HSET stays on its existing fast path and larger/odd arities stay
+  generic. Retry condition if rejected: only revisit HSET arity specialization
+  with a release A/B that isolates HSET field-pair pipelines.
+- MSET exact-parser prefix dispatcher — CODED in `fr-server` under
+  `frankenredis-ohsk5` (reasoned; batch benchmark pending). The server now
+  selects the 2..8-pair exact MSET parser by canonical RESP array header instead
+  of probing lower arities first; noncanonical, single-pair, 9+ pair, limited,
+  and malformed inputs still fall through to generic parsing. Retry condition if
+  rejected: do not add more MSET exact arities unless a profile names the MSET
+  parser probe chain or a release A/B isolates MSET arity-mix pipelines.
 - frankenredis-h6ppr / cod-a: `fr-protocol` CRLF line scan via locked
   `memchr::memchr` — CODED (reasoned; batch benchmark pending). Guard covers
   CR-not-LF scanning plus exact `MAX_LINE_LENGTH` `Incomplete`/`LineTooLong`
