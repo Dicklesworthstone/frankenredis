@@ -234,6 +234,7 @@ PORT_BASED = [
     ("stream_id_trim_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("set_intset_canonical_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("nonutf8_arg_parity_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("keyspace_event_name_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("strict_limit_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("reload_dump_determinism_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
