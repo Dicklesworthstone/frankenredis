@@ -27,6 +27,11 @@ CASES = [
     ("invalid_metadata_no_nl", ("FUNCTION", "LOAD", "#!lua name=l1")),
     ("unknown_engine", ("FUNCTION", "LOAD", "#!badengine name=x\n)syntax")),
     ("missing_name", ("FUNCTION", "LOAD", "#!lua\n)syntax")),
+    # (frankenredis-7qmmr) a non-UTF8 library NAME is an invalid-charset name, not a type
+    # mismatch: must give the name-validation error, never WRONGTYPE (fr used to from_utf8 the
+    # whole body and map failure to WrongType; now decodes lossily so the charset check runs).
+    ("nonutf8_name", ("FUNCTION", "LOAD",
+      b"#!lua name=l\xff\xfe\nredis.register_function('f', function() return 1 end)")),
     # empty / valid-no-register bodies -> "No functions registered" (compile ok)
     ("empty_body", ("FUNCTION", "LOAD", "#!lua name=e\n")),
     ("valid_no_register", ("FUNCTION", "LOAD", "#!lua name=nr\nlocal x=1+1")),
