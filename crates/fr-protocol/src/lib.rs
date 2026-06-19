@@ -3,8 +3,6 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use memchr::memchr;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RespFrame {
     SimpleString(String),
@@ -1684,33 +1682,17 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
         return Err(RespParseError::Incomplete);
     }
     let max_line_end = start.saturating_add(MAX_LINE_LENGTH);
-    let max_candidate_end = max_line_end.saturating_add(1);
-    let mut search_start = start;
-    loop {
-        let candidate_end = input.len().saturating_sub(1).min(max_candidate_end);
-        if search_start >= candidate_end {
-            if input.len() > max_candidate_end {
-                return Err(RespParseError::LineTooLong);
-            }
-            return Err(RespParseError::Incomplete);
-        }
-
-        let Some(offset) = memchr(b'\r', &input[search_start..candidate_end]) else {
-            if input.len() > max_candidate_end {
-                return Err(RespParseError::LineTooLong);
-            }
-            return Err(RespParseError::Incomplete);
-        };
-
-        let i = search_start + offset;
-        if input[i + 1] == b'\n' {
+    let mut i = start;
+    while i + 1 < input.len() {
+        if input[i] == b'\r' && input[i + 1] == b'\n' {
             return Ok((&input[start..i], i + 2));
         }
-        search_start = i + 1;
-        if search_start > max_line_end {
+        i += 1;
+        if i > max_line_end {
             return Err(RespParseError::LineTooLong);
         }
     }
+    Err(RespParseError::Incomplete)
 }
 
 #[cfg(test)]
@@ -1720,7 +1702,7 @@ mod tests {
         RespParseError, decimal_u64_len, decimal_usize_len, encode_redis_double,
         format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64,
-        push_redis_double_ascii, push_usize, read_line,
+        push_redis_double_ascii, push_usize,
     };
 
     // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original
@@ -1757,43 +1739,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn read_line_memchr_scan_preserves_crlf_and_length_edges_h6ppr() {
-        let (line, consumed) = read_line(b"PING\r\nNEXT", 0).expect("plain CRLF line");
-        assert_eq!(line, b"PING");
-        assert_eq!(consumed, 6);
-
-        let (line, consumed) =
-            read_line(b"abc\rxdef\r\nNEXT", 0).expect("CR not followed by LF is data");
-        assert_eq!(line, b"abc\rxdef");
-        assert_eq!(consumed, b"abc\rxdef\r\n".len());
-
-        let mut exact = vec![b'a'; MAX_LINE_LENGTH];
-        exact.extend_from_slice(b"\r\n");
-        let (line, consumed) = read_line(&exact, 0).expect("exact max line length is accepted");
-        assert_eq!(line.len(), MAX_LINE_LENGTH);
-        assert_eq!(consumed, MAX_LINE_LENGTH + 2);
-
-        let incomplete_at_boundary = vec![b'a'; MAX_LINE_LENGTH + 1];
-        assert_eq!(
-            read_line(&incomplete_at_boundary, 0).unwrap_err(),
-            RespParseError::Incomplete
-        );
-
-        let too_long = vec![b'a'; MAX_LINE_LENGTH + 2];
-        assert_eq!(
-            read_line(&too_long, 0).unwrap_err(),
-            RespParseError::LineTooLong
-        );
-
-        let mut cr_without_lf_at_boundary = vec![b'a'; MAX_LINE_LENGTH];
-        cr_without_lf_at_boundary.extend_from_slice(b"\rx");
-        assert_eq!(
-            read_line(&cr_without_lf_at_boundary, 0).unwrap_err(),
-            RespParseError::LineTooLong
-        );
     }
 
     // (frankenredis-432l0) Golden contract for how `parse_frame` NORMALIZES the
