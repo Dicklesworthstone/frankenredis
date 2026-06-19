@@ -206,6 +206,15 @@ turns). Keep claims honest — mark which.
   crate-scoped check. Retry condition if rejected: do not retry owned-entry
   move cleanup unless a fresh DEBUG RELOAD / RESTORE profile names compact
   collection listpack decode allocation.
+- frankenredis-ta8s1 / cod-a: `fr-persist` RDB QUICKLIST_2 PACKED list decode
+  now consumes owned decoded listpack entries with `into_bytes()` instead of
+  cloning string payloads through `to_bytes()` and dropping the original —
+  CODED (reasoned; batch benchmark pending). PLAIN quicklist2 nodes still move
+  the raw node blob directly; integer listpack entries still render through the
+  same canonical decimal helper. Guard is the quicklist2 packed-list decode/DUMP
+  RDB suite plus crate-scoped check. Retry condition if rejected: do not retry
+  quicklist2 owned-entry move cleanup unless a fresh DEBUG RELOAD / RESTORE
+  profile names packed quicklist2 listpack decode allocation.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;

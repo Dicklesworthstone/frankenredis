@@ -3586,11 +3586,12 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                     items.push(node_blob);
                                 }
                                 2 => {
-                                    // PACKED: the blob is a listpack.
+                                    // PACKED: the blob is a listpack. Move owned
+                                    // string payloads out of decoded entries.
                                     for entry in listpack::decode_listpack(&node_blob)
                                         .map_err(|_| PersistError::InvalidFrame)?
                                     {
-                                        items.push(entry.to_bytes());
+                                        items.push(entry.into_bytes());
                                     }
                                 }
                                 _ => return Err(PersistError::InvalidFrame),
