@@ -1997,6 +1997,31 @@ impl Parser {
         }
     }
 
+    /// Lua 5.1 lparser.c::check_match — consume a block closer (`end`/`until`), or, when it is
+    /// missing, raise the diagnostic Lua does: if the opener sits on a DIFFERENT source line
+    /// than the (unexpected) current token, append "(to close '<opener>' at line <N>)";
+    /// otherwise fall back to the plain "'<close>' expected near '<got>'". The same-line case
+    /// is why a one-line `if true then return 1` reports just "'end' expected near '<eof>'".
+    /// (frankenredis-5qhz7)
+    fn check_match(&mut self, close: &Token, opener: &str, opener_line: u32) -> Result<(), String> {
+        let got_line = self.error_line();
+        let tok = self.advance();
+        if std::mem::discriminant(&tok) == std::mem::discriminant(close) {
+            return Ok(());
+        }
+        if got_line == opener_line {
+            Err(parser_expected_near(close, &tok))
+        } else {
+            Err(format!(
+                "'{}' expected (to close '{}' at line {}) near '{}'",
+                expected_token_label(close),
+                opener,
+                opener_line,
+                token_display(&tok),
+            ))
+        }
+    }
+
     fn check(&self, expected: &Token) -> bool {
         std::mem::discriminant(self.peek()) == std::mem::discriminant(expected)
     }
@@ -2040,9 +2065,10 @@ impl Parser {
             Token::Repeat => self.parse_repeat(),
             Token::For => self.parse_for(),
             Token::Do => {
+                let opener_line = self.cur_line();
                 self.advance();
                 let body = self.parse_block()?;
-                self.expect(&Token::End)?;
+                self.check_match(&Token::End, "do", opener_line)?;
                 Ok(Stmt::DoBlock(body))
             }
             Token::Local => self.parse_local(),
@@ -2067,6 +2093,7 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, String> {
+        let opener_line = self.cur_line();
         self.advance(); // 'if'
         let mut branches = Vec::new();
         let cond = self.parse_expr()?;
@@ -2090,11 +2117,12 @@ impl Parser {
                 break;
             }
         }
-        self.expect(&Token::End)?;
+        self.check_match(&Token::End, "if", opener_line)?;
         Ok(Stmt::If(branches, else_body))
     }
 
     fn parse_while(&mut self) -> Result<Stmt, String> {
+        let opener_line = self.cur_line();
         self.advance(); // 'while'
         let cond = self.parse_expr()?;
         self.expect(&Token::Do)?;
@@ -2102,22 +2130,24 @@ impl Parser {
         let body_result = self.parse_block();
         self.loop_depth -= 1;
         let body = body_result?;
-        self.expect(&Token::End)?;
+        self.check_match(&Token::End, "while", opener_line)?;
         Ok(Stmt::While(cond, body))
     }
 
     fn parse_repeat(&mut self) -> Result<Stmt, String> {
+        let opener_line = self.cur_line();
         self.advance(); // 'repeat'
         self.loop_depth += 1;
         let body_result = self.parse_block();
         self.loop_depth -= 1;
         let body = body_result?;
-        self.expect(&Token::Until)?;
+        self.check_match(&Token::Until, "repeat", opener_line)?;
         let cond = self.parse_expr()?;
         Ok(Stmt::Repeat(body, cond))
     }
 
     fn parse_for(&mut self) -> Result<Stmt, String> {
+        let opener_line = self.cur_line();
         self.advance(); // 'for'
         let name = match self.advance() {
             Token::Name(n) => n,
@@ -2141,7 +2171,7 @@ impl Parser {
             let body_result = self.parse_block();
             self.loop_depth -= 1;
             let body = body_result?;
-            self.expect(&Token::End)?;
+            self.check_match(&Token::End, "for", opener_line)?;
             Ok(Stmt::NumericFor(name, start, stop, step, body))
         } else {
             // Generic for: for name [, name ...] in explist do ... end
@@ -2160,7 +2190,7 @@ impl Parser {
             let body_result = self.parse_block();
             self.loop_depth -= 1;
             let body = body_result?;
-            self.expect(&Token::End)?;
+            self.check_match(&Token::End, "for", opener_line)?;
             Ok(Stmt::GenericFor(names, exprs, body))
         }
     }
@@ -2168,12 +2198,13 @@ impl Parser {
     fn parse_local(&mut self) -> Result<Stmt, String> {
         self.advance(); // 'local'
         if self.check(&Token::Function) {
+            let fn_line = self.cur_line();
             self.advance(); // 'function'
             let name = match self.advance() {
                 Token::Name(n) => n,
                 t => return Err(parser_name_expected_near(&t)),
             };
-            let (params, is_variadic, body) = self.parse_func_body()?;
+            let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
             return Ok(Stmt::LocalFunctionDecl(name, params, is_variadic, body));
         }
 
@@ -2214,6 +2245,7 @@ impl Parser {
     }
 
     fn parse_function_decl(&mut self) -> Result<Stmt, String> {
+        let fn_line = self.cur_line();
         self.advance(); // 'function'
         let mut names = Vec::new();
         match self.advance() {
@@ -2227,11 +2259,11 @@ impl Parser {
                 t => return Err(parser_name_expected_near(&t)),
             }
         }
-        let (params, is_variadic, body) = self.parse_func_body()?;
+        let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
         Ok(Stmt::FunctionDecl(names, params, is_variadic, body))
     }
 
-    fn parse_func_body(&mut self) -> Result<(Vec<String>, bool, Block), String> {
+    fn parse_func_body(&mut self, opener_line: u32) -> Result<(Vec<String>, bool, Block), String> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         let mut is_variadic = false;
@@ -2254,7 +2286,7 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
-        self.expect(&Token::End)?;
+        self.check_match(&Token::End, "function", opener_line)?;
         Ok((params, is_variadic, body))
     }
 
@@ -2595,8 +2627,9 @@ impl Parser {
             }
             Token::LBrace => self.parse_table_constructor(),
             Token::Function => {
+                let fn_line = self.cur_line();
                 self.advance();
-                let (params, is_variadic, body) = self.parse_func_body()?;
+                let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
                 Ok(Expr::FunctionDef(params, is_variadic, body))
             }
             Token::Dots => {
