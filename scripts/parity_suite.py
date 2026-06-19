@@ -139,6 +139,7 @@ PORT_BASED = [
     ("geo_precision_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("scan_encoding_cursor_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("scan_invariant_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("randomkey_invariant_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("string_growth_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("in_command_dup_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("store_dest_aliasing_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
