@@ -237,6 +237,19 @@ turns). Keep claims honest — mark which.
   condition if rejected: do not claim this as an end-user RAM win by itself;
   only retry if focused KeyDict build benchmarks still name resize/allocation
   churn, or with full side-index-removing Store integration.
+- frankenredis-uhthd / cod-b: `fr-store` RANDOMKEY's per-db `Arc<[u8]>`
+  sampling vectors are now dirty lazy caches instead of resident side indices
+  maintained on every key insert/delete, and the now-unused `Entry.random_slot`
+  back-index is removed behind a stricter `Entry <= 48B` compile-time guard —
+  CODED (reasoned from the 1M-key RSS gap and prior `random_key_positions`
+  win; batch RSS/throughput and Redis-oracle RANDOMKEY/SCAN proof pending).
+  Guard adds a lazy-rebuild reachability test proving write-only loads keep the
+  RANDOMKEY vector empty until first use, then rebuild from live entries after
+  churn; local gate was `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo check -p fr-store --all-targets`.
+  Retry condition if rejected: do not reintroduce an always-resident RANDOMKEY
+  side vector; only revisit with a benchmark showing RANDOMKEY-heavy workloads
+  dominate and requiring an incremental cache-maintenance mode behind the same
+  Store-level invariants.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
 
