@@ -84,3 +84,29 @@ This is the realistic head-to-head for the encode (cc presize/direct-emit) + dec
 Last section's LPUSH 0.54× (fr slower) and this list-RELOAD 0.731× (fr faster) are consistent:
 LPUSH = incremental per-element ChunkedList push (structural slow path, 99fwc); list RELOAD =
 bulk decode (ta8s1 made it fast). Different code paths — both measured honestly.
+
+## Large-value SET/GET head-to-head (MEASURED 2026-06-19) — qesp3 gap
+fr-bench (Rust client) --pipeline 1 --requests 40000 --trials 5, fr-release(29431) vs
+redis-7.2.4(29442). Isolates the value-size scaling of the read/write path.
+
+| Workload | fr ops/s | redis ops/s | fr/redis | cv f/r | Verdict |
+|---|--:|--:|--:|--:|---|
+| SET 4KB   |  73,577 |  68,484 | 1.074 | 4.7/3.0 | fr faster |
+| GET 4KB   |  75,069 |  73,144 | 1.026 | 4.2/3.2 | fr faster |
+| SET 64KB  |  11,949 |  28,624 | **0.417** | 3.9/9.0 | **redis 2.4x faster** |
+| GET 64KB  |  28,813 |  28,868 | 0.998 | 6.0/4.2 | ~parity |
+| SET 256KB |   2,703 |  10,976 | **0.246** | 3.8/12.3 | **redis 4.1x faster** |
+| GET 256KB |  10,182 |   8,099 | 1.257 | 7.2/15.6 | fr faster [noisy] |
+
+### Reads of this:
+- **Small/medium values: fr faster** (4KB SET 1.07x, GET 1.03x) — consistent with the hot-path win.
+- **CONFIRMED SEVERE GAP — large-value SET:** fr SET craters with value size — 0.417x at 64KB,
+  0.246x at 256KB (redis 2.4-4x faster). GET is unaffected (parity-or-faster at all sizes). So it
+  is SET write-path-specific: the **2-copy large-value framing plateau** (fr-server handle_readable
+  scratch + realloc churn), bead **qesp3 / apg7r / project_large_value_framing_gap**. STRUCTURAL,
+  pre-existing — NOT a recent lever -> **NO REVERT**. Note: hand-rolled buffer-reuse fixes here
+  REGRESS (mimalloc already recycles; see rejected-levers row) — the real fix is the framing
+  rewrite (zero-copy read into the value buffer), delicate.
+- **Release-readiness flag:** large-value writes (>=64KB) are fr's worst measured workload. For a
+  release targeting large-payload use (e.g. caching big blobs), this is the headline gap to close;
+  for typical small-value workloads fr dominates (geomean 1.348x).
