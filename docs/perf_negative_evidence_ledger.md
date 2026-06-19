@@ -88,6 +88,16 @@ turns). Keep claims honest — mark which.
   and malformed inputs still fall through to generic parsing. Retry condition if
   rejected: do not add more MSET exact arities unless a profile names the MSET
   parser probe chain or a release A/B isolates MSET arity-mix pipelines.
+- batch-cached borrowed write gate — CODED in `fr-server` / `fr-runtime` under
+  `frankenredis-ohsk5` (reasoned; batch benchmark pending). The buffered
+  multibulk loop now computes the expensive default write fast-path predicate
+  once per batch for canonical SET/MSET/HSET exact packets, matching the existing
+  cached GET read gate and invalidating on generic state-changing dispatch. Guard
+  proves a cached true gate before `SELECT 1` cannot leak the following `SET`
+  through the db0 fast path. Retry condition if rejected: do not add more cached
+  gate variants unless a profile names default write-gate/ACL/session predicates
+  on SET/MSET/HSET pipelines; route instead to output/batch arena or key-layout
+  work.
 - frankenredis-15lug / cod-b: uppercase no-arg multibulk `PING` literal parser
   fast path — CODED in `fr-server` (reasoned; batch benchmark pending). Target:
   pass195 residual `ping_mbulk` (~0.94x) where inline PING is already fr-faster.

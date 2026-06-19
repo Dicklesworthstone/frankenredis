@@ -2437,6 +2437,21 @@ fn record_deferred_buffered_token(
     }
 }
 
+fn cached_plain_write_gate(
+    cache: &mut Option<bool>,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> bool {
+    match *cache {
+        Some(allowed) => allowed,
+        None => {
+            let allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+            *cache = Some(allowed);
+            allowed
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_buffered_frames(
     token: Token,
@@ -2455,6 +2470,7 @@ fn process_buffered_frames(
     let mut budget_exhausted = false;
     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
     let mut plain_get_read_gate_cache: Option<bool> = None;
+    let mut plain_write_gate_cache: Option<bool> = None;
 
     // (frankenredis-7grsy) Begin a fresh command-timing chain for this batch.
     // The chained fast-path timer reuses one command's end-instant as the next
@@ -2493,6 +2509,7 @@ fn process_buffered_frames(
         if let Some(cmd) = conn.owned_plain_sets.pop_front() {
             processed_frames = processed_frames.saturating_add(1);
             plain_get_read_gate_cache = None;
+            plain_write_gate_cache = None;
             match runtime.execute_plain_set_owned_or_return(cmd.key, cmd.value, ts) {
                 Ok(response) => {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -2580,6 +2597,7 @@ fn process_buffered_frames(
                     processed_frames = processed_frames.saturating_add(1);
                     if !command_frame_can_move_to_argv(&frame) {
                         plain_get_read_gate_cache = None;
+                        plain_write_gate_cache = None;
                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -2589,6 +2607,7 @@ fn process_buffered_frames(
                     let argv = fr_command::argv_from_frame(frame)
                         .expect("command frame prevalidated for argv move");
                     plain_get_read_gate_cache = None;
+                    plain_write_gate_cache = None;
                     match process_argv_frame(
                         token,
                         &argv,
@@ -2720,19 +2739,44 @@ fn process_buffered_frames(
                     }
                 } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
-                    && let Some(response) =
-                        runtime.execute_plain_set_borrowed(packet.key, packet.value, ts)
                 {
-                    Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: packet.consumed,
-                        response,
-                    })
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_set_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.value,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_hset_packet(unparsed, &parser_config)
                 {
                     let pairs = [packet.field, packet.value];
-                    if let Some(response) =
-                        runtime.execute_plain_hset_borrowed(packet.key, &pairs, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_hset_borrowed_with_default_write_gate(
+                            packet.key,
+                            &pairs,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -2757,8 +2801,15 @@ fn process_buffered_frames(
                         packet.field2,
                         packet.value2,
                     ];
-                    if let Some(response) =
-                        runtime.execute_plain_hset_borrowed(packet.key, &pairs, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_hset_borrowed_with_default_write_gate(
+                            packet.key,
+                            &pairs,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -2778,7 +2829,14 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mset_packet(unparsed, &parser_config)
                 {
                     let consumed = packet.consumed();
-                    if let Some(response) = runtime.execute_plain_mset_borrowed(packet.pairs(), ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_mset_borrowed_with_default_write_gate(
+                            packet.pairs(),
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed,
@@ -5130,6 +5188,7 @@ fn process_buffered_frames(
                     }
                     let argv = &argv_scratch[..argv_len];
                     plain_get_read_gate_cache = None;
+                    plain_write_gate_cache = None;
                     match process_argv_frame(
                         token,
                         argv,
@@ -5192,6 +5251,7 @@ fn process_buffered_frames(
                 }
                 if !command_frame_can_move_to_argv(&frame) {
                     plain_get_read_gate_cache = None;
+                    plain_write_gate_cache = None;
                     let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -5201,6 +5261,7 @@ fn process_buffered_frames(
                 let argv = fr_command::argv_from_frame(frame)
                     .expect("command frame prevalidated for argv move");
                 plain_get_read_gate_cache = None;
+                plain_write_gate_cache = None;
                 match process_argv_frame(
                     token,
                     &argv,
@@ -21874,6 +21935,86 @@ mod tests {
         expected.extend_from_slice(&RespFrame::BulkString(Some(b"v".to_vec())).to_bytes());
         expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
         expected.extend_from_slice(&RespFrame::BulkString(None).to_bytes());
+        assert_eq!(conn.write_buf, expected);
+    }
+
+    #[test]
+    fn process_buffered_frames_invalidates_cached_write_gate_after_generic_state_change() {
+        use crate::ClientConnection;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 2;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (_server_stream, _server_addr) = listener.accept().unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+
+        let set_db0 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SET".to_vec())),
+            RespFrame::BulkString(Some(b"k0".to_vec())),
+            RespFrame::BulkString(Some(b"v0".to_vec())),
+        ]));
+        let select_db1 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SELECT".to_vec())),
+            RespFrame::BulkString(Some(b"1".to_vec())),
+        ]));
+        let set_db1 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SET".to_vec())),
+            RespFrame::BulkString(Some(b"k1".to_vec())),
+            RespFrame::BulkString(Some(b"v1".to_vec())),
+        ]));
+        let select_db0 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SELECT".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+        ]));
+        let get_k1 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"GET".to_vec())),
+            RespFrame::BulkString(Some(b"k1".to_vec())),
+        ]));
+
+        conn.read_buf.extend_from_slice(&set_db0.to_bytes());
+        conn.read_buf.extend_from_slice(&select_db1.to_bytes());
+        conn.read_buf.extend_from_slice(&set_db1.to_bytes());
+        conn.read_buf.extend_from_slice(&select_db0.to_bytes());
+        conn.read_buf.extend_from_slice(&get_k1.to_bytes());
+        conn.read_buf.extend_from_slice(&select_db1.to_bytes());
+        conn.read_buf.extend_from_slice(&get_k1.to_bytes());
+
+        let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts.saturating_mul(1000),
+        );
+        conn.session = runtime.swap_session(prev);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::BulkString(None).to_bytes());
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::BulkString(Some(b"v1".to_vec())).to_bytes());
         assert_eq!(conn.write_buf, expected);
     }
 

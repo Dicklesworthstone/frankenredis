@@ -6969,7 +6969,27 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_set_borrowed(key, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_set_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            default_write_allowed,
+        ) {
             return None;
         }
 
@@ -7073,7 +7093,23 @@ impl Runtime {
         pairs: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_mset_borrowed(pairs, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_mset_borrowed_with_default_write_gate(
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_mset_borrowed_with_default_write_gate(
+        &mut self,
+        pairs: &[(&[u8], &[u8])],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self
+            .can_execute_plain_mset_borrowed_with_default_write_gate(pairs, default_write_allowed)
+        {
             return None;
         }
 
@@ -7106,7 +7142,11 @@ impl Runtime {
         Some(RespFrame::SimpleString("OK".to_string()))
     }
 
-    fn can_execute_plain_mset_borrowed(&mut self, pairs: &[(&[u8], &[u8])], now_ms: u64) -> bool {
+    fn can_execute_plain_mset_borrowed_with_default_write_gate(
+        &self,
+        pairs: &[(&[u8], &[u8])],
+        default_write_allowed: bool,
+    ) -> bool {
         if pairs.is_empty()
             || self.policy.gate.max_array_len < 1 + pairs.len() * 2
             || self.policy.gate.max_bulk_len < b"MSET".len()
@@ -7118,7 +7158,7 @@ impl Runtime {
                 return false;
             }
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     fn record_plain_mset_borrowed_metrics(
@@ -7172,6 +7212,20 @@ impl Runtime {
     }
 
     fn can_execute_plain_set_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.can_execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            default_write_allowed,
+        )
+    }
+
+    fn can_execute_plain_set_borrowed_with_default_write_gate(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        default_write_allowed: bool,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -7179,6 +7233,10 @@ impl Runtime {
         {
             return false;
         }
+        default_write_allowed
+    }
+
+    pub fn plain_borrowed_default_key_write_gate(&mut self, now_ms: u64) -> bool {
         self.plain_borrowed_default_key_write_allows(now_ms)
     }
 
@@ -8239,6 +8297,22 @@ impl Runtime {
         pairs: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hset_borrowed_with_default_write_gate(
+            key,
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_hset_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HSET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -8248,7 +8322,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
