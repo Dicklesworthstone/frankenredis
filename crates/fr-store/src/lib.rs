@@ -2678,7 +2678,7 @@ impl SetValue {
     /// Keep only members for which `keep` returns true.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         match self {
-            SetValue::Int(v) => v.retain(|&n| keep(&set_int_to_bytes(n))),
+            SetValue::Int(v) => v.retain(|&n| with_integer_decimal_bytes(n, |bytes| keep(bytes))),
             SetValue::Generic(s) => s.retain(|m| keep(m)),
         }
     }
@@ -3220,15 +3220,22 @@ fn i64_text_len(value: i64) -> usize {
     digits
 }
 
-fn integer_decimal_bytes(value: i64) -> Vec<u8> {
+fn with_integer_decimal_bytes<R>(value: i64, f: impl FnOnce(&[u8]) -> R) -> R {
     let mut scratch = [0u8; 20];
     let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
-    let mut out = Vec::with_capacity(i64_text_len(value));
     if value.is_negative() {
-        out.push(b'-');
+        let mut signed = [0u8; 21];
+        let digit_len = 20 - start;
+        signed[0] = b'-';
+        signed[1..=digit_len].copy_from_slice(&scratch[start..]);
+        f(&signed[..=digit_len])
+    } else {
+        f(&scratch[start..])
     }
-    out.extend_from_slice(&scratch[start..]);
-    out
+}
+
+fn integer_decimal_bytes(value: i64) -> Vec<u8> {
+    with_integer_decimal_bytes(value, <[u8]>::to_vec)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4427,10 +4434,13 @@ pub struct Store {
     entries: HashMap<std::sync::Arc<[u8]>, Entry, foldhash::quality::RandomState>,
     // (frankenredis-x4tgs) `ordered_keys` shares the SAME per-key `Arc<[u8]>` as
     // `entries`, so the SCAN/KEYS ordered index stores no duplicate key bytes.
-    // `Arc<[u8]>` orders/​hashes via `[u8]` (lexicographic), identical to the
+    // (frankenredis-uhthd) It is now a lazy side index: write-heavy keyspaces keep
+    // it empty, and ordered consumers rebuild it from `entries` only when needed.
+    // `Arc<[u8]>` orders/hashes via `[u8]` (lexicographic), identical to the
     // prior `Vec<u8>`, so SCAN/KEYS order and every `&[u8]` range/lookup are
-    // byte-for-byte unchanged.
+    // byte-for-byte unchanged once materialized.
     ordered_keys: BTreeSet<std::sync::Arc<[u8]>>,
+    ordered_keys_dirty: bool,
     /// (frankenredis-3e92e) Monotonic counter bumped on every STRUCTURAL
     /// keyspace mutation (key insert / remove / flush). Used to validate the
     /// SCAN resume cache: a cached resume point is only trusted when the
@@ -4973,6 +4983,7 @@ impl Default for Store {
         Self {
             entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
+            ordered_keys_dirty: true,
             keyspace_generation: 0,
             scan_cache: Vec::new(),
             db_scan_cache: Vec::new(),
@@ -5280,7 +5291,25 @@ impl Store {
         fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
     }
 
-    fn ordered_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
+    fn mark_ordered_keys_dirty(&mut self) {
+        if self.ordered_keys_dirty {
+            return;
+        }
+        self.ordered_keys.clear();
+        self.ordered_keys_dirty = true;
+    }
+
+    fn rebuild_ordered_keys_if_dirty(&mut self) {
+        if !self.ordered_keys_dirty {
+            return;
+        }
+        self.ordered_keys.clear();
+        self.ordered_keys.extend(self.entries.keys().cloned());
+        self.ordered_keys_dirty = false;
+    }
+
+    fn ordered_physical_keys_in_db(&mut self, db: usize) -> Vec<Vec<u8>> {
+        self.rebuild_ordered_keys_if_dirty();
         if db == 0 {
             return self
                 .ordered_keys
@@ -8170,6 +8199,7 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching(&mut self, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
+        self.rebuild_ordered_keys_if_dirty();
         // (frankenredis-2wgom) Range-prune by the pattern's literal prefix when
         // one exists: fr's keyspace is an ORDERED BTreeSet, so a prefix glob
         // (`user:*`, an exact key, ...) touches only O(log n + matches) keys
@@ -8225,6 +8255,7 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
+        self.rebuild_ordered_keys_if_dirty();
         // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
         // prefix applies to the LOGICAL key, so the candidate PHYSICAL range is
         // `encode_db_key(db, lit) ..`; the db-membership filter (db-0: not
@@ -8249,6 +8280,7 @@ impl Store {
             // (ordered_keys is physical/logical sorted), so the final sort is
             // dropped. Byte-identical replies + identical eviction side effects.
             self.expire_volatile_keys_in_db(db, now_ms);
+            self.rebuild_ordered_keys_if_dirty();
             let is_star = pattern == b"*";
             let mut result: Vec<Vec<u8>> = Vec::new();
             if db == 0 {
@@ -8674,14 +8706,12 @@ impl Store {
             }
         }
         // (frankenredis-x4tgs) For a NEW key, allocate the key bytes ONCE behind
-        // an Arc and share that single allocation across entries and the ordered
-        // index (refcount clones, no extra byte copies). RANDOMKEY's per-db
-        // vector is a lazy cache now; new keys only dirty it. For an OVERWRITE
-        // there is no new allocation at all — the value is replaced in place
-        // below, keeping the existing Arc key.
+        // an Arc. Ordered-key and RANDOMKEY side indexes are lazy caches now; new
+        // keys only dirty them. For an OVERWRITE there is no new allocation at
+        // all — the value is replaced in place below, keeping the existing Arc key.
         let shared: Option<std::sync::Arc<[u8]>> = if is_new_key {
             let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(key.as_slice());
-            self.ordered_keys.insert(std::sync::Arc::clone(&shared));
+            self.mark_ordered_keys_dirty();
             self.mark_random_key_index_dirty(db);
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
@@ -8754,7 +8784,7 @@ impl Store {
         if let Some(entry) = self.entries.remove(key) {
             self.hll_register_cache.remove(key);
             self.mem_estimate_cache.borrow_mut().remove(key);
-            self.ordered_keys.remove(key);
+            self.mark_ordered_keys_dirty();
             self.expiry_deadlines.remove(key);
             // RANDOMKEY's per-db vector is a lazy cache; dropping any key in the
             // DB invalidates the cache and the next RANDOMKEY rebuilds it from
@@ -9184,6 +9214,7 @@ impl Store {
         // similarly survived as orphan TTLs without their parent
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
+        self.ordered_keys_dirty = true;
         self.expiry_deadlines.clear();
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
@@ -9295,6 +9326,7 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
         }
+        self.rebuild_ordered_keys_if_dirty();
 
         // (frankenredis-x8kef) Gather each side via an ordered_keys prefix-range
         // walk (O(log n + matches)) instead of scanning the whole keyspace twice.
@@ -40916,6 +40948,7 @@ mod tests {
         ] {
             let expected = value.to_string().into_bytes();
             assert_eq!(integer_decimal_bytes(value), expected);
+            with_integer_decimal_bytes(value, |bytes| assert_eq!(bytes, expected.as_slice()));
             assert_eq!(set_int_to_bytes(value), expected);
             assert_eq!(ziplist_integer_bytes(value), expected);
 
@@ -40929,6 +40962,22 @@ mod tests {
                 expected.as_slice()
             );
         }
+
+        let mut retained = SetValue::Int(vec![i64::MIN, -1, 0, 42, i64::MAX]);
+        retained.retain(|member| {
+            matches!(
+                member,
+                b"-9223372036854775808" | b"0" | b"9223372036854775807"
+            )
+        });
+        assert_eq!(
+            retained.iter().map(Cow::into_owned).collect::<Vec<_>>(),
+            vec![
+                b"-9223372036854775808".to_vec(),
+                b"0".to_vec(),
+                b"9223372036854775807".to_vec(),
+            ]
+        );
     }
 
     #[test]

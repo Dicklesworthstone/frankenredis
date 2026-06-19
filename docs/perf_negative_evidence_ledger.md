@@ -132,6 +132,16 @@ turns). Keep claims honest — mark which.
   reference for `Value::Integer` and intset member materialization. Retry
   condition if rejected: do not retry generic i64 formatting cleanup unless a
   fresh profile names integer materialization or intset member formatting.
+- frankenredis-gu5nf.32 / cod-a: `fr-store` `SetValue::retain` now feeds intset
+  predicates stack-borrowed decimal bytes through `with_integer_decimal_bytes`
+  instead of allocating a `Vec<u8>` per retained member — CODED (reasoned; batch
+  benchmark pending). Scope is the mixed-encoding set-algebra fallback path where
+  an intset is filtered by a byte predicate; direct intset/intset merge kernels
+  and reply encoding are unchanged. Guard pins stack-borrowed bytes against the
+  old `to_string` reference and checks retain membership/order for i64 min/max,
+  negative, zero, and positive values. Retry condition if rejected: do not retry
+  intset predicate byte formatting unless a fresh profile names `SetValue::retain`
+  or mixed intset/generic set-algebra allocation cost.
 - frankenredis-n2u1g / cod-b: zset score direct encoder for borrowed `ZSCORE`
   and `ZMSCORE` network fast paths — CODED (reasoned; batch benchmark pending).
   `fr-protocol::encode_redis_double` writes Redis d2string bytes directly into
