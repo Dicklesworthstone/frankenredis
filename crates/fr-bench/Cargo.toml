@@ -14,3 +14,10 @@ fr-protocol = { path = "../fr-protocol" }
 hdrhistogram.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "keyed_write_vs_redis"
+harness = false

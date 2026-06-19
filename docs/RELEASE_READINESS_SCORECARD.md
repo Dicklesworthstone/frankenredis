@@ -197,3 +197,31 @@ SHIP GUIDANCE: for the typical Redis workload (pipelined small-value GET/SET/has
 keyspace) fr is a measured win on both speed and (collection) RAM. For large-payload caching
 (>=64KB values) or very-large-keyspace RAM-sensitive deployments, the three gaps above apply.
 Conformance GREEN throughout (all measured levers byte-identical-verified; zero code reverted).
+
+## Cod-b keyed-write parser backlog (MEASURED 2026-06-19)
+
+Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench keyed_write_vs_redis
+-- --noplot`, release `frankenredis` rch-built under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`, oracle Redis 7.2.4 at
+`/dp/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+| Workload | Redis cmds/s | fr cmds/s | fr/redis | fr current/pre-series | Verdict |
+|---|--:|--:|--:|--:|---|
+| LPUSH 5 values  | 652,752 | 266,685 | 0.409 | 1.019 | Redis faster; parser not enough |
+| LPUSH 8 values  | 574,203 | 200,729 | 0.350 | 1.036 | Redis faster; parser not enough |
+| LPUSH 12 values | 433,576 | 143,680 | 0.331 | 1.095 | Redis faster; modest A/B win |
+| LPUSH 16 values | 395,036 | 107,754 | 0.273 | 1.039 | Redis faster; parser not enough |
+| RPUSH 5 values  | 812,741 | 650,096 | 0.800 | 1.173 | Keep: A/B win |
+| RPUSH 8 values  | 727,872 | 583,571 | 0.802 | 1.142 | Keep: A/B win |
+| RPUSH 12 values | 618,824 | 558,775 | 0.903 | 1.276 | Keep: A/B win |
+| RPUSH 16 values | 551,333 | 455,962 | 0.827 | 1.174 | Keep: A/B win |
+| SADD 5 values   | 896,106 | 758,819 | 0.847 | 1.100 | Keep: A/B win |
+| SADD 8 values   | 660,337 | 766,967 | 1.161 | 1.223 | fr faster |
+| SADD 12 values  | 506,039 | 670,508 | 1.325 | 1.114 | fr faster |
+| SADD 16 values  | 395,918 | 623,214 | 1.574 | 1.207 | fr faster |
+
+Correctness: `scripts/keyed_write_packet_differ.py` PASS against Redis 7.2.4 on fresh ports,
+covering LPUSH/RPUSH/SADD/ZADD N=4..19, HSET N=4..20, MSET fallback. Decision: **keep the
+5-16 exact keyed-write parser backlog**. The ladder is real for RPUSH/SADD, but it does not
+close LPUSH; LPUSH remains part of the existing structural `ChunkedList` gap rather than a
+recent parser regression.

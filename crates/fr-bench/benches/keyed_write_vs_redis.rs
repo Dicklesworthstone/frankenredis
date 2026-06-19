@@ -1,0 +1,283 @@
+#![forbid(unsafe_code)]
+
+use std::env;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+
+const HOST: &str = "127.0.0.1";
+const COMMANDS_PER_ITER: usize = 64;
+const ARITIES: [usize; 4] = [5, 8, 12, 16];
+const COMMANDS: [&str; 3] = ["LPUSH", "RPUSH", "SADD"];
+
+#[derive(Clone, Copy)]
+struct Engine {
+    name: &'static str,
+    port: u16,
+}
+
+struct Server {
+    child: Child,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+struct Client {
+    stream: TcpStream,
+    buf: Vec<u8>,
+}
+
+impl Client {
+    fn connect(port: u16) -> Self {
+        let stream = TcpStream::connect((HOST, port)).expect("connect benchmark server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("set write timeout");
+        Self {
+            stream,
+            buf: Vec::with_capacity(8192),
+        }
+    }
+
+    fn flushall(&mut self) {
+        self.run_packet(&encode_command(&["FLUSHALL"]), 1);
+    }
+
+    fn run_packet(&mut self, packet: &[u8], replies: usize) {
+        self.stream
+            .write_all(packet)
+            .expect("write benchmark packet");
+        self.read_integer_replies(replies);
+    }
+
+    fn read_integer_replies(&mut self, replies: usize) {
+        self.buf.clear();
+        let mut seen = 0usize;
+        let mut scan_from = 0usize;
+        while seen < replies {
+            let mut tmp = [0u8; 8192];
+            let read = self.stream.read(&mut tmp).expect("read benchmark replies");
+            assert!(read > 0, "server closed benchmark connection");
+            self.buf.extend_from_slice(&tmp[..read]);
+
+            while let Some(pos) = find_crlf(&self.buf[scan_from..]) {
+                let line_end = scan_from + pos;
+                let line = &self.buf[scan_from..line_end];
+                assert!(
+                    line.first() == Some(&b':') || line == b"+OK",
+                    "unexpected benchmark reply: {:?}",
+                    String::from_utf8_lossy(line)
+                );
+                seen += 1;
+                scan_from = line_end + 2;
+                if seen == replies {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|pair| pair == b"\r\n")
+}
+
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .sample_size(10)
+        .warm_up_time(Duration::from_millis(300))
+        .measurement_time(Duration::from_secs(1))
+}
+
+fn keyed_write_vs_redis(c: &mut Criterion) {
+    let redis_bin = redis_server_bin();
+    let fr_bin = fr_server_bin();
+    assert!(
+        redis_bin.is_file(),
+        "REDIS_SERVER_BIN not found: {}",
+        redis_bin.display()
+    );
+    assert!(
+        fr_bin.is_file(),
+        "FR_SERVER_BIN not found: {}",
+        fr_bin.display()
+    );
+
+    let redis_port = free_port(env_u16("FR_REDIS_BENCH_PORT").unwrap_or(43_151));
+    let fr_port = free_port(redis_port + 1);
+    let _redis = spawn_redis(&redis_bin, redis_port);
+    let _fr = spawn_frankenredis(&fr_bin, fr_port);
+    wait_for_ping(redis_port);
+    wait_for_ping(fr_port);
+
+    let engines = [
+        Engine {
+            name: "redis-7.2.4",
+            port: redis_port,
+        },
+        Engine {
+            name: "frankenredis",
+            port: fr_port,
+        },
+    ];
+
+    let mut group = c.benchmark_group("keyed_write_vs_redis");
+    group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+
+    for cmd in COMMANDS {
+        for arity in ARITIES {
+            let packet = pipelined_keyed_write_packet(cmd, arity, COMMANDS_PER_ITER);
+            for engine in engines {
+                let id = BenchmarkId::new(format!("{cmd}_{arity}v"), engine.name);
+                group.bench_with_input(id, &engine, |b, engine| {
+                    let mut client = Client::connect(engine.port);
+                    b.iter_custom(|iters| {
+                        client.flushall();
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            client.run_packet(&packet, COMMANDS_PER_ITER);
+                        }
+                        let elapsed = start.elapsed();
+                        client.flushall();
+                        elapsed
+                    });
+                });
+            }
+        }
+    }
+
+    group.finish();
+}
+
+fn redis_server_bin() -> PathBuf {
+    env::var_os("REDIS_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let local = Path::new("legacy_redis_code/redis/src/redis-server");
+            if local.exists() {
+                local.to_path_buf()
+            } else {
+                PathBuf::from("/dp/frankenredis/legacy_redis_code/redis/src/redis-server")
+            }
+        })
+}
+
+fn fr_server_bin() -> PathBuf {
+    env::var_os("FR_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let target_dir = env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target"));
+            target_dir.join("release/frankenredis")
+        })
+}
+
+fn spawn_redis(bin: &Path, port: u16) -> Server {
+    let child = Command::new(bin)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--save")
+        .arg("")
+        .arg("--appendonly")
+        .arg("no")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn redis-server");
+    Server { child }
+}
+
+fn spawn_frankenredis(bin: &Path, port: u16) -> Server {
+    let child = Command::new(bin)
+        .arg("--port")
+        .arg(port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn frankenredis");
+    Server { child }
+}
+
+fn wait_for_ping(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect((HOST, port)) {
+            let _ = stream.write_all(&encode_command(&["PING"]));
+            let mut buf = [0u8; 64];
+            if let Ok(read) = stream.read(&mut buf)
+                && buf[..read].windows(4).any(|part| part == b"PONG")
+            {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("server did not answer PING on port {port}");
+}
+
+fn free_port(start: u16) -> u16 {
+    for port in start..start.saturating_add(500) {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        if TcpListener::bind(addr).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port near {start}");
+}
+
+fn env_u16(name: &str) -> Option<u16> {
+    env::var(name).ok()?.parse().ok()
+}
+
+fn pipelined_keyed_write_packet(cmd: &str, arity: usize, count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * (32 + arity * 8));
+    for _ in 0..count {
+        packet.extend_from_slice(&keyed_write_command(cmd, arity));
+    }
+    packet
+}
+
+fn keyed_write_command(cmd: &str, arity: usize) -> Vec<u8> {
+    let mut args = Vec::with_capacity(arity + 2);
+    args.push(cmd);
+    args.push("k");
+    let values = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "l", "m", "n", "o", "p", "q",
+    ];
+    for value in values.iter().take(arity) {
+        args.push(value);
+    }
+    encode_command(&args)
+}
+
+fn encode_command(args: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
+    for arg in args {
+        out.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+        out.extend_from_slice(arg.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = keyed_write_vs_redis
+}
+criterion_main!(benches);

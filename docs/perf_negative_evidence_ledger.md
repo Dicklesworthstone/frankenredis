@@ -430,3 +430,47 @@ caveats in docs/RELEASE_READINESS_SCORECARD.md. Sandbox-contended; cv>5% flagged
 - **METHOD constraint (Measured the hard way):** the full 36-cell matrix + heavy 2-server bench
   loops 144-KILL under cumulative sandbox load; only focused light batches (≤8 fr-bench runs,
   reused servers) complete. Publication-grade numbers still need a quiet host (bead vibu6).
+
+## MEASURED cod-b exact keyed-write parser gauntlet (2026-06-19) — Criterion vs Redis 7.2.4
+
+Scope: `frankenredis-bnrnp`, `frankenredis-2tbmh`, `frankenredis-8lqp4`,
+`frankenredis-ons7i`, `frankenredis-r3on0`, `frankenredis-d061n`,
+`frankenredis-unj78`, `frankenredis-nrybx`, `frankenredis-44wcq`,
+`frankenredis-3gx3y`, `frankenredis-tp5aa`, `frankenredis-w0i5z`.
+
+Harness: `cargo bench -p fr-bench --bench keyed_write_vs_redis -- --noplot`
+with `FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`
+and `REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server`.
+Current server was rch-built from `bf87bd00c`; pre-series A/B server was built from
+`ecb5ca0a` (parent before the 5-value parser series). The benchmark sends canonical
+single-byte-value `LPUSH`/`RPUSH`/`SADD` packets in 64-command pipelines; `FLUSHALL`
+setup/cleanup is outside the Criterion timed section. Correctness gate:
+`scripts/keyed_write_packet_differ.py 46791 46792` PASS — byte-exact vs Redis 7.2.4 for
+LPUSH/RPUSH/SADD/ZADD N=4..19, HSET N=4..20, MSET fallback.
+
+Ratios below are command-throughput ratios. `fr/redis < 1` means Redis is faster;
+`current/pre` compares current frankenredis against the pre-5/16 parser baseline.
+
+| Bead | Arity | LPUSH fr/redis | LPUSH current/pre | RPUSH fr/redis | RPUSH current/pre | SADD fr/redis | SADD current/pre | Decision |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| frankenredis-bnrnp | 5  | 0.409 | 1.019 | 0.800 | 1.173 | 0.847 | 1.100 | KEEP: RPUSH/SADD A/B wins; LPUSH still structural |
+| frankenredis-2tbmh / 8lqp4 / ons7i | 8 | 0.350 | 1.036 | 0.802 | 1.142 | 1.161 | 1.223 | KEEP: SADD beats Redis; RPUSH A/B win |
+| frankenredis-nrybx | 12 | 0.331 | 1.095 | 0.903 | 1.276 | 1.325 | 1.114 | KEEP: all three A/B wins; SADD beats Redis |
+| frankenredis-w0i5z | 16 | 0.273 | 1.039 | 0.827 | 1.174 | 1.574 | 1.207 | KEEP: SADD beats Redis; RPUSH A/B win |
+
+Per-bead rollup for the intermediate arities not shown individually in Criterion:
+6/7/9/10/11/13/14/15 are part of the same generated exact-parser ladder and are covered
+by the byte-exact differential gate; the measured arity sweep shows the ladder has real
+positive signal on RPUSH/SADD, but does not close LPUSH. Do not extend this exact-arity
+family solely to chase LPUSH — the list-push gap is `ChunkedList` structural allocation,
+not parser dispatch.
+
+Negative evidence:
+- **LPUSH remains Redis-faster even when exact parsers fire**: 0.409x (5v), 0.350x (8v),
+  0.331x (12v), 0.273x (16v). This is not a parser regression; current/pre is within
+  noise to modestly positive, and the previous scorecard already tied LPUSH to the
+  `ChunkedList` per-element push path. Retry only if a profiler attributes >=0.15% RPS p99
+  to `parse_borrowed_plain_keyed_values*_packet` under an LPUSH/RPUSH/SADD arity-mix
+  workload after the ChunkedList packed-node rewrite lands.
+- **No revert this pass**: no arity showed a family-level regression versus the pre-series
+  baseline; RPUSH improved 1.14-1.28x and SADD improved 1.10-1.22x on the sampled arities.
