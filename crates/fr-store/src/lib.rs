@@ -2353,7 +2353,7 @@ pub enum SetValue {
 /// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
 #[allow(dead_code)]
 fn set_int_to_bytes(n: i64) -> Vec<u8> {
-    n.to_string().into_bytes()
+    integer_decimal_bytes(n)
 }
 
 /// Iterator over `SetValue` members yielding owned bytes for the intset
@@ -3057,7 +3057,7 @@ impl Value {
     fn string_bytes(&self) -> Option<Cow<'_, [u8]>> {
         match self {
             Self::String(bytes) => Some(Cow::Borrowed(bytes.as_slice())),
-            Self::Integer(value) => Some(Cow::Owned(value.to_string().into_bytes())),
+            Self::Integer(value) => Some(Cow::Owned(integer_decimal_bytes(*value))),
             _ => None,
         }
     }
@@ -3065,7 +3065,7 @@ impl Value {
     fn string_owned(&self) -> Option<Vec<u8>> {
         match self {
             Self::String(bytes) => Some(bytes.to_vec()),
-            Self::Integer(value) => Some(value.to_string().into_bytes()),
+            Self::Integer(value) => Some(integer_decimal_bytes(*value)),
             _ => None,
         }
     }
@@ -3084,7 +3084,7 @@ impl Value {
 
     fn materialize_string(&mut self) -> Option<&mut Vec<u8>> {
         if let Self::Integer(value) = self {
-            *self = Self::String(value.to_string().into_bytes().into());
+            *self = Self::String(integer_decimal_bytes(*value).into());
         }
         match self {
             Self::String(bytes) => Some(bytes.make_heap()),
@@ -6813,7 +6813,7 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::String(v) => (Cow::Borrowed(v.as_slice()), existing_expiry),
                 Value::Integer(value) => {
-                    (Cow::Owned(value.to_string().into_bytes()), existing_expiry)
+                    (Cow::Owned(integer_decimal_bytes(*value)), existing_expiry)
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -6853,7 +6853,7 @@ impl Store {
         self.adjust_cached_memory_usage_after_remove(key, &entry);
         match entry.value {
             Value::String(v) => Ok(Some(v.into_vec())),
-            Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
+            Value::Integer(value) => Ok(Some(integer_decimal_bytes(value))),
             _ => Err(StoreError::WrongType),
         }
     }
@@ -40916,7 +40916,18 @@ mod tests {
         ] {
             let expected = value.to_string().into_bytes();
             assert_eq!(integer_decimal_bytes(value), expected);
+            assert_eq!(set_int_to_bytes(value), expected);
             assert_eq!(ziplist_integer_bytes(value), expected);
+
+            let value_obj = Value::Integer(value);
+            assert_eq!(value_obj.string_bytes().unwrap().as_ref(), expected.as_slice());
+            assert_eq!(value_obj.string_owned().unwrap(), expected);
+
+            let mut materialized = Value::Integer(value);
+            assert_eq!(
+                materialized.materialize_string().unwrap().as_slice(),
+                expected.as_slice()
+            );
         }
     }
 

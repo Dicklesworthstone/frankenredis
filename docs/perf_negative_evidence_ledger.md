@@ -122,6 +122,16 @@ turns). Keep claims honest — mark which.
   behavior across zero, `-0`, leading-zero, plus-sign, i64 min/max, overflow, and
   encoding-width boundaries. Retry condition if rejected: only revisit with a
   profile naming `list_lp_int`/listpack sizing, not as generic integer cleanup.
+- frankenredis-087qq / cod-a: `fr-store` integer value materialization now routes
+  `Value::Integer` owned-byte paths and intset member bytes through the shared
+  `integer_decimal_bytes` / itoa2 writer instead of `i64::to_string()` formatting
+  machinery — CODED (reasoned; batch benchmark pending). Scope is store-side byte
+  materialization for integer GET-like paths and `SetValue::Int` iteration /
+  promotion / removal; RESP serializer, runtime, and server code are unchanged.
+  Guard pins zero, sign edges, and i64 min/max against the old `to_string`
+  reference for `Value::Integer` and intset member materialization. Retry
+  condition if rejected: do not retry generic i64 formatting cleanup unless a
+  fresh profile names integer materialization or intset member formatting.
 - frankenredis-n2u1g / cod-b: zset score direct encoder for borrowed `ZSCORE`
   and `ZMSCORE` network fast paths — CODED (reasoned; batch benchmark pending).
   `fr-protocol::encode_redis_double` writes Redis d2string bytes directly into
