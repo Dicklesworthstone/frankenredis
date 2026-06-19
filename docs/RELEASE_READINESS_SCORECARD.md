@@ -165,3 +165,35 @@ shipped levers), but the **per-KEY keyspace-dict overhead is the real RAM gap (1
 123 B/key. So the RAM headline is: *the dict, not the values.* The single highest-impact RAM lever
 remaining is the keyspace-dict compaction (uhthd, in-progress, already 4.49x->1.79x). All structural;
 no recent-lever regression -> NO REVERT.
+
+## GET/SET pipeline-depth scaling (MEASURED 2026-06-19, fresh servers)
+| Workload | depth 1 | depth 16 | depth 128 |
+|---|--:|--:|--:|
+| GET fr/redis | 1.056 (cv 3.3/3.7) | 1.148 | 1.456 (cv 5.2/7.4) |
+| SET fr/redis | 1.026 (cv 2.5/5.3) | 1.272 | 1.711 (cv 12.4/7.5) |
+
+fr is faster at EVERY depth, and the margin GROWS with pipelining: ~parity at depth 1
+(latency-bound — both syscall-round-trip-dominated) -> 1.46-1.71x at depth 128 (throughput-bound,
+where fr's efficient per-command dispatch + borrowed fast paths dominate). Note: the long-lived
+sandbox servers DEGRADE over a session (a stale run gave fr cv 104% nonsense) — these are on
+FRESH processes; reinforces the vibu6 quiet-host need for publication numbers.
+
+## RELEASE-READINESS VERDICT (synthesized from all MEASURED dimensions)
+**fr beats Redis 7.2.4 on the common case; trails on three scoped, structural fronts.**
+
+WINS (measured vs redis 7.2.4):
+- **Small/medium-value throughput**: faster at all pipeline depths, geomean 1.348x @depth16,
+  up to 1.7x @depth128; reads especially (smembers/hgetall/lrange 1.7-1.9x).
+- **Collection RAM**: hashtable hash 0.506x (HALF — CompactFieldMap); stream/zset near-parity.
+- **RDB decode** for list (0.731x, ta8s1) / set / int-strings (087qq).
+
+GAPS (measured, structural, each scoped — NONE a recent-lever regression -> NO REVERTS):
+1. **Large-value SET writes**: 0.12-0.42x (worsens with size) — safe-Rust zero-fill framing tax
+   (read side already qesp3-optimized; residual needs MaybeUninit/unsafe or move-out-of-read_buf). GET fine.
+2. **Keyspace-dict RAM**: 1.79x RSS (220 vs 123 B/key) — uhthd in-progress (already 4.49x->1.79x).
+3. **zset/hash RDB-decode build**: 1.62x / 1.18x — dual-structure (uybhq) / field-rebuild; next lever = zset bulk-build.
+
+SHIP GUIDANCE: for the typical Redis workload (pipelined small-value GET/SET/hash, moderate
+keyspace) fr is a measured win on both speed and (collection) RAM. For large-payload caching
+(>=64KB values) or very-large-keyspace RAM-sensitive deployments, the three gaps above apply.
+Conformance GREEN throughout (all measured levers byte-identical-verified; zero code reverted).
