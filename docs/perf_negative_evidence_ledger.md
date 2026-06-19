@@ -197,6 +197,15 @@ turns). Keep claims honest — mark which.
   and decodes binary/integer-looking/signed members. Retry condition if
   rejected: do not retry set-listpack vector cleanup unless a fresh SET
   DUMP/RDB profile names listpack construction.
+- frankenredis-knzdi / cod-a: `fr-persist` RDB listpack decode for compact
+  set/hash/zset now consumes owned decoded entries with `into_bytes()` instead
+  of cloning string payloads through `to_bytes()` and dropping the original —
+  CODED (reasoned; batch benchmark pending). Integer listpack entries still
+  render through the same canonical decimal helper, and output ordering/types
+  stay unchanged. Guard is the compact set/hash/zset listpack decode suite plus
+  crate-scoped check. Retry condition if rejected: do not retry owned-entry
+  move cleanup unless a fresh DEBUG RELOAD / RESTORE profile names compact
+  collection listpack decode allocation.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;
