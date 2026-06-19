@@ -17,6 +17,36 @@
 | 16 | 176,576 | 226,505 | 1.283 | 3.67/1.43 | 486/307 | **fr faster clean** |
 | 128 | 188,686 | 259,932 | 1.378 | 0.71/1.54 | 3937/2401 | **fr faster clean** |
 
+## Targeted Gauntlet: frankenredis-uhthd Boxed Keyspace Storage
+
+- Commit measured: pre-commit candidate on top of `c1f8893d`; proof artifact
+  `artifacts/optimization/frankenredis-uhthd-boxed-keys/20260619T0557Z/summary.json`.
+- Build: `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+  RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile release-perf -p fr-server
+  -p fr-bench`, then local materialization in the same target dir because rch did not copy back
+  custom-target release-perf executables.
+- Workload: `scripts/memory_baseline_capture.py`, fresh Redis 7.2.4 and FrankenRedis processes,
+  scale 200k, high non-colliding ports.
+- Keep/revert decision: **KEEP**. Target keyspace RSS ratio improved from `1.688x` to `1.348x`
+  Redis, and FrankenRedis absolute RSS fell in all seven memory cells. Not a closeout:
+  keyspace is still a Redis-relative loss.
+- Correctness gates: focused `fr-store` keyspace/volatile tests passed, `scan_invariant_gate.py`
+  passed, and `cargo test -p fr-conformance -- --nocapture` passed.
+
+| memory cell | baseline fr/redis RSS | post fr/redis RSS | verdict |
+|---|--:|--:|---|
+| keyspace | 1.688 | 1.348 | target gap shrank 20.1%; Redis still lighter |
+| hash | 1.474 | 1.239 | improved; still loss |
+| list | 1.177 | 1.169 | neutral/improved; still loss |
+| set | 1.107 | 1.184 | fr RSS improved; ratio hurt by Redis RSS variance |
+| string_1k | 0.951 | 0.892 | fr win |
+| stream | 0.981 | 0.978 | fr win |
+| zset | 1.795 | 1.883 | fr RSS improved; ratio hurt by Redis RSS variance |
+
+Win/loss/neutral vs Redis on memory after lever: **2/5/0**. Absolute FrankenRedis RSS
+delta across cells: **7/0/0** improved/regressed. Throughput smoke: SET `1.02x`, GET `0.94x`,
+HSET `1.06x`, ZADD `0.84x`; with neutral band 0.90-1.00x, **2/1/1**. ZADD remains a gap.
+
 ## Targeted Gauntlet: frankenredis-uhthd Lazy Sorted Key Index
 
 - Commit measured: `4cf73ebef`
@@ -79,16 +109,18 @@ _Note: a point-in-time artifact sweep, not the ratcheted .bench-history baseline
 
 - Types rated: **7**
 - fr wins (<=1.0x RSS): **2/7**
-- RSS geomean: **1.315x**
+- RSS geomean: **1.210x**
 
 | data-type | fr/redis RSS | fr/redis used_memory | verdict |
 |---|---|---|---|
-| hash | 1.426 | 0.838 | loss |
-| keyspace | 1.912 | 0.805 | loss |
-| list | 1.212 | 0.391 | loss |
-| set | 1.199 | 0.562 | loss |
-| stream | 0.988 | 1.096 | WIN |
-| string_1k | 0.942 | 0.964 | WIN |
-| zset | 1.841 | 0.62 | loss |
+| hash | 1.239 | 0.838 | loss |
+| keyspace | 1.348 | 0.805 | loss |
+| list | 1.169 | 0.391 | loss |
+| set | 1.184 | 0.562 | loss |
+| stream | 0.978 | 1.096 | WIN |
+| string_1k | 0.892 | 0.964 | WIN |
+| zset | 1.883 | 0.620 | loss |
 
-**RAM gaps (fr heavier):** keyspace=1.91x, zset=1.84x, hash=1.43x, list=1.21x, set=1.20x
+**RAM gaps (fr heavier):** zset=1.88x, keyspace=1.35x, hash=1.24x, set=1.18x, list=1.17x.
+The zset ratio worsened in the latest run because Redis RSS fell more than fr; fr absolute RSS
+improved by 73,728 B in that cell.

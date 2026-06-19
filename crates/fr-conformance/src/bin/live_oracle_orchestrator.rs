@@ -851,12 +851,12 @@ mod tests {
             runner: "local".to_string(),
             run_seed: 424242,
             matrix: "baseline".to_string(),
-            suite_manifest: default_suite_manifest_path(),
+            suite_manifest: "fixtures/live_oracle_matrix.json".into(),
             suites: Vec::new(),
         };
         assert_eq!(
             compute_run_fingerprint(&cli),
-            "09cbc41f84fc318f41bfa9562d041ff36953689225d1afbb5dc6fd1433364ad4".to_string()
+            "cbf479cfd1de73f4bd97e7ad412d5b320ca32762d16463bcc0f161cc759b4339".to_string()
         );
     }
 

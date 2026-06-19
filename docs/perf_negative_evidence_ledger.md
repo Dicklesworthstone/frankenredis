@@ -591,3 +591,46 @@ Negative evidence:
   for list reloads; the isolated `ta8s1` decode-string move is not a Redis-relative win.
 - Source hunk reverted to `entry.to_bytes()` for PACKED quicklist2 node decode.
 - Keep the benchmark harness as the future gate before retrying this family.
+
+## MEASURED cod-b boxed keyspace storage gauntlet (2026-06-19) — KEPT, residual gap open
+
+Scope: `frankenredis-uhthd`, replacing the write-hot canonical keyspace key from
+`Arc<[u8]>` to `Box<[u8]>` and keeping ordered/RANDOMKEY/volatile side views lazy. This applies
+the graveyard/layout lever to the current measured RAM gap after earlier lazy ordered/random
+index work: persistent keyspaces should not pay an Arc header/refcount for side indexes that are
+not resident.
+
+Build/proof bundle: `release-perf`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+`rch exec` builds/checks passed, but rch did not copy back the custom-target release-perf
+executables; benchmark binaries were therefore materialized locally in the same target dir before
+measurement. Raw artifacts:
+`artifacts/optimization/frankenredis-uhthd-boxed-keys/20260619T0557Z/{baseline_memory.json,post_memory.json,throughput_smoke.txt,scan_invariant_gate.txt,summary.json}`.
+
+Memory harness: `scripts/memory_baseline_capture.py`, fresh Redis 7.2.4 and FrankenRedis
+processes, scale 200k, high non-colliding port bases.
+
+| Cell | baseline fr/redis RSS | post fr/redis RSS | fr RSS delta | Redis-relative verdict |
+|---|--:|--:|--:|---|
+| keyspace | 1.688 | 1.348 | -5,935,104 B | KEEP: target gap shrank 20.1%, Redis still lighter |
+| hash | 1.474 | 1.239 | -573,440 B | improves, still Redis-relative loss |
+| list | 1.177 | 1.169 | -8,192 B | neutral/improves, still Redis-relative loss |
+| set | 1.107 | 1.184 | -122,880 B | fr RSS improved; ratio worsened from Redis RSS variance |
+| string_1k | 0.951 | 0.892 | -712,704 B | fr wins |
+| stream | 0.981 | 0.978 | -4,784,128 B | fr wins |
+| zset | 1.795 | 1.883 | -73,728 B | fr RSS improved; ratio worsened from Redis RSS variance |
+
+Memory scorecard: Redis-relative win/loss/neutral **2/5/0** after the lever; FrankenRedis
+absolute RSS improved in **7/7** cells. Target keyspace remains a Redis-relative loss at 1.348x,
+so `uhthd` stays open for deeper dict/table compaction.
+
+Throughput smoke: `bench_vs_redis.py` with `redis-benchmark`, 3 trials, 50k requests, p16/c50:
+`SET 1.02x`, `GET 0.94x`, `HSET 1.06x`, `ZADD 0.84x`, `RANDOMKEY no data`
+(`redis-benchmark` unsupported). With neutral band 0.90-1.00x, scorecard is **2/1/1**;
+`ZADD` remains a measured Redis-relative gap and is not explained by this key-storage lever.
+
+Correctness/gates: `cargo check --workspace --all-targets` PASS via rch; `cargo clippy
+--workspace --all-targets -- -D warnings` PASS via rch; focused `fr-store` keyspace/volatile
+tests PASS; `scan_invariant_gate.py` PASS; `cargo test -p fr-conformance -- --nocapture` PASS.
+`cargo fmt --all -- --check` remains red on pre-existing formatting drift outside this lever
+(`fr-command`, `fr-persist`, `fr-protocol`, `fr-server`, `fr-store/keyspace_dict.rs`,
+`fr-store/packed_set.rs`); the production diff stayed scoped.

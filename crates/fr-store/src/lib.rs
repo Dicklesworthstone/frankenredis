@@ -598,6 +598,12 @@ const ZSET_INDEX_TREE_WARM_MIN_LEN: usize = 4096;
 const ZSET_INDEX_TREE_WARM_MIN_SKIP: usize = 1024;
 const ZSET_INDEX_TREE_WARM_HITS: u8 = 2;
 type SharedZSetMember = Arc<[u8]>;
+type StoreKey = Box<[u8]>;
+
+#[inline]
+fn store_key_from_slice(key: &[u8]) -> StoreKey {
+    Box::<[u8]>::from(key)
+}
 
 #[derive(Debug, Clone)]
 pub struct SortedSet {
@@ -3260,7 +3266,7 @@ const _: () = assert!(std::mem::size_of::<Entry>() <= 48);
 
 #[derive(Debug, Clone, Default)]
 struct RandomKeySlotIndex {
-    keys: Vec<std::sync::Arc<[u8]>>,
+    keys: Vec<StoreKey>,
     dirty: bool,
 }
 
@@ -4418,21 +4424,18 @@ pub struct Store {
     /// defeated) at a fraction of the cost. Iteration order is not an
     /// observable: SCAN walks the sorted `ordered_keys`, and RANDOMKEY /
     /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
-    // (frankenredis-x4tgs) The canonical key copy. Shares the SAME per-key
-    // `Arc<[u8]>` as ordered_keys (and, only after RANDOMKEY is used, the lazy
-    // random_key_slots cache), so each key's bytes live in exactly ONE allocation
-    // across the write-hot keyspace. `Arc<[u8]>` hashes/orders via `<[u8]>`
-    // identically to the prior `Vec<u8>`, so bucket placement and every `&[u8]`
-    // lookup are byte-for-byte unchanged.
-    entries: HashMap<std::sync::Arc<[u8]>, Entry, foldhash::quality::RandomState>,
-    // (frankenredis-x4tgs) `ordered_keys` shares the SAME per-key `Arc<[u8]>` as
-    // `entries`, so the SCAN/KEYS ordered index stores no duplicate key bytes.
+    // (frankenredis-uhthd) The write-hot canonical key copy is a boxed byte slice,
+    // not refcounted storage. Ordered/RANDOMKEY/volatile side views are lazy now, so
+    // persistent keys should not pay an `Arc` header and atomic refcount just in
+    // case a rare side index is materialized. `Box<[u8]>` hashes/orders via `[u8]`,
+    // so bucket placement and every borrowed `&[u8]` lookup are byte-identical.
+    entries: HashMap<StoreKey, Entry, foldhash::quality::RandomState>,
     // (frankenredis-uhthd) It is now a lazy side index: write-heavy keyspaces keep
     // it empty, and ordered consumers rebuild it from `entries` only when needed.
-    // `Arc<[u8]>` orders/hashes via `[u8]` (lexicographic), identical to the
+    // `Box<[u8]>` orders/hashes via `[u8]` (lexicographic), identical to the
     // prior `Vec<u8>`, so SCAN/KEYS order and every `&[u8]` range/lookup are
     // byte-for-byte unchanged once materialized.
-    ordered_keys: BTreeSet<std::sync::Arc<[u8]>>,
+    ordered_keys: BTreeSet<StoreKey>,
     ordered_keys_dirty: bool,
     /// (frankenredis-3e92e) Monotonic counter bumped on every STRUCTURAL
     /// keyspace mutation (key insert / remove / flush). Used to validate the
@@ -4458,14 +4461,13 @@ pub struct Store {
     /// Physical keys by DB for RANDOMKEY sampling. `ordered_keys` remains the
     /// deterministic SCAN/KEYS surface; RANDOMKEY has no ordering contract, so
     /// its per-db vector is rebuilt lazily only when a caller actually asks for
-    /// RANDOMKEY. Write-heavy workloads no longer keep one `Arc` clone per key
+    /// RANDOMKEY. Write-heavy workloads no longer keep one side-index key per key
     /// resident solely for a rare command. (frankenredis-uhthd)
     random_key_slots: Vec<RandomKeySlotIndex>,
     /// Absolute expiry deadlines for keys that currently carry a TTL. This is
     /// Redis's `db->expires` shape: persistent keys pay zero bytes in `Entry`,
-    /// while volatile keys share the same canonical key Arc as `entries`.
-    expiry_deadlines:
-        HashMap<std::sync::Arc<[u8]>, std::num::NonZeroU64, foldhash::quality::RandomState>,
+    /// while volatile keys pay in the expiry side dictionary only when needed.
+    expiry_deadlines: HashMap<StoreKey, std::num::NonZeroU64, foldhash::quality::RandomState>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -4480,10 +4482,10 @@ pub struct Store {
     /// consumer observes that the earliest deadline is due. Long-TTL write-heavy
     /// workloads therefore avoid a global `BTreeSet<Vec<u8>>` insertion on
     /// every SETEX/PSETEX, but due-key sampling still uses the same sorted order.
-    // (frankenredis-x4tgs) Rebuilt lazily from `entries` by cloning the shared
-    // per-key Arc (refcount bump, no byte copy), so the volatile sampling index
-    // adds zero duplicate key storage. Orders via <[u8]>, identical to Vec<u8>.
-    volatile_keys: BTreeSet<std::sync::Arc<[u8]>>,
+    // (frankenredis-uhthd) Rebuilt lazily from `expiry_deadlines`. Persistent
+    // keyspaces keep it empty; volatile workloads materialize the sorted sampling
+    // view only when expiry work can actually run.
+    volatile_keys: BTreeSet<StoreKey>,
     volatile_keys_dirty: bool,
     /// Counts of absolute key-expiry deadlines, keyed by deadline ms.
     ///
@@ -8509,7 +8511,7 @@ impl Store {
     }
 
     /// Mark one DB's RANDOMKEY sample vector stale. The vector is a cache, not
-    /// canonical state: inserts/deletes only clear its `Arc` clones and the next
+    /// canonical state: inserts/deletes only clear it and the next
     /// RANDOMKEY rebuilds it from `entries`. This keeps the write-hot keyspace
     /// from paying a resident side index for workloads that never call RANDOMKEY.
     /// (frankenredis-uhthd)
@@ -8534,11 +8536,11 @@ impl Store {
             return;
         }
 
-        let keys: Vec<std::sync::Arc<[u8]>> = self
+        let keys: Vec<StoreKey> = self
             .entries
             .keys()
             .filter(|key| physical_key_belongs_to_db(key.as_ref(), db))
-            .map(std::sync::Arc::clone)
+            .cloned()
             .collect();
 
         if let Some(index) = self.random_key_slots.get_mut(db) {
@@ -8577,7 +8579,7 @@ impl Store {
         match expires_at_ms.and_then(std::num::NonZeroU64::new) {
             Some(deadline) => {
                 self.expiry_deadlines
-                    .insert(std::sync::Arc::clone(canonical_key), deadline);
+                    .insert(canonical_key.clone(), deadline);
             }
             None => {
                 self.expiry_deadlines.remove(key);
@@ -8598,7 +8600,7 @@ impl Store {
         }
         self.volatile_keys.clear();
         self.volatile_keys
-            .extend(self.expiry_deadlines.keys().map(std::sync::Arc::clone));
+            .extend(self.expiry_deadlines.keys().cloned());
         self.volatile_keys_dirty = false;
     }
 
@@ -8698,28 +8700,28 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
             }
         }
-        // (frankenredis-x4tgs) For a NEW key, allocate the key bytes ONCE behind
-        // an Arc. Ordered-key and RANDOMKEY side indexes are lazy caches now; new
-        // keys only dirty them. For an OVERWRITE there is no new allocation at
-        // all — the value is replaced in place below, keeping the existing Arc key.
-        let shared: Option<std::sync::Arc<[u8]>> = if is_new_key {
-            let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(key.as_slice());
+        // For a NEW persistent key, allocate only the canonical boxed key bytes.
+        // Ordered-key and RANDOMKEY side indexes are lazy caches now; new keys only
+        // dirty them. For an OVERWRITE there is no new key allocation at all — the
+        // value is replaced in place below, keeping the existing boxed key.
+        let canonical_key: Option<StoreKey> = if is_new_key {
+            let canonical_key = store_key_from_slice(key.as_slice());
             self.mark_ordered_keys_dirty();
             self.mark_random_key_index_dirty(db);
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-            Some(shared)
+            Some(canonical_key)
         } else {
             None
         };
-        let expiry_key = shared.as_ref().map_or_else(
+        let expiry_key = canonical_key.as_ref().map_or_else(
             || {
                 self.entries
                     .get_key_value(key.as_slice())
-                    .map(|(key, _)| std::sync::Arc::clone(key))
+                    .map(|(key, _)| key.clone())
             },
-            |shared| Some(std::sync::Arc::clone(shared)),
+            |canonical_key| Some(canonical_key.clone()),
         );
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
@@ -8731,10 +8733,10 @@ impl Store {
         }
         self.hll_register_cache.remove(&key);
         self.mem_estimate_cache.borrow_mut().remove(&key);
-        let old_entry = match shared {
-            // New key: insert the shared Arc as the canonical key.
-            Some(shared) => self.entries.insert(shared, entry),
-            // Overwrite: replace the value in place, reusing the existing Arc key
+        let old_entry = match canonical_key {
+            // New key: insert the boxed bytes as the canonical key.
+            Some(canonical_key) => self.entries.insert(canonical_key, entry),
+            // Overwrite: replace the value in place, reusing the existing boxed key
             // (no new key allocation on the hot SET-existing path).
             None => self
                 .entries
@@ -18182,42 +18184,10 @@ impl Store {
     /// Return a random live key, or None if the keyspace is empty.
     #[must_use]
     pub fn randomkey(&mut self, now_ms: u64) -> Option<Vec<u8>> {
-        if self.entries.is_empty() {
-            return None;
-        }
-
-        // Try up to 100 times to find a non-expired key randomly.
-        // This is much faster than expiring all keys in an O(N) scan.
-        for _ in 0..100 {
-            let idx = (self.next_rand() as usize) % self.entries.len();
-            let key = self.entries.keys().nth(idx).map(|k| k.to_vec())?;
-
-            // Check if it's expired. If so, drop it (with stats/notifications) and try again.
-            self.drop_if_expired(&key, now_ms);
-            if self.entries.contains_key(key.as_slice()) {
-                return Some(key);
-            }
-            if self.entries.is_empty() {
-                return None;
-            }
-        }
-
-        // Fallback: if we failed many times, just pick the first key that isn't expired.
-        // This handles cases where many keys are expired but not yet reaped.
-        let mut expired_keys = Vec::new();
-        let mut result = None;
-        for key in self.entries.keys() {
-            if evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict {
-                expired_keys.push(key.to_vec());
-            } else {
-                result = Some(key.to_vec());
-                break;
-            }
-        }
-        for key in expired_keys {
-            self.drop_if_expired(&key, now_ms);
-        }
-        result
+        // Store-level convenience wrapper for DB 0. Command dispatch and runtime
+        // call `randomkey_in_db(selected_db, ...)`; keep this path on the same lazy
+        // positional index instead of the stale all-keyspace sampler.
+        self.randomkey_in_db(0, now_ms)
     }
 
     #[must_use]
@@ -18266,8 +18236,7 @@ impl Store {
             return None;
         }
         let idx = (self.next_rand() as usize) % len;
-        let physical = self.random_key_slots.get(db)?.keys.get(idx)?.clone();
-        let physical: &[u8] = &physical;
+        let physical = self.random_key_slots.get(db)?.keys.get(idx)?.as_ref();
         decode_db_key(physical)
             .map(|(_, logical)| logical.to_vec())
             .or_else(|| Some(physical.to_vec()))
@@ -18597,7 +18566,7 @@ impl Store {
     /// `range` resume and the `skip` fallback.
     fn scan_walk<'a>(
         &'a self,
-        keys: impl Iterator<Item = &'a std::sync::Arc<[u8]>>,
+        keys: impl Iterator<Item = &'a StoreKey>,
         start: usize,
         batch_size: usize,
         pattern: Option<&[u8]>,
@@ -18606,7 +18575,7 @@ impl Store {
         let mut pos = start;
         let mut processed = 0;
         let mut result = Vec::new();
-        let mut last_examined: Option<&'a std::sync::Arc<[u8]>> = None;
+        let mut last_examined: Option<&'a StoreKey> = None;
         for key in keys {
             let Some(_entry) = self.entries.get(key.as_ref()) else {
                 continue;

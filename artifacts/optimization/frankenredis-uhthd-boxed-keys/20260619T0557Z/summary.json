@@ -1,0 +1,59 @@
+{
+  "bead": "frankenredis-uhthd",
+  "agent": "CobaltCove",
+  "lever": "boxed keyspace storage for canonical keys and lazy side indexes",
+  "decision": "keep",
+  "build_profile": "release-perf",
+  "target_dir": "/data/projects/.rch-targets/frankenredis-cod-b",
+  "oracle": "Redis 7.2.4 vendored legacy_redis_code/redis",
+  "baseline_head": "c1f8893d493593e08b9984f6b5e1d62fb1e8e416",
+  "memory_harness": {
+    "command": "FR_BENCH_PORT_BASE=<high-port> python3 scripts/memory_baseline_capture.py legacy_redis_code/redis/src/redis-server /data/projects/.rch-targets/frankenredis-cod-b/release-perf/frankenredis",
+    "scale": 200000,
+    "baseline_json": "baseline_memory.json",
+    "post_json": "post_memory.json"
+  },
+  "target_memory_delta": {
+    "cell": "keyspace",
+    "baseline_fr_rss": 30322688,
+    "post_fr_rss": 24387584,
+    "fr_rss_delta_bytes": -5935104,
+    "baseline_redis_rss": 17960960,
+    "post_redis_rss": 18096128,
+    "baseline_fr_redis_rss_ratio": 1.688,
+    "post_fr_redis_rss_ratio": 1.348,
+    "ratio_improvement": 0.799
+  },
+  "memory_ratio_scorecard": {
+    "wins_vs_redis": 2,
+    "losses_vs_redis": 5,
+    "neutral_vs_redis": 0,
+    "fr_absolute_rss_cells_improved": 7,
+    "fr_absolute_rss_cells_regressed": 0
+  },
+  "throughput_smoke": {
+    "artifact": "throughput_smoke.txt",
+    "set_fr_redis": 1.02,
+    "get_fr_redis": 0.94,
+    "hset_fr_redis": 1.06,
+    "zadd_fr_redis": 0.84,
+    "win_loss_neutral": "2/1/1 with neutral band 0.90x-1.00x"
+  },
+  "gates": [
+    "cargo check --workspace --all-targets: pass via rch",
+    "cargo clippy --workspace --all-targets -- -D warnings: pass via rch",
+    "cargo test -p fr-store uhthd: pass",
+    "cargo test -p fr-store volatile_keys_index_tracks_ttl_transitions: pass",
+    "cargo test -p fr-store active_expire_samples_volatile_keys_only_not_persistent: pass",
+    "cargo test -p fr-store randomkey_in_db_uses_positional_index_and_logical_names: pass",
+    "cargo test -p fr-store randomkey_in_db_expires_volatile_keys_before_sampling: pass",
+    "scripts/scan_invariant_gate.py: pass",
+    "cargo test -p fr-conformance -- --nocapture: pass"
+  ],
+  "known_negative_evidence": [
+    "keyspace RSS remains heavier than Redis at 1.348x, so uhthd remains open",
+    "zadd throughput smoke remains below Redis at 0.84x",
+    "cargo fmt --all -- --check still fails on pre-existing workspace formatting drift outside this lever"
+  ],
+  "rch_note": "rch remote builds/checks passed, but custom CARGO_TARGET_DIR release-perf executable artifacts were not copied back; release-perf benchmark binaries were materialized locally in the same target dir before measurement."
+}

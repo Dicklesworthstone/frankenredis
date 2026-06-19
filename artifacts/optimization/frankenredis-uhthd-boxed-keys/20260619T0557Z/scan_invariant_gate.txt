@@ -1,0 +1,1 @@
+PASS — keyspace SCAN invariant holds (complete + no-dup + sorted across COUNT 1..5000, MATCH/TYPE filters, post-delete, mixed types, post-DEBUG-RELOAD presized rebuild) [guards uhthd KeyDict]

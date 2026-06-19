@@ -1,0 +1,11 @@
+loadavg=4.10  (high load -> absolute rps noisy; ratio stays stable)
+  fr:46502 exe=/data/projects/.rch-targets/frankenredis-cod-b/release-perf/frankenredis sha=00000000 connected_slaves=0
+  redis:46501 exe=/data/projects/.worktrees/frankenredis-cod-b-n2u1g-push-20260619T0540/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+set                median ratio=1.02x  (trials: 0.84, 1.21, 1.02)
+get                median ratio=0.94x  (trials: 0.94, 0.94, 0.87)
+randomkey          (no data)
+hset               median ratio=1.06x  (trials: 0.98, 1.29, 1.06)
+zadd               median ratio=0.84x  (trials: 0.76, 0.90, 0.84)  <-- below 0.9x
+======================================================================
+below-0.9x: [('zadd', 0.8382352116352958)]
