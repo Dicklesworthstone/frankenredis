@@ -775,3 +775,34 @@ Retry condition: do not retry small integer reply tables, exact-8 runtime unroll
 `exists_no_touch` stat aggregation for this workload. The next viable `EXISTS` route needs fresh
 profile evidence naming a different primitive, likely command timing/histogram accounting,
 connection write batching, or a larger keyspace-layout change shared with `frankenredis-uhthd`.
+
+## MEASURED cod-a k263a quicklist2 RESTORE fused-stats pass (2026-06-19) — REJECTED
+
+Scope: `frankenredis-k263a`, the remaining Redis-relative QUICKLIST_2 `RESTORE ... REPLACE`
+materialization gap after the kept `frankenredis-tnv37` slot-reuse lever. This pass tried a
+single production candidate: decode listpack value spans with raw/canonical encoded byte totals
+and seed `ListValue` growth metadata from those totals instead of rebuilding through the
+already-built quicklist chunks. The candidate preserved the prior canonical `lpBytes` rule and
+passed focused tests, but did not improve the measured Redis-relative gate. The source hunk was
+reverted.
+
+Build and proof:
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo build --release -p fr-server -p fr-bench` PASS on worker `hz1`.
+- Focused candidate guards while present: `rch exec -- ... cargo test -p fr-persist decode_value_spans_with_stats_matches_canonical_entry_sizing -- --nocapture` PASS; `rch exec -- ... cargo test -p fr-store restored_quicklist2_stats_constructor_matches_rescan -- --nocapture` PASS.
+- Timing harness: `cargo bench -p fr-bench --bench restore_quicklist_vs_redis -- --noplot`, local same-host Criterion run using rch-built `frankenredis` and Redis 7.2.4 at `legacy_redis_code/redis/src/redis-server`.
+- Kernel profiling was unavailable (`perf_event_paranoid=4`), so the accepted evidence is the focused Criterion A/B.
+
+| Run | Redis elems/s | fr elems/s | fr/redis | Criterion verdict |
+|---|--:|--:|--:|---|
+| Control before candidate | 135.51 K | 56.476 K | 0.417 | baseline |
+| Fused decode/growth stats candidate | 133.17 K | 55.544 K | 0.417 | no significant fr change; median -3.98% throughput, p=0.22 |
+
+Win/loss/neutral:
+- Lever decision in this `k263a` pass: **0 wins / 0 losses / 1 neutral**; no production hunk kept.
+- Redis-relative score after reverting: unchanged at **0 wins / 1 loss / 0 neutral** for this
+  focused QUICKLIST_2 RESTORE gate.
+
+Retry condition: do not retry listpack-span stats fusion, post-build growth-state seeding, or
+generic `lpBytes` rescan avoidance for QUICKLIST_2 RESTORE. The next viable `k263a` lever must
+target request materialization/key-payload cloning in the runtime/server path, direct quicklist
+object construction, or a fresh profile-named primitive distinct from listpack span accounting.

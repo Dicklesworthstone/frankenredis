@@ -400,3 +400,21 @@ hunk remains. RCH release build succeeded, but remote bench failed on `FR_SERVER
 rewriting; accepted timing artifacts used the local compiler-scoped subtarget under
 `/data/projects/.rch-targets/frankenredis-cod-b`. Redis-relative score remains **0 wins / 3 losses /
 0 neutral** for the focused `EXISTS` suite.
+
+## Cod-a remaining quicklist2 RESTORE materialization gap (MEASURED 2026-06-19)
+
+Follow-up for `frankenredis-k263a`: no production lever kept. The candidate fused listpack-span
+decode with canonical growth-state byte totals and seeded restored `ListValue` metadata from those
+totals. Focused correctness guards passed, but the Redis-vs-FrankenRedis Criterion gate showed no
+statistically significant improvement and the median FrankenRedis throughput moved slightly down.
+
+| Run | Redis elems/s | fr elems/s | fr/redis | Release-readiness impact |
+|---|--:|--:|--:|---|
+| Control after tnv37 | 135.51 K | 56.476 K | 0.417 | Redis faster |
+| Fused stats candidate | 133.17 K | 55.544 K | 0.417 | rejected; no hunk remains |
+
+Validation while the candidate was present: focused `fr-persist` and `fr-store` tests passed via
+RCH, and the release server/bench build passed via RCH. The production hunk was reverted, so the
+scorecard remains unchanged: QUICKLIST_2 `RESTORE ... REPLACE` is still a Redis-relative loss,
+with **0 wins / 1 loss / 0 neutral** for this focused gate. Next work should target runtime/server
+request materialization or direct quicklist object construction, not listpack growth-stat fusion.
