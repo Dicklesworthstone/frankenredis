@@ -1,0 +1,78 @@
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+   Compiling fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.01s
+     Running unittests src/lib.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/fr_runtime-ffd5b083b60b34b3)
+
+running 3 tests
+test tests::plain_exists_borrowed_fast_path_disabled_in_non_default_states ... ok
+test tests::plain_exists_borrowed_fast_path_matches_generic_including_duplicates ... ok
+test tests::plain_exists_borrowed_into_encodes_integer_reply ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 540 filtered out; finished in 0.00s
+
+     Running tests/admin_commands_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/admin_commands_test-ae6bd5cc584914e7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+
+     Running tests/aof_roundtrip_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/aof_roundtrip_test-18b79c89e03abd67)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/client_pause_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/client_pause_test-d41db8b683576917)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/dump_restore_roundtrip.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/dump_restore_roundtrip-2517474b51efe69b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/lua_edge_cases_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/lua_edge_cases_test-5a1884f0d5df93fd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_test-b936c37d40d73645)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/multi_exec_linearizability.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/multi_exec_linearizability-23177b3680c781e3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/noreplicas_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/noreplicas_test-c14be28f0e9aacb1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/scan_iteration_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/scan_iteration_test-5c3328c5e262480e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/stale_replica_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/stale_replica_test-32e2261f05c96df6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/watch_cross_client_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/watch_cross_client_test-0ff8ece59a4ac6a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

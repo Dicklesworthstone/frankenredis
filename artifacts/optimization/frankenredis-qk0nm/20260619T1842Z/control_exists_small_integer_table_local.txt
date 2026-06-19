@@ -1,0 +1,150 @@
+   Compiling num-traits v0.2.19
+   Compiling nom v7.1.3
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling syn v2.0.117
+   Compiling crc32fast v1.5.0
+   Compiling serde_json v1.0.149
+   Compiling is-terminal v0.4.17
+error[E0514]: found crate `libc` compiled by an incompatible version of rustc
+  --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/is-terminal-0.4.17/src/lib.rs:90:22
+   |
+90 |             unsafe { libc::isatty(fd.as_raw_fd()) != 0 }
+   |                      ^^^^
+   |
+   = note: the following crate versions were found:
+           crate `libc` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/liblibc-fe3b3eece5886d56.rmeta
+   = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error[E0514]: found crate `autocfg` compiled by an incompatible version of rustc
+ --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num-traits-0.2.19/build.rs:2:14
+  |
+2 |     let ac = autocfg::new();
+  |              ^^^^^^^
+  |
+  = note: the following crate versions were found:
+          crate `autocfg` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libautocfg-ca6717da2c4ccec4.rlib
+  = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error[E0514]: found crate `memchr` compiled by an incompatible version of rustc
+ --> crates/fr-protocol/src/lib.rs:6:5
+  |
+6 | use memchr::memchr;
+  |     ^^^^^^
+  |
+  = note: the following crate versions were found:
+          crate `memchr` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libmemchr-4f9c15f27d143ac3.rmeta
+  = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error[E0514]: found crate `zmij` compiled by an incompatible version of rustc
+   --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.149/src/error.rs:474:17
+    |
+474 |                 zmij::Buffer::new().format(value),
+    |                 ^^^^
+    |
+    = note: the following crate versions were found:
+            crate `zmij` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libzmij-89e2813fba791572.rmeta
+    = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+For more information about this error, try `rustc --explain E0514`.
+error[E0514]: found crate `itoa` compiled by an incompatible version of rustc
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.149/src/ser.rs:1571:26
+     |
+1571 |         let mut buffer = itoa::Buffer::new();
+     |                          ^^^^
+     |
+     = note: the following crate versions were found:
+             crate `itoa` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libitoa-fdfa82d6981e4d48.rmeta
+     = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error[E0514]: found crate `memchr` compiled by an incompatible version of rustc
+   --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.149/src/read.rs:422:35
+    |
+422 |         let start_of_line = match memchr::memrchr(b'\n', &self.slice[..i]) {
+    |                                   ^^^^^^
+    |
+    = note: the following crate versions were found:
+            crate `memchr` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libmemchr-4f9c15f27d143ac3.rmeta
+    = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error: could not compile `fr-protocol` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0514]: found crate `cfg_if` compiled by an incompatible version of rustc
+ --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc32fast-1.5.0/src/specialized/mod.rs:1:1
+  |
+1 | cfg_if::cfg_if! {
+  | ^^^^^^
+  |
+  = note: the following crate versions were found:
+          crate `cfg_if` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libcfg_if-d2e636d86701c50e.rmeta
+  = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error: could not compile `num-traits` (build script) due to 1 previous error
+error: could not compile `is-terminal` (lib) due to 1 previous error
+error[E0425]: cannot find type `State` in module `specialized`
+  --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc32fast-1.5.0/src/lib.rs:59:30
+   |
+59 |     Specialized(specialized::State),
+   |                              ^^^^^ not found in `specialized`
+   |
+help: consider importing this struct
+   |
+39 + use crate::baseline::State;
+   |
+help: if you import `State`, refer to it directly
+   |
+59 -     Specialized(specialized::State),
+59 +     Specialized(State),
+   |
+
+error[E0433]: cannot find `State` in `specialized`
+   --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc32fast-1.5.0/src/lib.rs:111:47
+    |
+111 |             if let Some(state) = specialized::State::new(init) {
+    |                                               ^^^^^ could not find `State` in `specialized`
+    |
+help: consider importing this struct
+    |
+ 39 + use crate::baseline::State;
+    |
+help: if you import `State`, refer to it directly
+    |
+111 -             if let Some(state) = specialized::State::new(init) {
+111 +             if let Some(state) = State::new(init) {
+    |
+
+error[E0514]: found crate `proc_macro2` compiled by an incompatible version of rustc
+ --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/syn-2.0.117/src/group.rs:4:5
+  |
+4 | use proc_macro2::extra::DelimSpan;
+  |     ^^^^^^^^^^^
+  |
+  = note: the following crate versions were found:
+          crate `proc_macro2` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libproc_macro2-d78a6099ad7849a5.rmeta
+  = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error[E0514]: found crate `quote` compiled by an incompatible version of rustc
+   --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/syn-2.0.117/src/token.rs:119:5
+    |
+119 | use quote::{ToTokens, TokenStreamExt as _};
+    |     ^^^^^
+    |
+    = note: the following crate versions were found:
+            crate `quote` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libquote-81727658b6b9ade4.rmeta
+    = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+error: could not compile `syn` (lib) due to 2 previous errors
+error[E0514]: found crate `memchr` compiled by an incompatible version of rustc
+   --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nom-7.1.3/src/traits.rs:883:5
+    |
+883 |     memchr::memchr(token, self).is_some()
+    |     ^^^^^^
+    |
+    = note: the following crate versions were found:
+            crate `memchr` compiled by rustc 1.98.0-nightly (654079540 2026-06-12): /data/projects/.rch-targets/frankenredis-cod-b/release/deps/libmemchr-4f9c15f27d143ac3.rmeta
+    = help: please recompile that crate using this compiler (rustc 1.98.0-nightly (f20a92ec0 2026-06-07)) (consider running `cargo clean` first)
+
+Some errors have detailed explanations: E0425, E0433, E0514.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `crc32fast` (lib) due to 3 previous errors
+error: could not compile `serde_json` (lib) due to 3 previous errors
+error: could not compile `nom` (lib) due to 1 previous error

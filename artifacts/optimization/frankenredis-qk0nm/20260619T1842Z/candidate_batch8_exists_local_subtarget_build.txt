@@ -1,0 +1,5 @@
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+   Compiling fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/frankenredis/crates/fr-server)
+    Finished `release` profile [optimized] target(s) in 24.69s

@@ -108,11 +108,12 @@ turns). Keep claims honest — mark which.
   parser literals unless `perf_baseline_capture.py --trials` confirms
   `ping_mbulk` as a low-CV residual and a profile names this parser branch.
 - frankenredis-h6ppr / cod-a: `fr-protocol` CRLF line scan via locked
-  `memchr::memchr` — CODED (reasoned; batch benchmark pending). Guard covers
-  CR-not-LF scanning plus exact `MAX_LINE_LENGTH` `Incomplete`/`LineTooLong`
-  boundaries. Retry condition if rejected: only revisit with a fresh parser
-  self-time row or a benchmark that isolates line scanning from runtime/server
-  packet-parser work.
+  `memchr::memchr` — MEASURED REJECTED 2026-06-19 and source hunk reverted.
+  Longer current-vs-control confirmation produced 1 win / 1 loss / 2 neutral
+  across GET/SET P16/P128, including a clean 0.959x current/control loss on
+  GET P128. Retry condition: only revisit CRLF line scanning with fresh parser
+  self-time evidence and a low-CV benchmark that isolates line scanning from
+  runtime/server packet-parser work.
 - frankenredis-bssrh / cod-a: `fr-store` listpack sizing canonical-integer
   probe now avoids `value.to_string().as_bytes() == entry` and uses an
   allocation-free canonical byte predicate before parsing — CODED (reasoned;
@@ -806,3 +807,62 @@ Retry condition: do not retry listpack-span stats fusion, post-build growth-stat
 generic `lpBytes` rescan avoidance for QUICKLIST_2 RESTORE. The next viable `k263a` lever must
 target request materialization/key-payload cloning in the runtime/server path, direct quicklist
 object construction, or a fresh profile-named primitive distinct from listpack span accounting.
+
+## MEASURED cod-a h6ppr RESP CRLF memchr scanner pass (2026-06-19) — REJECTED
+
+Scope: `frankenredis-h6ppr`, a code-first `fr-protocol::read_line` candidate that replaced the
+byte-by-byte CRLF search with `memchr::memchr`. This targeted hot-path RESP command parsing while
+avoiding peer-owned runtime/keyspace/persistence surfaces. Focused parser guards passed when the
+candidate was present, but release A/B did not justify carrying the production hunk. The source
+hunk and direct `fr-protocol` `memchr` dependency were reverted.
+
+Build and proof:
+- Current release build: `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo build --release -p fr-server -p fr-bench` PASS on worker `hz2`.
+- Control release build: detached worktree `/data/projects/frankenredis-h6ppr-control`, current
+  `HEAD` with only the h6ppr scanner patch reversed, built via
+  `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a-h6ppr-control cargo build --release -p fr-server -p fr-bench` PASS on worker `hz2`.
+- Kernel profiling unavailable: `/proc/sys/kernel/perf_event_paranoid` was `4`.
+- Timing artifacts:
+  `artifacts/optimization/frankenredis-h6ppr/verify_memchr_crlf_20260619T234447Z/summary.json`,
+  `.../confirm_long_current_control/summary.json`, and
+  `.../confirm_p128_2m/summary.json`.
+
+Initial Redis-relative run (fresh server per engine, 300k requests/cell, 5 trials/cell) showed
+FrankenRedis faster than Redis 7.2.4 in all four GET/SET cells, but the current/control cells were
+too noisy (`cv_pct > 5`) for a keep decision:
+
+| Workload | Redis ops/s | Control ops/s | Current ops/s | current/control | current/redis |
+|---|--:|--:|--:|--:|--:|
+| GET P16 | 939,666 | 1,186,062 | 1,208,901 | 1.019 | 1.287 |
+| SET P16 | 856,098 | 1,038,795 | 1,033,280 | 0.995 | 1.207 |
+| GET P128 | 2,257,312 | 3,023,477 | 2,993,988 | 0.990 | 1.326 |
+| SET P128 | 1,869,422 | 2,725,010 | 2,664,623 | 0.978 | 1.425 |
+
+Longer current-vs-control confirmation (1M requests/cell, interleaved by workload, 5 trials/cell):
+
+| Workload | Control ops/s | Control cv | Current ops/s | Current cv | current/control | Verdict |
+|---|--:|--:|--:|--:|--:|---|
+| GET P16 | 1,103,074 | 3.23% | 1,102,414 | 3.24% | 0.999 | neutral |
+| SET P16 | 992,467 | 3.21% | 1,010,799 | 1.38% | 1.018 | win |
+| GET P128 | 3,305,999 | 5.88% | 3,478,986 | 2.44% | 1.052 | noisy win |
+| SET P128 | 2,777,399 | 2.98% | 2,934,994 | 5.87% | 1.057 | noisy win |
+
+Deeper P128 confirmation (2M requests/cell, 5 trials/cell) reversed the noisy P128 signal:
+
+| Workload | Control ops/s | Control cv | Current ops/s | Current cv | current/control | Verdict |
+|---|--:|--:|--:|--:|--:|---|
+| GET P128 | 3,635,483 | 2.55% | 3,486,702 | 2.68% | 0.959 | loss |
+| SET P128 | 2,919,684 | 4.77% | 2,913,354 | 3.01% | 0.998 | neutral |
+
+Win/loss/neutral:
+- Lever decision for `h6ppr`: **1 win / 1 loss / 2 neutral** on the low-CV confirmation set
+  (`SET P16` win, `GET P128` loss, `GET P16` and `SET P128` neutral). Because the loss is clean
+  and the only clean win is small, no production hunk is kept.
+- Redis-relative score after reverting: unchanged favorable for this focused GET/SET harness;
+  the first-pass control ratios were **4 wins / 0 losses / 0 neutral** vs Redis 7.2.4, but this
+  pass does not claim h6ppr as the cause.
+
+Retry condition: do not retry generic CRLF `memchr` scanning, byte-by-byte line-scan rewrites, or
+line scanner micro-specialization unless a fresh profile names `fr-protocol::read_line` or CRLF
+search self-time as a dominant parser cost and a low-CV current-vs-control bench shows no P128
+regression.

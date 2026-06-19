@@ -1,0 +1,202 @@
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.97s
+     Running unittests src/lib.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/fr_store-74912788b9d7b3f6)
+
+running 2 tests
+test tests::exists_many_no_touch_counts_duplicates_and_batches_stats ... ok
+test tests::exists_many_no_touch_honors_ttl_fallback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 655 filtered out; finished in 0.00s
+
+     Running tests/bulk_member_isomorphism.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/bulk_member_isomorphism-776ef339fb18d840)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/encoding_matrix.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/encoding_matrix-2decb2e47f15fba9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/hash_field_ttl.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/hash_field_ttl-70aaec755ef107e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/metamorphic.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic-81e9a1d0330fcf2e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_bit.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_bit-a8f21704cd573cc2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_bitop.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_bitop-69d7f94f60586a4e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_hash-ad8a01e89e4a30cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_advanced.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_hash_advanced-110d9a6417cc9611)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_field_ttl.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_hash_field_ttl-3f37fc7ed3ac8e3f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_numeric.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_hash_numeric-e5d202f81992e931)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_keys.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_keys-a9c6c891ba6200f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_list.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_list-c40c278c51353480)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_list_advanced.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_list_advanced-41472b7c69a34a7e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_numeric.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_numeric-dce07183effab441)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_set.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_set-4150543ab1ed6e8f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_set_advanced.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_set_advanced-abac32ec50ee571e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_stream.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_stream-2472d04e48e88579)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_string.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_string-f9be9a45eaca357d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_string_advanced.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_string_advanced-12f7d368466000c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_swapdb.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_swapdb-4ed4fd081ab0300b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_zset-5aa9e382046848ad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset_advanced.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_zset_advanced-eed9fcbf6b19d9e3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset_geo.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/metamorphic_zset_geo-a27894e780b0d1c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/pfadd_empty.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/pfadd_empty-8e6129f279dd9775)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/randomkey_panic_test.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/randomkey_panic_test-168d094788a003cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/sdiff_type.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/sdiff_type-140361e9a92fa95a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/sinter_opt.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/sinter_opt-4cb5739d2c1d6abb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/sunionstore_dirty.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/sunionstore_dirty-0ce06299151378dd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zadd_bug.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/zadd_bug-b889dcc12a4251ab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zadd_empty_leak.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/zadd_empty_leak-90095dab074be958)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zincrby_nan_leak.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/zincrby_nan_leak-a1d38b490b6f7873)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zremrangebyrank_bug.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm/debug/deps/zremrangebyrank_bug-083e80b45ac53863)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

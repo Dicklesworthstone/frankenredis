@@ -418,3 +418,22 @@ RCH, and the release server/bench build passed via RCH. The production hunk was 
 scorecard remains unchanged: QUICKLIST_2 `RESTORE ... REPLACE` is still a Redis-relative loss,
 with **0 wins / 1 loss / 0 neutral** for this focused gate. Next work should target runtime/server
 request materialization or direct quicklist object construction, not listpack growth-stat fusion.
+
+## Cod-a RESP CRLF memchr scanner (MEASURED 2026-06-19)
+
+Follow-up for `frankenredis-h6ppr`: no production lever kept. The candidate replaced
+`fr-protocol::read_line`'s byte loop with `memchr::memchr`. It preserved parser behavior in focused
+guards, and the initial Redis-relative GET/SET harness showed FrankenRedis still faster than Redis
+7.2.4 in all four measured cells, but the current-vs-control keep gate failed after low-CV
+confirmation.
+
+| Workload | current/control | cv quality | Release-readiness impact |
+|---|--:|---|---|
+| GET P16 | 0.999 | clean | neutral |
+| SET P16 | 1.018 | clean | small win |
+| GET P128 | 0.959 | clean | rejected regression |
+| SET P128 | 0.998 | clean | neutral |
+
+Decision: revert h6ppr. The final lever score is **1 win / 1 loss / 2 neutral**, and the clean
+P128 GET regression is enough to reject the scanner rewrite. Redis-relative GET/SET remains
+favorable on this harness after reverting; the pass adds negative evidence only.

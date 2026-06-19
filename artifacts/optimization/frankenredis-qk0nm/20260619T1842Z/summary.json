@@ -1,0 +1,118 @@
+{
+  "schema": "frankenredis-perf-summary-v1",
+  "issue": "frankenredis-qk0nm",
+  "agent": "CobaltCove",
+  "timestamp_utc": "2026-06-19T18:42:00Z",
+  "reference": "Redis 7.2.4",
+  "target_dir_requested": "/data/projects/.rch-targets/frankenredis-cod-b",
+  "target_dir_measured": "/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm",
+  "rustc": "rustc 1.98.0-nightly (f20a92ec0 2026-06-07)",
+  "rch": {
+    "doctor": "pass",
+    "release_build": "pass on hz1",
+    "bench": "failed: remote FR_SERVER_BIN rewritten to ephemeral bench target without release/frankenredis",
+    "local_shared_target": "failed: mixed-nightly metadata from rustc 654079540 vs local f20a92ec0"
+  },
+  "profiling": {
+    "perf_event_paranoid": 4,
+    "verdict": "kernel perf profiling blocked; Criterion timing used as acceptance evidence"
+  },
+  "control": {
+    "artifact": "control_exists_small_integer_table_local_subtarget.txt",
+    "cells": {
+      "exists8_all_hit": {
+        "redis_elems_per_sec": 1062600,
+        "frankenredis_elems_per_sec": 917600,
+        "fr_over_redis": 0.864
+      },
+      "exists8_half_hit": {
+        "redis_elems_per_sec": 1147500,
+        "frankenredis_elems_per_sec": 1002500,
+        "fr_over_redis": 0.874
+      },
+      "exists8_duplicates": {
+        "redis_elems_per_sec": 1222100,
+        "frankenredis_elems_per_sec": 932190,
+        "fr_over_redis": 0.763
+      }
+    }
+  },
+  "candidates": [
+    {
+      "name": "small_integer_reply_table",
+      "artifact": "candidate_exists_small_integer_table_local_subtarget.txt",
+      "kept": false,
+      "decision": "rejected: significant frankenredis absolute throughput regression",
+      "fr_candidate_over_control": {
+        "exists8_all_hit": 0.848,
+        "exists8_half_hit": 0.795,
+        "exists8_duplicates": 0.854
+      },
+      "fr_over_redis": {
+        "exists8_all_hit": 0.754,
+        "exists8_half_hit": 0.812,
+        "exists8_duplicates": 0.839
+      }
+    },
+    {
+      "name": "runtime_exact8_unrolled_count",
+      "artifact": "candidate_unrolled_exists_local_subtarget.txt",
+      "kept": false,
+      "decision": "rejected: significant frankenredis absolute throughput regression",
+      "fr_candidate_over_control": {
+        "exists8_all_hit": 0.841,
+        "exists8_half_hit": 0.733,
+        "exists8_duplicates": 0.817
+      },
+      "fr_over_redis": {
+        "exists8_all_hit": 0.777,
+        "exists8_half_hit": 0.755,
+        "exists8_duplicates": 0.769
+      }
+    },
+    {
+      "name": "batch_exists_many_no_touch",
+      "artifact": "candidate_batch_exists_local_subtarget.txt",
+      "kept": false,
+      "decision": "rejected: no credible same-control win; all cells still Redis losses",
+      "fr_candidate_over_control": {
+        "exists8_all_hit": 0.963,
+        "exists8_half_hit": 0.950,
+        "exists8_duplicates": 0.995
+      },
+      "fr_over_redis": {
+        "exists8_all_hit": 0.812,
+        "exists8_half_hit": 0.812,
+        "exists8_duplicates": 0.835
+      }
+    },
+    {
+      "name": "batch_exists_many_no_touch_exact8",
+      "artifact": "candidate_batch8_exists_local_subtarget.txt",
+      "kept": false,
+      "decision": "rejected: significant frankenredis absolute throughput regression",
+      "fr_candidate_over_control": {
+        "exists8_all_hit": 0.853,
+        "exists8_half_hit": 0.823,
+        "exists8_duplicates": 0.857
+      },
+      "fr_over_redis": {
+        "exists8_all_hit": 0.789,
+        "exists8_half_hit": 0.807,
+        "exists8_duplicates": 0.822
+      }
+    }
+  ],
+  "lever_decisions": {
+    "wins": 0,
+    "losses": 4,
+    "neutral": 0
+  },
+  "redis_relative_after_revert": {
+    "wins": 0,
+    "losses": 3,
+    "neutral": 0
+  },
+  "source_state": "all qk0nm production hunks reverted before closeout",
+  "retry_condition": "Do not retry small integer reply tables, exact-8 runtime unrolling, or batch exists_no_touch stat aggregation without fresh profile evidence naming a different primitive."
+}

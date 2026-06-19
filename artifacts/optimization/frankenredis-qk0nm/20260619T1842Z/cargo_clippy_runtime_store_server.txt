@@ -1,0 +1,12 @@
+    Checking fr-expire v0.1.0 (/data/projects/frankenredis/crates/fr-expire)
+    Checking fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+    Checking fr-config v0.1.0 (/data/projects/frankenredis/crates/fr-config)
+    Checking fr-repl v0.1.0 (/data/projects/frankenredis/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/data/projects/frankenredis/crates/fr-eventloop)
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+    Checking fr-sentinel v0.1.0 (/data/projects/frankenredis/crates/fr-sentinel)
+    Checking fr-persist v0.1.0 (/data/projects/frankenredis/crates/fr-persist)
+    Checking fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+    Checking fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/data/projects/frankenredis/crates/fr-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.31s

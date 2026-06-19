@@ -170,3 +170,28 @@ open, but the encoded reply path narrows all three focused cells and is a measur
 Redis-relative score remains **0/3/0** wins/losses/neutral. qk0nm added negative evidence only:
 small integer reply tables, exact-8 unrolling, and batch hit/miss aggregation are not viable next
 steps for the remaining `EXISTS` loss without new profile evidence.
+
+## Targeted Gauntlet: frankenredis-h6ppr RESP CRLF Scanner
+
+- Commit candidate: none kept. The `fr-protocol::read_line` `memchr::memchr` scanner was measured
+  against a HEAD-minus-h6ppr control and reverted.
+- Build/bench: current and control release binaries were built with `rch exec` under
+  `/data/projects/.rch-targets/frankenredis-cod-a` and
+  `/data/projects/.rch-targets/frankenredis-cod-a-h6ppr-control`; Redis 7.2.4 oracle was
+  `legacy_redis_code/redis/src/redis-server`.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-h6ppr/verify_memchr_crlf_20260619T234447Z/summary.json`.
+- Profiling note: kernel `perf` was blocked by `perf_event_paranoid=4`.
+
+Initial Redis-relative GET/SET sweep showed current FrankenRedis faster than Redis in all four
+cells, but current/control was noisy. Low-CV confirmation rejected the lever:
+
+| workload | current/control | verdict |
+|---|---:|---|
+| get_p16 | 0.999 | neutral |
+| set_p16 | 1.018 | small win |
+| get_p128 | 0.959 | rejected regression |
+| set_p128 | 0.998 | neutral |
+
+Lever score: **1/1/2** win/loss/neutral. The parser line-scanner rewrite is not a contributor to
+the project’s GET/SET Redis-relative wins and should not be retried without fresh profile evidence.
