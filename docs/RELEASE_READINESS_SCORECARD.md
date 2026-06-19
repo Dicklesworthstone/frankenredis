@@ -51,3 +51,36 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 ## No reverts this pass
 No recent lever showed a measured regression: the hot path is 8/9 fr-faster (geomean 1.348×), and
 the one loss (lpush) is a pre-existing structural ChunkedList gap, not a backlog optimization.
+
+## RDB encode+decode head-to-head (DEBUG RELOAD, MEASURED 2026-06-19)
+Per-type `DEBUG RELOAD` (full RDB save+load cycle) on 2500 keys/type (40 entries each;
+20000 int-strings), fr-release(29431) vs redis-7.2.4(29442), median of 5 (warmup discarded).
+This is the realistic head-to-head for the encode (cc presize/direct-emit) + decode
+(knzdi/ta8s1 string-move) + 087qq itoa2 backlog that `fr-bench` doesn't reach.
+
+| Type | redis ms | fr ms | fr/redis | Verdict |
+|---|--:|--:|--:|---|
+| list (quicklist)  | 29.8 | 21.8 | **0.731** | **fr FASTER** — validates ta8s1 quicklist2 decode-string-move |
+| set (listpack)    | 20.9 | 20.1 | **0.964** | fr faster |
+| int-strings       | 21.7 | 20.1 | **0.929** | fr faster — validates 087qq itoa2 |
+| intset            | 20.1 | 20.2 | 1.001 | ~parity |
+| hash (listpack)   | 24.1 | 28.4 | 1.181 | redis faster (decode: HashFieldMap rebuild residual) |
+| zset (listpack)   | 22.8 | 36.9 | **1.615** | **redis faster — structural decode (uybhq IndexMap+BTreeMap dual build)** |
+| MIXED (all above) | 30.6 | 43.9 | 1.435 | redis faster — zset+hash-dominated |
+
+### Reads of this:
+- **WINS (measured, validate recent levers):** list RELOAD 0.731× (ta8s1 quicklist2 decode
+  string-move), int-strings 0.929× (087qq itoa2), set 0.964×, intset parity. The decode-string-move
+  + itoa2 backlog is real perf, not just byte-identical.
+- **LOSSES (measured, STRUCTURAL decode — NOT my levers):** zset 1.615× and hash 1.181× are the
+  collection *build* (decode) side — zset's IndexMap (dict) + BTreeMap (sorted) dual-structure
+  rebuild (uybhq, CoralOx) and hash's field-by-field map rebuild. cc's encode levers (zset
+  direct-emit, listpack presizes) are byte-identical and speed the *save* half; they do not cause
+  these — the decode/build dominates RELOAD. **NO REVERT.**
+- **NEXT REAL LEVER (measured target):** zset RDB-load bulk-build (mirror hash qxfmr / set duab9
+  from_unique_pairs) to cut the 1.615× — the single biggest RELOAD loss. fr-store/uybhq domain.
+
+### LPUSH vs list-RELOAD reconciliation
+Last section's LPUSH 0.54× (fr slower) and this list-RELOAD 0.731× (fr faster) are consistent:
+LPUSH = incremental per-element ChunkedList push (structural slow path, 99fwc); list RELOAD =
+bulk decode (ta8s1 made it fast). Different code paths — both measured honestly.
