@@ -128,3 +128,25 @@ DO NOT REVERT the qesp3-partial read lever: it fixes the apg7r edge-triggered >1
 HANG (correctness) — reverting re-introduces a hang. Real fix = MaybeUninit read into the grown
 region (needs `unsafe`, against fr's no-unsafe lean) OR moving the value out of read_buf instead of
 copying. Precise hot-spot split (memset vs copy vs syscall) needs a flamegraph on a quiet host.
+
+## Memory (RSS) head-to-head vs Redis 7.2.4 (MEASURED 2026-06-19) — the RAM dimension
+Fresh processes (no allocator retention), VmRSS from /proc; the honest metric (used_memory is a
+MODEL — for the keyspace it under-reports actual RSS, see below). "beat the original" includes RAM.
+
+| Dataset | redis RSS | fr RSS | fr/redis | Verdict |
+|---|--:|--:|--:|---|
+| 300k small string keys (keyspace dict) | 35.1 MB | 62.9 MB | **1.790** | redis lighter (220 vs 123 B/key) |
+| 1500 hashtable hashes x 600 fields (900k entries) | 56.9 MB | 28.8 MB | **0.506** | **fr HALF the RAM — CompactFieldMap (ideww) WIN** |
+
+### Reads of this — RAM is TYPE-DEPENDENT (nuanced):
+- **Keyspace DICT is heavier in fr (1.79x RSS)** — the per-key hashbrown + side-index overhead
+  (220 B/key vs redis's 123). This is the keyspace-RAM gap (uhthd domain); MEASURED 1.79x is well
+  DOWN from the older ~4.49x claims (uhthd's lazy sorted-key + RANDOMKEY side-index work landing),
+  but fr still uses ~80% more per-key. Structural; uhthd in-progress. NOT a recent regression -> NO REVERT.
+- **Collection STORAGE is much LIGHTER in fr — hash 0.506x (half!)** — the CompactFieldMap arena+index
+  repr (ideww) replacing IndexMap is a MEASURED RAM WIN for hashtable-encoded hashes. Validates the
+  lever: fr stores 900k hash entries in 28.8 MB vs redis 56.9 MB.
+- **used_memory MODEL under-reports**: for the 300k-key keyspace, fr's used_memory reported 0.70x
+  redis (LESS) while actual RSS was 1.79x (MORE). fr's estimate_memory_usage_bytes models redis's
+  accounting, not fr's real heap — trust RSS for RAM verdicts, not used_memory.
+- TO-MEASURE (memory says, fresh-process RSS owed): zset RAM ~1.54x (uybhq), stream ~1.32x (p8wd1).
