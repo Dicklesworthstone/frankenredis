@@ -132,16 +132,14 @@ turns). Keep claims honest — mark which.
   reference for `Value::Integer` and intset member materialization. Retry
   condition if rejected: do not retry generic i64 formatting cleanup unless a
   fresh profile names integer materialization or intset member formatting.
-- frankenredis-gu5nf.32 / cod-a: `fr-store` `SetValue::retain` now feeds intset
-  predicates stack-borrowed decimal bytes through `with_integer_decimal_bytes`
-  instead of allocating a `Vec<u8>` per retained member — CODED (reasoned; batch
-  benchmark pending). Scope is the mixed-encoding set-algebra fallback path where
-  an intset is filtered by a byte predicate; direct intset/intset merge kernels
-  and reply encoding are unchanged. Guard pins stack-borrowed bytes against the
-  old `to_string` reference and checks retain membership/order for i64 min/max,
-  negative, zero, and positive values. Retry condition if rejected: do not retry
-  intset predicate byte formatting unless a fresh profile names `SetValue::retain`
-  or mixed intset/generic set-algebra allocation cost.
+- frankenredis-gu5nf.32 / cod-a: `fr-store` `SetValue::retain` stack-borrowed
+  decimal bytes for intset predicates — MEASURED REJECTED 2026-06-19 and source
+  hunk reverted. Criterion set-algebra vs Redis 7.2.4 showed no Redis-relative
+  keep signal on the target `SINTERSTORE` / `SDIFFSTORE` mixed-encoding path,
+  and `SDIFFSTORE` improved after reverting the candidate. Do not retry intset
+  predicate byte formatting unless a fresh profile names `SetValue::retain` or
+  mixed intset/generic set-algebra allocation cost as a top hotspot, and a
+  before/after Criterion run beats the reverted baseline.
 - frankenredis-n2u1g / cod-b: zset score direct encoder for borrowed `ZSCORE`
   and `ZMSCORE` network fast paths — CODED (reasoned; batch benchmark pending).
   `fr-protocol::encode_redis_double` writes Redis d2string bytes directly into
@@ -430,6 +428,43 @@ caveats in docs/RELEASE_READINESS_SCORECARD.md. Sandbox-contended; cv>5% flagged
 - **METHOD constraint (Measured the hard way):** the full 36-cell matrix + heavy 2-server bench
   loops 144-KILL under cumulative sandbox load; only focused light batches (≤8 fr-bench runs,
   reused servers) complete. Publication-grade numbers still need a quiet host (bead vibu6).
+
+## MEASURED cod-a set retain gauntlet (2026-06-19) — Criterion vs Redis 7.2.4
+
+Scope: `frankenredis-gu5nf.32`, the stack-borrowed `SetValue::retain` decimal-byte
+predicate candidate for mixed intset/generic set algebra. Harness:
+`cargo bench -p fr-bench --bench set_algebra_vs_redis -- --noplot`, with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`,
+`FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`,
+and the vendored Redis 7.2.4 oracle at
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`. The
+workload builds realistic mixed sets (`small` 512 intset members, `large` 4096
+generic decimal-byte members, `large_miss` 4096 disjoint members), then times
+16-command batches of `SINTERSTORE`, `SDIFFSTORE`, and `SUNIONSTORE`.
+
+Ratios below are command-throughput ratios. `fr/redis < 1` means Redis is faster.
+The candidate row is the code-first stack-borrowed retain hunk; the reverted row
+is the post-revert source state now kept on `main`.
+
+| Workload | Candidate Redis cmds/s | Candidate fr cmds/s | Candidate fr/redis | Post-revert Redis cmds/s | Post-revert fr cmds/s | Post-revert fr/redis | Decision |
+|---|--:|--:|--:|--:|--:|--:|---|
+| SINTERSTORE mixed hit | 13,911 | 7,978 | 0.574 | 18,525 | 7,960 | 0.430 | REJECT: fr remains slower; no candidate gain |
+| SDIFFSTORE mixed miss | 15,069 | 7,432 | 0.493 | 20,562 | 8,053 | 0.392 | REVERT: candidate was slower than reverted fr baseline |
+| SUNIONSTORE mixed | 1,727 | 2,024 | 1.172 | 1,903 | 2,298 | 1.208 | existing fr win, unrelated to retain predicate |
+
+Negative evidence:
+- **No Redis-relative win on the target path:** mixed `SINTERSTORE` and `SDIFFSTORE`
+  remain Redis-faster after the candidate, with fr at 0.574x and 0.493x respectively.
+- **Candidate was not a same-frankenredis keep:** `SDIFFSTORE` improved from 7,432
+  to 8,053 commands/s after reverting the stack-borrowed retain hunk (~8% better
+  than the candidate on this run). `SINTERSTORE` was flat within noise.
+- **`SUNIONSTORE` is not evidence for this lever:** it was already faster than Redis
+  and does not exercise the retain-filter predicate that `gu5nf.32` changed.
+- **Action taken:** source hunk removed manually; focused `fr-store` guard
+  `rdb_and_ziplist_integer_restore_bytes_match_decimal_reference_edges` passed
+  post-revert. A direct bench-binary rerun was used for the post-revert Criterion
+  pass after the shared target dir hit a rustc-version cache mismatch; no target
+  cleanup was performed.
 
 ## MEASURED cod-b exact keyed-write parser gauntlet (2026-06-19) — Criterion vs Redis 7.2.4
 

@@ -2678,7 +2678,7 @@ impl SetValue {
     /// Keep only members for which `keep` returns true.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         match self {
-            SetValue::Int(v) => v.retain(|&n| with_integer_decimal_bytes(n, |bytes| keep(bytes))),
+            SetValue::Int(v) => v.retain(|&n| keep(&set_int_to_bytes(n))),
             SetValue::Generic(s) => s.retain(|m| keep(m)),
         }
     }
@@ -3220,22 +3220,15 @@ fn i64_text_len(value: i64) -> usize {
     digits
 }
 
-fn with_integer_decimal_bytes<R>(value: i64, f: impl FnOnce(&[u8]) -> R) -> R {
+fn integer_decimal_bytes(value: i64) -> Vec<u8> {
     let mut scratch = [0u8; 20];
     let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
+    let mut out = Vec::with_capacity(i64_text_len(value));
     if value.is_negative() {
-        let mut signed = [0u8; 21];
-        let digit_len = 20 - start;
-        signed[0] = b'-';
-        signed[1..=digit_len].copy_from_slice(&scratch[start..]);
-        f(&signed[..=digit_len])
-    } else {
-        f(&scratch[start..])
+        out.push(b'-');
     }
-}
-
-fn integer_decimal_bytes(value: i64) -> Vec<u8> {
-    with_integer_decimal_bytes(value, <[u8]>::to_vec)
+    out.extend_from_slice(&scratch[start..]);
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25984,8 +25977,6 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::{
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
@@ -26005,8 +25996,7 @@ mod tests {
         decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
         encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
-        redis_allocation_size, redis_score_to_string, set_int_to_bytes, with_integer_decimal_bytes,
-        ziplist_integer_bytes,
+        redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40995,7 +40985,6 @@ mod tests {
         ] {
             let expected = value.to_string().into_bytes();
             assert_eq!(integer_decimal_bytes(value), expected);
-            with_integer_decimal_bytes(value, |bytes| assert_eq!(bytes, expected.as_slice()));
             assert_eq!(set_int_to_bytes(value), expected);
             assert_eq!(ziplist_integer_bytes(value), expected);
 
@@ -41009,22 +40998,6 @@ mod tests {
                 expected.as_slice()
             );
         }
-
-        let mut retained = SetValue::Int(vec![i64::MIN, -1, 0, 42, i64::MAX]);
-        retained.retain(|member| {
-            matches!(
-                member,
-                b"-9223372036854775808" | b"0" | b"9223372036854775807"
-            )
-        });
-        assert_eq!(
-            retained.iter().map(Cow::into_owned).collect::<Vec<_>>(),
-            vec![
-                b"-9223372036854775808".to_vec(),
-                b"0".to_vec(),
-                b"9223372036854775807".to_vec(),
-            ]
-        );
     }
 
     #[test]

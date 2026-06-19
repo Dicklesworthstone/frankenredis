@@ -198,6 +198,26 @@ keyspace) fr is a measured win on both speed and (collection) RAM. For large-pay
 (>=64KB values) or very-large-keyspace RAM-sensitive deployments, the three gaps above apply.
 Conformance GREEN throughout (all measured levers byte-identical-verified; zero code reverted).
 
+## Cod-a mixed set-algebra retain candidate (MEASURED 2026-06-19)
+
+Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench set_algebra_vs_redis
+-- --noplot`, release `frankenredis` rch-built under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, oracle Redis 7.2.4 at
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+| Workload | Redis cmds/s | fr cmds/s after revert | fr/redis | Verdict |
+|---|--:|--:|--:|---|
+| SINTERSTORE mixed intset/generic | 18,525 | 7,960 | 0.430 | Redis faster; retain hunk rejected |
+| SDIFFSTORE mixed intset/generic | 20,562 | 8,053 | 0.392 | Redis faster; retain hunk rejected |
+| SUNIONSTORE mixed | 1,903 | 2,298 | 1.208 | fr faster; unrelated existing union-path win |
+
+Decision: `frankenredis-gu5nf.32` does **not** raise release readiness. The candidate
+stack-borrowed intset retain bytes showed no keep signal on `SINTERSTORE`, regressed the
+fr baseline on `SDIFFSTORE`, and has been reverted. Residual set-algebra risk is scoped:
+mixed intset/generic intersection and difference remain slower than Redis, while union is
+already faster. Retry only from a fresh profile naming `SetValue::retain` or mixed
+set-algebra allocation as a top hotspot.
+
 ## Cod-b keyed-write parser backlog (MEASURED 2026-06-19)
 
 Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench keyed_write_vs_redis
