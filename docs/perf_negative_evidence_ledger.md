@@ -509,3 +509,42 @@ Negative evidence:
   workload after the ChunkedList packed-node rewrite lands.
 - **No revert this pass**: no arity showed a family-level regression versus the pre-series
   baseline; RPUSH improved 1.14-1.28x and SADD improved 1.10-1.22x on the sampled arities.
+
+## MEASURED cod-b exact eight-key EXISTS parser gauntlet (2026-06-19) — Criterion vs Redis 7.2.4
+
+Scope: `frankenredis-z3yrs`, the code-first exact canonical 8-key `EXISTS` packet parser.
+Harness added in `fr-bench`: `cargo bench -p fr-bench --bench exists_vs_redis -- --noplot`.
+The benchmark starts Redis 7.2.4 from `/dp/frankenredis/legacy_redis_code/redis/src/redis-server`
+and a supplied `frankenredis` release binary, initializes `k0..k7`, then times 128-command
+pipelines of `EXISTS` with all-hit, half-hit, and duplicate-key mixes. Setup and `FLUSHALL` are
+outside the Criterion timed section. Ratios are command-throughput ratios; `fr/redis < 1` means
+Redis is faster.
+
+Decision-quality isolation used clean detached worktrees at `03709a07c`: clean `HEAD` and clean
+`HEAD` with only the z3yrs eight-key parser branch/type/tests removed. Release servers were built
+with rch into separate target dirs; the benchmark harness was compiled locally in separate target
+dirs to avoid mixing rch-built `.rmeta` files with the local nightly.
+
+| Workload | Redis cmds/s | fr HEAD cmds/s | fr/redis | fr no-z3yrs cmds/s | no-z3yrs/redis | HEAD/no-z3yrs | Decision |
+|---|--:|--:|--:|--:|--:|--:|---|
+| EXISTS 8 all hit | 1,124,940 | 866,759 | 0.770 | 776,600 | 0.708 | 1.116 | KEEP: z3yrs helps, but Redis still faster |
+| EXISTS 8 half hit | 1,089,832 | 860,349 | 0.789 | 812,086 | 0.761 | 1.059 | KEEP: modest same-HEAD win |
+| EXISTS 8 duplicates | 1,042,333 | 892,906 | 0.857 | 807,226 | 0.762 | 1.106 | KEEP: z3yrs helps, but Redis still faster |
+
+Negative evidence:
+- **Redis-relative loss remains:** clean `HEAD` is only 0.770x, 0.789x, and 0.857x Redis on the
+  canonical 8-key `EXISTS` mixes. This is not a release-readiness win for the workload.
+- **No revert:** removing only z3yrs made clean `HEAD` slower by 5.9-11.6%, so the exact parser is
+  a measured same-HEAD keep, not a regression.
+- **Confounded preliminary runs recorded, not used for the keep/revert decision:** the shared-dirty
+  current binary measured 0.775x / 0.767x / 0.840x vs Redis, while the old parent `83544997b`
+  measured 1.260x / 1.279x / 1.261x vs Redis. That comparison spans later unrelated commits and
+  was treated as routing evidence only. It suggests a separate post-`83544997b` `EXISTS` slowdown
+  profile is warranted, but it does not justify reverting z3yrs.
+- **Correctness gates:** focused `cargo test -p fr-server borrowed_plain_exists_eight_packet`
+  passed (2 parser tests). Full `fr-conformance` gate is recorded in the scorecard entry for this
+  gauntlet.
+
+Retry condition: do not extend the exact-arity `EXISTS` parser ladder from this evidence alone.
+Retry only after a fresh profile on a quiet host names 8+ key `EXISTS` parser/dispatch as a top
+hotspot, or after isolating the post-`83544997b` slowdown to a non-z3yrs commit.

@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name = "set_algebra_vs_redis"
 harness = false
+
+[[bench]]
+name = "exists_vs_redis"
+harness = false

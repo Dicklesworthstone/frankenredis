@@ -245,3 +245,23 @@ covering LPUSH/RPUSH/SADD/ZADD N=4..19, HSET N=4..20, MSET fallback. Decision: *
 5-16 exact keyed-write parser backlog**. The ladder is real for RPUSH/SADD, but it does not
 close LPUSH; LPUSH remains part of the existing structural `ChunkedList` gap rather than a
 recent parser regression.
+
+## Cod-b exact eight-key EXISTS parser (MEASURED 2026-06-19)
+
+Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench exists_vs_redis
+-- --noplot`, oracle Redis 7.2.4 at
+`/dp/frankenredis/legacy_redis_code/redis/src/redis-server`. Clean release binaries were rch-built
+from detached worktrees at `03709a07c`: one clean `HEAD`, one clean `HEAD` with only the
+`frankenredis-z3yrs` eight-key `EXISTS` parser removed. The workload initializes `k0..k7` and
+times 128-command pipelines of 8-key `EXISTS` all-hit, half-hit, and duplicate-key mixes.
+
+| Workload | Redis cmds/s | fr HEAD cmds/s | fr/redis | fr no-z3yrs cmds/s | HEAD/no-z3yrs | Verdict |
+|---|--:|--:|--:|--:|--:|---|
+| EXISTS 8 all hit | 1,124,940 | 866,759 | 0.770 | 776,600 | 1.116 | z3yrs keep; workload gap remains |
+| EXISTS 8 half hit | 1,089,832 | 860,349 | 0.789 | 812,086 | 1.059 | z3yrs keep; workload gap remains |
+| EXISTS 8 duplicates | 1,042,333 | 892,906 | 0.857 | 807,226 | 1.106 | z3yrs keep; workload gap remains |
+
+Decision: keep `frankenredis-z3yrs`. The exact eight-key parser improves same-HEAD throughput by
+5.9-11.6%, so it is not a revert candidate. Release-readiness impact is still negative for this
+workload: clean FrankenRedis remains Redis-faster/Redis-wins on all three 8-key `EXISTS` mixes.
+Focused parser tests passed; full `fr-conformance` was rerun for this closeout.
