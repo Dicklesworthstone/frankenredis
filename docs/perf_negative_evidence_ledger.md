@@ -235,14 +235,13 @@ turns). Keep claims honest — mark which.
   move cleanup unless a fresh DEBUG RELOAD / RESTORE profile names compact
   collection listpack decode allocation.
 - frankenredis-ta8s1 / cod-a: `fr-persist` RDB QUICKLIST_2 PACKED list decode
-  now consumes owned decoded listpack entries with `into_bytes()` instead of
-  cloning string payloads through `to_bytes()` and dropping the original —
-  CODED (reasoned; batch benchmark pending). PLAIN quicklist2 nodes still move
-  the raw node blob directly; integer listpack entries still render through the
-  same canonical decimal helper. Guard is the quicklist2 packed-list decode/DUMP
-  RDB suite plus crate-scoped check. Retry condition if rejected: do not retry
-  quicklist2 owned-entry move cleanup unless a fresh DEBUG RELOAD / RESTORE
-  profile names packed quicklist2 listpack decode allocation.
+  owned-entry move (`into_bytes()` instead of `to_bytes()`) — MEASURED
+  REJECTED 2026-06-19 and source hunk reverted. Focused Criterion RESTORE
+  head-to-head against Redis 7.2.4 measured only 0.371x Redis throughput
+  (fr median 87.777 K restores/s, Redis median 236.90 K restores/s; fr time
+  2.699x Redis). Do not retry quicklist2 owned-entry move cleanup unless a
+  fresh profile names packed quicklist2 listpack decode allocation and a
+  same-worker Criterion A/B beats the reverted baseline.
 - frankenredis-ohsk5 / cod-b: `fr-store` compact hash duplicate-field
   overwrite now uses a borrowed `CompactFieldMap::insert_borrowed` path for
   hashtable-range hashes instead of allocating the old value only to discard it;
@@ -548,3 +547,31 @@ Negative evidence:
 Retry condition: do not extend the exact-arity `EXISTS` parser ladder from this evidence alone.
 Retry only after a fresh profile on a quiet host names 8+ key `EXISTS` parser/dispatch as a top
 hotspot, or after isolating the post-`83544997b` slowdown to a non-z3yrs commit.
+
+## MEASURED cod-a quicklist2 PACKED RESTORE decode gauntlet (2026-06-19) — REJECTED
+
+Scope: `frankenredis-ta8s1`, the code-first `fr-persist` QUICKLIST_2 PACKED decode change that
+moved owned listpack string entries with `ListpackEntry::into_bytes()` instead of cloning through
+`to_bytes()`. Harness added in `fr-bench`: `cargo bench -p fr-bench --bench
+restore_quicklist_vs_redis`.
+
+Workload: the harness starts Redis 7.2.4, builds a 96-member list with 40-byte members, reads the
+Redis `DUMP` payload, asserts payload type 18 (`RDB_TYPE_LIST_QUICKLIST_2`), then times 8-command
+pipelines of `RESTORE dst:N 0 <redis-dump-payload> REPLACE` against both Redis and FrankenRedis.
+The timed path therefore decodes the exact original Redis 7.2.4 quicklist2 payload.
+
+Measurement command: pinned rch worker `vmi1149989`; `frankenredis` release binary built with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`; benchmark invoked with
+`REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server` and
+`FR_SERVER_BIN=/data/projects/frankenredis/.rch-target-vmi1149989-pool-92ff1a2a912611f45cd8f8e10ee25ce0/release/frankenredis`.
+Earlier local/shared-target and `--noplot` attempts produced no measurements and are not evidence.
+
+| Workload | Redis median cmds/s | fr candidate median cmds/s | fr/redis throughput | fr/redis time | Decision |
+|---|--:|--:|--:|--:|---|
+| QUICKLIST_2 PACKED RESTORE, 96x40B members | 236,900 | 87,777 | 0.371 | 2.699 | REJECT: Redis faster; source hunk reverted |
+
+Negative evidence:
+- The focused RESTORE gate contradicts the earlier broad DEBUG RELOAD read that looked favorable
+  for list reloads; the isolated `ta8s1` decode-string move is not a Redis-relative win.
+- Source hunk reverted to `entry.to_bytes()` for PACKED quicklist2 node decode.
+- Keep the benchmark harness as the future gate before retrying this family.

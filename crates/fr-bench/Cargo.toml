@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name = "exists_vs_redis"
 harness = false
+
+[[bench]]
+name = "restore_quicklist_vs_redis"
+harness = false

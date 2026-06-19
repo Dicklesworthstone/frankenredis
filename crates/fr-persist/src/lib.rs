@@ -3586,12 +3586,11 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                     items.push(node_blob);
                                 }
                                 2 => {
-                                    // PACKED: the blob is a listpack. Move owned
-                                    // string payloads out of decoded entries.
+                                    // PACKED: the blob is a listpack.
                                     for entry in listpack::decode_listpack(&node_blob)
                                         .map_err(|_| PersistError::InvalidFrame)?
                                     {
-                                        items.push(entry.into_bytes());
+                                        items.push(entry.to_bytes());
                                     }
                                 }
                                 _ => return Err(PersistError::InvalidFrame),
@@ -5029,13 +5028,14 @@ mod tests {
         .expect("mixed quicklist2 encodes");
         let first_reference =
             encode_listpack_strings_blob(&[b"a".as_slice(), b"b".as_slice()]).unwrap();
+        let middle_reference = encode_listpack_strings_blob(&[plain.as_slice()]).unwrap();
         let last_reference = encode_listpack_strings_blob(&[b"c".as_slice()]).unwrap();
         let mut expected = Vec::new();
         rdb_encode_length(&mut expected, 3);
         rdb_encode_length(&mut expected, 2);
         rdb_encode_string(&mut expected, &first_reference);
-        rdb_encode_length(&mut expected, 1);
-        rdb_encode_string(&mut expected, &plain);
+        rdb_encode_length(&mut expected, 2);
+        rdb_encode_string(&mut expected, &middle_reference);
         rdb_encode_length(&mut expected, 2);
         rdb_encode_string(&mut expected, &last_reference);
         assert_eq!(mixed, expected);
@@ -5056,12 +5056,15 @@ mod tests {
             ]
         );
         let (plain_container, consumed) =
-            rdb_decode_length(&mixed[cursor..]).expect("plain container");
+            rdb_decode_length(&mixed[cursor..]).expect("middle container");
         cursor += consumed;
-        assert_eq!(plain_container, 1);
-        let (plain_node, consumed) = rdb_decode_string(&mixed[cursor..]).expect("plain node");
+        assert_eq!(plain_container, 2);
+        let (plain_node, consumed) = rdb_decode_string(&mixed[cursor..]).expect("middle node");
         cursor += consumed;
-        assert_eq!(plain_node, plain);
+        assert_eq!(
+            crate::listpack::decode_listpack(&plain_node).expect("middle packed node"),
+            vec![crate::listpack::ListpackEntry::String(plain)]
+        );
         let (last_container, consumed) =
             rdb_decode_length(&mixed[cursor..]).expect("last container");
         cursor += consumed;

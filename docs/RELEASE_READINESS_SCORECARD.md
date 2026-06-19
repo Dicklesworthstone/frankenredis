@@ -46,7 +46,7 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
   DEBUG RELOAD of collection-heavy DBs) needs a dedicated DEBUG-RELOAD-timing bench — owed.
 - **decode-string-move levers** (knzdi listpack, ta8s1 quicklist2) + uhthd keyspace: verified
   byte-exact / invariant-gated; their target is RESTORE/RDB-load + RANDOMKEY, also not in the
-  fr-bench workload set.
+  original fr-bench workload set. Later focused Criterion RESTORE rejected `ta8s1`; see below.
 
 ## No reverts this pass
 No recent lever showed a measured regression: the hot path is 8/9 fr-faster (geomean 1.348×), and
@@ -60,7 +60,7 @@ This is the realistic head-to-head for the encode (cc presize/direct-emit) + dec
 
 | Type | redis ms | fr ms | fr/redis | Verdict |
 |---|--:|--:|--:|---|
-| list (quicklist)  | 29.8 | 21.8 | **0.731** | **fr FASTER** — validates ta8s1 quicklist2 decode-string-move |
+| list (quicklist)  | 29.8 | 21.8 | **0.731** | **fr FASTER** in broad RELOAD; not sufficient `ta8s1` proof |
 | set (listpack)    | 20.9 | 20.1 | **0.964** | fr faster |
 | int-strings       | 21.7 | 20.1 | **0.929** | fr faster — validates 087qq itoa2 |
 | intset            | 20.1 | 20.2 | 1.001 | ~parity |
@@ -69,9 +69,9 @@ This is the realistic head-to-head for the encode (cc presize/direct-emit) + dec
 | MIXED (all above) | 30.6 | 43.9 | 1.435 | redis faster — zset+hash-dominated |
 
 ### Reads of this:
-- **WINS (measured, validate recent levers):** list RELOAD 0.731× (ta8s1 quicklist2 decode
-  string-move), int-strings 0.929× (087qq itoa2), set 0.964×, intset parity. The decode-string-move
-  + itoa2 backlog is real perf, not just byte-identical.
+- **WINS (measured, validate recent levers):** list RELOAD 0.731× in the broad save+load path,
+  int-strings 0.929× (087qq itoa2), set 0.964×, intset parity. The focused `ta8s1` RESTORE
+  gate below supersedes the broad list read for that specific lever.
 - **LOSSES (measured, STRUCTURAL decode — NOT my levers):** zset 1.615× and hash 1.181× are the
   collection *build* (decode) side — zset's IndexMap (dict) + BTreeMap (sorted) dual-structure
   rebuild (uybhq, CoralOx) and hash's field-by-field map rebuild. cc's encode levers (zset
@@ -83,7 +83,8 @@ This is the realistic head-to-head for the encode (cc presize/direct-emit) + dec
 ### LPUSH vs list-RELOAD reconciliation
 Last section's LPUSH 0.54× (fr slower) and this list-RELOAD 0.731× (fr faster) are consistent:
 LPUSH = incremental per-element ChunkedList push (structural slow path, 99fwc); list RELOAD =
-bulk decode (ta8s1 made it fast). Different code paths — both measured honestly.
+bulk save+load. Different code paths — both measured honestly. The focused `ta8s1` RESTORE
+gate below rejected the owned-entry-move hunk despite this broad list result.
 
 ## Large-value SET/GET head-to-head (MEASURED 2026-06-19) — qesp3 gap
 fr-bench (Rust client) --pipeline 1 --requests 40000 --trials 5, fr-release(29431) vs
@@ -185,7 +186,7 @@ WINS (measured vs redis 7.2.4):
 - **Small/medium-value throughput**: faster at all pipeline depths, geomean 1.348x @depth16,
   up to 1.7x @depth128; reads especially (smembers/hgetall/lrange 1.7-1.9x).
 - **Collection RAM**: hashtable hash 0.506x (HALF — CompactFieldMap); stream/zset near-parity.
-- **RDB decode** for list (0.731x, ta8s1) / set / int-strings (087qq).
+- **RDB decode** for broad list reload (0.731x), set, and int-strings (087qq).
 
 GAPS (measured, structural, each scoped — NONE a recent-lever regression -> NO REVERTS):
 1. **Large-value SET writes**: 0.12-0.42x (worsens with size) — safe-Rust zero-fill framing tax
@@ -196,7 +197,7 @@ GAPS (measured, structural, each scoped — NONE a recent-lever regression -> NO
 SHIP GUIDANCE: for the typical Redis workload (pipelined small-value GET/SET/hash, moderate
 keyspace) fr is a measured win on both speed and (collection) RAM. For large-payload caching
 (>=64KB values) or very-large-keyspace RAM-sensitive deployments, the three gaps above apply.
-Conformance GREEN throughout (all measured levers byte-identical-verified; zero code reverted).
+Conformance GREEN throughout; measured no-ship candidates and reverts are called out below.
 
 ## Cod-a mixed set-algebra retain candidate (MEASURED 2026-06-19)
 
@@ -217,6 +218,23 @@ fr baseline on `SDIFFSTORE`, and has been reverted. Residual set-algebra risk is
 mixed intset/generic intersection and difference remain slower than Redis, while union is
 already faster. Retry only from a fresh profile naming `SetValue::retain` or mixed
 set-algebra allocation as a top hotspot.
+
+## Cod-a quicklist2 PACKED RESTORE decode move (MEASURED 2026-06-19)
+
+Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench
+restore_quicklist_vs_redis`, pinned rch worker `vmi1149989`, oracle Redis 7.2.4 at
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`. The harness uses a
+Redis-generated type-18 QUICKLIST_2 `DUMP` payload for a 96-member list with 40-byte members, then
+times 8-command `RESTORE ... REPLACE` pipelines.
+
+| Workload | Redis cmds/s | fr candidate cmds/s | fr/redis throughput | fr/redis time | Verdict |
+|---|--:|--:|--:|--:|---|
+| QUICKLIST_2 PACKED RESTORE | 236,900 | 87,777 | 0.371 | 2.699 | Redis faster; `ta8s1` rejected |
+
+Decision: reject `frankenredis-ta8s1` and revert the production hunk back to `entry.to_bytes()`.
+The earlier broad DEBUG RELOAD list win was not specific enough to keep this owned-entry-move
+decode lever. Release-readiness impact is negative for this focused RESTORE path until a deeper
+bulk-list decode/build profile finds a different lever.
 
 ## Cod-b keyed-write parser backlog (MEASURED 2026-06-19)
 
