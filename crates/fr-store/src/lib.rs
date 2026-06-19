@@ -21024,11 +21024,6 @@ impl Store {
         } else {
             None
         };
-        self.internal_entries_remove(key);
-        self.stream_groups.remove(key);
-        self.stream_last_ids.remove(key);
-        self.stream_entries_added.remove(key);
-        self.stream_max_deleted_ids.remove(key);
         let mut entry = Entry::new(value, now_ms);
         entry.set_flag(
             ENTRY_FORCE_SET_LISTPACK_ENCODING,
@@ -21067,6 +21062,22 @@ impl Store {
                 self.set_max_listpack_value,
             ),
             _ => {}
+        }
+        let old_was_stream = self
+            .entries
+            .get(key)
+            .is_some_and(|old_entry| matches!(&old_entry.value, Value::Stream(_)));
+        if self.entries.contains_key(key) {
+            // RESTORE REPLACE semantically discards the old object even though
+            // the key name is unchanged. Reuse the keyspace slot for speed, but
+            // clear per-object sidecars that belong to the old value.
+            self.hash_field_ttl_clear_for_key(key);
+            if old_was_stream {
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+                self.stream_entries_added.remove(key);
+                self.stream_max_deleted_ids.remove(key);
+            }
         }
         self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         if let Some(last_id) = restored_stream_last_id {
@@ -25953,19 +25964,20 @@ mod tests {
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
         HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
-        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL,
-        LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
-        NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2,
-        RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
-        RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
-        RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3,
-        RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
-        RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata,
-        ScoreBound, SetValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
-        decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
-        encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, HashFieldTtl,
+        HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, LFU_INIT_VAL, LatencySample,
+        MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
+        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH,
+        RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST,
+        RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
+        RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING,
+        RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
+        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue,
+        Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
+        ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
+        encode_intset, encode_length, encode_listpack_strings, encode_set_listpack_dump,
+        estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
         lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size, redis_score_to_string,
         set_int_to_bytes, ziplist_integer_bytes,
@@ -42630,6 +42642,74 @@ mod tests {
         // With REPLACE, should succeed
         store.restore_key(b"k", 0, &payload, true, 100).unwrap();
         assert_eq!(store.get(b"k", 100).unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn restore_replace_hash_clears_old_field_ttls() {
+        let mut source = Store::new();
+        source
+            .hset(b"src", b"field".to_vec(), b"new".to_vec(), 100)
+            .unwrap();
+        let payload = source.dump_key(b"src", 100).unwrap();
+
+        let mut store = Store::new();
+        store
+            .hset(b"k", b"field".to_vec(), b"old".to_vec(), 100)
+            .unwrap();
+        assert_eq!(
+            store.hash_field_set_abs_expiry(
+                b"k",
+                b"field",
+                1_000,
+                HashFieldTtlCondition::None,
+                100
+            ),
+            HashFieldTtlSet::Applied
+        );
+        assert_eq!(store.hash_field_ttl_carrier_count(), 1);
+
+        store.restore_key(b"k", 0, &payload, true, 100).unwrap();
+
+        assert_eq!(
+            store.hgetall(b"k", 100).unwrap(),
+            vec![(b"field".to_vec(), b"new".to_vec())]
+        );
+        assert_eq!(
+            store.hash_field_ttl(b"k", b"field", 100, HashFieldTtlUnit::Milliseconds, false),
+            HashFieldTtl::NoTtl
+        );
+        assert_eq!(store.hash_field_ttl_carrier_count(), 0);
+    }
+
+    #[test]
+    fn restore_replace_stream_clears_old_consumer_groups() {
+        let mut source = Store::new();
+        source
+            .xadd(b"src", (2, 0), &[(b"f".to_vec(), b"new".to_vec())], 100)
+            .unwrap();
+        let payload = source.dump_key(b"src", 100).unwrap();
+
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"f".to_vec(), b"old".to_vec())], 100)
+            .unwrap();
+        assert!(
+            store
+                .xgroup_create(b"s", b"stale", (0, 0), false, 100)
+                .unwrap()
+        );
+        assert!(store.stream_consumer_groups(b"s").is_some());
+
+        store.restore_key(b"s", 0, &payload, true, 100).unwrap();
+
+        assert!(store.stream_consumer_groups(b"s").is_none());
+        assert_eq!(store.xinfo_groups(b"s", 100).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            store
+                .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 100)
+                .unwrap(),
+            vec![((2, 0), vec![(b"f".to_vec(), b"new".to_vec())])]
+        );
     }
 
     #[test]
