@@ -26,12 +26,14 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BENCH_HISTORY = os.path.join(ROOT, ".bench-history")
 BASELINE_PATH = os.path.join(BENCH_HISTORY, "comprehensive_bench.latest.json")
+TMPDIR = tempfile.gettempdir()
 
 # Read-reply + serialize + scalar/write coverage (every fr-bench workload family).
 WORKLOADS = [
@@ -43,13 +45,22 @@ RATCHET_PCT = 5.0   # a cell whose fr/redis ratio drops > this vs baseline fails
 CV_NOISE_PCT = 5.0  # cells with cv_pct above this are flagged noisy (not keep-eligible)
 
 
-def _free_port(preferred):
+def _free_port(preferred, reserved=()):
+    reserved = set(reserved)
     for port in range(preferred, preferred + 400):
+        if port in reserved:
+            continue
         try:
             socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
         except OSError:
             return port
     return preferred
+
+
+def _free_port_pair(preferred):
+    redis_port = _free_port(preferred)
+    fr_port = _free_port(redis_port + 1, reserved={redis_port})
+    return redis_port, fr_port
 
 
 def _enc(a):
@@ -62,12 +73,10 @@ def _enc(a):
 
 def _ping(port):
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=1)
-        s.sendall(_enc(["PING"]))
-        time.sleep(0.03)
-        ok = b"PONG" in s.recv(64)
-        s.close()
-        return ok
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as s:
+            s.sendall(_enc(["PING"]))
+            time.sleep(0.03)
+            return b"PONG" in s.recv(64)
     except Exception:
         return False
 
@@ -83,18 +92,25 @@ def _wait_up(port, deadline=10):
 
 def _config_set(port, key, value):
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=2)
-        s.sendall(_enc(["CONFIG", "SET", key, value]))
-        time.sleep(0.03)
-        s.recv(256)
-        s.close()
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.sendall(_enc(["CONFIG", "SET", key, value]))
+            time.sleep(0.03)
+            s.recv(256)
     except Exception:
         pass
 
 
+def _checked_executable(path, label):
+    resolved = os.path.realpath(os.path.abspath(path))
+    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+        print(f"FAIL — {label} is not an executable file: {path}")
+        sys.exit(2)
+    return resolved
+
+
 def run_bench(bench_bin, port, workload, pipeline, requests, trials):
     """Invoke the fr-bench CLIENT (--json-out) against `port`; return its report or None."""
-    out = os.path.join("/tmp", f"frbench_{workload}_{port}_{pipeline}.json")
+    out = os.path.join(TMPDIR, f"frbench_{workload}_{port}_{pipeline}.json")
     cmd = [
         bench_bin, "--host", "127.0.0.1", "--port", str(port),
         "--workload", workload, "--requests", str(requests),
@@ -105,7 +121,7 @@ def run_bench(bench_bin, port, workload, pipeline, requests, trials):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if r.returncode != 0:
             return None
-        with open(out) as fh:
+        with open(out, encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return None
@@ -115,13 +131,13 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    redis_bin = os.path.abspath(sys.argv[1])
-    fr_bin = os.path.abspath(sys.argv[2])
+    redis_bin = _checked_executable(sys.argv[1], "redis-server")
+    fr_bin = _checked_executable(sys.argv[2], "frankenredis")
     # The fr-bench CLIENT is a separate binary from the fr SERVER. Take it as the 3rd
     # positional arg, else auto-locate next to the fr server binary or under the cc target.
     positional = [a for a in sys.argv[3:] if not a.startswith("--")]
     if positional:
-        bench_bin = os.path.abspath(positional[0])
+        bench_bin = _checked_executable(positional[0], "fr-bench")
     else:
         candidates = [
             os.path.join(os.path.dirname(fr_bin), "fr-bench"),
@@ -133,6 +149,7 @@ def main():
             print("FAIL — fr-bench client binary not found; pass it as the 3rd argument "
                   "(perf_baseline_capture.py <redis-server> <fr-server> <fr-bench>)")
             sys.exit(2)
+        bench_bin = _checked_executable(bench_bin, "fr-bench")
     trials = 5
     requests = 200_000
     if "--trials" in sys.argv:
@@ -141,11 +158,12 @@ def main():
         requests = 20_000
         trials = 3
 
-    oracle_port, fr_port = _free_port(29951), _free_port(29952)
+    port_base = int(os.environ.get("FR_BENCH_PORT_BASE", "29951"))
+    oracle_port, fr_port = _free_port_pair(port_base)
     procs = [
         subprocess.Popen(
             [redis_bin, "--port", str(oracle_port), "--save", "", "--appendonly", "no"],
-            cwd="/tmp", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+            cwd=TMPDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
         subprocess.Popen(
             [fr_bin, "--port", str(fr_port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
@@ -178,10 +196,12 @@ def main():
     finally:
         for p in procs:
             p.terminate()
-        time.sleep(0.5)
         for p in procs:
-            if p.poll() is None:
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait(timeout=2)
 
     current = {"schema_version": "perf-baseline.v1", "trials": trials, "requests": requests,
                "cells": cells}
@@ -191,7 +211,7 @@ def main():
     prior = None
     if os.path.exists(BASELINE_PATH):
         try:
-            with open(BASELINE_PATH) as fh:
+            with open(BASELINE_PATH, encoding="utf-8") as fh:
                 prior = json.load(fh)
         except Exception:
             prior = None
@@ -206,6 +226,7 @@ def main():
             if drop_pct > RATCHET_PCT:
                 regressions.append(
                     f"{key}: fr/redis {old['fr_over_redis']} -> {cur['fr_over_redis']} (-{drop_pct:.1f}%)")
+    current["ratchet_regressions"] = regressions
 
     print("=" * 64)
     for key, c in sorted(cells.items()):
@@ -215,16 +236,16 @@ def main():
             tag = " NOISY" if c.get("noisy") else ""
             print(f"  {key:28} fr/redis={c['fr_over_redis']:.3f} (fr cv={c['fr_cv_pct']}%){tag}")
 
-    # Persist baseline only when not regressing (ratchet semantics).
+    os.makedirs(BENCH_HISTORY, exist_ok=True)
+    with open(BASELINE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(current, fh, indent=2, sort_keys=True)
     if regressions:
         print(f"FAIL — {len(regressions)} cell(s) regressed vs baseline > {RATCHET_PCT}%:")
         for r in regressions[:20]:
             print(f"  {r}")
+        print(f"Current throughput baseline still captured to {os.path.relpath(BASELINE_PATH, ROOT)}")
         sys.exit(1)
 
-    os.makedirs(BENCH_HISTORY, exist_ok=True)
-    with open(BASELINE_PATH, "w") as fh:
-        json.dump(current, fh, indent=2, sort_keys=True)
     print(f"PASS — baseline captured to {os.path.relpath(BASELINE_PATH, ROOT)} "
           f"({len([c for c in cells.values() if 'fr_over_redis' in c])} cells)")
 

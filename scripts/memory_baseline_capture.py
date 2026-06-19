@@ -25,6 +25,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,15 +33,25 @@ ROOT = os.path.dirname(HERE)
 BENCH_HISTORY = os.path.join(ROOT, ".bench-history")
 BASELINE_PATH = os.path.join(BENCH_HISTORY, "memory_baseline.latest.json")
 RATCHET_PCT = 15.0  # RSS is noisy; a generous band before flagging a regression
+TMPDIR = tempfile.gettempdir()
 
 
-def _free_port(preferred):
+def _free_port(preferred, reserved=()):
+    reserved = set(reserved)
     for port in range(preferred, preferred + 400):
+        if port in reserved:
+            continue
         try:
             socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
         except OSError:
             return port
     return preferred
+
+
+def _free_port_pair(preferred):
+    redis_port = _free_port(preferred)
+    fr_port = _free_port(redis_port + 1, reserved={redis_port})
+    return redis_port, fr_port
 
 
 def _enc(a):
@@ -54,6 +65,15 @@ def _enc(a):
 class Client:
     def __init__(self, port):
         self.s = socket.create_connection(("127.0.0.1", port), timeout=10)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.close()
+
+    def close(self):
+        self.s.close()
 
     def cmd(self, *a):
         self.s.sendall(_enc(a))
@@ -93,9 +113,8 @@ class Client:
 
 def _ping(port):
     try:
-        c = Client(port)
-        ok = b"PONG" in c.cmd("PING")
-        return ok
+        with Client(port) as c:
+            return b"PONG" in c.cmd("PING")
     except Exception:
         return False
 
@@ -110,38 +129,46 @@ def _wait_up(port, deadline=10):
 
 
 def load_dataset(port, kind, scale):
-    c = Client(port)
-    c.cmd("FLUSHALL")
-    if kind == "keyspace":  # many tiny string keys -> the dict RAM gap (uhthd)
-        batch = [("SET", f"k:{i}", "v") for i in range(scale)]
-    elif kind == "string_1k":
-        val = "x" * 1024
-        batch = [("SET", f"s:{i}", val) for i in range(scale // 8)]
-    elif kind == "list":
-        batch = [("RPUSH", f"l:{i}", *[str(j) for j in range(64)]) for i in range(scale // 64)]
-    elif kind == "hash":
-        batch = [("HSET", f"h:{i}", *sum(([f"f{j}", str(j)] for j in range(32)), []))
-                 for i in range(scale // 32)]
-    elif kind == "set":
-        batch = [("SADD", f"st:{i}", *[f"m{j}" for j in range(32)]) for i in range(scale // 32)]
-    elif kind == "zset":  # the zset RAM gap (uybhq)
-        batch = [("ZADD", f"z:{i}", *sum(([str(j), f"m{j}"] for j in range(32)), []))
-                 for i in range(scale // 32)]
-    elif kind == "stream":
-        batch = [("XADD", f"x:{i}", "*", "f", "v") for i in range(scale)]
-    else:
-        batch = []
-    # send in chunks to bound memory of the request buffer
-    for off in range(0, len(batch), 500):
-        c.pipe(batch[off:off + 500])
+    with Client(port) as c:
+        c.cmd("FLUSHALL")
+        if kind == "keyspace":  # many tiny string keys -> the dict RAM gap (uhthd)
+            batch = [("SET", f"k:{i}", "v") for i in range(scale)]
+        elif kind == "string_1k":
+            val = "x" * 1024
+            batch = [("SET", f"s:{i}", val) for i in range(scale // 8)]
+        elif kind == "list":
+            batch = [("RPUSH", f"l:{i}", *[str(j) for j in range(64)]) for i in range(scale // 64)]
+        elif kind == "hash":
+            batch = [("HSET", f"h:{i}", *sum(([f"f{j}", str(j)] for j in range(32)), []))
+                     for i in range(scale // 32)]
+        elif kind == "set":
+            batch = [("SADD", f"st:{i}", *[f"m{j}" for j in range(32)]) for i in range(scale // 32)]
+        elif kind == "zset":  # the zset RAM gap (uybhq)
+            batch = [("ZADD", f"z:{i}", *sum(([str(j), f"m{j}"] for j in range(32)), []))
+                     for i in range(scale // 32)]
+        elif kind == "stream":
+            batch = [("XADD", f"x:{i}", "*", "f", "v") for i in range(scale)]
+        else:
+            batch = []
+        # send in chunks to bound memory of the request buffer
+        for off in range(0, len(batch), 500):
+            c.pipe(batch[off:off + 500])
     time.sleep(1.0)  # settle
 
 
-def measure_type(redis_bin, fr_bin, kind, scale):
-    op, fp = _free_port(29951), _free_port(29952)
+def _checked_executable(path, label):
+    resolved = os.path.realpath(os.path.abspath(path))
+    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+        print(f"FAIL — {label} is not an executable file: {path}")
+        sys.exit(2)
+    return resolved
+
+
+def measure_type(redis_bin, fr_bin, kind, scale, port_base):
+    op, fp = _free_port_pair(port_base)
     procs = [
         subprocess.Popen([redis_bin, "--port", str(op), "--save", "", "--appendonly", "no"],
-                         cwd="/tmp", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+                         cwd=TMPDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
         subprocess.Popen([fr_bin, "--port", str(fp)],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
     ]
@@ -150,7 +177,8 @@ def measure_type(redis_bin, fr_bin, kind, scale):
             return None
         load_dataset(op, kind, scale)
         load_dataset(fp, kind, scale)
-        rm, fm = Client(op).info_mem(), Client(fp).info_mem()
+        with Client(op) as redis_client, Client(fp) as fr_client:
+            rm, fm = redis_client.info_mem(), fr_client.info_mem()
         if not rm.get("used_memory_rss") or not fm.get("used_memory_rss"):
             return None
         return {
@@ -164,23 +192,27 @@ def measure_type(redis_bin, fr_bin, kind, scale):
     finally:
         for p in procs:
             p.terminate()
-        time.sleep(0.4)
         for p in procs:
-            if p.poll() is None:
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait(timeout=2)
 
 
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    redis_bin, fr_bin = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+    redis_bin = _checked_executable(sys.argv[1], "redis-server")
+    fr_bin = _checked_executable(sys.argv[2], "frankenredis")
     scale = 20_000 if "--quick" in sys.argv else 200_000
 
     types = ["keyspace", "string_1k", "list", "hash", "set", "zset", "stream"]
     cells = {}
     for kind in types:
-        res = measure_type(redis_bin, fr_bin, kind, scale)
+        port_base = int(os.environ.get("FR_BENCH_PORT_BASE", "29951"))
+        res = measure_type(redis_bin, fr_bin, kind, scale, port_base)
         cells[kind] = res if res else {"status": "skipped"}
 
     current = {"schema_version": "memory-baseline.v1", "scale": scale, "cells": cells}
@@ -188,7 +220,8 @@ def main():
     prior = None
     if os.path.exists(BASELINE_PATH):
         try:
-            prior = json.load(open(BASELINE_PATH))
+            with open(BASELINE_PATH, encoding="utf-8") as fh:
+                prior = json.load(fh)
         except Exception:
             prior = None
     regressions = []
@@ -201,6 +234,7 @@ def main():
             if worsened > RATCHET_PCT:
                 regressions.append(
                     f"{kind}: RSS ratio {old['rss_ratio']} -> {cur['rss_ratio']} (+{worsened:.1f}% worse)")
+    current["ratchet_regressions"] = regressions
 
     print("=" * 64)
     print("  data-type        fr/redis RSS    fr/redis used_memory")
@@ -210,14 +244,16 @@ def main():
         else:
             print(f"  {kind:15} {c['rss_ratio']:>8.3f}x      {c['used_ratio']:>8.3f}x")
 
+    os.makedirs(BENCH_HISTORY, exist_ok=True)
+    with open(BASELINE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(current, fh, indent=2, sort_keys=True)
     if regressions:
         print(f"FAIL — {len(regressions)} data-type(s) RAM-regressed vs baseline > {RATCHET_PCT}%:")
         for r in regressions:
             print(f"  {r}")
+        print(f"Current memory baseline still captured to {os.path.relpath(BASELINE_PATH, ROOT)}")
         sys.exit(1)
 
-    os.makedirs(BENCH_HISTORY, exist_ok=True)
-    json.dump(current, open(BASELINE_PATH, "w"), indent=2, sort_keys=True)
     print(f"PASS — memory baseline captured to {os.path.relpath(BASELINE_PATH, ROOT)}")
 
 

@@ -302,6 +302,23 @@ turns). Keep claims honest — mark which.
   Retry condition if rejected: do not restore always-resident sorted key storage
   for generic workloads; only add incremental maintenance if a SCAN/KEYS-heavy
   profile shows rebuild churn dominating after this memory win.
+- frankenredis-uhthd / cod-b: MEASURED gauntlet for lazy sorted `ordered_keys`
+  on current `4cf73ebef` vs vendored Redis 7.2.4. Release build:
+  `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo build --release -p fr-server -p fr-bench`.
+  Fixed the baseline scripts first after an invalid 299xx run exposed a same-port
+  allocator collision under peer benchmark load; do not use all-equal-RSS
+  `.bench-history` runs from the old allocator as evidence. Valid high-port run
+  (`FR_BENCH_PORT_BASE=42051`, 200k scale) measured keyspace RSS at **1.912x
+  Redis** (`fr_rss=30,515,200`, `redis_rss=15,958,016`) and memory geomean
+  **1.315x**; this is still not domination, but it improves on the prior
+  documented post-pass225 residual **2.59x**. Throughput quick matrix
+  (`FR_BENCH_PORT_BASE=42151`) had only three low-noise cells: `set@p1=1.054x`
+  win, `hset@p1=0.901x` loss, `incr@p1=0.993x` neutral/loss; 33 cells excluded
+  as noisy. Targeted SCAN guard passed; 100k-key load was `0.963x`, first full
+  `SCAN COUNT 1000` was `0.985x`, warm full SCAN was `1.039x`. Decision: KEEP,
+  no revert. Retry condition: next `uhthd` work must attack the remaining
+  1.91x keyspace RSS gap or collection RSS gaps; do not claim parity from
+  `used_memory` alone, and always run high-port distinct Redis/fr pairs.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
 
