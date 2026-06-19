@@ -380,3 +380,23 @@ Validation: `cargo test -p fr-runtime plain_exists_borrowed -- --nocapture`, tar
 compiler-scoped target under `/data/projects/.rch-targets/frankenredis-cod-b`. Redis-relative
 score remains **0 wins / 3 losses / 0 neutral** for this focused suite, so `EXISTS` stays a
 release-performance gap even after the keeper.
+
+## Cod-b residual 8-key EXISTS runtime accounting (MEASURED 2026-06-19)
+
+Follow-up for `frankenredis-qk0nm`: no production lever kept. Four runtime/accounting candidates
+were measured and reverted: small pre-encoded integer replies, exact-8 runtime unrolling, batch
+`exists_no_touch` hit/miss aggregation, and exact-8 specialization inside that batch helper.
+
+| Candidate | all-hit fr/redis | half-hit fr/redis | duplicate fr/redis | Release-readiness impact |
+|---|--:|--:|--:|---|
+| Control after upx5x | 0.864 | 0.874 | 0.763 | Redis wins all cells |
+| Small integer reply table | 0.754 | 0.812 | 0.839 | rejected |
+| Runtime exact-8 unroll | 0.777 | 0.755 | 0.769 | rejected |
+| Batch `exists_many_no_touch` | 0.812 | 0.812 | 0.835 | rejected |
+| Exact-8 batch helper | 0.789 | 0.807 | 0.822 | rejected |
+
+Validation during candidates: focused `fr-store` and `fr-runtime` tests passed; no qk0nm source
+hunk remains. RCH release build succeeded, but remote bench failed on `FR_SERVER_BIN` path
+rewriting; accepted timing artifacts used the local compiler-scoped subtarget under
+`/data/projects/.rch-targets/frankenredis-cod-b`. Redis-relative score remains **0 wins / 3 losses /
+0 neutral** for the focused `EXISTS` suite.

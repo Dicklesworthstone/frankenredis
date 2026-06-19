@@ -145,3 +145,28 @@ improved by 73,728 B in that cell.
 
 Redis-relative score after this lever: **0/3/0** wins/losses/neutral. The `EXISTS` loss remains
 open, but the encoded reply path narrows all three focused cells and is a measured keeper.
+
+## Targeted Gauntlet: frankenredis-qk0nm EXISTS Runtime Accounting
+
+- Commit candidate: none kept. All runtime/store accounting experiments were reverted.
+- Build/bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm`,
+  `cargo bench -p fr-bench --bench exists_vs_redis -- --noplot`, Redis 7.2.4 oracle from
+  `legacy_redis_code/redis/src/redis-server`.
+- RCH note: `rch exec -- cargo build --release -p fr-server -p fr-bench` succeeded on `hz1`;
+  remote `cargo bench` failed because `FR_SERVER_BIN` was rewritten to a bench target that did not
+  contain `release/frankenredis`. The shared requested target also contained mixed-nightly metadata,
+  so the measured local fallback used the compiler-scoped subtarget under the requested root.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-qk0nm/20260619T1842Z/summary.json`.
+
+| candidate | all-hit fr/redis | half-hit fr/redis | duplicate fr/redis | verdict |
+|---|---:|---:|---:|---|
+| control after upx5x | 0.864 | 0.874 | 0.763 | baseline |
+| small integer reply table | 0.754 | 0.812 | 0.839 | rejected; fr absolute throughput regressed |
+| runtime exact-8 unroll | 0.777 | 0.755 | 0.769 | rejected; fr absolute throughput regressed |
+| batch `exists_many_no_touch` | 0.812 | 0.812 | 0.835 | rejected; no credible same-control win |
+| exact-8 batch helper | 0.789 | 0.807 | 0.822 | rejected; fr absolute throughput regressed |
+
+Redis-relative score remains **0/3/0** wins/losses/neutral. qk0nm added negative evidence only:
+small integer reply tables, exact-8 unrolling, and batch hit/miss aggregation are not viable next
+steps for the remaining `EXISTS` loss without new profile evidence.

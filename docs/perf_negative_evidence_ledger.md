@@ -727,3 +727,51 @@ pre-existing large-file findings; no finding was specific to the new encoded `EX
 
 Retry condition: the next `EXISTS` pass should target the remaining Redis-relative loss in key
 lookup/runtime accounting, not parser cascade order or no-expiry `drop_if_expired` micro-branches.
+
+## MEASURED cod-b qk0nm residual EXISTS runtime-accounting pass (2026-06-19) — REJECTED
+
+Scope: `frankenredis-qk0nm`, the residual 8-key `EXISTS` Redis-relative loss after the
+`frankenredis-upx5x` encoded-reply keep. This pass tried runtime/accounting levers that were
+distinct from the previously rejected parser cascade and single-key `drop_if_expired` no-expiry
+micro-branch. All production hunks were reverted.
+
+Build/proof bundle:
+`artifacts/optimization/frankenredis-qk0nm/20260619T1842Z/{control_exists_small_integer_table_local_subtarget.txt,candidate_exists_small_integer_table_local_subtarget.txt,candidate_unrolled_exists_local_subtarget.txt,candidate_batch_exists_local_subtarget.txt,candidate_batch8_exists_local_subtarget.txt,summary.json}`.
+`rch exec -- cargo build --release -p fr-server -p fr-bench` succeeded on worker `hz1`, but
+`rch exec -- cargo bench -p fr-bench --bench exists_vs_redis -- --noplot` failed because the remote
+bench process rewrote `FR_SERVER_BIN` to an ephemeral bench target without `release/frankenredis`.
+The shared requested target then failed locally with mixed-nightly metadata (`654079540` artifacts
+vs local `f20a92ec0`), so the measured A/B lane used fresh subtarget
+`/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0-qk0nm` under the requested root.
+Kernel profiling remained blocked by `perf_event_paranoid=4`.
+
+Control (`HEAD` after the upx5x keep, with peer RESTORE sidecar diff present but no qk0nm code):
+
+| Workload | Control Redis elems/s | Control fr elems/s | Control fr/redis |
+|---|--:|--:|--:|
+| EXISTS 8 all hit | 1,062,600 | 917,600 | 0.864 |
+| EXISTS 8 half hit | 1,147,500 | 1,002,500 | 0.874 |
+| EXISTS 8 duplicates | 1,222,100 | 932,190 | 0.763 |
+
+Rejected candidates:
+
+| Candidate | all-hit fr/redis | half-hit fr/redis | duplicate fr/redis | fr absolute vs control | Decision |
+|---|--:|--:|--:|---:|---|
+| Small pre-encoded integer reply table (`:0\r\n`..`:16\r\n`) + `_into` `u64` count | 0.754 | 0.812 | 0.839 | 0.848 / 0.795 / 0.854 | REJECT: significant fr throughput regression |
+| Runtime exact-8 unrolled count over `exists_no_touch` | 0.777 | 0.755 | 0.769 | 0.841 / 0.733 / 0.817 | REJECT: significant fr throughput regression |
+| `Store::exists_many_no_touch` batch helper with no-expiry aggregate hit/miss stats | 0.812 | 0.812 | 0.835 | 0.963 / 0.950 / 0.995 | REJECT: no credible same-control win; still Redis losses |
+| Exact-8 specialization inside `exists_many_no_touch` | 0.789 | 0.807 | 0.822 | 0.853 / 0.823 / 0.857 | REJECT: significant fr throughput regression |
+
+Win/loss/neutral:
+- Lever decisions in this `qk0nm` pass: **0 wins / 4 losses / 0 neutral**.
+- Redis-relative score after reverting: unchanged at **0 wins / 3 losses / 0 neutral** for the
+  focused `EXISTS` suite.
+
+Correctness gates while candidates were present: focused `fr-store exists_many_no_touch` tests PASS
+for the batch helper; focused `fr-runtime plain_exists_borrowed` tests PASS for every candidate.
+No production qk0nm code remained, so final validation is evidence-only plus source diff check.
+
+Retry condition: do not retry small integer reply tables, exact-8 runtime unrolling, or batch
+`exists_no_touch` stat aggregation for this workload. The next viable `EXISTS` route needs fresh
+profile evidence naming a different primitive, likely command timing/histogram accounting,
+connection write batching, or a larger keyspace-layout change shared with `frankenredis-uhthd`.
