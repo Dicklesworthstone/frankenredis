@@ -19744,7 +19744,15 @@ impl Store {
 
     pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
         // Parse + validate the library header: #!<engine> name=<name>
-        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
+        // (frankenredis-7qmmr) Upstream parses the shebang and compiles the body from BYTES, so a
+        // non-UTF8 library NEVER yields WRONGTYPE: an invalid-charset name produces the
+        // name-validation error and a non-UTF8 body a compile error. fr required strict UTF-8 and
+        // mapped ANY non-UTF8 input to WRONGTYPE (a wrong-category error — FUNCTION LOAD is never a
+        // type mismatch). Decode lossily — as the sibling metadata-only validator already does —
+        // so the name-charset check and the Lua compile path run and surface the right error
+        // category. Valid UTF-8 is byte-for-byte unaffected (lossy == strict there).
+        let code_owned = String::from_utf8_lossy(code);
+        let code_str: &str = &code_owned;
         let (lib_name, engine) = Self::extract_lib_metadata(code_str)?;
 
         if !replace && self.function_libraries.contains_key(&lib_name) {
