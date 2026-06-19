@@ -110,3 +110,21 @@ redis-7.2.4(29442). Isolates the value-size scaling of the read/write path.
 - **Release-readiness flag:** large-value writes (>=64KB) are fr's worst measured workload. For a
   release targeting large-payload use (e.g. caching big blobs), this is the headline gap to close;
   for typical small-value workloads fr dominates (geomean 1.348x).
+
+### Large-value SET — scaling curve + root-cause diagnosis (MEASURED 2026-06-19, refinement)
+SET scaling (depth1, 30k req, 4 trials), fr/redis: 16KB 0.192x, 64KB 0.178x, 128KB 0.134x,
+256KB 0.115x — monotonically WORSE with value size. Absolute ratio is RUN-TO-RUN noisy
+(earlier batch: 64KB 0.417x, 256KB 0.246x; cv<5% within each run) = sandbox-contention variance
+(vibu6). ROBUST facts (stable across runs): large-value SET is fr's worst workload (~0.12-0.42x,
+redis 2.4-8x faster), worsens with size, GET unaffected.
+ROOT-CAUSE (code-read, fr-server handle_readable): the read side is ALREADY optimized
+(frankenredis-largeval-bigbulk-zerocopy-qesp3 partial — reads the >8KB continuation directly into
+read_buf's tail, dropping the stack->read_buf copy + per-chunk realloc). The RESIDUAL cost is the
+SAFE-RUST tax it could not avoid: the grown read_buf region is ZERO-FILLED (memset) before reading
+because safe Rust can't read into uninitialized memory without `unsafe`/MaybeUninit, plus the
+store-copy (read_buf -> owned value). redis (C) reads straight into uninitialized buffer (no
+memset) with ~1 copy. So fr pays ~memset(n) + copy(n) where redis pays ~copy(n).
+DO NOT REVERT the qesp3-partial read lever: it fixes the apg7r edge-triggered >16KB read-drain
+HANG (correctness) — reverting re-introduces a hang. Real fix = MaybeUninit read into the grown
+region (needs `unsafe`, against fr's no-unsafe lean) OR moving the value out of read_buf instead of
+copying. Precise hot-spot split (memset vs copy vs syscall) needs a flamegraph on a quiet host.
