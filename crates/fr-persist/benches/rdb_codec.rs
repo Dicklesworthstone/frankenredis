@@ -53,7 +53,13 @@ fn build_entries() -> Vec<RdbEntry> {
     }
     // int-bearing strings (087qq itoa2 path)
     for _ in 0..4000 {
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::String((key as i64 * 7919).to_string().into_bytes()), expire_ms: None });
+        let string_key = entries.len() + 1;
+        entries.push(RdbEntry {
+            db: 0,
+            key: k(),
+            value: RdbValue::String((string_key as i64 * 7919).to_string().into_bytes()),
+            expire_ms: None,
+        });
     }
     entries
 }

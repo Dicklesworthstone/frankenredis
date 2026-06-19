@@ -1,0 +1,51 @@
+{
+  "schema_version": "n2u1g-zrange-withscores.v1",
+  "generated_at": "2026-06-19T05:15Z",
+  "git_head": "0a395dd57",
+  "build_profile": "release-perf",
+  "target_dir": "/data/projects/.rch-targets/frankenredis-cod-b",
+  "requests": 200000,
+  "clients": 4,
+  "trials": 5,
+  "redis_version": "7.2.4",
+  "cells": [
+    {
+      "depth": 1,
+      "redis_ops": 65524.43465287627,
+      "fr_ops": 71037.9703410741,
+      "fr_over_redis": 1.0841447273434173,
+      "redis_cv_pct": 5.944427440165749,
+      "fr_cv_pct": 2.579287538566613,
+      "redis_p99_us": 99,
+      "fr_p99_us": 83,
+      "noisy": true
+    },
+    {
+      "depth": 16,
+      "redis_ops": 176575.5986786403,
+      "fr_ops": 226504.59818717363,
+      "fr_over_redis": 1.2827627366531085,
+      "redis_cv_pct": 3.667540310109384,
+      "fr_cv_pct": 1.4344647719812311,
+      "redis_p99_us": 486,
+      "fr_p99_us": 307,
+      "noisy": false
+    },
+    {
+      "depth": 128,
+      "redis_ops": 188685.86673289692,
+      "fr_ops": 259931.96766819063,
+      "fr_over_redis": 1.3775910838947436,
+      "redis_cv_pct": 0.7067010431952587,
+      "fr_cv_pct": 1.5362988446647161,
+      "redis_p99_us": 3937,
+      "fr_p99_us": 2401,
+      "noisy": false
+    }
+  ],
+  "win_loss_neutral": {
+    "wins": 3,
+    "losses": 0,
+    "neutral": 0
+  }
+}

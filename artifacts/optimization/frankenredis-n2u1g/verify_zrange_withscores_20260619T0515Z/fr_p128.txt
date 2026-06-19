@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:43122
+workload: zrange-withscores
+clients: 4  requests: 200000  pipeline: 128  keyspace: 10000  datasize: 3
+elapsed: 769 ms  throughput: 259931.97 ops/sec (median of 5 trial(s), cv=1.54%)
+latency(us): min=412 p50=1419 p95=1922 p99=2401 p999=3099 max=3519 mean=1430.57
+bytes: sent=15578040 received=214800000 key_prefix=n2u1g:p128:fr

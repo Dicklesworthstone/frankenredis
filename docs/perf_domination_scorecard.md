@@ -1,5 +1,22 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Targeted Gauntlet: frankenredis-n2u1g ZRANGE WITHSCORES Direct Score Encode
+
+- Commit measured: `0a395dd57` server source (`release-perf`; local binary materialized after
+  rch compile completed but did not copy back release-perf executables).
+- Build: `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile release-perf -p fr-server -p fr-bench`, then local materialization into the same target dir.
+- Workload: `fr-bench --workload zrange-withscores`, 200k requests, 4 clients, 5 trials,
+  p1/p16/p128, fresh ports `43121/43122`, vendored Redis 7.2.4.
+- Raw artifact: `artifacts/optimization/frankenredis-n2u1g/verify_zrange_withscores_20260619T0515Z/summary.json`.
+- Guard: `zset_score_emit_differ.py` passed byte-exact vs Redis 7.2.4 for ZSCORE/ZMSCORE/ZINCRBY/ZADD-INCR/WITHSCORES/ZPOPMIN/ZPOPMAX under RESP2 and RESP3.
+- Keep/revert decision: **KEEP**. Win/loss/neutral `3/0/0`; p16 and p128 are clean low-CV Redis-relative wins.
+
+| depth | Redis ops/s | fr ops/s | fr/redis | cv redis/fr | p99 redis/fr us | verdict |
+|---:|--:|--:|--:|--:|--:|---|
+| 1 | 65,524 | 71,038 | 1.084 | 5.94/2.58 | 99/83 | fr faster, exact cell noisy |
+| 16 | 176,576 | 226,505 | 1.283 | 3.67/1.43 | 486/307 | **fr faster clean** |
+| 128 | 188,686 | 259,932 | 1.378 | 0.71/1.54 | 3937/2401 | **fr faster clean** |
+
 ## Targeted Gauntlet: frankenredis-uhthd Lazy Sorted Key Index
 
 - Commit measured: `4cf73ebef`

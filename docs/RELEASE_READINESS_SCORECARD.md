@@ -219,6 +219,55 @@ mixed intset/generic intersection and difference remain slower than Redis, while
 already faster. Retry only from a fresh profile naming `SetValue::retain` or mixed
 set-algebra allocation as a top hotspot.
 
+## Cod-b ZRANGE WITHSCORES score direct-encode (MEASURED 2026-06-19)
+
+Harness: `fr-bench --workload zrange-withscores`. Setup preloads each key with 64
+integer-scored sorted-set members, then the timed operation is
+`ZRANGE key 0 -1 WITHSCORES`, isolating the `frankenredis-n2u1g` direct score
+emit path. Release-perf binaries used `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`;
+raw artifacts live in
+`artifacts/optimization/frankenredis-n2u1g/verify_zrange_withscores_20260619T0515Z/`.
+
+| Depth | Redis ops/s | fr ops/s | fr/redis | cv redis/fr | p99 redis/fr us | Verdict |
+|---:|--:|--:|--:|--:|--:|---|
+| p1 | 65,524 | 71,038 | 1.084 | 5.94/2.58 | 99/83 | fr faster [noisy] |
+| p16 | 176,576 | 226,505 | 1.283 | 3.67/1.43 | 486/307 | fr faster clean |
+| p128 | 188,686 | 259,932 | 1.378 | 0.71/1.54 | 3937/2401 | fr faster clean |
+
+Win/loss/neutral: **3/0/0**. Decision: keep `frankenredis-n2u1g`; no revert.
+Conformance guard: `zset_score_emit_differ.py` passed byte-exact vs Redis 7.2.4 for
+ZSCORE/ZMSCORE/ZINCRBY/ZADD-INCR/WITHSCORES/ZPOPMIN/ZPOPMAX under RESP2 and RESP3.
+
+## Cod-a integer GET materialization (MEASURED 2026-06-19)
+
+Harness added in `fr-bench`: `--workload integer-get`. Setup uses `INCRBY` to prefill
+integer-encoded string values, then the timed operation is `GET`, isolating the
+`frankenredis-087qq` `Value::Integer` materialization path. Release binaries were rch-built
+under `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`; raw artifacts live in
+`artifacts/optimization/frankenredis-087qq/verify_integer_get_20260619T0505Z/`.
+
+| Workload | Redis ops/s | fr ops/s | fr/redis | cv fr/redis | Verdict |
+|---|--:|--:|--:|--:|---|
+| GET p1 | 83,375 | 93,111 | 1.117 | 5.35/6.13 | fr faster |
+| GET p16 | 939,014 | 1,162,525 | 1.238 | 6.37/5.25 | fr faster |
+| GET p128 | 2,313,189 | 3,660,514 | 1.583 | 5.99/8.97 | fr faster |
+| SET p1 | 88,728 | 99,203 | 1.118 | 4.26/3.65 | fr faster |
+| SET p16 | 938,451 | 960,631 | 1.024 | 13.64/10.25 | fr faster [noisy] |
+| SET p128 | 1,896,334 | 2,748,513 | 1.449 | 19.01/13.15 | fr faster [noisy] |
+| integer-get p1 | 96,367 | 97,091 | 1.008 | 6.36/2.53 | fr faster [noisy] |
+| integer-get p16 | 774,653 | 848,026 | 1.095 | 8.24/8.30 | fr faster [noisy] |
+| integer-get p128 | 1,769,645 | 2,393,822 | 1.353 | 19.73/8.63 | fr faster [noisy] |
+
+Win/loss/neutral: **9/0/0** cells overall; target `integer-get`: **3/0/0**. Decision:
+keep `frankenredis-087qq`. The small p1 margin is noisy but positive, and the pipelined integer
+GET cells are clearly fr-faster. No revert.
+
+Validation: focused `fr-bench` fmt/clippy/tests passed, release binaries were rch-built, and
+`cargo test -p fr-conformance -- --nocapture` passed via rch. After fixing unrelated
+test/bench compile blockers, full workspace all-targets check also passed via rch. Full
+workspace clippy and full rustfmt remain blocked by unrelated gate debt tracked in
+`frankenredis-pjtld`.
+
 ## Cod-a quicklist2 PACKED RESTORE decode move (MEASURED 2026-06-19)
 
 Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench

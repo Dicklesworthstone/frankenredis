@@ -1,0 +1,1 @@
+PASS — zset score-output formatting byte-exact vs redis 7.2.4 (ZSCORE/ZMSCORE/ZINCRBY/ZADD-INCR/WITHSCORES/ZPOPMIN-MAX x int/float/inf/2^53/max-f64/subnormal x RESP2+RESP3 Double) [guards n2u1g direct-encode]

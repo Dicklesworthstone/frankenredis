@@ -1808,6 +1808,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn tokenize_all(&mut self) -> Result<Vec<Token>, String> {
         Ok(self.tokenize_all_with_lines()?.0)
     }
@@ -1815,6 +1816,7 @@ impl<'a> Lexer<'a> {
     /// Tokenize, also returning the 1-based source line where each token begins
     /// (parallel to the token vec, including the trailing `Eof`). Used to thread
     /// real line numbers into Lua error messages. (frankenredis-m7oy8)
+    #[allow(dead_code)]
     fn tokenize_all_with_lines(&mut self) -> Result<(Vec<Token>, Vec<u32>), String> {
         // Bare-message form — preserves the contract tokenize_all / loadstring
         // assert on. (frankenredis-5qhz7)
@@ -1948,6 +1950,7 @@ struct Parser {
 }
 
 impl Parser {
+    #[allow(dead_code)]
     fn new(tokens: Vec<Token>) -> Self {
         // Default line map (all 1) for callers that don't supply one — keeps
         // the line numbers harmless when source positions aren't tracked.
@@ -3846,6 +3849,7 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn split_direct_yield_exprs(
         &mut self,
         exprs: &[Expr],
@@ -3909,6 +3913,7 @@ impl<'a> LuaState<'a> {
         Err(LUA_YIELD_SENTINEL.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exec_numeric_for_body_from(
         &mut self,
         name: &str,
@@ -5253,6 +5258,7 @@ impl<'a> LuaState<'a> {
         Ok(CoroutineRun::Complete(Vec::new()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resume_numeric_for_continuation(
         &mut self,
         name: String,

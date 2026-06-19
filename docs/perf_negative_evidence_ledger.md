@@ -125,13 +125,27 @@ turns). Keep claims honest — mark which.
 - frankenredis-087qq / cod-a: `fr-store` integer value materialization now routes
   `Value::Integer` owned-byte paths and intset member bytes through the shared
   `integer_decimal_bytes` / itoa2 writer instead of `i64::to_string()` formatting
-  machinery — CODED (reasoned; batch benchmark pending). Scope is store-side byte
+  machinery — MEASURED KEEP 2026-06-19. Focused fresh-server release A/B used
+  the new `fr-bench --workload integer-get` harness, prefilled keys via `INCRBY`
+  so both engines store integer-encoded string values, then timed `GET` against
+  Redis 7.2.4 at p1/p16/p128. Result: integer-get fr/redis throughput
+  1.008 / 1.095 / 1.353; win/loss/neutral 3/0/0 for the target cells and 9/0/0
+  including ordinary GET/SET control cells. Several cells are noisy (`cv_pct > 5`)
+  under shared-host contention, so the direction is keep-quality but publication
+  numbers still need quiet-host rerun (`vibu6`). Raw artifact:
+  `artifacts/optimization/frankenredis-087qq/verify_integer_get_20260619T0505Z/summary.json`.
+  Validation: focused `fr-bench` fmt/clippy/tests passed and
+  `cargo test -p fr-conformance -- --nocapture` passed via rch. After fixing
+  unrelated test/bench compile blockers, `cargo check --workspace --all-targets`
+  also passed via rch. Full workspace clippy and full rustfmt remain blocked by
+  unrelated gate debt tracked as `frankenredis-pjtld`.
+  Scope is store-side byte
   materialization for integer GET-like paths and `SetValue::Int` iteration /
   promotion / removal; RESP serializer, runtime, and server code are unchanged.
   Guard pins zero, sign edges, and i64 min/max against the old `to_string`
   reference for `Value::Integer` and intset member materialization. Retry
-  condition if rejected: do not retry generic i64 formatting cleanup unless a
-  fresh profile names integer materialization or intset member formatting.
+  condition: only revisit integer materialization after a fresh profile names
+  this path again or quiet-host verification contradicts the measured keep.
 - frankenredis-gu5nf.32 / cod-a: `fr-store` `SetValue::retain` stack-borrowed
   decimal bytes for intset predicates — MEASURED REJECTED 2026-06-19 and source
   hunk reverted. Criterion set-algebra vs Redis 7.2.4 showed no Redis-relative
@@ -141,28 +155,29 @@ turns). Keep claims honest — mark which.
   mixed intset/generic set-algebra allocation cost as a top hotspot, and a
   before/after Criterion run beats the reverted baseline.
 - frankenredis-n2u1g / cod-b: zset score direct encoder for borrowed `ZSCORE`
-  and `ZMSCORE` network fast paths — CODED (reasoned; batch benchmark pending).
+  and `ZMSCORE` network fast paths — MEASURED KEEP 2026-06-19.
   `fr-protocol::encode_redis_double` writes Redis d2string bytes directly into
   RESP3 Double / RESP2 bulk-string frames, and fr-runtime/fr-server now use it
   for score-read fast paths instead of allocating a `String`/score `RespFrame`.
   Guard compares raw wire bytes against generic dispatch for RESP2, RESP3, nil,
-  and WRONGTYPE paths. Retry condition if rejected: do not add a wide
-  `RespFrame` score variant or option-bearing `ZRANGE WITHSCORES` direct path
-  unless a release profile names score formatting/allocation in a zset
-  WITHSCORES workload.
+  and WRONGTYPE paths. The focused `zrange-withscores` head-to-head below also
+  covers the option-bearing direct encoder, so this is no longer pending.
 - frankenredis-n2u1g / cod-b: direct encoder for canonical rank-form
-  `ZRANGE key start stop WITHSCORES` — CODED (reasoned after the dedicated
-  `fr-bench --workload zrange-withscores` harness landed; batch profile and
-  criterion vs Redis pending). RESP2 emits the flat upstream shape
-  `member,score,...`; RESP3 emits `[member,score]` pair subarrays and writes
-  score doubles through the existing direct Redis d2string encoder. Generic
-  `REV`/`BYSCORE`/`BYLEX`/`LIMIT` option shapes still fall through to canonical
-  dispatch. Guard compares raw wire bytes against generic dispatch for RESP2,
-  RESP3, missing-key empty arrays, WRONGTYPE errors, and bad-integer fallback.
-  Retry condition if rejected: do not expand to `ZREVRANGE`,
-  `ZRANGEBYSCORE WITHSCORES`, or `ZRANGE ... LIMIT` direct encoders unless the
-  focused zrange-withscores bench or a release profile isolates those exact
-  option shapes as score-format/allocation bottlenecks.
+  `ZRANGE key start stop WITHSCORES` — MEASURED KEEP 2026-06-19. Focused
+  fresh-server `release-perf` A/B used the dedicated
+  `fr-bench --workload zrange-withscores` harness at p1/p16/p128, 200k requests,
+  4 clients, 5 trials, against vendored Redis 7.2.4. Result: fr/Redis
+  throughput `1.084 / 1.283 / 1.378`; win/loss/neutral `3/0/0`. p1 is noisy
+  because Redis cv was 5.94%, but p16 and p128 are clean (`cv_pct < 5`) and
+  have lower fr p99s (`307us` vs `486us`, `2401us` vs `3937us`). Raw artifact:
+  `artifacts/optimization/frankenredis-n2u1g/verify_zrange_withscores_20260619T0515Z/summary.json`.
+  Conformance guard: `zset_score_emit_differ.py` passed byte-exact vs Redis
+  7.2.4 across ZSCORE/ZMSCORE/ZINCRBY/ZADD-INCR/WITHSCORES/ZPOPMIN/ZPOPMAX and
+  RESP2+RESP3 Double output. Generic `REV`/`BYSCORE`/`BYLEX`/`LIMIT` option
+  shapes still fall through to canonical dispatch. Retry condition: do not
+  expand to `ZREVRANGE`, `ZRANGEBYSCORE WITHSCORES`, or `ZRANGE ... LIMIT`
+  direct encoders unless a fresh focused bench or release profile isolates those
+  exact option shapes as score-format/allocation bottlenecks.
 - frankenredis-mixed-zset-listpack-direct-emit-vly2n / cod-a: `fr-persist`
   compact zset listpack encode now streams member/score entries directly for
   mixed integer/fractional score sets instead of building `score_bytes` and

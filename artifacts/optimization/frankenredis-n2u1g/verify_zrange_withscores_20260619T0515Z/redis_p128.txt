@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:43121
+workload: zrange-withscores
+clients: 4  requests: 200000  pipeline: 128  keyspace: 10000  datasize: 3
+elapsed: 1059 ms  throughput: 188685.87 ops/sec (median of 5 trial(s), cv=0.71%)
+latency(us): min=454 p50=1993 p95=3321 p99=3937 p999=4955 max=6283 mean=2062.19
+bytes: sent=16177959 received=214800000 key_prefix=n2u1g:p128:redis

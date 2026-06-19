@@ -1725,9 +1725,10 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, decimal_u64_len, decimal_usize_len, format_redis_double,
-        parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
-        parse_frame, parse_frame_with_config, push_i64, push_usize, read_line,
+        RespParseError, decimal_u64_len, decimal_usize_len, encode_redis_double,
+        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
+        parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64,
+        push_redis_double_ascii, push_usize, read_line,
     };
 
     // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original

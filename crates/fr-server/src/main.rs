@@ -5,6 +5,9 @@
 //! etc.) while sharing a single `ServerState` (store, config) via the `Runtime`.
 
 #![forbid(unsafe_code)]
+// Hot RESP fast-path parsers use explicit branch ladders to keep fixed wire
+// shapes easy to audit against benchmarked offsets.
+#![allow(clippy::question_mark)]
 
 #[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
 compile_error!("features \"jemalloc\" and \"mimalloc\" are mutually exclusive");
