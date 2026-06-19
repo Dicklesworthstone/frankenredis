@@ -319,6 +319,15 @@ turns). Keep claims honest — mark which.
   no revert. Retry condition: next `uhthd` work must attack the remaining
   1.91x keyspace RSS gap or collection RSS gaps; do not claim parity from
   `used_memory` alone, and always run high-port distinct Redis/fr pairs.
+- frankenredis-uhthd / cod-a: INVALIDATED default-port gauntlet attempt against
+  `4cf73ebef` and parent `10af233f4`. The run used the old/default 299xx port
+  pair under peer benchmark load and produced suspicious all-equal/parity RSS
+  cells (`full keyspace 1.003x -> 1.000x`) plus a low-CV `mixed@p16=0.956x`
+  ratchet failure. Do not use this as keep/reject proof: the high-port rerun
+  above supersedes it, and the temporary local rollback was backed out. Decision:
+  no revert from this invalidated run. Retry condition: every future Redis/fr
+  head-to-head must use distinct high-port pairs (`FR_BENCH_PORT_BASE`) or an
+  explicitly isolated quiet host before making a code decision.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
 
@@ -397,3 +406,27 @@ turns). Keep claims honest — mark which.
   asserts the contract not the bytes. Retry condition: do NOT re-file as a bug; only revisit if
   a future requirement demands byte-equal stream DUMP with redis (would need retain-until-rewrite
   semantics in PackedStreamLog = CoralOx fr-store structural, not a parity bug).
+
+## MEASURED head-to-head vs Redis 7.2.4 (2026-06-19, cc, release build via rch) — VERIFY PHASE
+Constraint lifted: rch release builds+benches allowed. First MEASURED numbers (were
+commit-message-only). Harness: fr-bench --pipeline 16 --requests 300000 --trials 5 (8 for lpush),
+fr-release @origin 4cf73ebef vs vendored redis-server 7.2.4, loopback. Full table +
+caveats in docs/RELEASE_READINESS_SCORECARD.md. Sandbox-contended; cv>5% flagged.
+
+- **HEADLINE CONFIRMED (Measured): throughput domination is REAL.** Geomean fr/redis = 1.348x
+  over 9 workloads (depth16); fr faster on 8/9. The long-claimed "GET ~1.2x / SET ~1.3x faster"
+  is measured: GET 1.148x, SET 1.272x, INCR 1.096x, HSET 1.379x. Reads dominate (clean, cv<5%):
+  LRANGE 1.707x, SMEMBERS 1.846x, ZRANGE-WITHSCORES 1.275x, HGETALL 1.878x.
+- **MEASURED LOSS — LPUSH ~0.54x (redis faster).** Re-measured 8 trials at depth 1 AND 16, both
+  ~0.54 (cv 5.8 / 18). Real, not noise. ROOT = ChunkedList per-element Vec alloc on push
+  (structural, bead 99fwc / project_list_restore_gap_architectural). NOT a recent lever — get/
+  set/hset writes are all fr-faster, so it is list-specific. NO REVERT (nothing recent caused it);
+  the fix is the packed-listpack-node ChunkedList rewrite (CoralOx). Retry: do not attempt to
+  "revert a lever" for LPUSH — it is the known structural list gap, not a regression.
+- **NO REVERTS this pass.** No backlog optimization showed a measured regression. The encode-path
+  presize/direct-emit cluster + decode-string-move levers are byte-identical (gate-verified) so
+  they cannot regress correctness; their throughput target (collection BGSAVE/MIGRATE/RELOAD) is
+  NOT exercised by fr-bench (string-dump only) — needs a DEBUG-RELOAD-timing bench (owed).
+- **METHOD constraint (Measured the hard way):** the full 36-cell matrix + heavy 2-server bench
+  loops 144-KILL under cumulative sandbox load; only focused light batches (≤8 fr-bench runs,
+  reused servers) complete. Publication-grade numbers still need a quiet host (bead vibu6).
