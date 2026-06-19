@@ -5008,11 +5008,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5027,11 +5028,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_three_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5046,11 +5048,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_four_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5065,11 +5068,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_five_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5084,11 +5088,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_six_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5103,11 +5108,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_seven_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5122,11 +5128,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_eight_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5435,11 +5442,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_exists_borrowed(keys, ts)
+                            && runtime
+                                .execute_plain_exists_borrowed_into(keys, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)

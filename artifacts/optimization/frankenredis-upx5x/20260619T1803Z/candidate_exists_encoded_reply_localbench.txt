@@ -1,0 +1,73 @@
+    Finished `bench` profile [optimized] target(s) in 0.11s
+     Running benches/exists_vs_redis.rs (/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0/release/deps/exists_vs_redis-3234d2b33743af49)
+Gnuplot not found, using plotters backend
+Benchmarking exists_vs_redis/exists8_all_hit/redis-7.2.4
+Benchmarking exists_vs_redis/exists8_all_hit/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_all_hit/redis-7.2.4: Collecting 10 samples in estimated 1.0023 s (8525 iterations)
+Benchmarking exists_vs_redis/exists8_all_hit/redis-7.2.4: Analyzing
+exists_vs_redis/exists8_all_hit/redis-7.2.4
+                        time:   [120.33 µs 124.02 µs 126.45 µs]
+                        thrpt:  [1.0123 Melem/s 1.0321 Melem/s 1.0638 Melem/s]
+                 change:
+                        time:   [-12.338% -6.7451% -1.1267%] (p = 0.03 < 0.05)
+                        thrpt:  [+1.1395% +7.2330% +14.075%]
+                        Performance has improved.
+Benchmarking exists_vs_redis/exists8_all_hit/frankenredis
+Benchmarking exists_vs_redis/exists8_all_hit/frankenredis: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_all_hit/frankenredis: Collecting 10 samples in estimated 1.0024 s (6710 iterations)
+Benchmarking exists_vs_redis/exists8_all_hit/frankenredis: Analyzing
+exists_vs_redis/exists8_all_hit/frankenredis
+                        time:   [151.42 µs 153.51 µs 155.40 µs]
+                        thrpt:  [823.69 Kelem/s 833.84 Kelem/s 845.31 Kelem/s]
+                 change:
+                        time:   [-14.188% -9.7421% -4.3553%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.5536% +10.794% +16.533%]
+                        Performance has improved.
+Benchmarking exists_vs_redis/exists8_half_hit/redis-7.2.4
+Benchmarking exists_vs_redis/exists8_half_hit/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_half_hit/redis-7.2.4: Collecting 10 samples in estimated 1.0062 s (8195 iterations)
+Benchmarking exists_vs_redis/exists8_half_hit/redis-7.2.4: Analyzing
+exists_vs_redis/exists8_half_hit/redis-7.2.4
+                        time:   [114.21 µs 117.95 µs 122.52 µs]
+                        thrpt:  [1.0447 Melem/s 1.0852 Melem/s 1.1207 Melem/s]
+                 change:
+                        time:   [-17.651% -15.135% -12.416%] (p = 0.00 < 0.05)
+                        thrpt:  [+14.175% +17.835% +21.435%]
+                        Performance has improved.
+Benchmarking exists_vs_redis/exists8_half_hit/frankenredis
+Benchmarking exists_vs_redis/exists8_half_hit/frankenredis: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_half_hit/frankenredis: Collecting 10 samples in estimated 1.0047 s (6655 iterations)
+Benchmarking exists_vs_redis/exists8_half_hit/frankenredis: Analyzing
+exists_vs_redis/exists8_half_hit/frankenredis
+                        time:   [143.40 µs 146.82 µs 152.30 µs]
+                        thrpt:  [840.46 Kelem/s 871.83 Kelem/s 892.60 Kelem/s]
+                 change:
+                        time:   [-18.042% -14.404% -10.383%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.586% +16.828% +22.013%]
+                        Performance has improved.
+Benchmarking exists_vs_redis/exists8_duplicates/redis-7.2.4
+Benchmarking exists_vs_redis/exists8_duplicates/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_duplicates/redis-7.2.4: Collecting 10 samples in estimated 1.0033 s (8470 iterations)
+Benchmarking exists_vs_redis/exists8_duplicates/redis-7.2.4: Analyzing
+exists_vs_redis/exists8_duplicates/redis-7.2.4
+                        time:   [120.27 µs 123.42 µs 126.24 µs]
+                        thrpt:  [1.0140 Melem/s 1.0371 Melem/s 1.0643 Melem/s]
+                 change:
+                        time:   [-20.951% -15.436% -9.8063%] (p = 0.00 < 0.05)
+                        thrpt:  [+10.873% +18.254% +26.504%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking exists_vs_redis/exists8_duplicates/frankenredis
+Benchmarking exists_vs_redis/exists8_duplicates/frankenredis: Warming up for 300.00 ms
+Benchmarking exists_vs_redis/exists8_duplicates/frankenredis: Collecting 10 samples in estimated 1.0005 s (7095 iterations)
+Benchmarking exists_vs_redis/exists8_duplicates/frankenredis: Analyzing
+exists_vs_redis/exists8_duplicates/frankenredis
+                        time:   [132.88 µs 137.93 µs 142.09 µs]
+                        thrpt:  [900.86 Kelem/s 927.98 Kelem/s 963.25 Kelem/s]
+                 change:
+                        time:   [-28.740% -23.698% -18.494%] (p = 0.00 < 0.05)
+                        thrpt:  [+22.690% +31.058% +40.331%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe

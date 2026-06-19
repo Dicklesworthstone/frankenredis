@@ -124,3 +124,24 @@ _Note: a point-in-time artifact sweep, not the ratcheted .bench-history baseline
 **RAM gaps (fr heavier):** zset=1.88x, keyspace=1.35x, hash=1.24x, set=1.18x, list=1.17x.
 The zset ratio worsened in the latest run because Redis RSS fell more than fr; fr absolute RSS
 improved by 73,728 B in that cell.
+
+## Targeted Gauntlet: frankenredis-upx5x EXISTS Encoded Reply
+
+- Commit candidate: borrowed `EXISTS` `_into` path + server `FastEncodedReply` wiring.
+- Build/bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0`,
+  `cargo bench -p fr-bench --bench exists_vs_redis -- --noplot`, Redis 7.2.4 oracle from
+  `legacy_redis_code/redis/src/redis-server`.
+- RCH note: requested-root `rch exec` builds were attempted but failed open after worker sync
+  timeouts and mixed-nightly metadata in the shared target; the accepted timing run used the
+  compiler-scoped subtarget under the requested root.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-upx5x/20260619T1803Z/summary.json`.
+
+| workload | fr/redis control | fr/redis candidate | fr candidate/control | verdict |
+|---|---:|---:|---:|---|
+| exists8_all_hit | 0.719 | 0.808 | 1.149 | keep; Redis still faster |
+| exists8_half_hit | 0.768 | 0.803 | 1.239 | keep; Redis still faster |
+| exists8_duplicates | 0.785 | 0.895 | 1.317 | keep; Redis still faster |
+
+Redis-relative score after this lever: **0/3/0** wins/losses/neutral. The `EXISTS` loss remains
+open, but the encoded reply path narrows all three focused cells and is a measured keeper.

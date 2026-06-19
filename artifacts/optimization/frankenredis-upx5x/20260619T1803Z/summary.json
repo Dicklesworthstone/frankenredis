@@ -1,0 +1,69 @@
+{
+  "issue": "frankenredis-upx5x",
+  "agent": "cod-b",
+  "timestamp_utc": "2026-06-19T18:30:00Z",
+  "target_dir": "/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0",
+  "redis_server": "/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server",
+  "fr_server": "/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0/release/frankenredis",
+  "kept_lever": "borrowed EXISTS encoded integer reply",
+  "candidate_artifact": "candidate_exists_encoded_reply_localbench.txt",
+  "control_artifact": "control_original_exists_vs_redis_localbench.txt",
+  "perf_note": "perf_event_paranoid=4 blocked kernel profiling; Criterion timing is acceptance evidence",
+  "rch_note": "rch build attempts used CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b but timed out during sync and failed open locally with mixed rustc metadata; final bench used compiler-scoped subtarget under the requested root",
+  "workloads": [
+    {
+      "name": "exists8_all_hit",
+      "control_redis_elems_per_sec": 1010100,
+      "control_fr_elems_per_sec": 725880,
+      "control_fr_over_redis": 0.719,
+      "candidate_redis_elems_per_sec": 1032100,
+      "candidate_fr_elems_per_sec": 833840,
+      "candidate_fr_over_redis": 0.808,
+      "candidate_fr_over_control_fr": 1.149,
+      "criterion_candidate_change": "+10.794% throughput, p=0.00",
+      "redis_relative_verdict": "loss"
+    },
+    {
+      "name": "exists8_half_hit",
+      "control_redis_elems_per_sec": 917040,
+      "control_fr_elems_per_sec": 703800,
+      "control_fr_over_redis": 0.768,
+      "candidate_redis_elems_per_sec": 1085200,
+      "candidate_fr_elems_per_sec": 871830,
+      "candidate_fr_over_redis": 0.803,
+      "candidate_fr_over_control_fr": 1.239,
+      "criterion_candidate_change": "+16.828% throughput, p=0.00",
+      "redis_relative_verdict": "loss"
+    },
+    {
+      "name": "exists8_duplicates",
+      "control_redis_elems_per_sec": 897910,
+      "control_fr_elems_per_sec": 704600,
+      "control_fr_over_redis": 0.785,
+      "candidate_redis_elems_per_sec": 1037100,
+      "candidate_fr_elems_per_sec": 927980,
+      "candidate_fr_over_redis": 0.895,
+      "candidate_fr_over_control_fr": 1.317,
+      "criterion_candidate_change": "+31.058% throughput, p=0.00",
+      "redis_relative_verdict": "loss"
+    }
+  ],
+  "redis_relative_score": {
+    "wins": 0,
+    "losses": 3,
+    "neutral": 0
+  },
+  "rejected_levers": [
+    "enum arity-dispatch parser wrapper: regressed/no keep",
+    "8-key-first parser reorder: mixed/no clean keep",
+    "Store::drop_if_expired no-expiry fast path: neutral/no statistically clean keep"
+  ],
+  "correctness_gates": [
+    "cargo test -p fr-runtime plain_exists_borrowed -- --nocapture",
+    "cargo check -p fr-runtime -p fr-server --all-targets",
+    "cargo clippy -p fr-runtime -p fr-server --all-targets -- -D warnings",
+    "cargo test -p fr-conformance -- --nocapture",
+    "cargo fmt --check"
+  ],
+  "known_gate_note": "ubs crates/fr-runtime/src/lib.rs crates/fr-server/src/main.rs exited 1 on broad pre-existing findings in the large files; cargo/clippy/fmt/conformance were green"
+}

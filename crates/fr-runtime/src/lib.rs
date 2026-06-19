@@ -46,6 +46,14 @@ use fr_store::{
 };
 use sha2::{Digest, Sha256};
 
+fn encode_nonnegative_integer_reply(value: u64, out: &mut Vec<u8>) {
+    out.push(b':');
+    let mut buf = [0_u8; 20];
+    let start = fr_protocol::write_u64_digits(&mut buf, 20, value);
+    out.extend_from_slice(&buf[start..]);
+    out.extend_from_slice(b"\r\n");
+}
+
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_AUTH_USER: &[u8] = b"default";
@@ -10039,6 +10047,52 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(reply)
+    }
+
+    pub fn execute_plain_exists_borrowed_into(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_exists_borrowed(keys, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("exists");
+        self.session.last_argv_len_sum =
+            b"EXISTS".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut count = 0_i64;
+        for key in keys {
+            if self.server.store.exists_no_touch(key, now_ms) {
+                count = count.saturating_add(1);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+
+        if !suppress_reply {
+            encode_nonnegative_integer_reply(u64::try_from(count).unwrap_or(0), out);
+        }
+
+        self.record_plain_exists_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
     }
 
     fn record_plain_exists_borrowed_metrics(
@@ -28118,6 +28172,32 @@ mod tests {
     }
 
     #[test]
+    fn plain_exists_borrowed_into_encodes_integer_reply() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1);
+        }
+
+        let keys: [&[u8]; 4] = [b"a", b"a", b"missing", b"l"];
+        let mut out = Vec::new();
+        assert!(
+            direct
+                .execute_plain_exists_borrowed_into(&keys, 2, &mut out)
+                .is_some(),
+            "default EXISTS should take borrowed encoded fast path"
+        );
+
+        let generic_reply =
+            generic.execute_frame(command(&[b"EXISTS", b"a", b"a", b"missing", b"l"]), 2);
+        let mut generic_out = Vec::new();
+        generic_reply.encode_into(&mut generic_out);
+        assert_eq!(out, generic_out);
+        assert_eq!(out, b":3\r\n");
+    }
+
+    #[test]
     fn plain_exists_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
@@ -28125,6 +28205,13 @@ mod tests {
         assert!(rt.execute_plain_exists_borrowed(&keys, 2).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(rt.execute_plain_exists_borrowed(&keys, 4).is_none());
+
+        let mut out = Vec::new();
+        assert!(
+            rt.execute_plain_exists_borrowed_into(&keys, 5, &mut out)
+                .is_none()
+        );
+        assert!(out.is_empty());
     }
 
     #[test]

@@ -592,6 +592,51 @@ Negative evidence:
 - Source hunk reverted to `entry.to_bytes()` for PACKED quicklist2 node decode.
 - Keep the benchmark harness as the future gate before retrying this family.
 
+## MEASURED cod-a quicklist2 RESTORE REPLACE slot reuse gauntlet (2026-06-19) — KEPT, residual Redis loss
+
+Scope: `frankenredis-tnv37`, follow-up after the rejected owned-entry move above. The kept lever
+changes `Store::restore_key_with_metadata` so `RESTORE ... REPLACE` overwrites an existing key's
+entry in place instead of removing and reinserting the keyspace slot. It still clears old per-object
+sidecars (`hash_field_ttl`, stream groups/last-id/entries-added/max-deleted-id) before installing
+the new object.
+
+Harness: `cargo bench -p fr-bench --bench restore_quicklist_vs_redis -- --noplot`. Release
+`frankenredis` binaries were built with `rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo build --release -p
+fr-server -p fr-bench`; the Criterion harness used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a-localbench`, `FR_SERVER_BIN` from
+the retrieved rch release binary, and Redis 7.2.4 at
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+| Workload | Redis median elems/s | fr median elems/s | fr/redis | fr candidate / no-candidate | Decision |
+|---|--:|--:|--:|--:|---|
+| QUICKLIST_2 PACKED RESTORE no-candidate | 112,860 | 49,455 | 0.438 | baseline | baseline |
+| QUICKLIST_2 PACKED RESTORE in-place REPLACE | 117,310 | 52,584 | 0.448 | 1.063 | KEEP: +6.33% vs paired no-candidate |
+
+Win/loss/neutral:
+- Lever decisions in this `tnv37` pass: **1 win / 1 loss / 0 neutral**.
+- Redis-relative score after the kept lever: **0 wins / 1 loss / 0 neutral**; Redis still wins this
+  focused RESTORE workload by about 2.23x.
+
+Negative evidence:
+- **Rejected listpack-count preallocation**: preallocating decoded listpack vectors from the header
+  count regressed the focused local Criterion run (`fr` median 52,335 elems/s vs the immediately
+  prior 57,025 elems/s baseline) and was reverted. This is not a retry path unless a profiler names
+  listpack vector growth directly.
+- **Kept slot reuse does not close the target gap**: `fr/redis` improved only from 0.438 to 0.448.
+  The remaining loss is deeper than keyspace remove/reinsert overhead.
+- **Kernel profiling blocked** on this host (`perf_event_paranoid=4`), so timing proof is the
+  acceptance evidence for this pass.
+
+Correctness gates: focused `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+cargo test -p fr-store restore_replace -- --nocapture` passed, including
+`restore_replace_hash_clears_old_field_ttls` and
+`restore_replace_stream_clears_old_consumer_groups`.
+
+Retry condition: the next radical lever should attack generic RESTORE request materialization or
+quicklist/listpack object construction, not the already-rejected `ListpackEntry::into_bytes` or
+listpack count preallocation families.
+
 ## MEASURED cod-b boxed keyspace storage gauntlet (2026-06-19) — KEPT, residual gap open
 
 Scope: `frankenredis-uhthd`, replacing the write-hot canonical keyspace key from
@@ -634,3 +679,51 @@ tests PASS; `scan_invariant_gate.py` PASS; `cargo test -p fr-conformance -- --no
 `cargo fmt --all -- --check` remains red on pre-existing formatting drift outside this lever
 (`fr-command`, `fr-persist`, `fr-protocol`, `fr-server`, `fr-store/keyspace_dict.rs`,
 `fr-store/packed_set.rs`); the production diff stayed scoped.
+
+## MEASURED cod-b 8-key EXISTS encoded-reply gauntlet (2026-06-19) — KEPT, residual gap open
+
+Scope: `frankenredis-upx5x`, the post-`frankenredis-z3yrs` 8-key `EXISTS` Redis-relative
+slowdown. The kept lever adds a borrowed `_into` runtime path for `EXISTS key [key ...]` that
+counts exactly as the existing borrowed path does, but writes the RESP integer reply directly to the
+connection buffer (`:<count>\r\n`) and lets the server return `FastEncodedReply`. This removes
+`RespFrame::Integer` materialization and the generic reply encoder from the exact 2-8 key parser
+hot path and the generic borrowed-args fallback.
+
+Build/proof bundle:
+`artifacts/optimization/frankenredis-upx5x/20260619T1803Z/{control_original_exists_vs_redis_localbench.txt,candidate_exists_encoded_reply_localbench.txt,summary.json}`.
+`rch exec` was attempted with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+but the worker sync timed out and fail-open local execution hit mixed remote/local nightly metadata
+in that shared target. The final release build and Criterion gate therefore used the compiler-scoped
+subtarget `/data/projects/.rch-targets/frankenredis-cod-b/local-f20a92ec0`, still under the requested
+root, with Redis 7.2.4 at `legacy_redis_code/redis/src/redis-server`.
+
+| Workload | Control Redis elems/s | Control fr elems/s | Control fr/redis | Candidate Redis elems/s | Candidate fr elems/s | Candidate fr/redis | fr candidate/control | Decision |
+|---|--:|--:|--:|--:|--:|--:|--:|---|
+| EXISTS 8 all hit | 1,010,100 | 725,880 | 0.719 | 1,032,100 | 833,840 | 0.808 | 1.149 | KEEP: Criterion +10.794% fr throughput, p=0.00 |
+| EXISTS 8 half hit | 917,040 | 703,800 | 0.768 | 1,085,200 | 871,830 | 0.803 | 1.239 | KEEP: Criterion +16.828% fr throughput, p=0.00 |
+| EXISTS 8 duplicates | 897,910 | 704,600 | 0.785 | 1,037,100 | 927,980 | 0.895 | 1.317 | KEEP: Criterion +31.058% fr throughput, p=0.00 |
+
+Win/loss/neutral:
+- Lever decisions in this `upx5x` pass: **1 win / 2 losses / 1 neutral**.
+- Redis-relative score after the kept lever: **0 wins / 3 losses / 0 neutral**. Redis still wins
+  every focused `EXISTS` cell, but the residual gap narrowed materially.
+
+Negative evidence and reverts:
+- **Rejected enum arity-dispatch parser wrapper**: a single `EXISTS` packet enum dispatcher removed
+  the parser cascade but regressed the local Criterion run and was removed before the keep.
+- **Rejected 8-key-first parser reorder**: direct 8-key-first ordering improved over the enum wrapper
+  but stayed mixed and did not cleanly beat the control across the scorecard; it was reverted.
+- **Rejected `Store::drop_if_expired` no-expiry fast path**: skipping expiry-deadline lookup when no
+  key TTLs exist looked promising, but the fair control/candidate run was neutral/noisy rather than
+  a statistically clean keep, so it was reverted.
+- **Kernel profiling blocked** on this host (`perf_event_paranoid=4`), so Criterion timing is the
+  acceptance evidence for this pass.
+
+Correctness gates: `cargo test -p fr-runtime plain_exists_borrowed -- --nocapture` PASS; `cargo
+check -p fr-runtime -p fr-server --all-targets` PASS; `cargo clippy -p fr-runtime -p fr-server
+--all-targets -- -D warnings` PASS; `cargo test -p fr-conformance -- --nocapture` PASS; `cargo fmt
+--check` PASS. `ubs crates/fr-runtime/src/lib.rs crates/fr-server/src/main.rs` exited 1 on broad
+pre-existing large-file findings; no finding was specific to the new encoded `EXISTS` path.
+
+Retry condition: the next `EXISTS` pass should target the remaining Redis-relative loss in key
+lookup/runtime accounting, not parser cascade order or no-expiry `drop_if_expired` micro-branches.

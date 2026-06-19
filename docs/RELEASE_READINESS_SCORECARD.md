@@ -292,6 +292,28 @@ The earlier broad DEBUG RELOAD list win was not specific enough to keep this own
 decode lever. Release-readiness impact is negative for this focused RESTORE path until a deeper
 bulk-list decode/build profile finds a different lever.
 
+## Cod-a quicklist2 RESTORE REPLACE slot reuse (MEASURED 2026-06-19)
+
+Criterion harness: `cargo bench -p fr-bench --bench restore_quicklist_vs_redis -- --noplot`.
+Release binaries were rch-built with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`; the timing harness used a
+separate local target dir and Redis 7.2.4 from
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+| Workload | Redis elems/s | fr elems/s | fr/redis | fr candidate/no-candidate | Verdict |
+|---|--:|--:|--:|--:|---|
+| QUICKLIST_2 PACKED RESTORE no-candidate | 112,860 | 49,455 | 0.438 | baseline | baseline |
+| QUICKLIST_2 PACKED RESTORE in-place REPLACE | 117,310 | 52,584 | 0.448 | 1.063 | keep; Redis still faster |
+
+Decision: keep `frankenredis-tnv37` production hunk. It avoids the remove/reinsert cycle for
+`RESTORE ... REPLACE` while explicitly clearing stale hash-field TTL and stream sidecar state.
+Release-readiness impact is mixed: a measured +6.33% same-harness win, but the workload remains a
+Redis-relative loss at 0.448x. This pass also rejected listpack-count preallocation as a regression.
+
+Validation: focused `cargo test -p fr-store restore_replace -- --nocapture` passed via rch,
+including hash-field TTL and stream-consumer-group replacement regressions. Full workspace gates are
+tracked with the closeout for this commit.
+
 ## Cod-b keyed-write parser backlog (MEASURED 2026-06-19)
 
 Criterion harness added in `fr-bench`: `cargo bench -p fr-bench --bench keyed_write_vs_redis
@@ -339,3 +361,22 @@ Decision: keep `frankenredis-z3yrs`. The exact eight-key parser improves same-HE
 5.9-11.6%, so it is not a revert candidate. Release-readiness impact is still negative for this
 workload: clean FrankenRedis remains Redis-faster/Redis-wins on all three 8-key `EXISTS` mixes.
 Focused parser tests passed; full `fr-conformance` was rerun for this closeout.
+
+## Cod-b 8-key EXISTS encoded reply (MEASURED 2026-06-19)
+
+Follow-up for `frankenredis-upx5x`: keep the borrowed `EXISTS` `_into` path that writes the integer
+reply directly and returns `FastEncodedReply` from the server hot path. The parser-order and
+no-expiry-store experiments were rejected/reverted; this is the only production lever kept from the
+pass.
+
+| Workload | Control fr/redis | Candidate fr/redis | fr candidate/control | Release-readiness impact |
+|---|--:|--:|--:|---|
+| EXISTS 8 all hit | 0.719 | 0.808 | 1.149 | improves, still Redis loss |
+| EXISTS 8 half hit | 0.768 | 0.803 | 1.239 | improves, still Redis loss |
+| EXISTS 8 duplicates | 0.785 | 0.895 | 1.317 | improves, still Redis loss |
+
+Validation: `cargo test -p fr-runtime plain_exists_borrowed -- --nocapture`, targeted
+`cargo check`/`clippy`, full `fr-conformance`, and `cargo fmt --check` all passed using the
+compiler-scoped target under `/data/projects/.rch-targets/frankenredis-cod-b`. Redis-relative
+score remains **0 wins / 3 losses / 0 neutral** for this focused suite, so `EXISTS` stays a
+release-performance gap even after the keeper.
