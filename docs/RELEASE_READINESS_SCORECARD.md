@@ -150,3 +150,18 @@ MODEL — for the keyspace it under-reports actual RSS, see below). "beat the or
   redis (LESS) while actual RSS was 1.79x (MORE). fr's estimate_memory_usage_bytes models redis's
   accounting, not fr's real heap — trust RSS for RAM verdicts, not used_memory.
 - TO-MEASURE (memory says, fresh-process RSS owed): zset RAM ~1.54x (uybhq), stream ~1.32x (p8wd1).
+
+### RAM dimension COMPLETE — all collection types measured (fresh-process RSS, 2026-06-19)
+| Dataset | redis RSS | fr RSS | fr/redis | Verdict |
+|---|--:|--:|--:|---|
+| 300k small string keys (keyspace dict) | 35.1 MB | 62.9 MB | **1.790** | redis lighter (the per-key gap) |
+| 1500 hashtable hashes x600f (900k entries) | 56.9 MB | 28.8 MB | **0.506** | **fr HALF — CompactFieldMap WIN** |
+| 2000 skiplist zsets x300m (600k entries)   | 64.6 MB | 80.9 MB | **1.253** | fr +25% (uybhq dual-structure; was ~1.54x, peni2 helped) |
+| 1500 streams x300e (450k entries)          | 24.0 MB | 28.0 MB | **1.165** | fr +16% near-parity (p8wd1 PackedStreamLog) |
+
+**SYNTHESIZED PATTERN (measured):** fr's **per-VALUE collection storage is competitive-or-better**
+(hash 0.506x win; stream 1.165x and zset 1.253x near/moderate, both down from older numbers via
+shipped levers), but the **per-KEY keyspace-dict overhead is the real RAM gap (1.79x)** — 220 vs
+123 B/key. So the RAM headline is: *the dict, not the values.* The single highest-impact RAM lever
+remaining is the keyspace-dict compaction (uhthd, in-progress, already 4.49x->1.79x). All structural;
+no recent-lever regression -> NO REVERT.
