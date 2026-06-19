@@ -18317,6 +18317,7 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
+        self.rebuild_ordered_keys_if_dirty();
         let start = cursor as usize;
         let batch_size = count.max(1);
 
@@ -18458,6 +18459,7 @@ impl Store {
         // Reap due volatile keys — identical eviction set to keys_in_db /
         // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
         self.expire_volatile_keys_in_db(db, now_ms);
+        self.rebuild_ordered_keys_if_dirty();
 
         let batch = count.max(1);
         let start = cursor as usize;
@@ -21132,7 +21134,12 @@ impl Store {
     /// Return all key names in the store (sorted for determinism).
     #[must_use]
     pub fn all_keys(&self) -> Vec<Vec<u8>> {
-        self.ordered_keys.iter().map(|k| k.to_vec()).collect()
+        if !self.ordered_keys_dirty {
+            return self.ordered_keys.iter().map(|k| k.to_vec()).collect();
+        }
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().map(|k| k.to_vec()).collect();
+        keys.sort();
+        keys
     }
 
     /// Drop stale TTL-bearing keys before snapshot serialization.
@@ -25977,6 +25984,8 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::{
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
@@ -25995,8 +26004,9 @@ mod tests {
         StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
         decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
         encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
-        integer_decimal_bytes, estimate_set_memory_usage_bytes, hll_sparse_decode,
-        redis_allocation_size, redis_score_to_string, ziplist_integer_bytes,
+        estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
+        redis_allocation_size, redis_score_to_string, set_int_to_bytes, with_integer_decimal_bytes,
+        ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -29550,6 +29560,41 @@ mod tests {
             Vec::<Vec<u8>>::new(),
             "KEYS * after flush must be empty"
         );
+    }
+
+    #[test]
+    fn write_hot_keyspace_defers_ordered_key_index_until_ordered_read_uhthd() {
+        let mut store = Store::new();
+        for i in 0..128_u32 {
+            store.set(format!("k:{i:03}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+
+        assert!(
+            store.ordered_keys.is_empty(),
+            "SET-only keyspaces must not keep the sorted side index resident"
+        );
+        assert!(store.ordered_keys_dirty);
+        assert_eq!(store.all_keys().len(), 128);
+        assert!(
+            store.ordered_keys.is_empty(),
+            "snapshot-style all_keys must stay non-resident when the index is dirty"
+        );
+
+        let keys = store.keys_matching_in_db(0, b"k:*", 0);
+        assert_eq!(keys.len(), 128);
+        assert_eq!(
+            store.ordered_keys.len(),
+            store.entries.len(),
+            "ordered commands must rebuild the sorted index exactly once"
+        );
+        assert!(!store.ordered_keys_dirty);
+
+        store.set(b"k:new".to_vec(), b"v".to_vec(), None, 0);
+        assert!(
+            store.ordered_keys.is_empty(),
+            "the next structural write drops the ordered side index again"
+        );
+        assert!(store.ordered_keys_dirty);
     }
 
     #[test]
@@ -33457,10 +33502,10 @@ mod tests {
             tf: Option<&[u8]>,
         ) -> Vec<Vec<u8>> {
             let mut v: Vec<Vec<u8>> = store
-                .ordered_keys
-                .iter()
+                .all_keys()
+                .into_iter()
                 .filter_map(|physical| {
-                    let physical: &[u8] = physical.as_ref();
+                    let physical: &[u8] = physical.as_slice();
                     let (kdb, logical) = match super::decode_db_key(physical) {
                         Some((d, l)) => (d, l.to_vec()),
                         None => (0, physical.to_vec()),
@@ -33554,7 +33599,7 @@ mod tests {
 
         // Old: materialise every logical key + sort + page (one SCAN call's cost).
         let t1 = std::time::Instant::now();
-        let mut allk: Vec<Vec<u8>> = store.ordered_keys.iter().map(|k| k.to_vec()).collect();
+        let mut allk = store.all_keys();
         allk.sort();
         let _page: Vec<Vec<u8>> = allk
             .iter()
@@ -33625,10 +33670,9 @@ mod tests {
                 let (got, _) = drive(&mut store, pat, count);
                 // Ground truth: every live key matching the glob, sorted.
                 let mut want: Vec<Vec<u8>> = store
-                    .ordered_keys
-                    .iter()
+                    .all_keys()
+                    .into_iter()
                     .filter(|k| super::glob_match(pat, k))
-                    .map(|k| k.to_vec())
                     .collect();
                 want.sort();
                 assert_eq!(
@@ -33657,8 +33701,8 @@ mod tests {
         // before this lever — examine all 200_050 keys).
         let t1 = std::time::Instant::now();
         let mut ref_matches = 0usize;
-        for k in store.ordered_keys.iter() {
-            if super::glob_match(b"zz:*", k) {
+        for k in store.all_keys() {
+            if super::glob_match(b"zz:*", &k) {
                 ref_matches += 1;
             }
         }
@@ -33692,7 +33736,7 @@ mod tests {
             "new-key insert must bump generation"
         );
         let g1 = s.keyspace_generation;
-        // Value-only overwrite of an existing key: ordered_keys is unchanged, so
+        // Value-only overwrite of an existing key: key membership is unchanged, so
         // the resume cache stays valid — the generation must NOT bump.
         s.set(encode_db_key(0, b"k1"), b"v2".to_vec(), None, 0);
         assert_eq!(
@@ -33815,7 +33859,7 @@ mod tests {
                     0,
                 );
             }
-            let all: Vec<Vec<u8>> = store.ordered_keys.iter().map(|k| k.to_vec()).collect();
+            let all = store.all_keys();
             for &count in &[1usize, 3, 7, 16] {
                 let lru = interleaved(&mut store, 5, count, 0);
                 let single = interleaved(&mut store, 5, count, 1);
@@ -34671,12 +34715,15 @@ mod tests {
         // Brute-force reference: glob every db-0 logical key (the old behavior).
         fn brute(store: &Store, pat: &[u8]) -> Vec<Vec<u8>> {
             let mut r: Vec<Vec<u8>> = store
-                .ordered_physical_keys_in_db(0)
+                .all_keys()
                 .into_iter()
                 .filter_map(|key| {
                     let logical = decode_db_key(&key)
                         .map(|(_, l)| l)
                         .unwrap_or(key.as_slice());
+                    if decode_db_key(&key).is_some() {
+                        return None;
+                    }
                     if glob_match(pat, logical) {
                         Some(logical.to_vec())
                     } else {

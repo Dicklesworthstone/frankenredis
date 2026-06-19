@@ -289,6 +289,19 @@ turns). Keep claims honest — mark which.
   side vector; only revisit with a benchmark showing RANDOMKEY-heavy workloads
   dominate and requiring an incremental cache-maintenance mode behind the same
   Store-level invariants.
+- frankenredis-uhthd / cod-b: `fr-store` sorted `ordered_keys` is now a dirty
+  lazy side index for ordinary write-heavy keyspaces, with SCAN/KEYS/SWAPDB
+  boundaries rebuilding it from canonical `entries` only when sorted traversal is
+  requested, and `all_keys()` preserving deterministic snapshot/debug order from
+  `entries` without forcing residency — CODED (reasoned from the persistent
+  keyspace-RAM gap after lazy RANDOMKEY; batch RSS/throughput and SCAN-heavy
+  regression proof pending). Guard proves SET-only loads keep `ordered_keys`
+  empty, ordered reads rebuild it exactly once, `all_keys()` remains sorted while
+  non-resident, and the next structural write drops the index again; local gate
+  was `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo check -p fr-store --all-targets`.
+  Retry condition if rejected: do not restore always-resident sorted key storage
+  for generic workloads; only add incremental maintenance if a SCAN/KEYS-heavy
+  profile shows rebuild churn dominating after this memory win.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
 
