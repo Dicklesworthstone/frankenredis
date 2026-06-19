@@ -21450,9 +21450,8 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     // errors on nonnumeric IDs ("Invalid client ID"). Numeric
                     // nonpositive IDs are valid filters that simply match no
                     // clients. (frankenredis-q3rts)
-                    let parsed_id = parse_i64_arg(id_arg).map_err(|_| {
-                        CommandError::Custom("ERR Invalid client ID".to_string())
-                    })?;
+                    let parsed_id = parse_i64_arg(id_arg)
+                        .map_err(|_| CommandError::Custom("ERR Invalid client ID".to_string()))?;
                     if parsed_id > 0 && parsed_id as u64 == store.dispatch_client_ctx.client_id {
                         payload.extend_from_slice(&info_line);
                     }
@@ -21677,9 +21676,8 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 };
                 current_kind.eq_ignore_ascii_case(kind)
             })
-            && filter_user.is_none_or(|user| {
-                store.dispatch_client_ctx.authenticated_user.as_slice() == user
-            })
+            && filter_user
+                .is_none_or(|user| store.dispatch_client_ctx.authenticated_user.as_slice() == user)
             && filter_addr
                 .as_ref()
                 .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr)
@@ -27211,19 +27209,19 @@ fn sort_generic(
         let arg = &argv[i];
         if arg.eq_ignore_ascii_case(b"BY") {
             if i + 1 >= argv.len() {
-                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             by_pattern = Some(argv[i].clone());
         } else if arg.eq_ignore_ascii_case(b"GET") {
             if i + 1 >= argv.len() {
-                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             get_patterns.push(argv[i].clone());
         } else if arg.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
-                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             limit_offset = parse_i64_arg(&argv[i])?;
@@ -27242,12 +27240,12 @@ fn sort_generic(
             // can land in a GET/BY pattern slot without being
             // misclassified as a flag.
             if i + 1 >= argv.len() {
-                return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             store_dest = Some(argv[i].clone());
         } else {
-            return Err(CommandError::SyntaxError);  // (re7sp) Err -> Lua script-context suffix
+            return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
         }
         i += 1;
     }

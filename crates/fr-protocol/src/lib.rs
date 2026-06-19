@@ -250,20 +250,12 @@ pub fn encode_redis_double(value: f64, resp3: bool, out: &mut Vec<u8>) {
 // special-case it). Verified exhaustively at the digit boundaries by the test below.
 #[inline]
 fn decimal_u64_len(n: u64) -> usize {
-    if n == 0 {
-        1
-    } else {
-        n.ilog10() as usize + 1
-    }
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
 }
 
 #[inline]
 fn decimal_usize_len(n: usize) -> usize {
-    if n == 0 {
-        1
-    } else {
-        n.ilog10() as usize + 1
-    }
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
 }
 
 fn decimal_i64_len(n: i64) -> usize {
@@ -1575,8 +1567,8 @@ fn parse_bulk_slice<'a>(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
-    let (line, consumed) =
-        read_line(input, start).map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
+    let (line, consumed) = read_line(input, start)
+        .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len == -1 {
         return Ok((None, consumed));
@@ -1758,7 +1750,11 @@ mod tests {
         for &n in &probes {
             assert_eq!(decimal_u64_len(n), reference(n), "u64 digit count for {n}");
             if let Ok(u) = usize::try_from(n) {
-                assert_eq!(decimal_usize_len(u), reference(n), "usize digit count for {u}");
+                assert_eq!(
+                    decimal_usize_len(u),
+                    reference(n),
+                    "usize digit count for {u}"
+                );
             }
         }
     }
@@ -1812,16 +1808,32 @@ mod tests {
     fn resp3_reply_parse_normalization_golden_432l0() {
         let cases: &[(&str, &[u8], RespFrame)] = &[
             // Double (`,`) -> BulkString carrying the numeric string verbatim.
-            ("double", b",3.14\r\n", RespFrame::BulkString(Some(b"3.14".to_vec()))),
-            ("double_neg", b",-1.5\r\n", RespFrame::BulkString(Some(b"-1.5".to_vec()))),
-            ("double_inf", b",inf\r\n", RespFrame::BulkString(Some(b"inf".to_vec()))),
+            (
+                "double",
+                b",3.14\r\n",
+                RespFrame::BulkString(Some(b"3.14".to_vec())),
+            ),
+            (
+                "double_neg",
+                b",-1.5\r\n",
+                RespFrame::BulkString(Some(b"-1.5".to_vec())),
+            ),
+            (
+                "double_inf",
+                b",inf\r\n",
+                RespFrame::BulkString(Some(b"inf".to_vec())),
+            ),
             // Big number (`(`) -> BulkString carrying the base-10 integer string.
             (
                 "bignumber",
                 b"(12345678901234567890\r\n",
                 RespFrame::BulkString(Some(b"12345678901234567890".to_vec())),
             ),
-            ("bignumber_neg", b"(-31337\r\n", RespFrame::BulkString(Some(b"-31337".to_vec()))),
+            (
+                "bignumber_neg",
+                b"(-31337\r\n",
+                RespFrame::BulkString(Some(b"-31337".to_vec())),
+            ),
             // Boolean (`#`) -> Integer 1/0 (upstream addReplyBool under RESP2).
             ("bool_true", b"#t\r\n", RespFrame::Integer(1)),
             ("bool_false", b"#f\r\n", RespFrame::Integer(0)),
@@ -1863,7 +1875,11 @@ mod tests {
             ),
             // Attribute (`|`) -> the metadata map is parsed and DISCARDED; the
             // following real frame is returned, and `consumed` spans both.
-            ("attribute_discarded", b"|1\r\n+k\r\n+v\r\n:42\r\n", RespFrame::Integer(42)),
+            (
+                "attribute_discarded",
+                b"|1\r\n+k\r\n+v\r\n:42\r\n",
+                RespFrame::Integer(42),
+            ),
             // Blob error (`!`) -> Error carrying the body text.
             (
                 "blob_error",
@@ -2013,7 +2029,10 @@ mod tests {
         // Measured ~1.58x real-world (format-into-Vec; the common extend cost
         // caps the kernel speedup per Amdahl). This is a regression floor, not a
         // 2.0 extreme-opt claim — guards that the two-digit LUT stays a net win.
-        assert!(score >= 1.25, "two-digit LUT itoa regressed below floor; got {score:.2}x");
+        assert!(
+            score >= 1.25,
+            "two-digit LUT itoa regressed below floor; got {score:.2}x"
+        );
     }
 
     // (frankenredis-e4fu8) Bench guard for the branchless ilog10 digit-count vs the
@@ -2072,10 +2091,15 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new digit-count disagree");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ILOG10 decimal-len reply-int mix: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        eprintln!(
+            "ILOG10 decimal-len reply-int mix: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
         // Conservative regression floor (not a speedup claim — ilog10 is reasoned-faster;
         // the real ratio is in the eprintln). 0.85 only trips on a true regression.
-        assert!(score >= 0.85, "ilog10 decimal-len regressed; got {score:.2}x");
+        assert!(
+            score >= 0.85,
+            "ilog10 decimal-len regressed; got {score:.2}x"
+        );
     }
 
     #[test]
@@ -2236,9 +2260,15 @@ mod tests {
             // (input, expected): no terminator yet -> Incomplete (wait); with the
             // `\r\n` present -> the type-byte error stands.
             (&b"*1\r\nPING"[..], RespParseError::Incomplete),
-            (&b"*2\r\n$4\r\nPING\r\nGARBAGE"[..], RespParseError::Incomplete),
+            (
+                &b"*2\r\n$4\r\nPING\r\nGARBAGE"[..],
+                RespParseError::Incomplete,
+            ),
             (&b"*1\r\nPING\r\n"[..], RespParseError::ExpectedBulk(b'P')),
-            (&b"*2\r\n$4\r\nPING\r\nGARBAGE\r\n"[..], RespParseError::ExpectedBulk(b'G')),
+            (
+                &b"*2\r\n$4\r\nPING\r\nGARBAGE\r\n"[..],
+                RespParseError::ExpectedBulk(b'G'),
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(

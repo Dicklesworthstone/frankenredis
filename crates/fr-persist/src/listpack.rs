@@ -702,8 +702,23 @@ mod tests {
             }
             scratch[start..].to_vec()
         }
-        let mut probes: Vec<i64> = vec![0, 1, -1, 9, -9, 10, -10, 99, -99, 100, -100,
-            i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1];
+        let mut probes: Vec<i64> = vec![
+            0,
+            1,
+            -1,
+            9,
+            -9,
+            10,
+            -10,
+            99,
+            -99,
+            100,
+            -100,
+            i64::MAX,
+            i64::MIN,
+            i64::MAX - 1,
+            i64::MIN + 1,
+        ];
         let mut p: i64 = 1;
         while let Some(next) = p.checked_mul(10) {
             probes.push(p);

@@ -991,14 +991,13 @@ pub fn evaluate_tls_hardened_deviation(
 mod tests {
     use super::{
         CompatibilityGate, ConfigFileParseErrorReason, DecisionAction, DriftSeverity,
-        HARDENED_ALLOWLIST_DEFAULT,
-        HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass, TlsAuthClients, TlsCfgError,
-        TlsConfig, TlsDirective, TlsListenerTransition, TlsProtocol, TlsRuntimeState,
-        default_tls_protocols, evaluate_tls_hardened_deviation, parse_redis_config,
-        parse_redis_config_bytes, parse_tls_bool, parse_tls_protocols, plan_tls_runtime_apply,
-        rewrite_tls_directives, split_config_line_args, split_config_line_args_bytes,
-        tls_bool_token, tls_directive_policy, validate_bind_transition_atomicity,
-        validate_tls_config, validate_tls_directive_value,
+        HARDENED_ALLOWLIST_DEFAULT, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+        TlsAuthClients, TlsCfgError, TlsConfig, TlsDirective, TlsListenerTransition, TlsProtocol,
+        TlsRuntimeState, default_tls_protocols, evaluate_tls_hardened_deviation,
+        parse_redis_config, parse_redis_config_bytes, parse_tls_bool, parse_tls_protocols,
+        plan_tls_runtime_apply, rewrite_tls_directives, split_config_line_args,
+        split_config_line_args_bytes, tls_bool_token, tls_directive_policy,
+        validate_bind_transition_atomicity, validate_tls_config, validate_tls_directive_value,
     };
 
     #[test]

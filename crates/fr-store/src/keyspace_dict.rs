@@ -110,7 +110,8 @@ impl<V> KeyDict<V> {
         if needed > self.buckets.len() {
             self.resize_buckets(Self::bucket_count_for_capacity(needed));
         }
-        self.nodes.reserve(additional.saturating_sub(self.free.len()));
+        self.nodes
+            .reserve(additional.saturating_sub(self.free.len()));
     }
 
     #[inline]
@@ -161,7 +162,9 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(key);
         let mut cur = self.buckets[self.bucket_of(h)];
         while let Some(idx) = cur {
-            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
+            let node = self.nodes[idx]
+                .as_ref()
+                .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(&node.value);
             }
@@ -176,7 +179,9 @@ impl<V> KeyDict<V> {
         let b = self.bucket_of(h);
         let mut cur = self.buckets[b];
         while let Some(idx) = cur {
-            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
+            let node = self.nodes[idx]
+                .as_ref()
+                .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(
                     &mut self.nodes[idx]
@@ -203,7 +208,9 @@ impl<V> KeyDict<V> {
         // Overwrite in place if present.
         let mut cur = self.buckets[b];
         while let Some(idx) = cur {
-            let node = self.nodes[idx].as_mut().expect("bucket chain points at live node");
+            let node = self.nodes[idx]
+                .as_mut()
+                .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(std::mem::replace(&mut node.value, value));
             }
@@ -242,10 +249,14 @@ impl<V> KeyDict<V> {
         let mut prev: Option<usize> = None;
         let mut cur = self.buckets[b];
         while let Some(idx) = cur {
-            let node = self.nodes[idx].as_ref().expect("bucket chain points at live node");
+            let node = self.nodes[idx]
+                .as_ref()
+                .expect("bucket chain points at live node");
             let next = node.next;
             if node.hash == h && *node.key == *key {
-                let removed = self.nodes[idx].take().expect("bucket chain points at live node");
+                let removed = self.nodes[idx]
+                    .take()
+                    .expect("bucket chain points at live node");
                 if let Some(prev_idx) = prev {
                     self.nodes[prev_idx]
                         .as_mut()
@@ -337,7 +348,9 @@ impl<V> KeyDict<V> {
             let b = (v & self.mask) as usize;
             let mut node = self.buckets[b];
             while let Some(idx) = node {
-                let n = self.nodes[idx].as_ref().expect("bucket chain points at live node");
+                let n = self.nodes[idx]
+                    .as_ref()
+                    .expect("bucket chain points at live node");
                 emit(&n.key, &n.value);
                 emitted += 1;
                 node = n.next;
@@ -375,14 +388,13 @@ impl<V> KeyDict<V> {
         for _ in 0..64 {
             let b = reduce(next_rand(), nb);
             if let Some(head) = self.buckets[b] {
-                let chain_len =
-                    std::iter::successors(Some(head), |&idx| {
-                        self.nodes[idx]
-                            .as_ref()
-                            .expect("bucket chain points at live node")
-                            .next
-                    })
-                    .count();
+                let chain_len = std::iter::successors(Some(head), |&idx| {
+                    self.nodes[idx]
+                        .as_ref()
+                        .expect("bucket chain points at live node")
+                        .next
+                })
+                .count();
                 let pick = reduce(next_rand(), chain_len);
                 let chosen = std::iter::successors(Some(head), |&idx| {
                     self.nodes[idx]
@@ -390,8 +402,8 @@ impl<V> KeyDict<V> {
                         .expect("bucket chain points at live node")
                         .next
                 })
-                    .nth(pick)
-                    .unwrap();
+                .nth(pick)
+                .unwrap();
                 let chosen = self.nodes[chosen]
                     .as_ref()
                     .expect("bucket chain points at live node");
@@ -600,7 +612,10 @@ mod tests {
 
         assert_eq!(incremental.len(), N);
         assert_eq!(presized.len(), N);
-        assert_eq!(incremental.get(b"key:00012345"), presized.get(b"key:00012345"));
+        assert_eq!(
+            incremental.get(b"key:00012345"),
+            presized.get(b"key:00012345")
+        );
         eprintln!(
             "KeyDict build {N} keys: incremental={incremental_us:.0}us presized={presized_us:.0}us speedup={:.2}x buckets={} storage_slots={}",
             incremental_us / presized_us,

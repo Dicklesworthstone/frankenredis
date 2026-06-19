@@ -1,0 +1,38 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781845560324,
+  "host": "127.0.0.1",
+  "port": 45601,
+  "workload": "set",
+  "clients": 4,
+  "requests": 80000,
+  "pipeline": 1,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:087qq:set:p1:redis",
+  "total_time_ms": 901,
+  "ops_per_sec": 88728.19906419012,
+  "trials": 5,
+  "cv_pct": 3.6513222140189865,
+  "ops_per_sec_samples": [
+    86487.35762455242,
+    86258.94434358773,
+    88728.19906419012,
+    94271.89573279454,
+    89857.84106524431
+  ],
+  "bytes_sent": 5067331,
+  "bytes_received": 400000,
+  "latency_us": {
+    "min": 20,
+    "p50": 42,
+    "p95": 63,
+    "p99": 77,
+    "p999": 134,
+    "max": 2927,
+    "mean": 43.95268749999998,
+    "samples": 80000
+  }
+}

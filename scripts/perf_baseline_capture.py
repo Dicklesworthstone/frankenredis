@@ -37,7 +37,7 @@ TMPDIR = tempfile.gettempdir()
 
 # Read-reply + serialize + scalar/write coverage (every fr-bench workload family).
 WORKLOADS = [
-    "set", "get", "incr", "hset", "hget",
+    "set", "get", "integer-get", "incr", "hset", "hget",
     "lpush", "lrange", "hgetall", "smembers", "zrange-withscores", "dump", "mixed",
 ]
 PIPELINE_DEPTHS = [1, 16, 128]

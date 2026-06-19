@@ -1837,7 +1837,10 @@ impl<'a> Lexer<'a> {
             self.skip_whitespace_and_comments().map_err(|e| {
                 let upto = self.pos.min(self.src.len());
                 let ln = cur_line
-                    + self.src[counted..upto].iter().filter(|&&b| b == b'\n').count() as u32;
+                    + self.src[counted..upto]
+                        .iter()
+                        .filter(|&&b| b == b'\n')
+                        .count() as u32;
                 (ln, e)
             })?;
             let start = self.pos.min(self.src.len());
@@ -3841,7 +3844,8 @@ impl<'a> LuaState<'a> {
         let Expr::Field(table_expr, method) = func_expr.as_ref() else {
             return None;
         };
-        if method == "yield" && matches!(table_expr.as_ref(), Expr::Name(name) if name == "coroutine")
+        if method == "yield"
+            && matches!(table_expr.as_ref(), Expr::Name(name) if name == "coroutine")
         {
             Some(args)
         } else {
@@ -3900,9 +3904,7 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
-        if self.current_coroutine.is_none()
-            || (self.nested_exec_stmts_depth > 0 && !allow_nested)
-        {
+        if self.current_coroutine.is_none() || (self.nested_exec_stmts_depth > 0 && !allow_nested) {
             return Err("attempt to yield across metamethod/C-call boundary".to_string());
         }
         let values = self.eval_call_args(yield_args, env, varargs)?;
@@ -4143,7 +4145,8 @@ impl<'a> LuaState<'a> {
                     }
                     env.push_scope();
                     env.set_local(name, LuaValue::Number(i));
-                    let cf = self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
+                    let cf =
+                        self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
                     env.pop_scope();
                     match cf {
                         ControlFlow::Break => break,
@@ -9360,8 +9363,7 @@ impl<'a> LuaState<'a> {
 /// "wrong number of arguments for '<cmd>'" wording is the DIRECT (non-script) reply.
 /// Idempotent: the rewritten strings don't match the input prefixes.
 fn script_context_rewrite_error(err_msg: String) -> String {
-    if err_msg.starts_with("ERR unknown command ")
-        || err_msg.starts_with("ERR unknown subcommand ")
+    if err_msg.starts_with("ERR unknown command ") || err_msg.starts_with("ERR unknown subcommand ")
     {
         "ERR Unknown Redis command called from script".to_string()
     } else if err_msg.starts_with("ERR wrong number of arguments")
@@ -12866,9 +12868,7 @@ fn parse_lua_chunk_located(source: &[u8]) -> Result<Block, (u32, String)> {
     let mut lexer = Lexer::new(source);
     let (tokens, lines) = lexer.tokenize_all_located()?;
     let mut parser = Parser::with_lines(tokens, lines);
-    let mut stmts = parser
-        .parse_block()
-        .map_err(|m| (parser.error_line(), m))?;
+    let mut stmts = parser.parse_block().map_err(|m| (parser.error_line(), m))?;
     if !parser.check(&Token::Eof) {
         return Err((
             parser.error_line(),
@@ -18209,10 +18209,7 @@ end
             return v1 .. ':' .. v2
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(
-            result,
-            Ok(RespFrame::BulkString(Some(b"11:10".to_vec())))
-        );
+        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:10".to_vec()))));
     }
 
     #[test]
@@ -18250,10 +18247,7 @@ end
             return co() .. co() .. co()
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(
-            result,
-            Ok(RespFrame::BulkString(Some(b"123".to_vec())))
-        );
+        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"123".to_vec()))));
     }
 
     #[test]

@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:45602
+workload: integer-get
+clients: 4  requests: 80000  pipeline: 128  keyspace: 10000  datasize: 3
+elapsed: 33 ms  throughput: 2393821.88 ops/sec (median of 5 trial(s), cv=19.73% NOISY: not keep-eligible)
+latency(us): min=69 p50=164 p95=192 p99=203 p999=244 max=247 mean=164.75
+bytes: sent=5031013 received=791047 key_prefix=fr:087qq:integer-get:p128:fr

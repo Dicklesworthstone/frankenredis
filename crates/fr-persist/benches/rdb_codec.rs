@@ -13,8 +13,8 @@
 //! ratio vs redis (criterion is in-process, fr-only) — the vs-redis ratios live in
 //! docs/RELEASE_READINESS_SCORECARD.md (DEBUG RELOAD).
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use fr_persist::{decode_rdb, encode_rdb, RdbEntry, RdbValue};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use fr_persist::{RdbEntry, RdbValue, decode_rdb, encode_rdb};
 
 fn build_entries() -> Vec<RdbEntry> {
     let mut entries = Vec::new();
@@ -28,36 +28,66 @@ fn build_entries() -> Vec<RdbEntry> {
         let fields = (0..40)
             .map(|j| (format!("f{j}").into_bytes(), format!("v{j}").into_bytes()))
             .collect();
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::Hash(fields), expire_ms: None });
+        entries.push(RdbEntry {
+            db: 0,
+            key: k(),
+            value: RdbValue::Hash(fields),
+            expire_ms: None,
+        });
     }
     // listpack zsets (40 members, mixed scores)
     for _ in 0..400 {
         let members = (0..40)
             .map(|j| (format!("m{j}").into_bytes(), j as f64 * 1.5))
             .collect();
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::SortedSet(members), expire_ms: None });
+        entries.push(RdbEntry {
+            db: 0,
+            key: k(),
+            value: RdbValue::SortedSet(members),
+            expire_ms: None,
+        });
     }
     // listpack sets + an intset
     for _ in 0..400 {
         let m = (0..40).map(|j| format!("m{j}").into_bytes()).collect();
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::Set(m), expire_ms: None });
-    }
-    for _ in 0..400 {
-        let m = (0..40).map(|j| j.to_string().into_bytes()).collect();
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::Set(m), expire_ms: None });
-    }
-    // quicklist lists (>8KiB => multi-node)
-    for _ in 0..300 {
-        let l = (0..60).map(|j| format!("e{j:02}{}", "x".repeat(40)).into_bytes()).collect();
-        entries.push(RdbEntry { db: 0, key: k(), value: RdbValue::List(l), expire_ms: None });
-    }
-    // int-bearing strings (087qq itoa2 path)
-    for _ in 0..4000 {
-        let string_key = entries.len() + 1;
         entries.push(RdbEntry {
             db: 0,
             key: k(),
-            value: RdbValue::String((string_key as i64 * 7919).to_string().into_bytes()),
+            value: RdbValue::Set(m),
+            expire_ms: None,
+        });
+    }
+    for _ in 0..400 {
+        let m = (0..40).map(|j| j.to_string().into_bytes()).collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: k(),
+            value: RdbValue::Set(m),
+            expire_ms: None,
+        });
+    }
+    // quicklist lists (>8KiB => multi-node)
+    for _ in 0..300 {
+        let l = (0..60)
+            .map(|j| format!("e{j:02}{}", "x".repeat(40)).into_bytes())
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: k(),
+            value: RdbValue::List(l),
+            expire_ms: None,
+        });
+    }
+    // int-bearing strings (087qq itoa2 path)
+    let mut integer_value = 0i64;
+    for _ in 0..4000 {
+        let key_bytes = k();
+        integer_value += 1;
+        let value = (integer_value * 7919).to_string().into_bytes();
+        entries.push(RdbEntry {
+            db: 0,
+            key: key_bytes,
+            value: RdbValue::String(value),
             expire_ms: None,
         });
     }

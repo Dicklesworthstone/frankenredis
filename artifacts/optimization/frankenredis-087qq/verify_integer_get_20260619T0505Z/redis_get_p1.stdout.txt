@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:45601
+workload: get
+clients: 4  requests: 80000  pipeline: 1  keyspace: 10000  datasize: 3
+elapsed: 959 ms  throughput: 83375.26 ops/sec (median of 5 trial(s), cv=6.13% NOISY: not keep-eligible)
+latency(us): min=21 p50=44 p95=58 p99=67 p999=113 max=2853 mean=46.45
+bytes: sent=4231098 received=720000 key_prefix=fr:087qq:get:p1:redis

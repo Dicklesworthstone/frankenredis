@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:45602
+workload: get
+clients: 4  requests: 80000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 68 ms  throughput: 1162525.19 ops/sec (median of 5 trial(s), cv=6.37% NOISY: not keep-eligible)
+latency(us): min=27 p50=47 p95=62 p99=75 p999=95 max=103 mean=48.62
+bytes: sent=4071218 received=720000 key_prefix=fr:087qq:get:p16:fr

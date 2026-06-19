@@ -262,11 +262,11 @@ Win/loss/neutral: **9/0/0** cells overall; target `integer-get`: **3/0/0**. Deci
 keep `frankenredis-087qq`. The small p1 margin is noisy but positive, and the pipelined integer
 GET cells are clearly fr-faster. No revert.
 
-Validation: focused `fr-bench` fmt/clippy/tests passed, release binaries were rch-built, and
-`cargo test -p fr-conformance -- --nocapture` passed via rch. After fixing unrelated
-test/bench compile blockers, full workspace all-targets check also passed via rch. Full
-workspace clippy and full rustfmt remain blocked by unrelated gate debt tracked in
-`frankenredis-pjtld`.
+Validation: focused `fr-bench` fmt/clippy/tests passed, release binaries were rch-built, and the
+full workspace gates are green after resolving closeout-only gate debt:
+`cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --check`, and refreshed `cargo test -p fr-conformance -- --nocapture` all passed
+(`rch` for the build/check/clippy/conformance gates).
 
 ## Cod-a quicklist2 PACKED RESTORE decode move (MEASURED 2026-06-19)
 

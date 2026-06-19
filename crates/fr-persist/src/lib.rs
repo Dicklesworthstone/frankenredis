@@ -1764,7 +1764,10 @@ fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
     // is built in one allocation. Under-estimates are harmless; output byte-identical.
     // (frankenredis perf: presize listpack blob, code-first batch-test pending)
     let cap = LISTPACK_BLOB_OVERHEAD
-        + fields.iter().map(|(f, v)| f.len() + v.len() + 22).sum::<usize>();
+        + fields
+            .iter()
+            .map(|(f, v)| f.len() + v.len() + 22)
+            .sum::<usize>();
     let mut encoded = Vec::with_capacity(cap);
     for (field, value) in fields {
         encode_listpack_entry(&mut encoded, field);
@@ -1820,7 +1823,10 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
     // the blob is built in one allocation. Under-estimates are harmless; output byte-identical.
     // (frankenredis perf: presize listpack blob, code-first batch-test pending)
     let cap = LISTPACK_BLOB_OVERHEAD
-        + sorted_members.iter().map(|(m, _)| m.len() + 11 + 32).sum::<usize>();
+        + sorted_members
+            .iter()
+            .map(|(m, _)| m.len() + 11 + 32)
+            .sum::<usize>();
     let mut encoded = Vec::with_capacity(cap);
     for (member, score) in sorted_members {
         encode_listpack_entry(&mut encoded, member);
@@ -5017,12 +5023,7 @@ mod tests {
         };
         let plain = b"plain-payload!".to_vec();
         let mixed = encode_compact_list_quicklist2(
-            &[
-                b"a".to_vec(),
-                b"b".to_vec(),
-                plain.clone(),
-                b"c".to_vec(),
-            ],
+            &[b"a".to_vec(), b"b".to_vec(), plain.clone(), b"c".to_vec()],
             &mixed_thresholds,
         )
         .expect("mixed quicklist2 encodes");

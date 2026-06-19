@@ -1,0 +1,93 @@
+{
+  "cells": {
+    "get@p1": {
+      "fr_cv_pct": 5.35,
+      "fr_ops": 93111.2,
+      "fr_over_redis": 1.1168,
+      "redis_cv_pct": 6.13,
+      "redis_ops": 83375.3,
+      "verdict": "win"
+    },
+    "get@p128": {
+      "fr_cv_pct": 5.99,
+      "fr_ops": 3660513.5,
+      "fr_over_redis": 1.5825,
+      "redis_cv_pct": 8.97,
+      "redis_ops": 2313189.0,
+      "verdict": "win"
+    },
+    "get@p16": {
+      "fr_cv_pct": 6.37,
+      "fr_ops": 1162525.2,
+      "fr_over_redis": 1.238,
+      "redis_cv_pct": 5.25,
+      "redis_ops": 939013.8,
+      "verdict": "win"
+    },
+    "integer-get@p1": {
+      "fr_cv_pct": 6.36,
+      "fr_ops": 97091.0,
+      "fr_over_redis": 1.0075,
+      "redis_cv_pct": 2.53,
+      "redis_ops": 96366.9,
+      "verdict": "win"
+    },
+    "integer-get@p128": {
+      "fr_cv_pct": 19.73,
+      "fr_ops": 2393821.9,
+      "fr_over_redis": 1.3527,
+      "redis_cv_pct": 8.63,
+      "redis_ops": 1769645.3,
+      "verdict": "win"
+    },
+    "integer-get@p16": {
+      "fr_cv_pct": 8.24,
+      "fr_ops": 848026.0,
+      "fr_over_redis": 1.0947,
+      "redis_cv_pct": 8.3,
+      "redis_ops": 774652.8,
+      "verdict": "win"
+    },
+    "set@p1": {
+      "fr_cv_pct": 4.26,
+      "fr_ops": 99202.5,
+      "fr_over_redis": 1.118,
+      "redis_cv_pct": 3.65,
+      "redis_ops": 88728.2,
+      "verdict": "win"
+    },
+    "set@p128": {
+      "fr_cv_pct": 19.01,
+      "fr_ops": 2748512.8,
+      "fr_over_redis": 1.4494,
+      "redis_cv_pct": 13.15,
+      "redis_ops": 1896334.2,
+      "verdict": "win"
+    },
+    "set@p16": {
+      "fr_cv_pct": 13.64,
+      "fr_ops": 960630.6,
+      "fr_over_redis": 1.0236,
+      "redis_cv_pct": 10.25,
+      "redis_ops": 938450.7,
+      "verdict": "win"
+    }
+  },
+  "clients": 4,
+  "fr_bench_bin": "/data/projects/.rch-targets/frankenredis-cod-a/release/fr-bench",
+  "fr_port": 45602,
+  "fr_server_bin": "/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis",
+  "keyspace": 10000,
+  "redis_port": 45601,
+  "redis_server_bin": "/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server",
+  "requests": 80000,
+  "schema_version": "frankenredis-087qq-integer-get-verify/v1",
+  "timestamp_utc": "2026-06-19T05:05:00Z",
+  "trials": 5,
+  "win_loss_neutral": {
+    "losses": 0,
+    "neutral": 0,
+    "total": 9,
+    "wins": 9
+  }
+}

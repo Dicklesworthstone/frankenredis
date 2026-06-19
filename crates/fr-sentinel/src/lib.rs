@@ -421,9 +421,7 @@ pub fn generate_run_id() -> [u8; 40] {
         .duration_since(UNIX_EPOCH)
         .map_or(0u64, |d| d.as_nanos() as u64);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let mut state = nanos
-        ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ 0xD1B5_4A32_D192_ED03;
+    let mut state = nanos ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0u8; 40];
     // 40 hex nibbles = 3 SplitMix64 words (16 + 16 + 8 nibbles).
@@ -655,7 +653,9 @@ mod tests {
         let b = SentinelState::new();
         assert_eq!(a.myid.len(), 40);
         assert!(
-            a.myid.iter().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            a.myid
+                .iter()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "run id must be lowercase hex: {:?}",
             a.myid_hex()
         );

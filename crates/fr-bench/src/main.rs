@@ -34,6 +34,10 @@ enum Workload {
     Lpop,
     Hset,
     Hget,
+    // (frankenredis-087qq) GET against integer-encoded string values prefilled by INCRBY.
+    // This isolates Value::Integer / int-object materialization instead of ordinary
+    // byte-string GET.
+    IntegerGet,
     Mixed,
     // (frankenredis-n2u1g) ZRANGE key 0 -1 WITHSCORES against a prefilled zset —
     // exercises the per-score reply path (redis_score_to_string + bulk encode) so the
@@ -94,6 +98,9 @@ impl Workload {
         if value.eq_ignore_ascii_case("hget") {
             return Some(Self::Hget);
         }
+        if value.eq_ignore_ascii_case("integer-get") || value.eq_ignore_ascii_case("int-get") {
+            return Some(Self::IntegerGet);
+        }
         if value.eq_ignore_ascii_case("mixed") {
             return Some(Self::Mixed);
         }
@@ -126,6 +133,7 @@ impl Workload {
             Self::Lpop => "lpop",
             Self::Hset => "hset",
             Self::Hget => "hget",
+            Self::IntegerGet => "integer-get",
             Self::Mixed => "mixed",
             Self::ZrangeWithscores => "zrange-withscores",
             Self::Lrange => "lrange",
@@ -145,6 +153,7 @@ enum CommandKind {
     Lpop,
     Hset,
     Hget,
+    IntegerGet,
     ZrangeWithscores,
     Lrange,
     Hgetall,
@@ -765,9 +774,11 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
 
 fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
     let prep_count = match config.workload {
-        Workload::Get | Workload::Mixed | Workload::Hget | Workload::ZrangeWithscores => {
-            config.keyspace
-        }
+        Workload::Get
+        | Workload::Mixed
+        | Workload::Hget
+        | Workload::IntegerGet
+        | Workload::ZrangeWithscores => config.keyspace,
         Workload::Lpop => list_prefill_per_key(config.requests, config.keyspace, config.pipeline)
             .saturating_mul(config.keyspace),
         Workload::Lrange => LIST_BENCH_ELEMENTS.saturating_mul(config.keyspace),
@@ -807,6 +818,22 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
                     &value,
                     None,
                 ));
+                flush_prepare_batch(&mut client, &mut batch)?;
+            }
+        }
+        Workload::IntegerGet => {
+            for key_index in 0..config.keyspace {
+                let key = benchmark_key(&config.key_prefix, CommandKind::IntegerGet, key_index);
+                let value = match i64::try_from(key_index) {
+                    Ok(index) => index.saturating_add(1),
+                    Err(_) => i64::MAX,
+                }
+                .to_string()
+                .into_bytes();
+                batch.push(PreparedCommand {
+                    frame: argv_frame(vec![b"INCRBY".to_vec(), key, value]),
+                    expectation: ResponseExpectation::INTEGER,
+                });
                 flush_prepare_batch(&mut client, &mut batch)?;
             }
         }
@@ -992,6 +1019,7 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Lpop => CommandKind::Lpop,
         Workload::Hset => CommandKind::Hset,
         Workload::Hget => CommandKind::Hget,
+        Workload::IntegerGet => CommandKind::IntegerGet,
         Workload::ZrangeWithscores => CommandKind::ZrangeWithscores,
         Workload::Lrange => CommandKind::Lrange,
         Workload::Hgetall => CommandKind::Hgetall,
@@ -1022,6 +1050,7 @@ fn build_command(
         CommandKind::Lpop => ResponseExpectation::NON_ERROR,
         CommandKind::Hset => ResponseExpectation::INTEGER,
         CommandKind::Hget => ResponseExpectation::NON_ERROR,
+        CommandKind::IntegerGet => ResponseExpectation::NON_ERROR,
         CommandKind::ZrangeWithscores => ResponseExpectation::NON_ERROR,
         CommandKind::Lrange => ResponseExpectation::NON_ERROR,
         CommandKind::Hgetall => ResponseExpectation::NON_ERROR,
@@ -1057,6 +1086,7 @@ fn build_command(
                 .unwrap_or_else(|| value_template.to_vec()),
         ],
         CommandKind::Hget => vec![b"HGET".to_vec(), key, b"field".to_vec()],
+        CommandKind::IntegerGet => vec![b"GET".to_vec(), key],
         // (frankenredis-n2u1g) full-range WITHSCORES read; the prefill ZADDs
         // ZSET_BENCH_MEMBERS integer-scored members per key.
         CommandKind::ZrangeWithscores => vec![
@@ -1093,6 +1123,7 @@ fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
     let family = match kind {
         CommandKind::Set | CommandKind::Get => "string",
         CommandKind::Incr => "counter",
+        CommandKind::IntegerGet => "intstring",
         CommandKind::Lpush | CommandKind::Lpop | CommandKind::Lrange => "list",
         CommandKind::Hset | CommandKind::Hget | CommandKind::Hgetall => "hash",
         CommandKind::ZrangeWithscores => "zset",
@@ -1197,7 +1228,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers|dump (default: set)\n\
+  --workload <KIND>        set|get|integer-get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers|dump (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
@@ -1266,6 +1297,8 @@ mod tests {
     fn workload_parser_accepts_expected_values() {
         assert_eq!(Workload::parse("set"), Some(Workload::Set));
         assert_eq!(Workload::parse("GET"), Some(Workload::Get));
+        assert_eq!(Workload::parse("int-get"), Some(Workload::IntegerGet));
+        assert_eq!(Workload::parse("INTEGER-GET"), Some(Workload::IntegerGet));
         assert_eq!(Workload::parse("mixed"), Some(Workload::Mixed));
         assert_eq!(Workload::parse("nope"), None);
     }
@@ -1323,6 +1356,10 @@ mod tests {
         assert_eq!(
             benchmark_key("fr:bench", CommandKind::Hset, 3),
             b"fr:bench:hash:3".to_vec()
+        );
+        assert_eq!(
+            benchmark_key("fr:bench", CommandKind::IntegerGet, 7),
+            b"fr:bench:intstring:7".to_vec()
         );
     }
 

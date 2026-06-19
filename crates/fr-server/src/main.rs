@@ -2440,11 +2440,7 @@ fn record_deferred_buffered_token(
     }
 }
 
-fn cached_plain_write_gate(
-    cache: &mut Option<bool>,
-    runtime: &mut Runtime,
-    ts: u64,
-) -> bool {
+fn cached_plain_write_gate(cache: &mut Option<bool>, runtime: &mut Runtime, ts: u64) -> bool {
     match *cache {
         Some(allowed) => allowed,
         None => {
@@ -2494,7 +2490,8 @@ fn process_buffered_frames(
         }
 
         if processed_frames > 0
-            && conn.write_buf.len().saturating_sub(conn.write_pos) >= MAX_REPLY_BYTES_PER_CLIENT_TICK
+            && conn.write_buf.len().saturating_sub(conn.write_pos)
+                >= MAX_REPLY_BYTES_PER_CLIENT_TICK
         {
             budget_exhausted = true;
             break;
@@ -2798,12 +2795,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hset_two_packet(unparsed, &parser_config)
                 {
-                    let pairs = [
-                        packet.field1,
-                        packet.value1,
-                        packet.field2,
-                        packet.value2,
-                    ];
+                    let pairs = [packet.field1, packet.value1, packet.field2, packet.value2];
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
@@ -2841,10 +2833,7 @@ fn process_buffered_frames(
                             default_write_allowed,
                         )
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed,
-                            response,
-                        })
+                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
@@ -3538,9 +3527,11 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pttl, packet.key, ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Pttl,
+                        packet.key,
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -3558,9 +3549,11 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_type_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Type, packet.key, ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Type,
+                        packet.key,
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -3724,9 +3717,11 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hmget2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_hmget_borrowed(packet.key, &[packet.start, packet.end], ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_hmget_borrowed(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -4129,7 +4124,12 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hvals_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_hcoll_borrowed_into(packet.key, ts, true, &mut conn.write_buf)
+                        .execute_plain_hcoll_borrowed_into(
+                            packet.key,
+                            ts,
+                            true,
+                            &mut conn.write_buf,
+                        )
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -4262,8 +4262,7 @@ fn process_buffered_frames(
                         &[
                             packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
                             packet.v7, packet.v8, packet.v9, packet.v10, packet.v11, packet.v12,
-                            packet.v13, packet.v14, packet.v15, packet.v16, packet.v17,
-                            packet.v18,
+                            packet.v13, packet.v14, packet.v15, packet.v16, packet.v17, packet.v18,
                         ],
                         ts,
                     ) {
@@ -4692,9 +4691,12 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_keyed_values_write_borrowed(cmd, packet.key, &[packet.member], ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                        cmd,
+                        packet.key,
+                        &[packet.member],
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -4908,9 +4910,11 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_smismember_borrowed(packet.key, &[packet.start, packet.end], ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -7154,7 +7158,10 @@ fn parse_borrowed_plain_object_encoding_packet<'a>(
     if !rest.get(..6)?.eq_ignore_ascii_case(b"OBJECT") {
         return None;
     }
-    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$8\r\n")?;
+    let rest = rest
+        .get(6..)?
+        .strip_prefix(b"\r\n")?
+        .strip_prefix(b"$8\r\n")?;
     if !rest.get(..8)?.eq_ignore_ascii_case(b"ENCODING") {
         return None;
     }
@@ -7182,7 +7189,10 @@ fn parse_borrowed_plain_object_refcount_packet<'a>(
     if !rest.get(..6)?.eq_ignore_ascii_case(b"OBJECT") {
         return None;
     }
-    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$8\r\n")?;
+    let rest = rest
+        .get(6..)?
+        .strip_prefix(b"\r\n")?
+        .strip_prefix(b"$8\r\n")?;
     if !rest.get(..8)?.eq_ignore_ascii_case(b"REFCOUNT") {
         return None;
     }
@@ -7200,6 +7210,7 @@ struct BorrowedPlainObjectStatPacket<'a> {
 
 // (frankenredis-2jasb) Byte-prefix fast path for
 // `OBJECT IDLETIME key` / `OBJECT FREQ key`.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_object_stat_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -7255,7 +7266,10 @@ fn parse_borrowed_plain_memory_usage_packet<'a>(
     if !rest.get(..6)?.eq_ignore_ascii_case(b"MEMORY") {
         return None;
     }
-    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$5\r\n")?;
+    let rest = rest
+        .get(6..)?
+        .strip_prefix(b"\r\n")?
+        .strip_prefix(b"$5\r\n")?;
     if !rest.get(..5)?.eq_ignore_ascii_case(b"USAGE") {
         return None;
     }
@@ -7435,7 +7449,10 @@ fn parse_borrowed_plain_command_count_packet(input: &[u8], config: &ParserConfig
     if !rest.get(..7)?.eq_ignore_ascii_case(b"COMMAND") {
         return None;
     }
-    let rest = rest.get(7..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$5\r\n")?;
+    let rest = rest
+        .get(7..)?
+        .strip_prefix(b"\r\n")?
+        .strip_prefix(b"$5\r\n")?;
     if !rest.get(..5)?.eq_ignore_ascii_case(b"COUNT") {
         return None;
     }
@@ -7889,6 +7906,7 @@ struct BorrowedPlainKeyedValues18Packet<'a> {
 // (frankenredis-ohsk5) 18-value LPUSH/RPUSH/SADD (`*20 $len CMD key v1 ... v18`);
 // reuses execute_plain_keyed_values_write_borrowed with an 18-element slice.
 // 19+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values18_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -7994,6 +8012,7 @@ struct BorrowedPlainKeyedValues17Packet<'a> {
 // (frankenredis-ohsk5) 17-value LPUSH/RPUSH/SADD (`*19 $len CMD key v1 ... v17`);
 // reuses execute_plain_keyed_values_write_borrowed with a 17-element slice.
 // 18+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values17_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8096,6 +8115,7 @@ struct BorrowedPlainKeyedValues16Packet<'a> {
 // (frankenredis-w0i5z) 16-value LPUSH/RPUSH/SADD (`*18 $len CMD key v1 ... v16`);
 // reuses execute_plain_keyed_values_write_borrowed with a 16-element slice.
 // 17+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values16_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8195,6 +8215,7 @@ struct BorrowedPlainKeyedValues15Packet<'a> {
 // (frankenredis-tp5aa) 15-value LPUSH/RPUSH/SADD (`*17 $len CMD key v1 ... v15`);
 // reuses execute_plain_keyed_values_write_borrowed with a 15-element slice.
 // 16+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values15_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8291,6 +8312,7 @@ struct BorrowedPlainKeyedValues14Packet<'a> {
 // (frankenredis-3gx3y) 14-value LPUSH/RPUSH/SADD (`*16 $len CMD key v1 ... v14`);
 // reuses execute_plain_keyed_values_write_borrowed with a 14-element slice.
 // 15+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values14_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8384,6 +8406,7 @@ struct BorrowedPlainKeyedValues13Packet<'a> {
 // (frankenredis-44wcq) 13-value LPUSH/RPUSH/SADD (`*15 $len CMD key v1 ... v13`);
 // reuses execute_plain_keyed_values_write_borrowed with a 13-element slice.
 // 14+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values13_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8474,6 +8497,7 @@ struct BorrowedPlainKeyedValues12Packet<'a> {
 // (frankenredis-nrybx) 12-value LPUSH/RPUSH/SADD (`*14 $len CMD key v1 ... v12`);
 // reuses execute_plain_keyed_values_write_borrowed with a 12-element slice.
 // 13+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values12_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8561,6 +8585,7 @@ struct BorrowedPlainKeyedValues11Packet<'a> {
 // (frankenredis-unj78) 11-value LPUSH/RPUSH/SADD (`*13 $len CMD key v1 ... v11`);
 // reuses execute_plain_keyed_values_write_borrowed with an 11-element slice.
 // 12+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values11_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8645,6 +8670,7 @@ struct BorrowedPlainKeyedValues10Packet<'a> {
 // (frankenredis-d061n) 10-value LPUSH/RPUSH/SADD (`*12 $len CMD key v1 ... v10`);
 // reuses execute_plain_keyed_values_write_borrowed with a 10-element slice.
 // 11+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values10_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8726,6 +8752,7 @@ struct BorrowedPlainKeyedValues9Packet<'a> {
 // (frankenredis-r3on0) 9-value LPUSH/RPUSH/SADD (`*11 $len CMD key v1 ... v9`);
 // reuses execute_plain_keyed_values_write_borrowed with a 9-element slice.
 // 10+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values9_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8804,6 +8831,7 @@ struct BorrowedPlainKeyedValues8Packet<'a> {
 // (frankenredis-ons7i) 8-value LPUSH/RPUSH/SADD (`*10 $len CMD key v1 ... v8`);
 // reuses execute_plain_keyed_values_write_borrowed with an 8-element slice.
 // 9+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values8_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8879,6 +8907,7 @@ struct BorrowedPlainKeyedValues7Packet<'a> {
 // (frankenredis-8lqp4) 7-value LPUSH/RPUSH/SADD (`*9 $len CMD key v1 ... v7`);
 // reuses execute_plain_keyed_values_write_borrowed with a 7-element slice.
 // 8+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values7_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -8951,6 +8980,7 @@ struct BorrowedPlainKeyedValues6Packet<'a> {
 // (frankenredis-2tbmh) 6-value LPUSH/RPUSH/SADD (`*8 $len CMD key v1 ... v6`);
 // reuses execute_plain_keyed_values_write_borrowed with a 6-element slice.
 // 7+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values6_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9020,6 +9050,7 @@ struct BorrowedPlainKeyedValues5Packet<'a> {
 // (frankenredis-bnrnp) 5-value LPUSH/RPUSH/SADD (`*7 $len CMD key v1 v2 v3 v4 v5`);
 // reuses execute_plain_keyed_values_write_borrowed with a 5-element slice.
 // 6+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values5_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9086,6 +9117,7 @@ struct BorrowedPlainKeyedValues4Packet<'a> {
 // (frankenredis-hqr5t) 4-value LPUSH/RPUSH/SADD (`*6 $len CMD key v1 v2 v3 v4`);
 // reuses execute_plain_keyed_values_write_borrowed with a 4-element slice.
 // 5+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values4_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9141,6 +9173,7 @@ fn parse_borrowed_plain_keyed_values4_packet<'a>(
 // (frankenredis-qmefy) 3-value LPUSH/RPUSH/SADD (`*5 $len CMD key v1 v2 v3`); reuses
 // execute_plain_keyed_values_write_borrowed with a 3-element slice (Hmget3's
 // {f1,f2,f3} = {v1,v2,v3}). 4+ value forms fall through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values3_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9194,6 +9227,7 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
 // (frankenredis-reioo) 2-value LPUSH/RPUSH/SADD (`*4 $len CMD key v1 v2`); reuses
 // execute_plain_keyed_values_write_borrowed with a 2-element value slice
 // (KeyRange's {start,end} = {v1,v2}). 3+ value forms fall through to generic.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values2_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9246,6 +9280,7 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
 // reusing the verified-live execute_plain_keyed_values_write_borrowed with a
 // 1-element value slice. Multi-value forms (arity > 3) fall through to the generic
 // path. LPUSHX/RPUSHX are NOT matched (distinct commands).
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values1_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9296,6 +9331,7 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
 // (`*2 $len CMD key`), reusing the verified-live execute_plain_keyed_pop_borrowed.
 // SPOP is excluded (returns a RANDOM member — not byte-exact verifiable). The
 // count form (arity 3) falls through to the generic path.
+#[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_pop_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -10156,8 +10192,7 @@ fn parse_borrowed_plain_mset_eight_packet<'a>(
     let (seventh_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (seventh_value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (eighth_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    let (eighth_value, consumed) =
-        parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (eighth_value, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainMsetEightPacket {
         consumed,
         pairs: [
@@ -10668,7 +10703,13 @@ fn parse_borrowed_plain_exists_seven_packet<'a>(
     Some(BorrowedPlainExistsSevenPacket {
         consumed,
         keys: [
-            first_key, second_key, third_key, fourth_key, fifth_key, sixth_key, seventh_key,
+            first_key,
+            second_key,
+            third_key,
+            fourth_key,
+            fifth_key,
+            sixth_key,
+            seventh_key,
         ],
     })
 }
@@ -14290,7 +14331,8 @@ mod tests {
 
     #[test]
     fn borrowed_plain_bitpos_start_packet_parser_accepts_canonical_start() {
-        let input = b"*4\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
+        let input =
+            b"*4\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
         let parsed =
             crate::parse_borrowed_plain_bitpos_start_packet(input, &ParserConfig::default())
                 .expect("canonical BITPOS key bit start packet should parse");
@@ -14433,7 +14475,8 @@ mod tests {
         assert_eq!(parsed.unit, b"BiT");
         assert_eq!(
             parsed.consumed,
-            b"*6\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n1\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nBiT\r\n".len()
+            b"*6\r\n$6\r\nbItPoS\r\n$3\r\nkey\r\n$1\r\n1\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nBiT\r\n"
+                .len()
         );
     }
 
@@ -14643,7 +14686,8 @@ mod tests {
         assert_eq!(parsed.value2, b"v2");
         assert_eq!(
             parsed.consumed,
-            b"*6\r\n$4\r\nhSeT\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n".len()
+            b"*6\r\n$4\r\nhSeT\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n"
+                .len()
         );
     }
 
@@ -14767,11 +14811,8 @@ mod tests {
     fn borrowed_plain_mset_three_packet_parser_accepts_canonical_three_pair_mset() {
         let input =
             b"*7\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_three_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical three-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_three_packet(input, &ParserConfig::default())
+            .expect("canonical three-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -14839,11 +14880,8 @@ mod tests {
     fn borrowed_plain_mset_four_packet_parser_accepts_canonical_four_pair_mset() {
         let input =
             b"*9\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_four_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical four-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_four_packet(input, &ParserConfig::default())
+            .expect("canonical four-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -14912,11 +14950,8 @@ mod tests {
     fn borrowed_plain_mset_five_packet_parser_accepts_canonical_five_pair_mset() {
         let input =
             b"*11\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_five_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical five-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_five_packet(input, &ParserConfig::default())
+            .expect("canonical five-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -14986,11 +15021,8 @@ mod tests {
     fn borrowed_plain_mset_six_packet_parser_accepts_canonical_six_pair_mset() {
         let input =
             b"*13\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n$2\r\nk6\r\n$2\r\nv6\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_six_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical six-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_six_packet(input, &ParserConfig::default())
+            .expect("canonical six-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -15061,11 +15093,8 @@ mod tests {
     fn borrowed_plain_mset_seven_packet_parser_accepts_canonical_seven_pair_mset() {
         let input =
             b"*15\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n$2\r\nk6\r\n$2\r\nv6\r\n$2\r\nk7\r\n$2\r\nv7\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_seven_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical seven-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_seven_packet(input, &ParserConfig::default())
+            .expect("canonical seven-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -15137,11 +15166,8 @@ mod tests {
     fn borrowed_plain_mset_eight_packet_parser_accepts_canonical_eight_pair_mset() {
         let input =
             b"*17\r\n$4\r\nmSeT\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n$2\r\nk3\r\n$2\r\nv3\r\n$2\r\nk4\r\n$2\r\nv4\r\n$2\r\nk5\r\n$2\r\nv5\r\n$2\r\nk6\r\n$2\r\nv6\r\n$2\r\nk7\r\n$2\r\nv7\r\n$2\r\nk8\r\n$2\r\nv8\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mset_eight_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical eight-pair MSET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mset_eight_packet(input, &ParserConfig::default())
+            .expect("canonical eight-pair MSET packet should parse");
 
         assert_eq!(
             parsed.pairs,
@@ -15287,8 +15313,8 @@ mod tests {
         assert_eq!(
             [
                 parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
-                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
-                parsed.v14, parsed.v15, parsed.v16, parsed.v17, parsed.v18
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13, parsed.v14,
+                parsed.v15, parsed.v16, parsed.v17, parsed.v18
             ],
             [
                 b"a".as_slice(),
@@ -15396,8 +15422,8 @@ mod tests {
         assert_eq!(
             [
                 parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
-                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
-                parsed.v14, parsed.v15, parsed.v16, parsed.v17
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13, parsed.v14,
+                parsed.v15, parsed.v16, parsed.v17
             ],
             [
                 b"a".as_slice(),
@@ -15504,8 +15530,8 @@ mod tests {
         assert_eq!(
             [
                 parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
-                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
-                parsed.v14, parsed.v15, parsed.v16
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13, parsed.v14,
+                parsed.v15, parsed.v16
             ],
             [
                 b"a".as_slice(),
@@ -15611,8 +15637,8 @@ mod tests {
         assert_eq!(
             [
                 parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
-                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
-                parsed.v14, parsed.v15
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13, parsed.v14,
+                parsed.v15
             ],
             [
                 b"a".as_slice(),
@@ -15717,8 +15743,7 @@ mod tests {
         assert_eq!(
             [
                 parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6, parsed.v7,
-                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13,
-                parsed.v14
+                parsed.v8, parsed.v9, parsed.v10, parsed.v11, parsed.v12, parsed.v13, parsed.v14
             ],
             [
                 b"a".as_slice(),
@@ -16517,7 +16542,9 @@ mod tests {
         assert_eq!(cmd, crate::PlainKeyedValuesCmd::Lpush);
         assert_eq!(parsed.key, b"list");
         assert_eq!(
-            [parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6],
+            [
+                parsed.v1, parsed.v2, parsed.v3, parsed.v4, parsed.v5, parsed.v6
+            ],
             [
                 b"a".as_slice(),
                 b"b".as_slice(),
@@ -16701,7 +16728,12 @@ mod tests {
         assert_eq!(parsed.key, b"list");
         assert_eq!(
             [parsed.v1, parsed.v2, parsed.v3, parsed.v4],
-            [b"a".as_slice(), b"b".as_slice(), b"c".as_slice(), b"d".as_slice()]
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice()
+            ]
         );
         assert_eq!(
             parsed.consumed,
@@ -16781,7 +16813,10 @@ mod tests {
             .expect("canonical two-key MGET packet should parse");
 
         assert_eq!(parsed.keys, [b"k1".as_slice(), b"k2".as_slice()]);
-        assert_eq!(parsed.consumed, b"*3\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n".len());
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n".len()
+        );
     }
 
     #[test]
@@ -16831,13 +16866,9 @@ mod tests {
 
     #[test]
     fn borrowed_plain_mget_three_packet_parser_accepts_canonical_three_key_mget() {
-        let input =
-            b"*4\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_three_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical three-key MGET packet should parse");
+        let input = b"*4\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_mget_three_packet(input, &ParserConfig::default())
+            .expect("canonical three-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -16901,11 +16932,8 @@ mod tests {
     fn borrowed_plain_mget_four_packet_parser_accepts_canonical_four_key_mget() {
         let input =
             b"*5\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_four_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical four-key MGET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mget_four_packet(input, &ParserConfig::default())
+            .expect("canonical four-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -16974,11 +17002,8 @@ mod tests {
     fn borrowed_plain_mget_five_packet_parser_accepts_canonical_five_key_mget() {
         let input =
             b"*6\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_five_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical five-key MGET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mget_five_packet(input, &ParserConfig::default())
+            .expect("canonical five-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -16992,7 +17017,8 @@ mod tests {
         );
         assert_eq!(
             parsed.consumed,
-            b"*6\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n".len()
+            b"*6\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n"
+                .len()
         );
     }
 
@@ -17048,11 +17074,8 @@ mod tests {
     fn borrowed_plain_mget_six_packet_parser_accepts_canonical_six_key_mget() {
         let input =
             b"*7\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_six_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical six-key MGET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mget_six_packet(input, &ParserConfig::default())
+            .expect("canonical six-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -17123,11 +17146,8 @@ mod tests {
     fn borrowed_plain_mget_seven_packet_parser_accepts_canonical_seven_key_mget() {
         let input =
             b"*8\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_seven_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical seven-key MGET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mget_seven_packet(input, &ParserConfig::default())
+            .expect("canonical seven-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -17199,11 +17219,8 @@ mod tests {
     fn borrowed_plain_mget_eight_packet_parser_accepts_canonical_eight_key_mget() {
         let input =
             b"*9\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n$2\r\nk8\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed = crate::parse_borrowed_plain_mget_eight_packet(
-            input,
-            &ParserConfig::default(),
-        )
-        .expect("canonical eight-key MGET packet should parse");
+        let parsed = crate::parse_borrowed_plain_mget_eight_packet(input, &ParserConfig::default())
+            .expect("canonical eight-key MGET packet should parse");
 
         assert_eq!(
             parsed.keys,
@@ -17275,9 +17292,8 @@ mod tests {
     #[test]
     fn borrowed_plain_exists_two_packet_parser_accepts_canonical_two_key_exists() {
         let input = b"*3\r\n$6\r\neXiStS\r\n$3\r\nfoo\r\n$3\r\nfoo\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed =
-            crate::parse_borrowed_plain_exists_two_packet(input, &ParserConfig::default())
-                .expect("canonical two-key EXISTS packet should parse");
+        let parsed = crate::parse_borrowed_plain_exists_two_packet(input, &ParserConfig::default())
+            .expect("canonical two-key EXISTS packet should parse");
 
         assert_eq!(parsed.keys, [b"foo".as_slice(), b"foo".as_slice()]);
         assert_eq!(
@@ -17298,8 +17314,11 @@ mod tests {
             "noncanonical multibulk length stays on the generic parser"
         );
         assert!(
-            crate::parse_borrowed_plain_exists_two_packet(b"*2\r\n$6\r\nEXISTS\r\n$1\r\na\r\n", &cfg)
-                .is_none(),
+            crate::parse_borrowed_plain_exists_two_packet(
+                b"*2\r\n$6\r\nEXISTS\r\n$1\r\na\r\n",
+                &cfg
+            )
+            .is_none(),
             "single-key EXISTS stays on the generic parser"
         );
         assert!(
@@ -17591,7 +17610,10 @@ mod tests {
             crate::parse_borrowed_plain_ping_packet(with_message, &ParserConfig::default())
                 .expect("canonical PING message packet should parse");
         assert_eq!(parsed.message, Some(b"hello".as_slice()));
-        assert_eq!(parsed.consumed, b"*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n".len());
+        assert_eq!(
+            parsed.consumed,
+            b"*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n".len()
+        );
     }
 
     #[test]
@@ -17613,11 +17635,8 @@ mod tests {
             "array-limit errors stay on the generic parser"
         );
         assert!(
-            crate::parse_borrowed_plain_ping_packet(
-                b"*2\r\n$4\r\nPING\r\n$2\r\nx\r\n",
-                &cfg
-            )
-            .is_none(),
+            crate::parse_borrowed_plain_ping_packet(b"*2\r\n$4\r\nPING\r\n$2\r\nx\r\n", &cfg)
+                .is_none(),
             "malformed bulk bodies stay on the generic parser"
         );
     }
@@ -19527,8 +19546,7 @@ mod tests {
 
     #[test]
     fn borrowed_plain_object_stat_packet_parser_accepts_idletime_and_freq() {
-        let idletime =
-            b"*3\r\n$6\r\noBjEcT\r\n$8\r\niDlEtImE\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let idletime = b"*3\r\n$6\r\noBjEcT\r\n$8\r\niDlEtImE\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed =
             crate::parse_borrowed_plain_object_stat_packet(idletime, &ParserConfig::default())
                 .expect("canonical OBJECT IDLETIME key packet should parse");
@@ -19600,7 +19618,8 @@ mod tests {
 
     #[test]
     fn borrowed_plain_zrange_packet_parser_accepts_canonical_plain_range() {
-        let input = b"*4\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
+        let input =
+            b"*4\r\n$6\r\nzRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_zrange_packet(input, &ParserConfig::default())
             .expect("canonical ZRANGE key start stop packet should parse");
 
@@ -19940,9 +19959,8 @@ mod tests {
     #[test]
     fn borrowed_plain_hrandfield_packet_parser_accepts_canonical_key_only() {
         let input = b"*2\r\n$10\r\nhRaNdFiElD\r\n$4\r\nhash\r\n*1\r\n$4\r\nPING\r\n";
-        let parsed =
-            crate::parse_borrowed_plain_hrandfield_packet(input, &ParserConfig::default())
-                .expect("canonical HRANDFIELD key packet should parse");
+        let parsed = crate::parse_borrowed_plain_hrandfield_packet(input, &ParserConfig::default())
+            .expect("canonical HRANDFIELD key packet should parse");
 
         assert_eq!(parsed.key, b"hash");
         assert_eq!(
@@ -20266,8 +20284,7 @@ mod tests {
         assert_eq!(parsed.k3, b"s3");
         assert_eq!(
             parsed.consumed,
-            b"*5\r\n$10\r\nsInTeRcArD\r\n$1\r\n3\r\n$2\r\ns1\r\n$2\r\ns2\r\n$2\r\ns3\r\n"
-                .len()
+            b"*5\r\n$10\r\nsInTeRcArD\r\n$1\r\n3\r\n$2\r\ns1\r\n$2\r\ns2\r\n$2\r\ns3\r\n".len()
         );
     }
 

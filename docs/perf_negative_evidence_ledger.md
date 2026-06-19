@@ -134,11 +134,12 @@ turns). Keep claims honest — mark which.
   under shared-host contention, so the direction is keep-quality but publication
   numbers still need quiet-host rerun (`vibu6`). Raw artifact:
   `artifacts/optimization/frankenredis-087qq/verify_integer_get_20260619T0505Z/summary.json`.
-  Validation: focused `fr-bench` fmt/clippy/tests passed and
-  `cargo test -p fr-conformance -- --nocapture` passed via rch. After fixing
-  unrelated test/bench compile blockers, `cargo check --workspace --all-targets`
-  also passed via rch. Full workspace clippy and full rustfmt remain blocked by
-  unrelated gate debt tracked as `frankenredis-pjtld`.
+  Validation: focused `fr-bench` fmt/clippy/tests passed, release binaries were
+  rch-built, and the full workspace gates are green after resolving closeout-only
+  gate debt: `cargo check --workspace --all-targets`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`,
+  and refreshed `cargo test -p fr-conformance -- --nocapture` all passed (`rch`
+  for the build/check/clippy/conformance gates).
   Scope is store-side byte
   materialization for integer GET-like paths and `SetValue::Int` iteration /
   promotion / removal; RESP serializer, runtime, and server code are unchanged.

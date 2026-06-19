@@ -1,0 +1,38 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781845554710,
+  "host": "127.0.0.1",
+  "port": 45602,
+  "workload": "get",
+  "clients": 4,
+  "requests": 80000,
+  "pipeline": 1,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:087qq:get:p1:fr",
+  "total_time_ms": 859,
+  "ops_per_sec": 93111.18243582871,
+  "trials": 5,
+  "cv_pct": 5.353998143452779,
+  "ops_per_sec_samples": [
+    93111.18243582871,
+    86522.03675448551,
+    90669.26585833255,
+    93113.8373880522,
+    100179.49297503139
+  ],
+  "bytes_sent": 3991030,
+  "bytes_received": 720000,
+  "latency_us": {
+    "min": 17,
+    "p50": 40,
+    "p95": 56,
+    "p99": 69,
+    "p999": 150,
+    "max": 2131,
+    "mean": 41.847674999999974,
+    "samples": 80000
+  }
+}

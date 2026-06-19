@@ -4062,11 +4062,7 @@ mod tests {
                 9 => {
                     let v = val(next());
                     let was_new = !o.contains_key(&k);
-                    assert_eq!(
-                        c.insert_borrowed(&k, &v),
-                        was_new,
-                        "insert_borrowed"
-                    );
+                    assert_eq!(c.insert_borrowed(&k, &v), was_new, "insert_borrowed");
                     o.insert(k.clone(), v);
                 }
                 _ => {

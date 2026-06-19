@@ -20586,7 +20586,10 @@ impl Store {
                     let mut entry_count = 0usize;
                     for (member, score) in zs.iter_asc() {
                         encode_listpack_entry(&mut encoded, member);
-                        encode_listpack_entry(&mut encoded, redis_score_to_string(score).as_bytes());
+                        encode_listpack_entry(
+                            &mut encoded,
+                            redis_score_to_string(score).as_bytes(),
+                        );
                         entry_count += 2;
                     }
                     encode_rdb_string(&mut buf, &finish_listpack_entries(encoded, entry_count)?);
@@ -25982,21 +25985,21 @@ mod tests {
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
         HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
         HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL,
-        RestoreMetadata, lfu_access_minutes, lfu_elapsed_minutes,
         LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
         NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2,
         RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
         RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
         RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3,
         RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
-        RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, ScoreBound,
-        SetValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata,
+        ScoreBound, SetValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
         decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
         encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
-        redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
+        lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size, redis_score_to_string,
+        set_int_to_bytes, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40989,7 +40992,10 @@ mod tests {
             assert_eq!(ziplist_integer_bytes(value), expected);
 
             let value_obj = Value::Integer(value);
-            assert_eq!(value_obj.string_bytes().unwrap().as_ref(), expected.as_slice());
+            assert_eq!(
+                value_obj.string_bytes().unwrap().as_ref(),
+                expected.as_slice()
+            );
             assert_eq!(value_obj.string_owned().unwrap(), expected);
 
             let mut materialized = Value::Integer(value);
@@ -41017,11 +41023,7 @@ mod tests {
                 i64::from(i8::MIN),
                 2usize,
             ),
-            (
-                vec![0xC0, i8::MAX.to_le_bytes()[0]],
-                i64::from(i8::MAX),
-                2,
-            ),
+            (vec![0xC0, i8::MAX.to_le_bytes()[0]], i64::from(i8::MAX), 2),
             (int16_min, i64::from(i16::MIN), 3),
             (int16_max, i64::from(i16::MAX), 3),
             (int32_min, i64::from(i32::MIN), 5),
@@ -42243,7 +42245,10 @@ mod tests {
         let last_reference =
             encode_listpack_strings(&[b"c".as_slice()]).expect("last reference listpack");
         assert_eq!(listpack, last_reference);
-        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![b"c".to_vec()]);
+        assert_eq!(
+            decode_listpack_strings(&listpack).unwrap(),
+            vec![b"c".to_vec()]
+        );
         assert_eq!(cursor, data_end);
 
         let mut restored = Store::new();

@@ -14524,11 +14524,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("zrange");
-        self.session.last_argv_len_sum = b"ZRANGE".len()
-            + key.len()
-            + start_arg.len()
-            + stop_arg.len()
-            + b"WITHSCORES".len();
+        self.session.last_argv_len_sum =
+            b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"WITHSCORES".len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -28730,8 +28727,12 @@ mod tests {
                 rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
             }
 
-            let cases: [(&[u8], &[u8]); 4] =
-                [(b"z", b"a"), (b"z", b"nope"), (b"nokey", b"a"), (b"str", b"a")];
+            let cases: [(&[u8], &[u8]); 4] = [
+                (b"z", b"a"),
+                (b"z", b"nope"),
+                (b"nokey", b"a"),
+                (b"str", b"a"),
+            ];
             for (ts, (key, member)) in (2..).zip(cases) {
                 let mut out = Vec::new();
                 direct
@@ -28859,9 +28860,7 @@ mod tests {
                     rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
                 }
                 rt.execute_frame(
-                    command(&[
-                        b"ZADD", b"z", b"1.5", b"a", b"2", b"b", b"3.25", b"c",
-                    ]),
+                    command(&[b"ZADD", b"z", b"1.5", b"a", b"2", b"b", b"3.25", b"c"]),
                     1,
                 );
                 rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
