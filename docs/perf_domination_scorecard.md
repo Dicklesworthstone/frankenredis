@@ -250,3 +250,37 @@ Latest broad quick matrix from `.bench-history/comprehensive_bench.latest.json`:
 Release-performance frontier after this pass: `MIXED@P1` is the largest stable loss
 (`0.434x` fr/redis), then `INCR@P1` (`0.951x`). Noisy P16/P128 losses need a quieter rerun before
 they are valid code targets.
+
+## Cod-b HSET Direct Histogram Candidate (MEASURED 2026-06-20)
+
+Follow-up for `frankenredis-ohsk5`: a dedicated `hset` command histogram slot was tested to bypass
+the fallback commandstats `HashMap` lookup. The candidate was reverted because the same-control
+A/B showed no clean win.
+
+| Gate | Cell | Ratio | CV / trial quality | Verdict |
+|---|---|---:|---|---|
+| candidate / baseline (`fr-bench`) | HSET P1 | 0.993x median | all CV < 5% | rejected: clean neutral/slight down |
+| candidate / baseline (`fr-bench`) | HSET P16 | 1.202x median | 0/2 clean runs | noisy, not keep evidence |
+| candidate / baseline (`fr-bench`) | HSET P128 | 1.068x median | 0/2 clean runs | noisy, not keep evidence |
+
+Lever score: **0/0/2 clean win/loss/neutral**, plus **4 noisy** runs. No source hunk remains.
+Proof bundle: `artifacts/optimization/frankenredis-ohsk5-hset-direct-hist/20260620T022647Z/`.
+
+Clean-source focused current-vs-Redis check after revert, built via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`:
+
+| cell | fr/redis | cv redis/fr | verdict |
+|---|---:|---|---|
+| `mixed@p1` | 1.031 | 2.21% / 5.69% | noisy, not a clean loss |
+| `mixed@p16` | 1.215 | 8.09% / 9.23% | noisy |
+| `incr@p1` | 0.954 | 3.55% / 3.39% | clean loss |
+| `incr@p16` | 1.144 | 6.41% / 9.14% | noisy |
+| `get@p1` | 1.034 | 2.81% / 3.29% | clean win |
+| `set@p1` | 0.993 | 2.86% / 4.86% | neutral |
+| `hset@p1` | 0.995 | 3.06% / 4.63% | neutral |
+| `hset@p16` | 1.069 | 6.17% / 4.45% | noisy |
+| `hset@p128` | 1.175 | 6.02% / 7.02% | noisy |
+
+Focused score: **1 win / 1 loss / 2 neutral / 5 noisy**. Clean cells only:
+**1 win / 1 loss / 2 neutral**. The current clean frontier for this narrow gate is now `INCR@P1`;
+`MIXED@P1` needs another quiet rerun before it is a valid code target.

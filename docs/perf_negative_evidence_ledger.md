@@ -971,3 +971,64 @@ Decision: keep the existing cached borrowed write gate; the original pending ben
 complete. Do not claim broad domination from this pass. Next `ohsk5` work should target measured
 stable losses, especially `MIXED@P1` and `INCR@P1`, or rerun the noisy P16/P128 gaps on a quieter
 worker before spending code on them.
+
+## MEASURED cod-b ohsk5 HSET direct histogram candidate (2026-06-20) -- REJECTED
+
+Scope: `frankenredis-ohsk5`. Candidate added a dedicated `hset: Option<CommandHistogram>` field to
+`CommandHistogramTracker` so HSET commandstats/latency recording could avoid the fallback
+`HashMap<String, CommandHistogram>` lookup. The idea was deliberately small and branch-local, but
+the same-binary A/B did not clear the keep bar, so the source hunk was reverted.
+
+Build and proof:
+- Baseline binary: pre-candidate `frankenredis-baseline`, sha256
+  `e16617e886d70d1ca22873a511ebd25d725e650716deeca7827cfadd342380cd`.
+- Candidate binary: HSET-direct-hist build, sha256
+  `46e3c55dad16a63ee165a0bd81ce883d19bce37f2b6a2c3e8a90fd2b9f1d1b7c`.
+- Clean-source rebuild after revert:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`
+  passed on `vmi1149989`; rebuilt `frankenredis` sha256
+  `10ce6936071c04ca41dcba795cc7261a6a1b59c21c62c4543edd5e6242903880`.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-ohsk5-hset-direct-hist/20260620T022647Z/`.
+- Profiling note: kernel sampling was blocked by `/proc/sys/kernel/perf_event_paranoid=4`, so this
+  closeout uses release A/B timing and harness CV gates rather than `perf` stacks.
+
+HSET direct-hist A/B, same host/server pair, `fr-bench --workload hset`, c4, n300k, 7 trials:
+
+| depth | order | baseline ops/s | candidate ops/s | candidate/baseline | baseline cv | candidate cv | verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| p1 | baseline-first | 93,555 | 92,915 | 0.993 | 3.75% | 2.81% | neutral/slight down |
+| p1 | candidate-first | 91,603 | 90,966 | 0.993 | 2.08% | 3.76% | neutral/slight down |
+| p16 | baseline-first | 840,254 | 938,223 | 1.117 | 6.42% | 4.87% | noisy |
+| p16 | candidate-first | 686,454 | 884,237 | 1.288 | 8.12% | 14.57% | noisy |
+| p128 | baseline-first | 1,821,120 | 2,004,639 | 1.101 | 11.67% | 9.34% | noisy |
+| p128 | candidate-first | 1,580,185 | 1,636,568 | 1.036 | 15.46% | 3.91% | noisy |
+
+Lever score: **0 wins / 0 losses / 2 neutral-clean / 4 noisy**. P1 is the only clean depth and it
+is slightly down, while P16/P128 are not publishable because at least one side exceeds the 5% CV
+noise gate. Retry condition: do not add more per-command histogram direct fields unless a fresh
+profile names commandstats accounting and a paired A/B shows a clean same-control win at P1.
+
+Focused current HEAD vs Redis 7.2.4 after reverting, same clean-source binary above, `fr-bench`
+c4, 7 trials:
+
+| cell | Redis ops/s | fr ops/s | fr/redis | Redis cv | fr cv | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `mixed@p1` | 97,244 | 100,276 | 1.031 | 2.21% | 5.69% | noisy, not a clean loss |
+| `mixed@p16` | 879,203 | 1,068,279 | 1.215 | 8.09% | 9.23% | noisy |
+| `incr@p1` | 98,241 | 93,771 | 0.954 | 3.55% | 3.39% | clean Redis-relative loss |
+| `incr@p16` | 824,907 | 943,306 | 1.144 | 6.41% | 9.14% | noisy |
+| `get@p1` | 98,551 | 101,903 | 1.034 | 2.81% | 3.29% | clean win |
+| `set@p1` | 98,132 | 97,462 | 0.993 | 2.86% | 4.86% | neutral |
+| `hset@p1` | 94,892 | 94,396 | 0.995 | 3.06% | 4.63% | neutral |
+| `hset@p16` | 964,076 | 1,030,433 | 1.069 | 6.17% | 4.45% | noisy |
+| `hset@p128` | 1,887,664 | 2,217,628 | 1.175 | 6.02% | 7.02% | noisy |
+
+Focused Redis-relative score after reverting: **1 win / 1 loss / 2 neutral / 5 noisy** across all
+nine cells; clean cells only: **1 win / 1 loss / 2 neutral**. `INCR@P1` remains the clean target.
+`MIXED@P1` is downgraded from "stable loss" to noisy/rerun-required for this specific focused gate.
+
+Correctness gates after reverting:
+- `cargo fmt --check` passed.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture`
+  passed: 194 lib tests, conformance bins, 99 smoke tests, and doctests green.

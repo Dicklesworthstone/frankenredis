@@ -463,3 +463,35 @@ Latest quick Redis 7.2.4 scorecard from `.bench-history/comprehensive_bench.late
 **22 wins / 15 losses / 2 neutral** across all 39 workload/depth cells, but **34 cells are noisy**.
 Stable cells only: **3 wins / 2 losses / 0 neutral**. Stable losses to target next:
 `mixed@p1 = 0.434x` and `incr@p1 = 0.951x`.
+
+## Cod-b HSET commandstats direct slot rejection (MEASURED 2026-06-20)
+
+Follow-up for `frankenredis-ohsk5`: a candidate dedicated HSET command histogram slot was tested
+and reverted. It targeted commandstats/latency accounting, not command semantics.
+
+| Gate | Workload | Ratio | Release-readiness impact |
+|---|---:|---:|---|
+| candidate/baseline | HSET P1 | 0.993x | rejected; clean neutral/slight regression |
+| candidate/baseline | HSET P16 | 1.202x median | rejected as noisy |
+| candidate/baseline | HSET P128 | 1.068x median | rejected as noisy |
+
+Validation after revert: clean-source release build passed via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`,
+`cargo fmt --check` passed, and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture`
+passed end-to-end.
+
+Focused current-vs-Redis 7.2.4 after revert, c4 and 7 trials:
+
+| Workload | fr/redis | Release-readiness impact |
+|---|---:|---|
+| `GET@P1` | 1.034 | clean win |
+| `INCR@P1` | 0.954 | clean Redis-relative loss |
+| `SET@P1` | 0.993 | neutral |
+| `HSET@P1` | 0.995 | neutral |
+| `MIXED@P1` | 1.031 | noisy because fr CV 5.69%; rerun before targeting |
+| `MIXED@P16` / `INCR@P16` / `HSET@P16` / `HSET@P128` | 1.069-1.215 | noisy, not release claims |
+
+Focused score: **1 win / 1 loss / 2 neutral / 5 noisy**. Clean cells only:
+**1 win / 1 loss / 2 neutral**. Release-readiness target from this pass is `INCR@P1`; `MIXED@P1`
+is no longer a clean loss on the focused rerun and should be remeasured quietly before code work.
