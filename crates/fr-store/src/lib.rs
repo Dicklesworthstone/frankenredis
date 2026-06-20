@@ -42227,7 +42227,7 @@ mod tests {
     }
 
     #[test]
-    fn dump_big_list_item_uses_plain_lzf_quicklist_node() {
+    fn dump_big_list_item_uses_packed_lzf_quicklist_node() {
         let mut store = Store::new();
         let big = vec![b'x'; 9_000];
         store.rpush(b"l", std::slice::from_ref(&big), 100).unwrap();
@@ -42235,17 +42235,20 @@ mod tests {
         let payload = store.dump_key(b"l", 100).unwrap();
         assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
         assert_eq!(payload[1], 1); // one quicklist node
-        assert_eq!(payload[2], 1); // container=PLAIN
+        // container=PACKED (0x02): an element over the per-node budget but < 1 GiB
+        // is its OWN 1-element PACKED listpack node, NOT a PLAIN node — byte-identical
+        // to redis 7.2.4 DUMP (verified via DUMP md5 parity). (frankenredis-1z4ba)
+        assert_eq!(payload[2], 2);
         assert_eq!(payload[3], 0xC3); // LZF-encoded RDB string payload
         assert!(
             payload.len() < 200,
-            "plain LZF node should be compact, got {} bytes",
+            "packed LZF node should be compact, got {} bytes",
             payload.len()
         );
 
         let data_end = payload.len() - DUMP_TRAILER_LEN;
-        let (decoded, consumed) = decode_rdb_string(&payload, 3, data_end).unwrap();
-        assert_eq!(decoded, big);
+        let (listpack, consumed) = decode_rdb_string(&payload, 3, data_end).unwrap();
+        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![big.clone()]);
         assert_eq!(3 + consumed, data_end);
 
         let mut restored = Store::new();
@@ -42254,7 +42257,7 @@ mod tests {
     }
 
     #[test]
-    fn dump_mixed_list_keeps_small_items_packed_before_plain_big_item() {
+    fn dump_mixed_list_keeps_small_items_packed_around_packed_big_item() {
         let mut store = Store::new();
         let big = vec![b'x'; 9_000];
         let items = vec![b"a".to_vec(), b"b".to_vec(), big.clone(), b"c".to_vec()];
@@ -42283,10 +42286,12 @@ mod tests {
 
         let (container, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
-        assert_eq!(container, 1);
-        let (decoded_big, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        // The over-budget element is its OWN 1-element PACKED listpack node
+        // (container 0x02), not a PLAIN node — byte-identical to redis 7.2.4.
+        assert_eq!(container, 2);
+        let (big_listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
         cursor += consumed;
-        assert_eq!(decoded_big, big);
+        assert_eq!(decode_listpack_strings(&big_listpack).unwrap(), vec![big.clone()]);
 
         let (container, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
