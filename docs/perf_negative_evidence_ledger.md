@@ -1273,3 +1273,35 @@ representation, such as retaining/caching the compact zset listpack payload or a
 single-pass DUMP-side representation that avoids rebuilding from `IndexMap` plus
 `BTreeMap` for every DUMP. Do not add more score-formatting shortcuts unless a
 fresh profile names them and a same-current A/B stays positive.
+
+## ZLEXCOUNT store-side micro-opt — DECLINED on measurement (BlackThrush 2026-06-20)
+
+Surfaced by an extended compute-heavy differential probe (reusing one live
+Redis 7.2.4 + shipped fr): `ZLEXCOUNT` was the only fresh standout loss
+(`0.24x` on a *varying-score* zset; `0.64–0.80x` on the realistic *equal-score*
+zset across bounded + full ranges). fr DOMINATES the rest of the extended set
+(`zintercard 12.5x`, `zinterstore 2.05x`, `zunionstore 1.75x`, `zdiffstore
+1.49x`, `sort_limit 1.43x`, `zunion 1.07x`).
+
+Investigated `SortedSet::lex_count`:
+- The `0.24x` varying-score cell hits the O(n) `iter_asc().filter(lex_in_range)`
+  fallback because the O(log n) rank-difference fast path requires
+  `first.score == last.score`. ZLEXCOUNT on a varying-score zset is
+  *unspecified* in Redis (it assumes one shared score), so this cell is not a
+  realistic workload. fr and Redis still agree on the count for `- +` (both =
+  cardinality); only the timing differs.
+- The realistic equal-score path DOES take the warm-treap fast path (correctness
+  verified: 0 diffs vs Redis across `- +`, `[lo [hi`, `(lo (hi`, half-open
+  bounds). It allocates `ScoreMember::actual(s, x.to_vec())` (a `Vec` + an
+  `Arc<[u8]>`) per `rank_of`, ×2, plus 2 `get_score` dict probes.
+
+Decision: **NOT pursued.** Back-of-envelope: the store-side allocations +
+2 treap descents total well under ~1µs, but the measured cost is ~3.8µs/call
+(`0.38ms / 100` pipelined ops). The gap is therefore dominated by per-command
+DISPATCH overhead (RESP parse + cold-command machinery in fr-runtime/fr-command),
+not the `lex_count` body — an allocation-free borrowed `rank_of` was estimated to
+land near `~0.86x`, still sub-parity, so it fails the "A/B must cross >1.0x"
+bar. Real lever would be a ZLEXCOUNT dispatch borrow fast-path (cold-command
+vein, fr-runtime), which is a separate, largely-exhausted domain. Absolute cost
+is sub-5µs/call on a rarely-hot command → low Impact×Confidence/Effort. No source
+hunk written. Score for this lever: **0 win / 0 loss / 1 declined-pre-build**.
