@@ -901,6 +901,30 @@ Next readiness target from this pass is the write-family storage path:
 ZADD parser-side borrowed-member shortcut should not be retried as a standalone
 lever.
 
+## Cod-a list LP-byte reuse rejection (MEASURED 2026-06-20)
+
+Release-readiness impact: evidence update only; no code keep. The attempted
+`ListValue` to `ChunkedList` LP-byte reuse plumbing did not improve the list
+write target cells in same-window A/B.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| candidate vs Redis 7.2.4 | `lpush` | 0.92x | above floor, but no candidate win |
+| clean control vs Redis 7.2.4 | `lpush` | 0.93x | control slightly better |
+| candidate vs control | `lpush` | 0.99x | rejected neutral |
+| candidate vs Redis 7.2.4 | `rpush` | 0.82x | release perf risk |
+| clean control vs Redis 7.2.4 | `rpush` | 0.87x | release perf risk remains |
+| candidate vs control | `rpush` | 0.94x | rejected regression |
+| clean control vs Redis 7.2.4 | `sadd` | 0.83x | release perf risk remains |
+| clean control vs Redis 7.2.4 | `zadd` | 0.77x | release perf risk remains |
+
+Proof bundle:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T141103Z-list-lpbytes-candidate/`.
+Profiling was blocked by `kernel.perf_event_paranoid=4`, confirmed by direct
+`perf stat`; the helper script was skipped because it deletes temp files. Next
+readiness target is deeper `RPUSH`/`SADD`/`ZADD` storage or batch-path work, not
+duplicate listpack-size accounting.
+
 ## Cod-b SMISMEMBER direct reply rejection (MEASURED 2026-06-20)
 
 Release-readiness impact: evidence update only; no code keep. The attempted

@@ -514,6 +514,29 @@ worse than the 0.77x pre-edit refresh. The source hunk was reverted. Next ZADD
 route should be storage/index complexity reduction, not parser-side member
 borrowing.
 
+## Cod-a list LP-byte reuse candidate rejection (MEASURED 2026-06-20)
+
+Focused follow-up for `frankenredis-ohsk5`: a duplicate listpack-size accounting
+shortcut was tested on the current list-write frontier. Candidate and clean
+control were both built via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --release -p fr-server`
+and measured against vendored Redis 7.2.4 with `redis-benchmark`, P16/c50/n150k,
+9 interleaved trials.
+
+| Command | candidate fr/redis | control fr/redis | candidate/control | scorecard result |
+|---|---:|---:|---:|---|
+| `lpush` | 0.92x | 0.93x | 0.99x | rejected neutral |
+| `rpush` | 0.82x | 0.87x | 0.94x | rejected loss |
+| `sadd` | 0.85x | 0.83x | 1.02x | guard neutral; still loss |
+| `zadd` | 0.75x | 0.77x | 0.97x | guard down; still loss |
+| `lpop` / `rpop` / `lrange_100` | 1.16x / 1.15x / 1.06x | 1.15x / 1.25x / 1.05x | 1.01x / 0.92x / 1.01x | guards mixed |
+| `set` / `get` / `incr` / `hset` / `mset` | 1.07x / 1.00x / 1.03x / 1.13x / 1.19x | 1.09x / 1.01x / 1.03x / 1.16x / 1.18x | 0.98x / 0.99x / 1.00x / 0.97x / 1.01x | guards neutral |
+
+Lever score: **0 wins / 1 loss / 1 neutral** on the list-write target cells.
+No source hunk remains. Current clean-control frontier in this gate:
+`RPUSH=0.87x`, `SADD=0.83x`, `ZADD=0.77x`; `LPUSH=0.93x` is above the 0.9x
+floor in this noisy rerun.
+
 ## Cod-b SMISMEMBER direct-encoder rejection (MEASURED 2026-06-20)
 
 Focused follow-up for the current broad set-read frontier. A direct

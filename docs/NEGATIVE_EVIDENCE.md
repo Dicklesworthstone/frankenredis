@@ -471,6 +471,46 @@ owned member materialization is the dominant cost. The live frontier from the
 fresh refresh remains list writes (`LPUSH`/`RPUSH`), `SADD`, and deeper `ZADD`
 storage/index work rather than parser-side no-op shortcuts.
 
+## 2026-06-20 cod-a rejected list LP-byte reuse plumbing
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, 9 interleaved
+trials, fresh Redis/frankenredis processes with `connected_slaves=0`. Release
+builds used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --release -p fr-server`.
+
+Candidate idea: reuse the `list_lp_entry_bytes(elem)` value already computed by
+`ListValue::add_entry_bytes` and pass it into `ChunkedList` append/prepend so the
+large-list path does not run the canonical integer/listpack sizing probe twice
+for a pushed element.
+
+Profiling note: local kernel profiling was blocked by
+`kernel.perf_event_paranoid = 4`; `perf stat -e cycles:u,instructions:u -- sleep 0.1`
+failed with the kernel access-denied message. The existing profiling helper was
+not run because it deletes temp files during setup, which is forbidden in this
+checkout. This pass therefore uses code inspection plus same-window release
+A/B and Redis-relative measurement.
+
+| artifact | command | candidate fr/redis | control fr/redis | candidate/control | verdict |
+|---|---|---:|---:|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T141103Z-list-lpbytes-candidate/` | lpush | 0.92x | 0.93x | 0.99x | neutral/rejected |
+| same | rpush | 0.82x | 0.87x | 0.94x | loss/rejected |
+| same | lpop | 1.16x | 1.15x | 1.01x | neutral guard |
+| same | rpop | 1.15x | 1.25x | 0.92x | guard down |
+| same | lrange_100 | 1.06x | 1.05x | 1.01x | neutral guard |
+| same | sadd | 0.85x | 0.83x | 1.02x | neutral guard; still below Redis |
+| same | zadd | 0.75x | 0.77x | 0.97x | guard down; still below Redis |
+| same | set | 1.07x | 1.09x | 0.98x | neutral guard |
+| same | get | 1.00x | 1.01x | 0.99x | neutral guard |
+| same | incr | 1.03x | 1.03x | 1.00x | neutral guard |
+| same | hset | 1.13x | 1.16x | 0.97x | guard down |
+| same | mset | 1.19x | 1.18x | 1.01x | neutral guard |
+
+Decision: reject and keep no production hunk. Same-window control tied or beat
+the candidate on the list-write targets, especially `RPUSH` (`0.87x` control vs
+`0.82x` candidate). Do not retry this standalone LP-byte plumbing patch without
+a profile proving the second sizing probe dominates. The measured frontier stays
+`RPUSH`, `SADD`, and `ZADD` storage/index or batch-path work.
+
 ## 2026-06-20 cod-b rejected SMISMEMBER direct reply encoding
 
 Harness: vendored Redis 7.2.4 plus saved FrankenRedis control binary, same host
