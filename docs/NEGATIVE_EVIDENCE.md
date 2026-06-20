@@ -818,3 +818,45 @@ Decision: keep the store-level fast path. This is a real measured target win,
 but not release domination: ZADD remains below Redis 7.2.4 (`0.8021x`). Next
 routes should attack deeper sorted-set storage/index costs and the independent
 list/set write losses rather than retrying runtime-only ZADD dispatch shortcuts.
+## 2026-06-20 CobaltCove (cc) — `modification_count` sidecar (shrink hot `Entry`) — MEASURED LOSS, reverted
+
+Lever: move the per-`Entry` `modification_count: u64` (WATCH/HLL-cache/mem-estimate
+epoch) out of the hot keyspace `Entry` (48→40B) into a sparse
+`key_modification_counts: HashMap<StoreKey,u64>` sidecar (row allocated lazily on
+first overwrite/mutation/removal; fresh SET keys pay 0). Targets the keyspace RSS
+gap. WATCH correctness verified sound (sidecar count strictly monotonic per key
+identity, never under-aborts; HLL/mem caches `.remove(key)` on delete). Compiled
+clean. A/B fr-OLD = HEAD `a8b6c3a63` vs fr-NEW sidecar (single-thread, mimalloc):
+
+| gate | result | verdict |
+|---|---|---|
+| `used_memory` (reported INFO/scorecard metric) | UNCHANGED (modeled estimate, blind to struct size) | no win on the reported metric |
+| RSS write-once (1M×64B) | NEW ~16–20MB / ~7% lower (noisy) | marginal RSS win, write-once only |
+| RSS full-overwrite churn | NEW ~+50MB (1M sidecar rows mimalloc won't free) | regression |
+| overwrite-SET throughput (best-of-6 ×3, 1.6M SETs) | OLD 720–759k vs NEW 477–634k sets/s (NEW best < OLD worst, −16..−25%) | **regression** |
+
+Decision: reverted. Trading a noisy write-once-RSS win that doesn't move the
+reported `used_memory` for a −16..−25% SET-overwrite throughput regression + churn
+RSS regression is a net loss. A real Entry-RAM win needs WATCH to stop using a
+per-key counter (Redis dirties watching clients directly — fr-runtime redesign).
+Recorded long-form at `docs/perf_negative_evidence_ledger.md` (commit `ce56e51d7`).
+
+## 2026-06-20 CobaltCove (cc) — SINTER/SINTERSTORE redis-style fresh-build (3+ sets) — MEASURED WIN, shipped `417c0193f`
+
+Lever: `sinter_value` cloned the whole smallest set then `retain`-removed rejects
+against each other set. Redis's `sinterGenericCommand` walks the smallest set once
+and emits only survivors. Fresh-build (gated to `keys.len() >= 3`, i.e. ≥2 other
+sets) avoids the intermediate result sets + extra per-other-set retain passes.
+2-set and intset-smallest paths keep clone + (galloping) retain. perf blocked at
+`kernel.perf_event_paranoid = 4`; used best-of-5 same-run timing.
+
+| command | A/B | result | verdict |
+|---|---|---:|---|
+| SINTER over 3 string sets (2000-elem) | fr-NEW3 vs fr-OLD, best-of-5 ×3 | 4520→5760 ops/s (**+25%**, reproducible) | **keep** |
+| SINTERSTORE 2 sets (2000-elem) | fr-NEW3 vs fr-OLD, best-of-5 ×3 | ~4460→~4500 ops/s (parity) | no regression (gated out) |
+| SINTERSTORE 2 sets vs Redis 7.2.4 | OLD ~222µs vs Redis ~210µs (~0.95x) | the broad-sweep "0.56x" was sweep NOISE; 2-set is ~parity | do not chase 2-set |
+
+Byte-exact: fr-OLD vs fr-NEW3 differential 0 diffs / 2000 ops (1–4 sets,
+int/string/missing/wrongtype); LFU-bump tests pass; `fr-conformance` core_set +
+core_set_live_redis green (99 passed). Complements BlackThrush's store-wrapper
+`a3310a98d` (which optimized only the destination build, not the intersection).
