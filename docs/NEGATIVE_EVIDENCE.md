@@ -336,3 +336,137 @@ from set-storage work and toward parser ordering.
 Decision: reject the exact-packet-only hunk because it left SPOP at 0.78x vs
 Redis. Keep the front-loaded no-count keyed-pop parser ordering plus SPOP packet
 recognition. LPUSH/RPUSH remain the next measured list-write gaps.
+
+## 2026-06-20 cod-b `frankenredis-gu5nf` ZCOUNT compact-slice count rejection
+
+Harness: `scripts/broad_command_headtohead.py`, vendored Redis 7.2.4, `--pipe
+200 --trials 9`, plus one focused `ZCOUNT` candidate/control run at `PIPE=5000`
+and 21 trials. Release binaries were built with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`; the isolated
+candidate came from detached worktree
+`/data/projects/.worktrees/frankenredis-cod-b-zcount-20260620T133708Z` at
+`8f7192689` with only the compact full-zset count hunk applied.
+
+Binary fingerprints:
+
+| binary | sha256 |
+|---|---|
+| control `frankenredis` | `28bfaadf5f4abf0ab07d784572d16fdc8f8bfc5e4724719fb18ea92f70e4991f` |
+| candidate `frankenredis` | `32dfc7e30ef2d4791cd721724050dab9f29aa788731cc9b3b724949ab62e8d2a` |
+| Redis 7.2.4 server | `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` |
+
+Idea tested: for compact full zsets, `FullZSetOrder::range` already binary
+searches score bounds and returns a contiguous slice. The candidate replaced
+the cold `ZCOUNT` slice walk with `window.len()` when all entries were actual
+members, falling back to the existing sentinel-filtering scan if corrupted
+test sentinels were present.
+
+| gate | command | fr/Redis 7.2.4 or candidate/control ratio | verdict |
+|---|---|---:|---|
+| control vs Redis | `getrange` | 0.85 | loss |
+| control vs Redis | `bitcount` | 2.12 | win |
+| control vs Redis | `sintercard` | 0.77 | loss |
+| control vs Redis | `sinterstore` | 0.96 | neutral |
+| control vs Redis | `sunionstore` | 0.99 | neutral |
+| control vs Redis | `sdiffstore` | 0.92 | neutral |
+| control vs Redis | `sinter3` | 0.90 | neutral |
+| control vs Redis | `smismember` | 0.74 | loss |
+| control vs Redis | `zrangebyscore` | 1.02 | neutral |
+| control vs Redis | `zrange_rev` | 0.92 | neutral |
+| control vs Redis | `hrandfield` | 1.10 | win |
+| control vs Redis | `zrandmember` | 1.15 | win |
+| control vs Redis | `srandmember` | 1.08 | win |
+| control vs Redis | `lrange_full` | 1.01 | neutral |
+| control vs Redis | `lpos` | 2.10 | win |
+| control vs Redis | `zcount` | 0.63 | target loss confirmed |
+| candidate vs control, broad | `zcount` | 1.03 | neutral, below keep threshold |
+| candidate vs control, focused | `zcount` | 0.982 | rejected; candidate slower |
+| candidate vs Redis | `getrange` | 0.68 | loss/noise guard |
+| candidate vs Redis | `bitcount` | 2.15 | win |
+| candidate vs Redis | `sintercard` | 0.66 | loss |
+| candidate vs Redis | `sinterstore` | 0.97 | neutral |
+| candidate vs Redis | `sunionstore` | 0.99 | neutral |
+| candidate vs Redis | `sdiffstore` | 1.04 | neutral |
+| candidate vs Redis | `sinter3` | 0.92 | neutral |
+| candidate vs Redis | `smismember` | 0.99 | neutral |
+| candidate vs Redis | `zrangebyscore` | 0.99 | neutral |
+| candidate vs Redis | `zrange_rev` | 0.92 | neutral |
+| candidate vs Redis | `hrandfield` | 1.06 | win |
+| candidate vs Redis | `zrandmember` | 1.08 | win |
+| candidate vs Redis | `srandmember` | 0.93 | neutral |
+| candidate vs Redis | `lrange_full` | 1.04 | neutral |
+| candidate vs Redis | `lpos` | 2.75 | win |
+| candidate vs Redis | `zcount` | 0.65 | loss, unchanged frontier |
+
+Correctness guard: the isolated candidate passed
+`cargo test -p fr-store score_bound_count -- --nocapture`, including the new
+compact full-zset sentinel fallback test and the existing warm-treap
+isomorphism test. `rch` timed out during that test sync and ran locally; the
+release build later succeeded remotely on `vmi1149989`. Final source
+conformance after reverting the candidate passed via
+`rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo test -p fr-conformance -- --nocapture`
+on `hz2` (`194` library tests plus conformance binaries, smoke, live, and
+doc-test suites green).
+
+Artifacts:
+`artifacts/optimization/frankenredis-codb-zcount-compact-count/20260620T133708Z/`
+contains the control/candidate binaries, the candidate patch, control-vs-Redis,
+candidate-vs-control, focused `ZCOUNT`, and candidate-vs-Redis outputs.
+
+Decision: reject and revert the compact-slice `ZCOUNT` count hunk. A colder
+`window.len()` shortcut does not beat the existing slice scan once measured at
+higher repetition, and Redis-relative `ZCOUNT` remains a loss (`0.65x` in the
+candidate gate, `0.63x` baseline). Do not retry this exact compact-count lever
+without a fresh profile proving the scan/filter itself dominates; route deeper
+to zset representation/rank-index parity or broader command dispatch overhead.
+
+## 2026-06-20 cod-a bold-verify current refresh + rejected borrowed ZADD no-op shortcut
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved
+trials through `scripts/bench_vs_redis.py`. FrankenRedis release builds used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a` via
+`rch exec -- cargo build --release -p fr-server`. Servers reported
+`connected_slaves=0` before measurement. This pass was a fresh restart under
+agent `CobaltCove`.
+
+Current refresh before the attempted ZADD lever:
+
+| artifact | command | median fr/redis | verdict |
+|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T133457Z/current_vs_redis_standard_p16_c50_n150k_trials7.txt` | set | 0.98x | neutral |
+| same | get | 1.01x | neutral/win |
+| same | incr | 0.98x | neutral |
+| same | lpush | 0.79x | loss |
+| same | rpush | 0.74x | loss |
+| same | lpop | 1.06x | win |
+| same | rpop | 1.16x | win |
+| same | sadd | 0.81x | loss |
+| same | hset | 1.01x | neutral/win |
+| same | spop | 1.01x | neutral/win |
+| same | zadd | 0.77x | loss |
+| same | lrange_100 | 1.00x | neutral |
+| same | mset | 0.93x | neutral |
+
+Attempted lever: parsed `ZADD key score member ...` into borrowed member slices
+and added a store fast path that skipped owned member buffers for existing
+members whose canonical score was unchanged. The idea was rejected and reverted:
+the release benchmark stayed below Redis and worsened the target cell versus
+the pre-edit refresh.
+
+| artifact | command | median fr/redis | verdict |
+|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T134553Z-zadd-borrowed-candidate/candidate_vs_redis_standard_p16_c50_n150k_trials9_zadd_family.txt` | zadd | 0.74x | rejected; worse than 0.77x refresh |
+| same | sadd | 0.87x | residual loss; guard only |
+| same | lpush | 0.94x | guard neutral, likely load/noise vs prior 0.79x |
+| same | rpush | 0.90x | guard neutral |
+| same | set | 1.09x | guard win |
+| same | get | 1.00x | guard neutral |
+| same | incr | 1.06x | guard win |
+| same | hset | 1.17x | guard win |
+
+Decision: no ZADD source hunk remains from this experiment. Do not retry the
+same "borrow existing member/no-op score" fast path without a profile proving
+owned member materialization is the dominant cost. The live frontier from the
+fresh refresh remains list writes (`LPUSH`/`RPUSH`), `SADD`, and deeper `ZADD`
+storage/index work rather than parser-side no-op shortcuts.

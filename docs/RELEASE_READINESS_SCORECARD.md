@@ -796,6 +796,31 @@ The profile-backed decision path is recorded in
 `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054407Z-profile-current-spop/`.
 Next release-readiness target in this command family is list-write throughput, not SPOP.
 
+## Cod-b ZCOUNT compact-slice count rejection (MEASURED 2026-06-20)
+
+Release-readiness impact: no source keep and no readiness improvement.
+`ZCOUNT` remains a Redis-relative loss in the broad command frontier.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| control vs Redis 7.2.4, broad harness | `zcount` | 0.63x | confirmed target loss |
+| candidate vs control, broad harness | `zcount` | 1.03x | neutral, below keep threshold |
+| candidate vs control, focused 5000-pipe/21-trial | `zcount` | 0.982x | rejected; candidate slower |
+| candidate vs Redis 7.2.4, broad harness | `zcount` | 0.65x | still below parity floor |
+
+The rejected hunk changed compact full-zset cold `ZCOUNT` from filtering the
+score-bounded slice to returning `window.len()` when all entries were actual
+members, with a sentinel fallback. The isolated candidate passed
+`cargo test -p fr-store score_bound_count -- --nocapture`, but the focused
+candidate/control gate did not pay. Final source conformance after revert passed
+via `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo test -p fr-conformance -- --nocapture`
+on `hz2`.
+
+Artifacts:
+`artifacts/optimization/frankenredis-codb-zcount-compact-count/20260620T133708Z/`.
+Next `ZCOUNT` route needs a deeper primitive, not this slice-count shortcut:
+rank-index parity on cold reads, zset layout, or dispatch/runtime overhead.
+
 ## Cod-a zset DUMP score-entry shortcut rejection (MEASURED 2026-06-20)
 
 Release-readiness impact: no code keep and no readiness improvement. The
@@ -829,3 +854,49 @@ The dirty `fr-store` hunk was under BlackThrush's active reservation, so cod-a
 did not stage, commit, or revert it. Next release-readiness route for DUMP is
 structural retained/cached compact-zset DUMP payloads or avoiding per-DUMP
 dual-index rebuild, not more score-formatting shortcuts.
+
+## Cod-a bold-verify Redis 7.2.4 refresh + rejected ZADD shortcut (MEASURED 2026-06-20)
+
+Release-readiness impact: evidence update only; the attempted ZADD shortcut was
+reverted and does not improve readiness.
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, 7-trial
+current refresh plus 9-trial candidate guard. FrankenRedis release builds used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a` with
+`rch exec -- cargo build --release -p fr-server`. Both servers reported
+`connected_slaves=0`.
+
+Current refresh artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T133457Z/current_vs_redis_standard_p16_c50_n150k_trials7.txt`.
+
+| Command | fr/redis | Release-readiness impact |
+|---|---:|---|
+| `set` | 0.98x | neutral |
+| `get` | 1.01x | parity/win |
+| `incr` | 0.98x | neutral |
+| `lpush` | 0.79x | release perf risk |
+| `rpush` | 0.74x | release perf risk |
+| `lpop` | 1.06x | win |
+| `rpop` | 1.16x | win |
+| `sadd` | 0.81x | release perf risk |
+| `hset` | 1.01x | parity/win |
+| `spop` | 1.01x | parity/win |
+| `zadd` | 0.77x | release perf risk |
+| `lrange_100` | 1.00x | neutral |
+| `mset` | 0.93x | neutral |
+
+Rejected ZADD borrowed-noop candidate artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T134553Z-zadd-borrowed-candidate/candidate_vs_redis_standard_p16_c50_n150k_trials9_zadd_family.txt`.
+
+| Candidate guard | fr/redis | Release-readiness impact |
+|---|---:|---|
+| `zadd` | 0.74x | rejected; worse than 0.77x refresh |
+| `sadd` | 0.87x | still below parity floor |
+| `lpush` | 0.94x | guard neutral |
+| `rpush` | 0.90x | guard neutral |
+| `set` / `get` / `incr` / `hset` | 1.09x / 1.00x / 1.06x / 1.17x | guards did not justify keeping ZADD hunk |
+
+Next readiness target from this pass is the write-family storage path:
+`RPUSH`, `LPUSH`, `SADD`, and deeper `ZADD` index/storage work. The reverted
+ZADD parser-side borrowed-member shortcut should not be retried as a standalone
+lever.

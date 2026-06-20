@@ -1,0 +1,19 @@
+fr:43121 redis:43123  pipe=200 trials=9
+cmd                fr_ms redis_ms  ratio  verdict
+getrange             2.7      1.7   0.62  REDIS
+bitcount             0.5      0.5   0.97  ~
+sintercard          15.8     16.6   1.05  ~
+sinterstore         44.3     48.7   1.10  fr
+sunionstore         75.6     77.8   1.03  ~
+sdiffstore          47.9     49.7   1.04  ~
+sinter3            201.6    219.8   1.09  fr
+smismember          24.9     26.1   1.05  ~
+zrangebyscore      352.4    368.7   1.05  ~
+zrange_rev          73.1     73.8   1.01  ~
+hrandfield          36.1     36.7   1.02  ~
+zrandmember         35.0     39.5   1.13  fr
+srandmember         38.6     35.9   0.93  ~
+lrange_full        727.3    727.3   1.00  ~
+lpos                 2.4      3.3   1.38  fr
+zcount               0.8      0.8   1.03  ~
+LOSSES(<0.9x): [('getrange', 0.622)]

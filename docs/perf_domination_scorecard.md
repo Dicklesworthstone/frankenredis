@@ -452,3 +452,64 @@ Clean-source focused current-vs-Redis check after revert, built via
 Focused score: **1 win / 1 loss / 2 neutral / 5 noisy**. Clean cells only:
 **1 win / 1 loss / 2 neutral**. The current clean frontier for this narrow gate is now `INCR@P1`;
 `MIXED@P1` needs another quiet rerun before it is a valid code target.
+
+## Targeted Gauntlet: cod-b ZCOUNT compact full-zset slice count
+
+- Commit candidate: none kept. The compact full-zset `ZCOUNT` `window.len()` fast path was measured
+  in a detached clean worktree and reverted.
+- Build/bench: release binaries built with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`; candidate release build
+  succeeded via `rch exec` on `vmi1149989`. Redis oracle was vendored Redis 7.2.4.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-codb-zcount-compact-count/20260620T133708Z/`.
+- Correctness guard: `cargo test -p fr-store score_bound_count -- --nocapture` passed for the
+  isolated candidate; the test run fell back locally after rch sync timeout.
+- Final source conformance after revert passed via
+  `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo test -p fr-conformance -- --nocapture`
+  on `hz2`.
+
+| gate | `ZCOUNT` ratio | verdict |
+|---|---:|---|
+| control vs Redis 7.2.4 broad harness | 0.63 | target loss confirmed |
+| candidate vs control broad harness | 1.03 | neutral |
+| candidate vs control focused 5000-pipe/21-trial | 0.982 | rejected |
+| candidate vs Redis 7.2.4 broad harness | 0.65 | still a Redis-relative loss |
+
+Lever score: **0 wins / 1 loss / 1 neutral** on candidate/control gates. Redis-relative score stays
+negative for `ZCOUNT`; broad candidate-vs-Redis also still showed `getrange` and `sintercard`
+below 0.9x. Do not spend another pass on this compact-slice count shortcut unless a fresh profile
+shows the sentinel-filter scan itself is the bottleneck.
+
+## Cod-a bold-verify refresh and rejected ZADD borrowed-noop lever (MEASURED 2026-06-20)
+
+Fresh restart, agent `CobaltCove`, vendored Redis 7.2.4, `redis-benchmark`,
+P16/c50/n150k, 7 interleaved trials, release build via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --release -p fr-server`.
+Artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T133457Z/current_vs_redis_standard_p16_c50_n150k_trials7.txt`.
+
+| Command | median fr/redis | scorecard result |
+|---|---:|---|
+| `set` | 0.98x | neutral |
+| `get` | 1.01x | neutral/win |
+| `incr` | 0.98x | neutral |
+| `lpush` | 0.79x | loss |
+| `rpush` | 0.74x | loss |
+| `lpop` | 1.06x | win |
+| `rpop` | 1.16x | win |
+| `sadd` | 0.81x | loss |
+| `hset` | 1.01x | neutral/win |
+| `spop` | 1.01x | neutral/win |
+| `zadd` | 0.77x | loss |
+| `lrange_100` | 1.00x | neutral |
+| `mset` | 0.93x | neutral |
+
+Score with the 0.9x parity floor: **5 wins / 4 losses / 4 neutral**.
+Current measured loss frontier: `RPUSH`, `ZADD`, `LPUSH`, `SADD`.
+
+Rejected lever: a borrowed `ZADD` existing-member/no-op-score shortcut avoided
+member ownership for unchanged scores, but the 9-trial guard produced
+`ZADD=0.74x` vs Redis (`artifacts/optimization/frankenredis-bold-verify-coda/20260620T134553Z-zadd-borrowed-candidate/candidate_vs_redis_standard_p16_c50_n150k_trials9_zadd_family.txt`),
+worse than the 0.77x pre-edit refresh. The source hunk was reverted. Next ZADD
+route should be storage/index complexity reduction, not parser-side member
+borrowing.

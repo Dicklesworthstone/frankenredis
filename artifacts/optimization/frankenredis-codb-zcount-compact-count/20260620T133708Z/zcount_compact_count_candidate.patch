@@ -1,0 +1,232 @@
+diff --git a/crates/fr-store/src/lib.rs b/crates/fr-store/src/lib.rs
+index 313a79579..8170af1c5 100644
+--- a/crates/fr-store/src/lib.rs
++++ b/crates/fr-store/src/lib.rs
+@@ -724,6 +724,24 @@ enum FullZSetOrder {
+ }
+ 
+ impl FullZSetOrder {
++    fn compact_range_window<R>(keys: &[ScoreMember], range: R) -> &[ScoreMember]
++    where
++        R: RangeBounds<ScoreMember>,
++    {
++        let start = match range.start_bound() {
++            Included(key) => keys.partition_point(|sm| sm < key),
++            Excluded(key) => keys.partition_point(|sm| sm <= key),
++            Unbounded => 0,
++        };
++        let end = match range.end_bound() {
++            Included(key) => keys.partition_point(|sm| sm <= key),
++            Excluded(key) => keys.partition_point(|sm| sm < key),
++            Unbounded => keys.len(),
++        };
++        let start = start.min(end);
++        keys.get(start..end).unwrap_or(&[])
++    }
++
+     fn with_capacity(cap: usize) -> Self {
+         if cap <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
+             Self::Compact(Vec::with_capacity(cap))
+@@ -813,23 +831,38 @@ impl FullZSetOrder {
+     {
+         match self {
+             Self::Compact(keys) => {
+-                let start = match range.start_bound() {
+-                    Included(key) => keys.partition_point(|sm| sm < key),
+-                    Excluded(key) => keys.partition_point(|sm| sm <= key),
+-                    Unbounded => 0,
+-                };
+-                let end = match range.end_bound() {
+-                    Included(key) => keys.partition_point(|sm| sm <= key),
+-                    Excluded(key) => keys.partition_point(|sm| sm < key),
+-                    Unbounded => keys.len(),
+-                };
+-                let start = start.min(end);
+-                let window = keys.get(start..end).unwrap_or(&[]);
++                let window = Self::compact_range_window(keys, range);
+                 FullZSetOrderRange::Compact(window.iter())
+             }
+             Self::Tree(keys) => FullZSetOrderRange::Tree(keys.range(range)),
+         }
+     }
++
++    fn actual_count_in_range<R>(&self, range: R) -> usize
++    where
++        R: RangeBounds<ScoreMember>,
++    {
++        match self {
++            Self::Compact(keys) => {
++                let window = Self::compact_range_window(keys, range);
++                if window
++                    .iter()
++                    .all(|sm| matches!(sm.member, MemberPart::Actual(_)))
++                {
++                    window.len()
++                } else {
++                    window
++                        .iter()
++                        .filter(|sm| matches!(sm.member, MemberPart::Actual(_)))
++                        .count()
++                }
++            }
++            Self::Tree(keys) => keys
++                .range(range)
++                .filter(|(sm, _)| matches!(sm.member, MemberPart::Actual(_)))
++                .count(),
++        }
++    }
+ }
+ 
+ enum FullZSetOrderIter<'a> {
+@@ -1896,10 +1929,7 @@ impl SortedSet {
+                     return atorbelow.saturating_sub(below);
+                 }
+                 let (lower, upper) = Self::score_bounds(min, max);
+-                full.ordered
+-                    .range((lower, upper))
+-                    .filter(|sm| sm.member.as_actual().is_some())
+-                    .count()
++                full.ordered.actual_count_in_range((lower, upper))
+             }
+         }
+     }
+@@ -21020,8 +21050,7 @@ impl Store {
+                 if spans.is_empty() {
+                     return Err(StoreError::InvalidDumpPayload);
+                 }
+-                let members: Vec<&[u8]> =
+-                    spans.iter().map(|s| s.as_bytes(&listpack)).collect();
++                let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                 // Dedup-check then BULK-build. from_unique_str_members appends each
+                 // member with no lookup (O(n)); insertion order — the only observable
+                 // order for a listpack set — is unchanged. RESTORE still rejects a
+@@ -34489,6 +34518,40 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn score_bound_count_compact_full_counts_slice_and_ignores_sentinels_codb() {
++        use super::{FullZSetOrder, ScoreBound, SortedSet, SortedSetInner};
++
++        let mut zs = SortedSet::new();
++        for i in 0..512 {
++            zs.insert(format!("member-{i:04}").into_bytes(), f64::from(i));
++        }
++
++        assert!(zs.is_full_storage());
++        match &zs.inner {
++            SortedSetInner::Full(full) => {
++                assert!(matches!(full.ordered, FullZSetOrder::Compact(_)))
++            }
++            SortedSetInner::Packed(_) => panic!("expected compact full zset"),
++        }
++
++        assert_eq!(
++            zs.score_bound_count(ScoreBound::Inclusive(100.0), ScoreBound::Inclusive(199.0)),
++            100
++        );
++        assert_eq!(
++            zs.score_bound_count(ScoreBound::Exclusive(100.0), ScoreBound::Exclusive(199.0)),
++            98
++        );
++
++        zs.insert_min_score_sentinel(150.0);
++        zs.insert_max_score_sentinel(160.0);
++        assert_eq!(
++            zs.score_bound_count(ScoreBound::Inclusive(150.0), ScoreBound::Inclusive(160.0)),
++            11
++        );
++    }
++
+     // (frankenredis-sp1qh) Frozen fingerprint of the windowed lex-range corpus.
+     const ZLX2_GOLDEN: u64 = 0xe2fd_e5dc_4e5b_e285;
+ 
+@@ -38303,13 +38366,48 @@ mod tests {
+         // including the negative-zero trap and the int/string boundary.
+         // (frankenredis-dump-zset-score-int)
+         let mut scores: Vec<f64> = vec![
+-            0.0, -0.0, 1.0, -1.0, 42.0, -42.0, 127.0, 128.0, -128.0, 4095.0, 4096.0,
+-            -4096.0, -4097.0, 32767.0, 32768.0, 8_388_607.0, 8_388_608.0, 2_147_483_647.0,
+-            2_147_483_648.0, 17179869184.0, 1e18, -1e18, 1e17, -1e17, 999_999_999_999.0,
++            0.0,
++            -0.0,
++            1.0,
++            -1.0,
++            42.0,
++            -42.0,
++            127.0,
++            128.0,
++            -128.0,
++            4095.0,
++            4096.0,
++            -4096.0,
++            -4097.0,
++            32767.0,
++            32768.0,
++            8_388_607.0,
++            8_388_608.0,
++            2_147_483_647.0,
++            2_147_483_648.0,
++            17179869184.0,
++            1e18,
++            -1e18,
++            1e17,
++            -1e17,
++            999_999_999_999.0,
+             // non-integer / out-of-range → must take the string fallback
+-            3.14, -2.5, 0.1, 0.000001, -0.0007, 1.5, 2.5, 1e20, 1.5e300, -1.5e300,
+-            123456789.123456789, f64::INFINITY, f64::NEG_INFINITY,
+-            1e18 + 1.0, -1e18 - 1.0, 9.2e18,
++            3.14,
++            -2.5,
++            0.1,
++            0.000001,
++            -0.0007,
++            1.5,
++            2.5,
++            1e20,
++            1.5e300,
++            -1.5e300,
++            123456789.123456789,
++            f64::INFINITY,
++            f64::NEG_INFINITY,
++            1e18 + 1.0,
++            -1e18 - 1.0,
++            9.2e18,
+         ];
+         // Add every integer in a dense band to exercise all listpack int widths.
+         for i in -5000i64..=5000 {
+@@ -38325,7 +38423,8 @@ mod tests {
+                 super::encode_listpack_entry(&mut got, redis_score_to_string(score).as_bytes());
+             }
+             assert_eq!(
+-                want, got,
++                want,
++                got,
+                 "score {score} (d2string={:?}) diverged",
+                 redis_score_to_string(score)
+             );
+@@ -42335,7 +42434,10 @@ mod tests {
+ 
+         let data_end = payload.len() - DUMP_TRAILER_LEN;
+         let (listpack, consumed) = decode_rdb_string(&payload, 3, data_end).unwrap();
+-        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![big.clone()]);
++        assert_eq!(
++            decode_listpack_strings(&listpack).unwrap(),
++            vec![big.clone()]
++        );
+         assert_eq!(3 + consumed, data_end);
+ 
+         let mut restored = Store::new();
+@@ -42378,7 +42480,10 @@ mod tests {
+         assert_eq!(container, 2);
+         let (big_listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+         cursor += consumed;
+-        assert_eq!(decode_listpack_strings(&big_listpack).unwrap(), vec![big.clone()]);
++        assert_eq!(
++            decode_listpack_strings(&big_listpack).unwrap(),
++            vec![big.clone()]
++        );
+ 
+         let (container, consumed) = decode_length(&payload, cursor).unwrap();
+         cursor += consumed;
