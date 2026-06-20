@@ -12252,46 +12252,25 @@ impl Store {
             return Ok(None);
         }
 
+        // Touch/LFU first, preserving the previous clone-then-retain ordering so
+        // the LFU rng draw sequence stays byte-identical: smallest set first, then
+        // the remaining keys in argument order. All keys exist here (the missing
+        // case returned via `has_empty` above) and were already type-checked, so
+        // every set is touched exactly once. The intersection itself is computed
+        // afterwards from immutable borrows. (frankenredis-sinterfresh)
         let rand_sample = if lfu_tracking_enabled {
             self.next_rand()
         } else {
             0
         };
-        let mut result = match self.entries.get_mut(keys[min_idx]) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let res = s.clone();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    res
-                }
-                _ => return Err(StoreError::WrongType),
-            },
-            None => return Ok(None),
-        };
-
+        if let Some(entry) = self.entries.get_mut(keys[min_idx]) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            entry.touch(now_ms);
+        }
         for (i, key) in keys.iter().enumerate() {
             if i == min_idx {
-                continue;
-            }
-            if result.is_empty() {
-                if self.entries.contains_key(*key) {
-                    let rand_sample = if lfu_tracking_enabled {
-                        self.next_rand()
-                    } else {
-                        0
-                    };
-                    if let Some(entry) = self.entries.get_mut(*key)
-                        && let Value::Set(_) = &entry.value
-                    {
-                        if lfu_tracking_enabled {
-                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                        }
-                        entry.touch(now_ms);
-                    }
-                }
                 continue;
             }
             let rand_sample = if lfu_tracking_enabled {
@@ -12299,21 +12278,89 @@ impl Store {
             } else {
                 0
             };
-            match self.entries.get_mut(*key) {
-                Some(entry) => {
-                    if let Value::Set(s) = &entry.value {
-                        result.retain_intersect(s);
-                        if lfu_tracking_enabled {
-                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                        }
-                        entry.touch(now_ms);
-                    }
+            if let Some(entry) = self.entries.get_mut(*key)
+                && let Value::Set(_) = &entry.value
+            {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                None => {
-                    result.clear();
-                }
+                entry.touch(now_ms);
             }
         }
+
+        // Build the intersection without cloning the whole smallest set. Redis's
+        // sinterGenericCommand iterates the smallest set and emits only members
+        // present in every other set; the previous code cloned the smallest set
+        // (every member byte-string) then `retain`-removed the rejects, copying
+        // ~2x the surviving members on the hot string-set path. For an
+        // intset-encoded smallest set we keep the clone + galloping
+        // `retain_intersect` (already O(k·log(N/k)) on sorted i64, no string
+        // materialisation). Output order = smallest set's iteration order in both
+        // paths, so SINTER stays byte-identical; the result encoding is transient
+        // (SINTER returns a Vec; SINTERSTORE re-derives via set_value_entry).
+        // (frankenredis-sinterfresh)
+        let Some(smallest) = self
+            .entries
+            .get(keys[min_idx])
+            .and_then(|e| match &e.value {
+                Value::Set(s) => Some(s),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let result: Box<SetValue> = match smallest.as_generic() {
+            // Fresh-build only pays off with >=2 other sets: it walks the smallest
+            // set once, testing membership in every other set, and copies just the
+            // survivors — avoiding the intermediate result sets and the extra
+            // retain pass the clone+retain path materialises per other set. With a
+            // single other set (2-key SINTER) the clone is a bulk copy and the one
+            // in-place retain beats per-survivor inserts when the result is a large
+            // fraction of the smallest set, so keep clone+retain there. Output
+            // order is the smallest set's iteration order in both paths
+            // (byte-identical; verified fr-vs-fr 0-diff). (frankenredis-sinterfresh)
+            Some(base) if keys.len() >= 3 => {
+                let mut out = GenericSet::with_capacity_and_hasher(
+                    base.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+                'member: for member in base.iter() {
+                    for (i, key) in keys.iter().enumerate() {
+                        if i == min_idx {
+                            continue;
+                        }
+                        let in_other = self
+                            .entries
+                            .get(*key)
+                            .and_then(|e| match &e.value {
+                                Value::Set(s) => Some(s.contains(member)),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        if !in_other {
+                            continue 'member;
+                        }
+                    }
+                    out.insert(member.to_vec());
+                }
+                Box::new(SetValue::Generic(out))
+            }
+            _ => {
+                let mut res = smallest.as_ref().clone();
+                for (i, key) in keys.iter().enumerate() {
+                    if i == min_idx || res.is_empty() {
+                        continue;
+                    }
+                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                        Value::Set(s) => Some(s),
+                        _ => None,
+                    }) {
+                        res.retain_intersect(s);
+                    }
+                }
+                Box::new(res)
+            }
+        };
         if result.is_empty() {
             Ok(None)
         } else {
