@@ -75,6 +75,32 @@ final rebuilt zset RSS is still `1.456x` Redis and the broad memory score remain
 non-integer-heavy zsets without fresh A/B proof; the next `uhthd` target should
 be deeper zset/keyspace layout.
 
+### cod-a recheck on the same shared hunk
+
+Artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T1609Z-packed-zset-coda-verify/`.
+Per-crate cod-a gates passed: `rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo build
+--release -p fr-server -p fr-bench`, `cargo check -p fr-store --all-targets`,
+`cargo test -p fr-store zset -- --nocapture`, `cargo clippy -p fr-store
+--all-targets -- -D warnings`, `cargo test -p fr-conformance -- --nocapture`
+(RCH local fallback), and `cargo fmt -p fr-store --check`.
+
+Read-only packed-zset RSS probe, fresh processes, 6,250 zsets x 32 members
+(200,000 packed members): Redis data-RSS `4.58 MB`, FrankenRedis data-RSS
+`8.11 MB`, ratio `1.77x` fr/Redis. Verdict: negative evidence for domination
+and for broad memory readiness. The compact integer-score hunk still has
+supporting target evidence from the cod-b run, but cod-a's fresh packed-zset
+probe says the remaining representation gap is larger than the committed final
+baseline cell; next work must remove deeper per-key/member overhead rather than
+another score-byte tweak.
+
+Targeted `ubs` on `crates/fr-store/src/packed_set.rs` returned nonzero on
+file-wide legacy/static-analysis findings, including false-positive JWT
+`decode` hits on existing `cfm_decode` helpers plus existing unwrap/clone/index
+inventories. No new compiler, clippy, fmt, zset, or conformance failures were
+introduced by the verified hunk.
+
 ## 2026-06-20 cod-a `frankenredis-ohsk5` pubsub direct encoder keep and pending-client rejection
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through

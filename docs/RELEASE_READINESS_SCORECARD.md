@@ -64,6 +64,17 @@ Redis-relative in the final rebuilt pass, but the scorecard remains
 **2 wins / 5 losses / 0 neutral** across memory cells. Continue with deeper
 zset/keyspace representation work rather than another score-byte micro-lever.
 
+cod-a recheck under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`: release
+build, `fr-store` check, focused zset tests, `fr-store` clippy, `fr-conformance`,
+and `fr-store` rustfmt all passed. The read-only packed-zset RSS probe with
+6,250 zsets x 32 members measured Redis data-RSS `4.58 MB` vs FrankenRedis
+`8.11 MB`, or `1.77x` fr/Redis. This is negative release-readiness evidence:
+the compact score hunk can narrow one target cell, but zset memory is still a
+material Redis-relative loss and needs a deeper layout change. Targeted `ubs`
+remains nonzero on pre-existing file-wide findings in `packed_set.rs`, including
+false-positive JWT `decode` hits on existing `cfm_decode` helpers.
+
 ## 2026-06-20 cod-a addendum: direct pubsub encoder narrows fanout gap
 
 Release-readiness impact: source hunk shipped for pubsub delivery. The hot path

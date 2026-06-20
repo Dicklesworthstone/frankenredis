@@ -59,6 +59,26 @@ memory classification is still
 **2 wins / 5 losses / 0 neutral** across the seven cells; remaining structural
 targets are zset/keyspace/list/hash/set layout.
 
+cod-a recheck on the same shared hunk:
+
+- Artifact:
+  `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1609Z-packed-zset-coda-verify/`.
+- Per-crate gates passed under
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`: release
+  build for `fr-server`/`fr-bench`, `cargo check -p fr-store --all-targets`,
+  `cargo test -p fr-store zset -- --nocapture`, `cargo clippy -p fr-store
+  --all-targets -- -D warnings`, `cargo test -p fr-conformance --
+  --nocapture` with RCH local fallback, and `cargo fmt -p fr-store --check`.
+- Read-only packed-zset RSS probe, 6,250 small zsets x 32 members:
+  Redis data-RSS `4.58 MB`, FrankenRedis data-RSS `8.11 MB`, ratio `1.77x`
+  fr/Redis.
+- Verdict: negative evidence for domination. Keep the compact-score hunk only as
+  a narrow target-density improvement; the next measured memory lever needs to
+  remove deeper zset/keyspace/member overhead.
+- Targeted `ubs` returned nonzero on file-wide legacy/static-analysis findings
+  in `packed_set.rs`, including false-positive JWT `decode` hits on existing
+  `cfm_decode` helpers. Compiler/clippy/fmt/zset/conformance gates were clean.
+
 ## Focused cod-a pubsub fanout direct encoder (`frankenredis-ohsk5`, 2026-06-20)
 
 - Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with
