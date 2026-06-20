@@ -21020,8 +21020,7 @@ impl Store {
                 if spans.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let members: Vec<&[u8]> =
-                    spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
                 // Dedup-check then BULK-build. from_unique_str_members appends each
                 // member with no lookup (O(n)); insertion order — the only observable
                 // order for a listpack set — is unchanged. RESTORE still rejects a
@@ -38303,13 +38302,48 @@ mod tests {
         // including the negative-zero trap and the int/string boundary.
         // (frankenredis-dump-zset-score-int)
         let mut scores: Vec<f64> = vec![
-            0.0, -0.0, 1.0, -1.0, 42.0, -42.0, 127.0, 128.0, -128.0, 4095.0, 4096.0,
-            -4096.0, -4097.0, 32767.0, 32768.0, 8_388_607.0, 8_388_608.0, 2_147_483_647.0,
-            2_147_483_648.0, 17179869184.0, 1e18, -1e18, 1e17, -1e17, 999_999_999_999.0,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            42.0,
+            -42.0,
+            127.0,
+            128.0,
+            -128.0,
+            4095.0,
+            4096.0,
+            -4096.0,
+            -4097.0,
+            32767.0,
+            32768.0,
+            8_388_607.0,
+            8_388_608.0,
+            2_147_483_647.0,
+            2_147_483_648.0,
+            17179869184.0,
+            1e18,
+            -1e18,
+            1e17,
+            -1e17,
+            999_999_999_999.0,
             // non-integer / out-of-range → must take the string fallback
-            3.14, -2.5, 0.1, 0.000001, -0.0007, 1.5, 2.5, 1e20, 1.5e300, -1.5e300,
-            123456789.123456789, f64::INFINITY, f64::NEG_INFINITY,
-            1e18 + 1.0, -1e18 - 1.0, 9.2e18,
+            3.14,
+            -2.5,
+            0.1,
+            0.000001,
+            -0.0007,
+            1.5,
+            2.5,
+            1e20,
+            1.5e300,
+            -1.5e300,
+            123456789.123456789,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e18 + 1.0,
+            -1e18 - 1.0,
+            9.2e18,
         ];
         // Add every integer in a dense band to exercise all listpack int widths.
         for i in -5000i64..=5000 {
@@ -38325,7 +38359,8 @@ mod tests {
                 super::encode_listpack_entry(&mut got, redis_score_to_string(score).as_bytes());
             }
             assert_eq!(
-                want, got,
+                want,
+                got,
                 "score {score} (d2string={:?}) diverged",
                 redis_score_to_string(score)
             );
@@ -42335,7 +42370,10 @@ mod tests {
 
         let data_end = payload.len() - DUMP_TRAILER_LEN;
         let (listpack, consumed) = decode_rdb_string(&payload, 3, data_end).unwrap();
-        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![big.clone()]);
+        assert_eq!(
+            decode_listpack_strings(&listpack).unwrap(),
+            vec![big.clone()]
+        );
         assert_eq!(3 + consumed, data_end);
 
         let mut restored = Store::new();
@@ -42378,7 +42416,10 @@ mod tests {
         assert_eq!(container, 2);
         let (big_listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
         cursor += consumed;
-        assert_eq!(decode_listpack_strings(&big_listpack).unwrap(), vec![big.clone()]);
+        assert_eq!(
+            decode_listpack_strings(&big_listpack).unwrap(),
+            vec![big.clone()]
+        );
 
         let (container, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;

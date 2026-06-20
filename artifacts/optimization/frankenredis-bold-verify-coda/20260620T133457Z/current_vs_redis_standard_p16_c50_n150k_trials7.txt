@@ -1,0 +1,20 @@
+artifact=artifacts/optimization/frankenredis-bold-verify-coda/20260620T133457Z
+loadavg=5.52  (high load -> absolute rps noisy; ratio stays stable)
+  fr:19480 exe=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis sha=00000000 connected_slaves=0
+  redis:19479 exe=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+set                median ratio=0.98x  (trials: 0.90, 1.00, 1.02, 1.17, 0.95, 0.98, 0.92)
+get                median ratio=1.01x  (trials: 1.01, 1.00, 1.07, 1.00, 1.00, 1.04, 1.19)
+incr               median ratio=0.98x  (trials: 0.92, 0.98, 1.08, 1.22, 0.96, 1.12, 0.97)
+lpush              median ratio=0.79x  (trials: 0.78, 0.94, 0.85, 0.79, 0.84, 0.79, 0.68)  <-- below 0.9x
+rpush              median ratio=0.74x  (trials: 0.99, 0.64, 0.79, 0.56, 0.71, 1.87, 0.74)  <-- below 0.9x
+lpop               median ratio=1.06x  (trials: 1.09, 1.13, 1.16, 0.99, 0.97, 1.06, 1.06)
+rpop               median ratio=1.16x  (trials: 1.16, 1.09, 1.03, 1.27, 1.20, 1.22, 1.08)
+sadd               median ratio=0.81x  (trials: 0.81, 0.96, 0.88, 0.79, 0.81, 0.90, 0.77)  <-- below 0.9x
+hset               median ratio=1.01x  (trials: 0.99, 1.12, 1.03, 0.95, 1.00, 1.01, 1.04)
+spop               median ratio=1.01x  (trials: 1.08, 1.11, 0.90, 1.04, 1.01, 0.97, 0.97)
+zadd               median ratio=0.77x  (trials: 0.71, 0.75, 0.83, 0.77, 0.80, 0.79, 0.76)  <-- below 0.9x
+lrange_100         median ratio=1.00x  (trials: 0.98, 1.11, 1.07, 0.97, 1.00, 0.99, 1.00)
+mset               median ratio=0.93x  (trials: 0.98, 1.01, 0.93, 0.98, 0.87, 0.90, 0.84)
+======================================================================
+below-0.9x: [('lpush', 0.788888887837037), ('rpush', 0.7381818540082433), ('sadd', 0.812834174528343), ('zadd', 0.7699999794666672)]
