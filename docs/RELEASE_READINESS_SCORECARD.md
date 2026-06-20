@@ -10,6 +10,39 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-b addendum: non-store GET probes did not ship
+
+Per-crate `rch` release builds and Redis C-client interleaved benches were run
+under `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+Current P16/c50/n150k Redis-relative matrix:
+
+| command | fr/redis | verdict |
+|---|---:|---|
+| set | 1.04 | win |
+| get | 0.83 | loss |
+| incr | 0.99 | neutral |
+| lpush | 0.84 | loss |
+| rpush | 0.74 | loss |
+| lpop | 1.07 | win |
+| rpop | 1.24 | win |
+| sadd | 0.73 | loss |
+| hset | 1.08 | win |
+| spop | 1.03 | win |
+| zadd | 0.69 | loss |
+| mset | 1.15 | win |
+
+Two non-store GET candidates were measured against a clean current-control and
+rejected: batch-local RESP3 reply-mode caching (`GET 1.02x` candidate/control)
+and skipping the plain-GET fast active-expire call when no keys expire (`GET
+1.01x` candidate/control). Guard cells were neutral-to-soft-loss. No source was
+kept. Artifacts live under
+`artifacts/optimization/frankenredis-ohsk5-codb-nonstore/`.
+
+Readiness impact: no readiness score improvement from this pass. The fresh
+open throughput risks are `zadd`, `sadd`, `rpush`, `lpush`, and `get`; the
+largest four are store/data-structure lanes and were not edited here because
+`fr-store/src/lib.rs` was reserved by another agent.
+
 ## Throughput head-to-head (pipeline depth 16) — MEASURED
 
 | Workload | fr ops/s | redis ops/s | fr/redis | cv fr/redis | Verdict |

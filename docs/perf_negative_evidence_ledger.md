@@ -22,6 +22,8 @@ turns). Keep claims honest — mark which.
 ## Rejected levers — measured REGRESSION or no-win (do NOT retry)
 | Lever | Result | Why |
 |---|---|---|
+| `frankenredis-ohsk5` cod-b batch-local RESP3 reply-mode cache for server fast paths | GET `1.02x` candidate/control; guards SET/INCR/HSET/MSET `1.01/0.95/0.98/1.02x` | Noise-scale target movement did not close the fresh current-vs-Redis GET loss (`0.83x`), and `INCR` softened. Source hunk reverted/not shipped. Artifact: `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061925Z-resp3-cache-candidate/candidate_vs_control_get_guard_20260620T0626Z.txt`. |
+| `frankenredis-ohsk5` cod-b skip plain-GET fast active-expire call when `count_expiring_keys()==0` | GET `1.01x` candidate/control; guards SET/INCR/HSET/MSET `0.99/0.97/0.95/1.01x` | The existing active-expire function already has a no-expiring-keys fast no-op; skipping the call outside it was neutral-to-soft-loss. Candidate stayed isolated in clean worktree, not shipped. Artifact: `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T0630Z-get-expire-count-gate/candidate_vs_control_get_guard_20260620T0632Z.txt`. |
 | Hand-rolled large-buffer reuse / malloc-avoidance | 0.77–0.93x (REGRESSION) | mimalloc (fr default) already recycles large buffers; hand reuse fights it. A/B before trusting any malloc-avoidance lever. |
 | ChunkedList → VecDeque / decode-path rewrite for list RESTORE | 0.53x (SLOWER) | per-element alloc is the cost; VecDeque didn't help. Real lever = packed-listpack-node ChunkedList (99fwc), not container swap. |
 | SWAR/SIMD on memory-bound byte loops (max/copy/fill, HLL register-max) | ~1.0x (0.94x for HLL) | only COMPUTE-bound loops win (popcount/CRC/bitwise = 4–13x). Check compute-vs-memory first. Clean-crate compute kernels already done. |
@@ -31,6 +33,7 @@ turns). Keep claims honest — mark which.
 ## Real residual gaps (structural; mind ownership before touching)
 | Gap | Ratio | Owner / bead | Note |
 |---|---|---|---|
+| Fresh cod-b P16/c50 Redis-benchmark residuals | GET 0.83x, LPUSH 0.84x, RPUSH 0.74x, SADD 0.73x, ZADD 0.69x | cod-b / ohsk5, store lanes held by BlackThrush during this pass | Artifact: `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061610Z-redis-benchmark-current/current_vs_redis_redis_benchmark.txt`. Non-store GET probes above did not pay; the largest confirmed gaps are list/set/zset store work. |
 | Keyspace dict RAM | ~4.5–5.4x | cod-b / uhthd, also project_keyspace_ram_gap | ordered_keys is the COST of deterministic sorted SCAN (encoded in core_scan.json + tests). Cutting it to ~2x = a SCAN-semantics design reversal (hash-order + reverse-binary cursor), multi-day, all-or-nothing. Not a clean opt. |
 | zset RAM | ~1.54x | CoralOx / uybhq | peni2 (Arc<[u8]> shared members) shipped; residual is structural (dict IndexMap + ordered BTreeMap each hold score+node overhead). Measure fresh-process RSS, not used_memory. |
 | list DUMP | ~1.7–2.7x | open / 99fwc | ChunkedList re-synthesizes Owned chunks per DUMP. Lever = make push build Listpack chunks (infra exists). BIG. |

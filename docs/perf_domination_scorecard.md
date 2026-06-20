@@ -1,5 +1,55 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b non-store GET probes (`frankenredis-ohsk5`, 2026-06-20)
+
+- Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b` for the
+  current binary and isolated target dirs for clean candidate worktrees.
+- Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, 7-9
+  interleaved trials through `scripts/bench_vs_redis.py`.
+- Current-vs-Redis artifact:
+  `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061610Z-redis-benchmark-current/current_vs_redis_redis_benchmark.txt`.
+- Candidate A/B artifacts:
+  `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061925Z-resp3-cache-candidate/candidate_vs_control_get_guard_20260620T0626Z.txt`
+  and
+  `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T0630Z-get-expire-count-gate/candidate_vs_control_get_guard_20260620T0632Z.txt`.
+- Keep/revert decision: **NO SOURCE KEPT**. Both non-store GET candidates were
+  noise-scale and were reverted/not applied to the shared checkout.
+- Coordination: store-owned `fr-store/src/lib.rs` was reserved by BlackThrush,
+  who reported the separate DUMP zset-listpack re-encode gap; this pass stayed
+  on non-store server/runtime probes.
+
+Current Redis-relative focused matrix:
+
+| command | median fr/redis | verdict |
+|---|---:|---|
+| set | 1.04 | fr faster |
+| get | 0.83 | **loss** |
+| incr | 0.99 | neutral |
+| lpush | 0.84 | **loss** |
+| rpush | 0.74 | **loss** |
+| lpop | 1.07 | fr faster |
+| rpop | 1.24 | fr faster |
+| sadd | 0.73 | **loss** |
+| hset | 1.08 | fr faster |
+| spop | 1.03 | fr faster |
+| zadd | 0.69 | **loss** |
+| mset | 1.15 | fr faster |
+
+Rejected candidates:
+
+| candidate | target command | target ratio vs control | guard ratios vs control | verdict |
+|---|---|---:|---|---|
+| Batch-local RESP3 reply-mode cache in `fr-server` | get | 1.02 | set/incr/hset/mset 1.01/0.95/0.98/1.02 | rejected |
+| Skip plain-GET fast active-expire call when no expiring keys in `fr-runtime` | get | 1.01 | set/incr/hset/mset 0.99/0.97/0.95/1.01 | rejected |
+
+Scorecard impact: focused P16/c50 score is **6 wins / 5 losses / 1 neutral**
+if every listed command is counted directly. The non-store GET probes did not
+move the measured `GET 0.83x` Redis-relative gap enough to ship. The largest
+fresh losses route to store/data-structure lanes: `ZADD 0.69x`, `SADD 0.73x`,
+`RPUSH 0.74x`, `LPUSH 0.84x`; `GET 0.83x` needs a deeper profile than reply
+mode caching or active-expire no-op elision.
+
 ## Targeted Gauntlet: frankenredis-n2u1g ZRANGE WITHSCORES Direct Score Encode
 
 - Commit measured: `0a395dd57` server source (`release-perf`; local binary materialized after

@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-ohsk5` non-store GET probes
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved
+trials through `scripts/bench_vs_redis.py`. Builds were per-crate release builds
+through `rch exec -- cargo build --release -p fr-server -p fr-bench` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b` or an isolated
+candidate target dir. Shared `fr-store` was reserved by BlackThrush, so this pass
+only tested non-store server/runtime levers.
+
+| artifact | variant | command | median ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061610Z-redis-benchmark-current/current_vs_redis_redis_benchmark.txt` | current vs Redis 7.2.4 | get | 0.83 | loss |
+| same | current vs Redis 7.2.4 | lpush | 0.84 | loss, store/list-write lane |
+| same | current vs Redis 7.2.4 | rpush | 0.74 | loss, store/list-write lane |
+| same | current vs Redis 7.2.4 | sadd | 0.73 | loss, store/set lane |
+| same | current vs Redis 7.2.4 | zadd | 0.69 | loss, store/zset lane |
+| same | current vs Redis 7.2.4 | set/incr/hset/mset/lpop/rpop/spop | 0.99-1.24 | mixed neutral/wins; exact ratios in artifact |
+| `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T061925Z-resp3-cache-candidate/candidate_vs_control_get_guard_20260620T0626Z.txt` | batch-local RESP3 cache vs current-control | get | 1.02 | rejected, noise-scale |
+| same | batch-local RESP3 cache vs current-control | set/incr/hset/mset | 1.01 / 0.95 / 0.98 / 1.02 | guard neutral; `incr` soft loss |
+| `artifacts/optimization/frankenredis-ohsk5-codb-nonstore/20260620T0630Z-get-expire-count-gate/candidate_vs_control_get_guard_20260620T0632Z.txt` | skip GET fast active-expire call when no expiring keys vs current-control | get | 1.01 | rejected, noise-scale |
+| same | skip GET fast active-expire call when no expiring keys vs current-control | set/incr/hset/mset | 0.99 / 0.97 / 0.95 / 1.01 | guard neutral-to-soft-loss |
+
+Decision: both non-store GET candidates were reverted/not applied to shared
+source. A 1-2% candidate/control median is not enough to close the measured
+0.83x Redis-relative GET loss, and the guard cells were not directionally clean.
+Do not retry session RESP3 caching or no-expire active-cycle elision as standalone
+GET levers unless a fresh profile names them with low-variance timing. The
+biggest confirmed losses in this pass remain store-owned list/set/zset writes,
+plus BlackThrush's separate DUMP zset-listpack re-encode gap.
+
 ## 2026-06-20 cod-a `frankenredis-15lug.1` SPOP parser ordering
 
 Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved
