@@ -1051,3 +1051,37 @@ failure is captured in that bundle. Conformance gate:
 passed after the source hunk was reverted. Next readiness target is the deeper
 `SINTERCARD`/`SMISMEMBER` set representation and membership-probe path, not
 reply-frame materialization alone.
+
+## Cod-a fr-persist zset RDB sorted-input fast path (MEASURED 2026-06-20)
+
+Release-readiness impact: small scoped RDB encode win kept, but DUMP/reload stay
+below Redis 7.2.4 and remain release perf risks.
+
+| Gate | Ratio | Release-readiness impact |
+|---|---:|---|
+| `fr-bench dump`, c50 p128 n300k trials=7 | 0.588915x fr/redis | DUMP release gap confirmed; path is mainly `fr-store::dump_key` |
+| zset-only `DEBUG RELOAD`, baseline | 0.308x fr/redis | RDB round-trip release gap confirmed |
+| zset-only DUMP encode half, baseline | 0.801x fr/redis | encode gap remains |
+| zset-only RESTORE decode half, baseline | 0.212x fr/redis | largest reload risk |
+| `fr-persist` `encode_rdb` criterion A/B | 1.0789x candidate/control | kept scoped fr-persist win |
+| zset-only `DEBUG RELOAD`, candidate run | 0.451x fr/redis | still Redis faster; not a clean end-to-end win |
+| zset-only RESTORE decode half, candidate run | 0.217x fr/redis | decode risk unchanged |
+
+Proof bundle:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2032Z-frpersist-zset-dump-baseline/`
+and
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2048Z-frpersist-zset-presorted-fastpath/`.
+
+Kept hunk: `fr-persist::encode_compact_zset_listpack` detects already-sorted
+zset member vectors from runtime snapshots and streams them directly, avoiding a
+temporary borrowed-ref vector plus redundant sort. Full byte identity is pinned
+by `encode_rdb_compact_zset_presorted_input_is_byte_identical`; arbitrary
+unsorted callers still go through the old canonical sort path.
+
+Gates: `rch` focused fr-persist zset tests, `cargo fmt -p fr-persist --check`,
+`rch cargo check -p fr-persist --all-targets`, `rch cargo clippy -p fr-persist
+--all-targets -- -D warnings`, and local `cargo test -p fr-conformance --
+--nocapture` all passed. RCH release server build was attempted and logged, but
+failed because the clean detached worktree did not include the untracked
+vendored Redis command metadata on the remote worker; release build/bench
+fallback used the local vendored Redis symlink and isolated target subdir.

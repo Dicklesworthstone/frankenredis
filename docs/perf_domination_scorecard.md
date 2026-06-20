@@ -856,3 +856,35 @@ candidate vs control (prior HEAD = pubsub), 6 rounds:
 **-195 M instructions (-7.9%), ~130 instr/cmd, all 6 rounds non-overlapping**
 (control ≥2,471 M, candidate ≤2,297 M). Lever score: **1 win / 0 loss / 0 neutral**
 (server-CPU). Biggest single win this session, on the hottest command (GET).
+
+## BlackThrush fr-persist presorted zset RDB fast path (MEASURED, 2026-06-20)
+
+Fresh cod-a DUMP/reload refresh still shows the zset persistence lane losing to
+Redis 7.2.4:
+
+| gate | fr/redis | note |
+|---|---:|---|
+| `fr-bench dump`, c50 p128 n300k trials=7 | 0.588915x | DUMP path is mostly `fr-store::dump_key`; still a release gap |
+| zset-only `DEBUG RELOAD`, 10k zsets x 64 members | 0.308x baseline, 0.451x candidate run | still Redis faster; run-to-run Redis median shifted, so not a clean end-to-end win claim |
+| zset-only RESTORE decode half | 0.212x baseline, 0.217x candidate | decode/rebuild remains the larger reload drag |
+
+Kept scoped lever: `fr-persist::encode_compact_zset_listpack` now detects
+already-sorted `(member, score)` input and streams directly from the existing
+owned member vector instead of allocating borrowed refs and sorting them again.
+Runtime RDB snapshots already collect sorted zsets via `iter_asc`; arbitrary
+callers still use the old canonical sort path. New guard proves full RDB bytes
+match presorted vs shuffled input.
+
+Measured fr-persist encode A/B:
+
+| bench | control | candidate | delta |
+|---|---:|---:|---:|
+| `cargo bench -p fr-persist --bench rdb_codec -- encode_rdb` | 4.2904 ms | 3.9765 ms | **1.0789x faster** |
+
+Quality gates: focused `fr-persist` zset tests via `rch` passed, `cargo fmt -p
+fr-persist --check` passed, `rch cargo check -p fr-persist --all-targets`
+passed, `rch cargo clippy -p fr-persist --all-targets -- -D warnings` passed,
+and local `cargo test -p fr-conformance -- --nocapture` passed using the
+vendored Redis symlink. Lever score: **1 win / 0 loss / 0 neutral** for
+fr-persist encode, but release score still carries DUMP/reload risk until
+`fr-store::dump_key` and RESTORE decode are attacked.

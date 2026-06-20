@@ -700,3 +700,61 @@ the controlling evidence: the direct encoder was slower than the saved control
 (`0.96x`). Do not retry `SMISMEMBER` reply-frame elimination alone; the next
 route should attack set membership/storage layout, hash probing, or `SINTERCARD`
 no-LIMIT set-intersection cost rather than only socket-buffer encoding.
+
+## 2026-06-20 cod-a kept fr-persist presorted zset RDB fast path; DUMP/reload remain Redis losses
+
+Harness notes:
+
+- Primary requested RCH release build in a clean detached worktree failed before
+  compilation because the worker sync omitted the untracked vendored Redis command
+  metadata tree required by `fr-command/build.rs`
+  (`legacy_redis_code/redis/src/commands`). The failed log is kept at
+  `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2032Z-frpersist-zset-dump-baseline/build-release.log`.
+- Local fallback used a symlink to the shared vendored Redis oracle and an
+  isolated target under the requested root,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a/local-f20a92ec0`.
+  The requested exact target root was not cleaned because it contained artifacts
+  built by a different nightly and deleting them would violate checkout rules.
+
+Baseline Redis 7.2.4 head-to-head:
+
+| artifact | gate | fr/redis ratio | verdict |
+|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2032Z-frpersist-zset-dump-baseline/` | `fr-bench --workload dump`, c50 p128 n300k trials=7, 10k compact zsets x 64 members | 0.588915x | LOSS |
+| same | zset-only `collection_reload_headtohead.py`, `DEBUG RELOAD` save+load | 0.308x | LOSS |
+| same | zset-only DUMP encode half | 0.801x | LOSS |
+| same | zset-only RESTORE decode half | 0.212x | LOSS |
+
+Candidate idea: exploit the runtime/RDB invariant that `store_to_rdb_entries`
+hands sorted-set members to `fr-persist` in score/member order. The old
+`encode_compact_zset_listpack` always allocated `Vec<(&[u8], f64)>` and sorted it
+again. The kept hunk detects already-sorted input and streams directly from the
+owned member vector, while preserving the old canonical sort path for arbitrary
+callers. This is the structural/sorted-input path, not a retry of the previously
+rejected score integer-entry shortcut.
+
+Measured keep evidence:
+
+| artifact | gate | result | verdict |
+|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2048Z-frpersist-zset-presorted-fastpath/control-rdb-codec-bench.log` | control `cargo bench -p fr-persist --bench rdb_codec -- encode_rdb` | 4.2904 ms | baseline |
+| `.../candidate-rdb-codec-bench.log` | candidate same bench/options | 3.9765 ms | 1.0789x candidate/control WIN |
+| `.../zset-reload-headtohead.log` | candidate zset-only `DEBUG RELOAD` vs Redis | 0.451x | still LOSS vs Redis; ratio is noisy because Redis median shifted |
+| same | candidate zset-only DUMP encode half | 0.770x | LOSS; DUMP is mostly `fr-store::dump_key`, not this fr-persist hunk |
+| same | candidate zset-only RESTORE decode half | 0.217x | LOSS; decode remains the larger reload drag |
+
+Correctness/quality:
+
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo test -p fr-persist encode_rdb_compact_zset -- --nocapture` passed; new byte-equality guard:
+  `encode_rdb_compact_zset_presorted_input_is_byte_identical`.
+- `cargo fmt -p fr-persist --check` passed.
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo check -p fr-persist --all-targets` passed.
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a cargo clippy -p fr-persist --all-targets -- -D warnings` passed.
+- Local fallback `cargo test -p fr-conformance -- --nocapture` passed with the
+  vendored Redis symlink; existing tolerant live-oracle drift remained non-fatal.
+
+Decision: keep the fr-persist presorted zset RDB fast path because the
+server-free per-crate encoder A/B is a clear win (`1.0789x`). Do not count this
+as DUMP parity or reload domination: Redis still wins the end-to-end zset DUMP
+and reload gates. Next routes are `fr-store::dump_key` structural retained/cached
+compact-zset payloads and RESTORE/decode listpack rebuild costs.

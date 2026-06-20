@@ -1795,18 +1795,17 @@ fn encode_compact_zset_listpack(
     if members.iter().any(|(_, score)| score.is_nan()) {
         return None;
     }
-    let mut sorted_members: Vec<(&[u8], f64)> = members
-        .iter()
-        .map(|(member, score)| (member.as_slice(), *score))
-        .collect();
-    sorted_members.sort_by(|left, right| {
-        left.1
-            .partial_cmp(&right.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.cmp(right.0))
-    });
 
-    let lp = encode_zset_score_listpack_blob(&sorted_members)?;
+    let lp = if zset_members_are_sorted(members) {
+        encode_zset_score_listpack_blob_from_members(members)?
+    } else {
+        let mut sorted_members: Vec<(&[u8], f64)> = members
+            .iter()
+            .map(|(member, score)| (member.as_slice(), *score))
+            .collect();
+        sorted_members.sort_by(|left, right| zset_member_cmp(*left, *right));
+        encode_zset_score_listpack_blob(&sorted_members)?
+    };
     let mut out = Vec::with_capacity(lp.len() + 4);
     // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
     // compresses it when it is large enough to beat the wire overhead (>20 bytes
@@ -1815,6 +1814,37 @@ fn encode_compact_zset_listpack(
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
     rdb_encode_string(&mut out, &lp);
     Some(out)
+}
+
+fn zset_member_cmp(left: (&[u8], f64), right: (&[u8], f64)) -> std::cmp::Ordering {
+    left.1
+        .partial_cmp(&right.1)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.0.cmp(right.0))
+}
+
+fn zset_members_are_sorted(members: &[(Vec<u8>, f64)]) -> bool {
+    members.windows(2).all(|pair| {
+        zset_member_cmp(
+            (pair[0].0.as_slice(), pair[0].1),
+            (pair[1].0.as_slice(), pair[1].1),
+        ) != std::cmp::Ordering::Greater
+    })
+}
+
+fn encode_zset_score_listpack_blob_from_members(
+    sorted_members: &[(Vec<u8>, f64)],
+) -> Option<Vec<u8>> {
+    let cap = LISTPACK_BLOB_OVERHEAD
+        + sorted_members
+            .iter()
+            .map(|(m, _)| m.len() + 11 + 32)
+            .sum::<usize>();
+    let mut encoded = Vec::with_capacity(cap);
+    for (member, score) in sorted_members {
+        encode_zset_score_listpack_entry(&mut encoded, member, *score);
+    }
+    finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
 
 fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Vec<u8>> {
@@ -1829,16 +1859,20 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
             .sum::<usize>();
     let mut encoded = Vec::with_capacity(cap);
     for (member, score) in sorted_members {
-        encode_listpack_entry(&mut encoded, member);
-        if let Some(score) = zset_listpack_integer_score(*score) {
-            let (scratch, start) = decimal_i64_scratch(score);
-            encode_listpack_entry(&mut encoded, &scratch[start..]);
-        } else {
-            let score = format!("{score}");
-            encode_listpack_entry(&mut encoded, score.as_bytes());
-        }
+        encode_zset_score_listpack_entry(&mut encoded, member, *score);
     }
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
+}
+
+fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
+    encode_listpack_entry(encoded, member);
+    if let Some(score) = zset_listpack_integer_score(score) {
+        let (scratch, start) = decimal_i64_scratch(score);
+        encode_listpack_entry(encoded, &scratch[start..]);
+    } else {
+        let score = format!("{score}");
+        encode_listpack_entry(encoded, score.as_bytes());
+    }
 }
 
 fn zset_listpack_integer_score(score: f64) -> Option<i64> {
@@ -5958,6 +5992,41 @@ mod tests {
                 "expected sorted set after compact zset decode"
             ),
         }
+    }
+
+    #[test]
+    fn encode_rdb_compact_zset_presorted_input_is_byte_identical() {
+        let presorted = vec![RdbEntry {
+            db: 0,
+            key: b"z".to_vec(),
+            value: RdbValue::SortedSet(vec![
+                (b"neg".to_vec(), -7.0),
+                (b"same-a".to_vec(), 2.0),
+                (b"same-b".to_vec(), 2.0),
+                (b"frac".to_vec(), 3.5),
+                (b"large".to_vec(), 4095.0),
+            ]),
+            expire_ms: None,
+        }];
+        let unsorted = vec![RdbEntry {
+            db: 0,
+            key: b"z".to_vec(),
+            value: RdbValue::SortedSet(vec![
+                (b"large".to_vec(), 4095.0),
+                (b"same-b".to_vec(), 2.0),
+                (b"neg".to_vec(), -7.0),
+                (b"frac".to_vec(), 3.5),
+                (b"same-a".to_vec(), 2.0),
+            ]),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&presorted, &[]);
+
+        assert_eq!(encoded, encode_rdb(&unsorted, &[]));
+        assert_eq!(
+            type_byte_for_key(&encoded, b"z"),
+            Some(RDB_TYPE_ZSET_LISTPACK)
+        );
     }
 
     #[test]
