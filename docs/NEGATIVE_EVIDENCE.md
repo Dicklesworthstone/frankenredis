@@ -1005,3 +1005,18 @@ in both protocols:
 protocols. Combined with the cod-b PackedZSet score verification above and my own
 SINTER/SDIFF large-set verification, **all three agents' recent risky changes are now
 independently byte-verified vs Redis 7.2.4.**
+
+## 2026-06-20 CobaltCove (cc) — cross-verify cod-a ZADD plain-store fast path (full option matrix)
+
+Independent differential of cod-a's recent change (`0004950b7` plain ZADD store fast
+path). A write fast path risks mishandling the option matrix, so probed all of
+NX/XX/GT/LT/CH/INCR plus combinations (incl. invalid NX+XX, GT+LT, NX+GT) on both new
+and pre-seeded members, comparing the ZADD reply AND the resulting full zset state
+(ZRANGE WITHSCORES): **300 trials × 6 checks = 1800 operations, 0 diffs vs Redis 7.2.4.**
+cod-a's ZADD fast path is byte-exact across the option matrix.
+
+**Swarm verification complete:** all four recent risky changes are now independently
+byte-verified vs Redis 7.2.4 — cc SINTER/SDIFF fresh-build (large hashtable sets),
+cod-b PackedZSet compact scores (encoding boundaries), BlackThrush pubsub direct
+encoder (RESP2+RESP3), and cod-a ZADD plain-store fast path (option matrix). 0 diffs
+across all.
