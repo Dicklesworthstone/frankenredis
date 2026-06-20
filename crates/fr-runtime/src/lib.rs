@@ -4780,6 +4780,26 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-ohsk5-genclock) Chained start for the GENERIC dispatch path,
+    /// which reads the clock at command entry — BEFORE the command increments
+    /// `stat_total_commands_processed` (the borrowed fast-path handlers call
+    /// `chained_command_start` AFTER their increment, hence the `+1`). Here the
+    /// recorded end-seq of the immediately-preceding command equals this
+    /// command's pre-increment seq, so adjacency is `prev_seq == seq`. Reusing
+    /// the prior command's end-instant as this command's start drops one
+    /// `clock_gettime` per long-tail command (profiled at ~6% of pipelined CPU);
+    /// the chain resets per batch so an idle gap is never read as exec time. The
+    /// match is robust to a command incrementing the counter by !=1 (recorded
+    /// post-count always equals the next command's pre-count).
+    #[inline]
+    fn chained_command_start_pre(&self) -> Instant {
+        let seq = self.server.store.stat_total_commands_processed;
+        match self.last_command_end {
+            Some((inst, prev_seq)) if prev_seq == seq => inst,
+            _ => Instant::now(),
+        }
+    }
+
     /// (frankenredis-7grsy) End-of-command monotonic read for a timed fast-path
     /// handler. Records the end-instant so the next adjacent fast-path command
     /// can chain off it, and returns the elapsed microseconds for this command
@@ -16214,7 +16234,11 @@ impl Runtime {
         // from lingering between server ticks.
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         let dirty_before = self.server.store.dirty;
-        let start = Instant::now();
+        // (frankenredis-ohsk5-genclock) Chain off the previous command's
+        // end-instant instead of a fresh clock read; `finish_chained_command`
+        // takes the single end read and records it for the next command. Cuts
+        // the generic long-tail path from 2 clock_gettime/cmd to 1.
+        let start = self.chained_command_start_pre();
         let handled_migrate = argv
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"MIGRATE"));
@@ -16223,7 +16247,7 @@ impl Runtime {
         } else {
             self.execute_db_scoped_command(argv, now_ms)
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let dirty_after = self.server.store.dirty;
         // Capture the keys DEL/UNLINK actually removed, so the keyspace
         // dispatcher fires "del"/"unlink" only for real removals (never for a

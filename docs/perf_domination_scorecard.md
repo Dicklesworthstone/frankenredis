@@ -591,3 +591,44 @@ encodings, both de-clustered and sequential paths, missing key both orders,
 WRONGTYPE both orders, self-intersection) → **0 diffs**. Source hunk shipped.
 Set-read frontier now: `SMISMEMBER≈0.79x` (noisy), `ZCOUNT≈0.61x` (rejected),
 `SINTER` 3-way `≈0.9x` (different path, retain_intersect).
+
+## BlackThrush generic-dispatch clock chaining (MEASURED, profile-driven, 2026-06-20)
+
+Profiled fr (`perf record`, paranoid lowered then restored) under a deep-pipelined
+cold-command load (SUBSTR/APPEND/GETEX/COPY/TYPE). Call-graph attribution put
+**~12% of CPU in `clock_gettime`** — the largest non-syscall cost — charged to
+`execute_frame_internal`. The 7grsy chained timer already collapses this to one
+clock read/cmd for the ~70 borrowed fast-path handlers, but the **generic
+dispatch path** (`lib.rs:16217`, the entire long tail + writes) still did
+`Instant::now()` + `start.elapsed()` = **2 clock reads/cmd**.
+
+Fix: added `chained_command_start_pre()` (adjacency `prev_seq == seq`, since the
+generic path reads the clock BEFORE the command increments
+`stat_total_commands_processed`, vs the fast paths' post-increment `+1`) and
+routed the generic path through it + `finish_chained_command`. Reuses the prior
+command's end-instant as this command's start → **1 clock read/cmd**. Also fixes
+a latent chain break (generic commands previously left `last_command_end` stale,
+forcing the next fast-path command to re-read). Robust to a command incrementing
+the counter by !=1 (recorded post-count always equals the next pre-count).
+
+Correctness: `cargo test -p fr-runtime --lib commandstat` (7) + `histogram` (1) +
+`-p fr-server process_buffered_frames` (4, incl `uses_microsecond_clock_for_time`)
+all green; live `INFO commandstats` usec stays populated and sane
+(substr 5.2 µs/call, append 1.92, type 1.64).
+
+MEASURED — `perf stat` over a FIXED 2.4M-command mixed cold load, candidate
+(genclock) vs control (prior shipped), 3 interleaved rounds:
+
+| metric | control | candidate | delta |
+|---|---:|---:|---:|
+| instructions retired | 21,720 M (±1 M) | 21,635 M (±1 M) | **-85 M (-0.39%), all 3 rounds** |
+| cycles | ~11,229 M | ~11,018 M | **-1.9%, lower every round** |
+| IPC | 1.90–1.93 | 1.94–1.99 | improved |
+
+Server does provably less work per command (deterministic instruction-count drop,
+reproducible ×3). Throughput A/B is network/client-bound at ~3 µs/call so the
+wall-clock delta sits under benchmark noise (incr/type fast-path anchors stayed
+neutral, confirming no regression); the win surfaces under real pipelined
+saturation, which is the ohsk5 scenario. Lever score: **1 win / 0 loss / 0
+neutral** (server-CPU). Helps the entire generic long tail + RPUSH/SADD/ZADD
+writes (they dispatch through the same path).
