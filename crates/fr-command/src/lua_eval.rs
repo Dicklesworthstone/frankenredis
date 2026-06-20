@@ -15944,7 +15944,7 @@ end
         );
         assert_eq!(
             wrong_multi,
-            Err("ERR wrong number of arguments for 'multi' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let multi = eval_script(b"return redis.call('MULTI')", &[], &[], &mut store, 0);
@@ -15959,7 +15959,7 @@ end
         );
         assert_eq!(
             wrong_exec,
-            Err("ERR wrong number of arguments for 'exec' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let exec = eval_script(b"return redis.call('EXEC')", &[], &[], &mut store, 0);
@@ -15974,7 +15974,7 @@ end
         );
         assert_eq!(
             wrong_discard,
-            Err("ERR wrong number of arguments for 'discard' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let discard = eval_script(b"return redis.call('DISCARD')", &[], &[], &mut store, 0);
@@ -15983,7 +15983,7 @@ end
         let wrong_watch = eval_script(b"return redis.call('WATCH')", &[], &[], &mut store, 0);
         assert_eq!(
             wrong_watch,
-            Err("ERR wrong number of arguments for 'watch' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let watch = eval_script(
@@ -16004,7 +16004,7 @@ end
         );
         assert_eq!(
             wrong_unwatch,
-            Err("ERR wrong number of arguments for 'unwatch' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let unwatch = eval_script(b"return redis.call('UNWATCH')", &[], &[], &mut store, 0);
@@ -16032,7 +16032,7 @@ end
         let acl_arity = eval_script(b"return redis.call('ACL')", &[], &[], &mut store, 0);
         assert_eq!(
             acl_arity,
-            Err("ERR wrong number of arguments for 'acl' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let whoami_arity = eval_script(
@@ -16044,7 +16044,7 @@ end
         );
         assert_eq!(
             whoami_arity,
-            Err("ERR wrong number of arguments for 'acl|whoami' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let genpass_bits = eval_script(
@@ -16101,7 +16101,7 @@ end
         );
         assert_eq!(
             help_arity,
-            Err("ERR wrong number of arguments for 'acl|help' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         // (frankenredis-sebba) Length must equal upstream's 29
@@ -16176,7 +16176,7 @@ end
         let auth_arity = eval_script(b"return redis.call('AUTH')", &[], &[], &mut store, 0);
         assert_eq!(
             auth_arity,
-            Err("ERR wrong number of arguments for 'auth' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         for script in [
@@ -16281,7 +16281,7 @@ end
         );
         assert_eq!(
             arity,
-            Err("ERR wrong number of arguments for 'sync' command".to_string())
+            Err("ERR Wrong number of args calling Redis command from script".to_string())
         );
 
         let sync = eval_script(b"return redis.call('SYNC')", &[], &[], &mut store, 0);

@@ -31378,7 +31378,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("dispatch returns Ok-with-error");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error("ERR source and destination objects are the same".to_string())
@@ -35028,7 +35028,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geoadd");
+        .unwrap_or_else(|e| e.to_resp());
 
         let meters = dispatch_argv(
             &[
@@ -35040,14 +35040,14 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist meters");
+        .unwrap_or_else(|e| e.to_resp());
         let RespFrame::BulkString(Some(distance_raw)) = meters else {
             panic!("geodist should return bulk distance"); // ubs:ignore — AI triage
         };
         let meters_value = std::str::from_utf8(&distance_raw)
-            .expect("distance utf8")
+            .expect("geodist distance utf8")
             .parse::<f64>()
-            .expect("distance float");
+            .expect("geodist distance parse");
         assert!(meters_value > 166_000.0);
 
         let invalid_unit = dispatch_argv(
@@ -35061,7 +35061,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist invalid unit");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             invalid_unit,
             RespFrame::Error("ERR unsupported unit provided. please use M, KM, FT, MI".to_string())
@@ -35077,7 +35077,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist missing");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(missing, RespFrame::BulkString(None));
     }
 
@@ -35101,7 +35101,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geoadd seed");
+        .unwrap_or_else(|e| e.to_resp());
 
         let cases = [
             // GEOSEARCH FROMMEMBER ... BYRADIUS ... <bad-unit>
@@ -35134,7 +35134,7 @@ mod tests {
             ],
         ];
         for argv in cases {
-            let out = dispatch_argv(&argv, &mut store, 0).expect("geo unit-error case");
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(out, RespFrame::Error(expected.to_string()), "argv={argv:?}");
         }
     }
@@ -43074,7 +43074,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("LPUSH listk a");
+        .unwrap_or_else(|e| e.to_resp());
         let err = dispatch_argv(
             &[
                 b"SETRANGE".to_vec(),
@@ -43100,7 +43100,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SETRANGE missing key + size-violation");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             r,
             RespFrame::Error(
@@ -46928,7 +46928,7 @@ mod tests {
                 b"a".to_vec(),
             ],
         ] {
-            let out = dispatch_argv(&argv, &mut store, 0).expect("zadd conflict");
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(
                 out,
                 RespFrame::Error(
@@ -55994,8 +55994,15 @@ mod tests {
         let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
             parts.iter().map(|p| p.as_bytes().to_vec()).collect()
         };
+        // Robust to the CommandError variant: a semantic-error refactor may surface
+        // WRONGTYPE as Store(WrongType) or Custom("WRONGTYPE ..."); both render to the
+        // same wire reply, so match on the rendered RESP error wording.
         let is_wrongtype = |r: Result<RespFrame, CommandError>| -> bool {
-            matches!(r, Err(CommandError::Store(fr_store::StoreError::WrongType)))
+            let frame = match r {
+                Ok(f) => f,
+                Err(e) => e.to_resp(),
+            };
+            matches!(frame, RespFrame::Error(s) if s.starts_with("WRONGTYPE"))
         };
         let mut store = Store::new();
         dispatch_argv(&argv(&["RPUSH", "l", "a", "b"]), &mut store, 0).unwrap();
@@ -56042,9 +56049,10 @@ mod tests {
             &argv(&["GEORADIUS", "nope", "15", "37", "100", "X"]),
             &mut store,
             0,
-        );
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert!(
-            matches!(missing, Ok(RespFrame::Error(ref s)) if s.contains("unsupported unit")),
+            matches!(missing, RespFrame::Error(ref s) if s.contains("unsupported unit")),
             "missing key must still parse options, got {missing:?}"
         );
         // Missing key + valid options -> empty array.
@@ -58218,7 +58226,7 @@ mod tests {
                 b"0".to_vec(),
             ],
         ] {
-            let out = dispatch_argv(&argv_in, &mut store, 0).expect("bitfield invalid type");
+            let out = dispatch_argv(&argv_in, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(
                 out,
                 RespFrame::Error(invalid_type.to_string()),
@@ -58240,7 +58248,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("bitfield overflow");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             overflow_bad,
             RespFrame::Error("ERR Invalid OVERFLOW type specified".to_string())
@@ -58517,7 +58525,7 @@ mod tests {
             for a in args {
                 argv.push(a.to_vec());
             }
-            match dispatch_argv(&argv, store, 0).unwrap() {
+            match dispatch_argv(&argv, store, 0).unwrap_or_else(|e| e.to_resp()) {
                 RespFrame::Error(m) => m,
                 other => panic!("expected error, got {other:?}"), // ubs:ignore — AI triage
             }
@@ -58546,8 +58554,9 @@ mod tests {
                 ],
                 &mut store,
                 0,
-            ),
-            Err(CommandError::InvalidInteger)
+            )
+            .unwrap_or_else(|e| e.to_resp()),
+            RespFrame::Error(s) if s.contains("not an integer or out of range")
         ));
         // Bad OVERFLOW keyword precedes the rejection.
         assert!(
@@ -58572,10 +58581,11 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rpush");
+        .unwrap_or_else(|e| e.to_resp());
         assert!(matches!(
-            dispatch_argv(&[b"BITFIELD_RO".to_vec(), b"lk".to_vec()], &mut store, 0),
-            Err(CommandError::Store(fr_store::StoreError::WrongType))
+            dispatch_argv(&[b"BITFIELD_RO".to_vec(), b"lk".to_vec()], &mut store, 0)
+                .unwrap_or_else(|e| e.to_resp()),
+            RespFrame::Error(s) if s.starts_with("WRONGTYPE")
         ));
     }
 
@@ -65615,7 +65625,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rpush");
+        .unwrap_or_else(|e| e.to_resp());
 
         let i64_min = b"-9223372036854775808";
         let err = dispatch_argv(
@@ -65651,7 +65661,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rank -1 must succeed");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(out, RespFrame::Integer(0));
 
         // RANK = 0 still hits the bespoke 'RANK can't be zero' error.
@@ -65666,7 +65676,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rank 0 returns Error frame");
+        .unwrap_or_else(|e| e.to_resp());
         let RespFrame::Error(msg) = err else {
             panic!("expected Error frame for RANK 0"); // ubs:ignore — AI triage
         };
@@ -66753,7 +66763,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO mylist GET STORE must not error");
+        .unwrap_or_else(|e| e.to_resp());
         match out {
             RespFrame::Array(Some(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -66773,7 +66783,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO mylist BY STORE must not error");
+        .unwrap_or_else(|e| e.to_resp());
         match out {
             RespFrame::Array(Some(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -66794,7 +66804,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO with STORE flag must surface as Error frame");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(err, RespFrame::Error("ERR syntax error".to_string()));
     }
 
