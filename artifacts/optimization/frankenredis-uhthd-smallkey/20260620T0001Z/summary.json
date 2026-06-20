@@ -1,0 +1,98 @@
+{
+  "schema_version": "frankenredis-perf-summary-v1",
+  "bead_id": "frankenredis-uhthd",
+  "agent": "CobaltCove",
+  "phase": "BOLD-VERIFY",
+  "date_utc": "2026-06-20T00:30:00Z",
+  "lever": "inline-small StoreKey enum, <=15 byte keys inline and longer keys boxed",
+  "decision": "rejected_and_reverted",
+  "baseline_commit": "fc2eee9f56d70e2844c349f6ac736396b2742ded",
+  "redis_oracle": "legacy_redis_code/redis/src/redis-server",
+  "target_dir": "/data/projects/.rch-targets/frankenredis-cod-b",
+  "commands": {
+    "baseline_build": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench",
+    "candidate_build": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench",
+    "memory_harness": "python3 scripts/memory_baseline_capture.py legacy_redis_code/redis/src/redis-server /data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis",
+    "conformance": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture"
+  },
+  "artifacts": {
+    "baseline_memory_json": "baseline_memory.json",
+    "candidate_memory_json": "candidate_memory.json",
+    "reverted_memory_json": "reverted_memory_2.json",
+    "baseline_build_log": "baseline_build.txt",
+    "candidate_build_log": "candidate_build.txt",
+    "reverted_build_log": "reverted_build.txt",
+    "workspace_check_log": "workspace_check.txt",
+    "workspace_clippy_log": "workspace_clippy.txt",
+    "conformance_log": "fr_conformance.txt"
+  },
+  "redis_relative_rss": {
+    "baseline": {
+      "keyspace": 1.169,
+      "string_1k": 0.879,
+      "list": 1.186,
+      "hash": 1.392,
+      "set": 1.075,
+      "zset": 1.834,
+      "stream": 0.974
+    },
+    "candidate": {
+      "keyspace": 1.465,
+      "string_1k": 0.894,
+      "list": 1.399,
+      "hash": 1.41,
+      "set": 1.243,
+      "zset": 1.579,
+      "stream": 0.977
+    },
+    "reverted_control_pass": {
+      "keyspace": 1.246,
+      "string_1k": 0.893,
+      "list": 1.206,
+      "hash": 1.375,
+      "set": 1.222,
+      "zset": 1.72,
+      "stream": 0.979
+    }
+  },
+  "candidate_vs_baseline_fr_rss_delta_bytes": {
+    "keyspace": 2883584,
+    "string_1k": 90112,
+    "list": 90112,
+    "hash": 208896,
+    "set": 294912,
+    "zset": -405504,
+    "stream": 585728
+  },
+  "scores": {
+    "candidate_absolute_fr_rss_win_loss_neutral": {
+      "wins": 1,
+      "losses": 6,
+      "neutral": 0
+    },
+    "candidate_redis_relative_memory_win_loss_neutral": {
+      "wins": 2,
+      "losses": 5,
+      "neutral": 0
+    },
+    "reverted_control_redis_relative_memory_win_loss_neutral": {
+      "wins": 2,
+      "losses": 5,
+      "neutral": 0
+    },
+    "reverted_control_rss_geomean": 1.2099618941643706
+  },
+  "validation": {
+    "candidate_fr_store_check": "passed",
+    "candidate_randomkey_test": "passed",
+    "cargo_fmt_check_after_revert": "passed",
+    "workspace_check_after_revert": "passed",
+    "workspace_clippy_after_revert": "passed",
+    "fr_conformance_after_revert": "99 passed, 0 failed"
+  },
+  "notes": [
+    "The expected heap-allocation saving did not survive table-entry size and enum overhead.",
+    "The target keyspace cell regressed from 1.169x Redis RSS to 1.465x Redis RSS.",
+    "Do not retry this StoreKey enum shape without a layout proof that preserves table-entry size."
+  ]
+}

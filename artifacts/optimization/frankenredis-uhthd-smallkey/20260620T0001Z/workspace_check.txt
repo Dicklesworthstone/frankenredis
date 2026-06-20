@@ -1,0 +1,390 @@
+  [2m2026-06-20T00:17:20.286339Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz2 at root@178.104.77.29 (6 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:866 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:20.529847Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for frankenredis (hash: c48d98f255166749)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:20.529896Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:24.521657Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz2...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:24.521714Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis -> /data/projects/frankenredis on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:34.564614Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 10042ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:34.564692Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-bench -> /data/projects/frankenredis/crates/fr-bench on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:36.434652Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1869ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:36.434743Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-command -> /data/projects/frankenredis/crates/fr-command on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:38.320270Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1885ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:38.320350Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-config -> /data/projects/frankenredis/crates/fr-config on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:40.232755Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1912ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:40.232848Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-conformance -> /data/projects/frankenredis/crates/fr-conformance on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:42.126771Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1893ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:42.126861Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-eventloop -> /data/projects/frankenredis/crates/fr-eventloop on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:43.985517Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1858ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:43.985605Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-expire -> /data/projects/frankenredis/crates/fr-expire on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:45.866249Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1880ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:45.866333Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-persist -> /data/projects/frankenredis/crates/fr-persist on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:47.766183Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1899ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:47.766254Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-protocol -> /data/projects/frankenredis/crates/fr-protocol on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:49.674140Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1907ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:49.674214Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-repl -> /data/projects/frankenredis/crates/fr-repl on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:51.554575Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1880ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:51.554658Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-runtime -> /data/projects/frankenredis/crates/fr-runtime on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:53.412819Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1858ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:53.412911Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-sentinel -> /data/projects/frankenredis/crates/fr-sentinel on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:55.252239Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1839ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:55.252328Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-server -> /data/projects/frankenredis/crates/fr-server on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:57.088107Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1835ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:57.088202Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-store -> /data/projects/frankenredis/crates/fr-store on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:58.943418Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1855ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:17:58.943461Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 143821 files, 7695648 bytes in 34412ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:04.467711Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo check --workspace --all-targets[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:04.467755Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/frankenredis-cod-b -> /data/projects/frankenredis/.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded bit-set v0.8.0
+  Downloaded anes v0.1.6
+  Downloaded bit-vec v0.8.0
+  Downloaded anstyle v1.0.14
+  Downloaded autocfg v1.5.0
+  Downloaded base64 v0.21.7
+  Downloaded aho-corasick v1.1.4
+  Downloaded equivalent v1.0.2
+  Downloaded getrandom v0.3.4
+  Downloaded displaydoc v0.2.6
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded hashbrown v0.17.0
+  Downloaded quick-error v1.2.3
+  Downloaded clap_lex v1.1.0
+  Downloaded icu_collections v2.2.0
+  Downloaded icu_locale v2.2.0
+  Downloaded icu_locale_core v2.2.0
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded is-terminal v0.4.17
+  Downloaded once_cell v1.21.4
+  Downloaded potential_utf v0.1.5
+  Downloaded proc-macro2 v1.0.106
+  Downloaded rand_chacha v0.9.0
+  Downloaded rayon v1.12.0
+  Downloaded rayon-core v1.13.0
+  Downloaded rusty-fork v0.3.1
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded block-buffer v0.12.0
+  Downloaded cast v0.3.0
+  Downloaded cc v1.2.60
+  Downloaded cfg-if v1.0.4
+  Downloaded ciborium-io v0.2.2
+  Downloaded criterion-plot v0.5.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded crypto-common v0.2.1
+  Downloaded fastrand v2.4.1
+  Downloaded flate2 v1.1.9
+  Downloaded fnv v1.0.7
+  Downloaded half v2.7.1
+  Downloaded hybrid-array v0.4.10
+  Downloaded icu_properties v2.2.0
+  Downloaded icu_provider v2.2.0
+  Downloaded itoa v1.0.18
+  Downloaded log v0.4.29
+  Downloaded miniz_oxide v0.8.9
+  Downloaded serde_derive v1.0.228
+  Downloaded sha2 v0.11.0
+  Downloaded clap v4.6.1
+  Downloaded errno v0.3.14
+  Downloaded indexmap v2.14.0
+  Downloaded itertools v0.10.5
+  Downloaded litemap v0.8.2
+  Downloaded mimalloc v0.1.49
+  Downloaded plotters-backend v0.3.7
+  Downloaded plotters-svg v0.3.7
+  Downloaded quote v1.0.45
+  Downloaded shlex v1.3.0
+  Downloaded byteorder v1.5.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded cpufeatures v0.3.0
+  Downloaded digest v0.11.2
+  Downloaded hdrhistogram v7.5.4
+  Downloaded hex v0.4.3
+  Downloaded memchr v2.8.0
+  Downloaded oorandom v11.1.5
+  Downloaded rand_core v0.9.5
+  Downloaded rand_xorshift v0.4.0
+  Downloaded regex v1.12.3
+  Downloaded same-file v1.0.6
+  Downloaded bitflags v2.11.1
+  Downloaded ciborium v0.2.2
+  Downloaded crc32fast v1.5.0
+  Downloaded crossbeam-channel v0.5.15
+  Downloaded either v1.16.0
+  Downloaded foldhash v0.1.5
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded criterion v0.5.1
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded icu_normalizer v2.2.0
+  Downloaded serde v1.0.228
+  Downloaded const-oid v0.10.2
+  Downloaded getrandom v0.4.2
+  Downloaded nom v7.1.3
+  Downloaded num-traits v0.2.19
+  Downloaded serde_core v1.0.228
+  Downloaded mio v1.2.0
+  Downloaded utf8_iter v1.0.4
+  Downloaded icu_locale_data v2.2.0
+  Downloaded plotters v0.3.7
+  Downloaded proptest v1.11.0
+  Downloaded icu_properties_data v2.2.0
+  Downloaded tinystr v0.8.3
+  Downloaded minimal-lexical v0.2.1
+  Downloaded rand v0.9.4
+  Downloaded rustix v1.1.4
+  Downloaded unarray v0.1.4
+  Downloaded clap_builder v4.6.0
+  Downloaded regex-syntax v0.8.10
+  Downloaded icu_collator_data v2.2.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded regex-automata v0.4.14
+  Downloaded libc v0.2.185
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded utf16_iter v1.0.5
+  Downloaded wait-timeout v0.2.1
+  Downloaded walkdir v2.5.0
+  Downloaded icu_collator v2.2.0
+  Downloaded zerofrom v0.1.8
+  Downloaded yoke-derive v0.8.2
+  Downloaded write16 v1.0.0
+  Downloaded tinytemplate v1.2.1
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded simd-adler32 v0.3.9
+  Downloaded writeable v0.6.3
+  Downloaded zerovec-derive v0.11.3
+  Downloaded zmij v1.0.21
+  Downloaded smallvec v1.15.2
+  Downloaded tempfile v3.27.0
+  Downloaded synstructure v0.13.2
+  Downloaded yoke v0.8.3
+  Downloaded unicode-ident v1.0.24
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded typenum v1.20.0
+  Downloaded zerotrie v0.2.4
+  Downloaded serde_json v1.0.149
+  Downloaded zerovec v0.11.6
+  Downloaded syn v2.0.117
+  Downloaded zerocopy v0.8.48
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+    Checking cfg-if v1.0.4
+   Compiling libc v0.2.185
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking foldhash v0.1.5
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling serde_core v1.0.228
+    Checking memchr v2.8.0
+    Checking itoa v1.0.18
+   Compiling zerocopy v0.8.48
+   Compiling autocfg v1.5.0
+    Checking stable_deref_trait v1.2.1
+    Checking regex-syntax v0.8.10
+    Checking once_cell v1.21.4
+    Checking writeable v0.6.3
+   Compiling getrandom v0.3.4
+    Checking litemap v0.8.2
+   Compiling rustix v1.1.4
+    Checking typenum v1.20.0
+   Compiling getrandom v0.4.2
+    Checking utf8_iter v1.0.4
+   Compiling icu_locale_data v2.2.0
+    Checking bitflags v2.11.1
+    Checking linux-raw-sys v0.12.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling num-traits v0.2.19
+   Compiling icu_collator_data v2.2.0
+    Checking indexmap v2.14.0
+    Checking fastrand v2.4.1
+    Checking utf16_iter v1.0.5
+    Checking quick-error v1.2.3
+    Checking fnv v1.0.7
+    Checking bit-vec v0.8.0
+    Checking write16 v1.0.0
+    Checking const-oid v0.10.2
+    Checking smallvec v1.15.2
+    Checking unarray v0.1.4
+    Checking bit-set v0.8.0
+    Checking cpufeatures v0.3.0
+   Compiling syn v2.0.117
+    Checking hex v0.4.3
+   Compiling serde v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling rayon-core v1.13.0
+    Checking hybrid-array v0.4.10
+   Compiling cc v1.2.60
+    Checking either v1.16.0
+    Checking ciborium-io v0.2.2
+    Checking anstyle v1.0.14
+    Checking clap_lex v1.1.0
+    Checking plotters-backend v0.3.7
+    Checking cast v0.3.0
+    Checking fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+    Checking wait-timeout v0.2.1
+    Checking itertools v0.10.5
+    Checking clap_builder v4.6.0
+    Checking same-file v1.0.6
+    Checking plotters-svg v0.3.7
+    Checking is-terminal v0.4.17
+    Checking rand_core v0.9.5
+    Checking anes v0.1.6
+    Checking plotters v0.3.7
+    Checking oorandom v11.1.5
+    Checking walkdir v2.5.0
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking rand v0.9.4
+    Checking rand_xorshift v0.4.0
+    Checking regex-automata v0.4.14
+    Checking log v0.4.29
+   Compiling crc32fast v1.5.0
+    Checking crossbeam-epoch v0.9.18
+    Checking adler2 v2.0.1
+    Checking mio v1.2.0
+    Checking simd-adler32 v0.3.9
+    Checking miniz_oxide v0.8.9
+    Checking crossbeam-deque v0.8.6
+    Checking minimal-lexical v0.2.1
+    Checking crossbeam-channel v0.5.15
+    Checking tempfile v3.27.0
+    Checking base64 v0.21.7
+    Checking nom v7.1.3
+    Checking digest v0.11.2
+    Checking rusty-fork v0.3.1
+    Checking flate2 v1.1.9
+    Checking sha2 v0.11.0
+    Checking criterion-plot v0.5.0
+    Checking byteorder v1.5.0
+    Checking rayon v1.12.0
+   Compiling libmimalloc-sys v0.1.46
+    Checking clap v4.6.1
+    Checking regex v1.12.3
+    Checking hdrhistogram v7.5.4
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+    Checking mimalloc v0.1.49
+   Compiling synstructure v0.13.2
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+    Checking zerofrom v0.1.8
+    Checking yoke v0.8.3
+    Checking zerovec v0.11.6
+    Checking zerotrie v0.2.4
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking tinytemplate v1.2.1
+    Checking fr-bench v0.1.0 (/data/projects/frankenredis/crates/fr-bench)
+    Checking icu_provider v2.2.0
+    Checking icu_properties v2.2.0
+    Checking icu_locale v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking icu_collator v2.2.0
+    Checking ppv-lite86 v0.2.21
+    Checking half v2.7.1
+    Checking rand_chacha v0.9.0
+    Checking ciborium-ll v0.2.2
+    Checking ciborium v0.2.2
+    Checking proptest v1.11.0
+    Checking criterion v0.5.1
+    Checking fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+    Checking fr-conformance v0.1.0 (/data/projects/frankenredis/crates/fr-conformance)
+    Checking fr-server v0.1.0 (/data/projects/frankenredis/crates/fr-server)
+    Checking fr-persist v0.1.0 (/data/projects/frankenredis/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/frankenredis/crates/fr-sentinel)
+    Checking fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.35s
+  [2m2026-06-20T00:18:19.706737Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 15238ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:19.706992Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:19.707011Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:21.663225Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1956ms (1 files, 12929 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:21.663254Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 12929 bytes in 1956ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz2 (61.4s)

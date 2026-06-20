@@ -1,0 +1,296 @@
+  [2m2026-06-20T00:08:49.295204Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (4 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:866 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:49.486205Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for frankenredis (hash: c48d98f255166749)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:49.486245Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:52.669234Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-a...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:52.669282Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis -> /data/projects/frankenredis on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:55.997733Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3328ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:55.997796Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-bench -> /data/projects/frankenredis/crates/fr-bench on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:56.490054Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 492ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:56.490125Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-command -> /data/projects/frankenredis/crates/fr-command on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:56.956811Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 466ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:56.956895Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-config -> /data/projects/frankenredis/crates/fr-config on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:57.467369Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 510ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:57.467440Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-conformance -> /data/projects/frankenredis/crates/fr-conformance on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:57.909686Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 442ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:57.909750Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-eventloop -> /data/projects/frankenredis/crates/fr-eventloop on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:58.467647Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 557ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:58.467722Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-expire -> /data/projects/frankenredis/crates/fr-expire on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:58.938952Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 471ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:58.939054Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-persist -> /data/projects/frankenredis/crates/fr-persist on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:59.458422Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 519ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:59.458513Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-protocol -> /data/projects/frankenredis/crates/fr-protocol on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:59.895232Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 436ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:59.895316Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-repl -> /data/projects/frankenredis/crates/fr-repl on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:00.418204Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 522ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:00.418274Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-runtime -> /data/projects/frankenredis/crates/fr-runtime on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:00.884782Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 466ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:00.884860Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-sentinel -> /data/projects/frankenredis/crates/fr-sentinel on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:01.404792Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 519ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:01.404866Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-server -> /data/projects/frankenredis/crates/fr-server on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:01.889725Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 484ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:01.889818Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-store -> /data/projects/frankenredis/crates/fr-store on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:02.345541Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 455ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:02.345598Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 143812 files, 7695805 bytes in 9667ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:04.272814Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo build --release -p fr-server -p fr-bench[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:04.272856Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/frankenredis-cod-b -> /data/projects/frankenredis/.rch-target-ovh-a-pool-92ff1a2a912611f45cd8f8e10ee25ce0[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded adler2 v2.0.1
+  Downloaded block-buffer v0.12.0
+  Downloaded byteorder v1.5.0
+  Downloaded flate2 v1.1.9
+  Downloaded cc v1.2.60
+  Downloaded serde_core v1.0.228
+  Downloaded smallvec v1.15.2
+  Downloaded serde_derive v1.0.228
+  Downloaded quote v1.0.45
+  Downloaded zerovec v0.11.6
+  Downloaded serde_json v1.0.149
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded minimal-lexical v0.2.1
+  Downloaded foldhash v0.1.5
+  Downloaded zerovec-derive v0.11.3
+  Downloaded memchr v2.8.0
+  Downloaded equivalent v1.0.2
+  Downloaded nom v7.1.3
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded yoke-derive v0.8.2
+  Downloaded crc32fast v1.5.0
+  Downloaded icu_provider v2.2.0
+  Downloaded log v0.4.29
+  Downloaded serde v1.0.228
+  Downloaded synstructure v0.13.2
+  Downloaded hdrhistogram v7.5.4
+  Downloaded base64 v0.21.7
+  Downloaded icu_locale v2.2.0
+  Downloaded mimalloc v0.1.49
+  Downloaded miniz_oxide v0.8.9
+  Downloaded shlex v1.3.0
+  Downloaded icu_collator v2.2.0
+  Downloaded potential_utf v0.1.5
+  Downloaded zerofrom v0.1.8
+  Downloaded litemap v0.8.2
+  Downloaded writeable v0.6.3
+  Downloaded autocfg v1.5.0
+  Downloaded simd-adler32 v0.3.9
+  Downloaded tinystr v0.8.3
+  Downloaded yoke v0.8.3
+  Downloaded icu_properties v2.2.0
+  Downloaded icu_collections v2.2.0
+  Downloaded zmij v1.0.21
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded const-oid v0.10.2
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded displaydoc v0.2.6
+  Downloaded utf8_iter v1.0.4
+  Downloaded hex v0.4.3
+  Downloaded proc-macro2 v1.0.106
+  Downloaded write16 v1.0.0
+  Downloaded itoa v1.0.18
+  Downloaded utf16_iter v1.0.5
+  Downloaded hashbrown v0.17.0
+  Downloaded sha2 v0.11.0
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded cpufeatures v0.3.0
+  Downloaded crypto-common v0.2.1
+  Downloaded num-traits v0.2.19
+  Downloaded digest v0.11.2
+  Downloaded hybrid-array v0.4.10
+  Downloaded indexmap v2.14.0
+  Downloaded icu_locale_data v2.2.0
+  Downloaded icu_normalizer v2.2.0
+  Downloaded zerotrie v0.2.4
+  Downloaded mio v1.2.0
+  Downloaded icu_locale_core v2.2.0
+  Downloaded crossbeam-channel v0.5.15
+  Downloaded icu_properties_data v2.2.0
+  Downloaded typenum v1.20.0
+  Downloaded syn v2.0.117
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded unicode-ident v1.0.24
+  Downloaded icu_collator_data v2.2.0
+  Downloaded libc v0.2.185
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling stable_deref_trait v1.2.1
+   Compiling zmij v1.0.21
+   Compiling writeable v0.6.3
+   Compiling serde_json v1.0.149
+   Compiling litemap v0.8.2
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_locale_data v2.2.0
+   Compiling libc v0.2.185
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling icu_normalizer_data v2.2.0
+   Compiling memchr v2.8.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling icu_collator_data v2.2.0
+   Compiling itoa v1.0.18
+   Compiling shlex v1.3.0
+   Compiling equivalent v1.0.2
+   Compiling cc v1.2.60
+   Compiling hashbrown v0.17.0
+   Compiling write16 v1.0.0
+   Compiling smallvec v1.15.2
+   Compiling utf16_iter v1.0.5
+   Compiling const-oid v0.10.2
+   Compiling fr-persist v0.1.0 (/data/projects/frankenredis/crates/fr-persist)
+   Compiling fr-sentinel v0.1.0 (/data/projects/frankenredis/crates/fr-sentinel)
+   Compiling cpufeatures v0.3.0
+   Compiling foldhash v0.1.5
+   Compiling crossbeam-utils v0.8.21
+   Compiling crc32fast v1.5.0
+   Compiling fr-expire v0.1.0 (/data/projects/frankenredis/crates/fr-expire)
+   Compiling autocfg v1.5.0
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling indexmap v2.14.0
+   Compiling miniz_oxide v0.8.9
+   Compiling fr-config v0.1.0 (/data/projects/frankenredis/crates/fr-config)
+   Compiling num-traits v0.2.19
+   Compiling minimal-lexical v0.2.1
+   Compiling hex v0.4.3
+   Compiling serde v1.0.228
+   Compiling fr-repl v0.1.0 (/data/projects/frankenredis/crates/fr-repl)
+   Compiling fr-eventloop v0.1.0 (/data/projects/frankenredis/crates/fr-eventloop)
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling log v0.4.29
+   Compiling flate2 v1.1.9
+   Compiling nom v7.1.3
+   Compiling mio v1.2.0
+   Compiling crossbeam-channel v0.5.15
+   Compiling libmimalloc-sys v0.1.46
+   Compiling byteorder v1.5.0
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+   Compiling base64 v0.21.7
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling synstructure v0.13.2
+   Compiling hdrhistogram v7.5.4
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling fr-bench v0.1.0 (/data/projects/frankenredis/crates/fr-bench)
+   Compiling icu_provider v2.2.0
+   Compiling mimalloc v0.1.49
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_locale v2.2.0
+   Compiling icu_collator v2.2.0
+   Compiling fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/frankenredis/crates/fr-server)
+    Finished `release` profile [optimized] target(s) in 26.94s
+  [2m2026-06-20T00:09:31.873051Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 27600ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:31.873339Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:31.873359Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:32.330821Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 457ms (1 files, 12829 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:32.330853Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 12829 bytes in 457ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:32.330966Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis/.rch-target-ovh-a-pool-92ff1a2a912611f45cd8f8e10ee25ce0 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:34.242655Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1911ms (190 files, 885376 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:09:34.242684Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 190 files, 885376 bytes in 1911ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-a (44.9s)

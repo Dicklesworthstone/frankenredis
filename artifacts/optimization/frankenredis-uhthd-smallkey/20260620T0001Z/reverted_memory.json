@@ -1,0 +1,65 @@
+{
+  "cells": {
+    "hash": {
+      "fr_rss": 10797056,
+      "fr_used": 2300000,
+      "redis_rss": 8196096,
+      "redis_used": 2744064,
+      "rss_ratio": 1.317,
+      "used_ratio": 0.838
+    },
+    "keyspace": {
+      "fr_rss": 24875008,
+      "fr_used": 12720000,
+      "redis_rss": 18202624,
+      "redis_used": 15795648,
+      "rss_ratio": 1.367,
+      "used_ratio": 0.805
+    },
+    "list": {
+      "fr_rss": 9211904,
+      "fr_used": 650000,
+      "redis_rss": 7565312,
+      "redis_used": 1661296,
+      "rss_ratio": 1.218,
+      "used_ratio": 0.391
+    },
+    "set": {
+      "fr_rss": 10031104,
+      "fr_used": 1342000,
+      "redis_rss": 7163904,
+      "redis_used": 2386000,
+      "rss_ratio": 1.4,
+      "used_ratio": 0.562
+    },
+    "stream": {
+      "fr_rss": 871731200,
+      "fr_used": 947120000,
+      "redis_rss": 892674048,
+      "redis_used": 863795680,
+      "rss_ratio": 0.977,
+      "used_ratio": 1.096
+    },
+    "string_1k": {
+      "fr_rss": 35676160,
+      "fr_used": 33320000,
+      "redis_rss": 39649280,
+      "redis_used": 34560800,
+      "rss_ratio": 0.9,
+      "used_ratio": 0.964
+    },
+    "zset": {
+      "fr_rss": 15208448,
+      "fr_used": 1700000,
+      "redis_rss": 8204288,
+      "redis_used": 2744064,
+      "rss_ratio": 1.854,
+      "used_ratio": 0.62
+    }
+  },
+  "ratchet_regressions": [
+    "zset: RSS ratio 1.579 -> 1.854 (+17.4% worse)"
+  ],
+  "scale": 200000,
+  "schema_version": "memory-baseline.v1"
+}

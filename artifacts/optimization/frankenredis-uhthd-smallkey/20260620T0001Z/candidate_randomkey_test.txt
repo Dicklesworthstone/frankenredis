@@ -1,0 +1,392 @@
+  [2m2026-06-20T00:07:18.416927Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz2 at root@178.104.77.29 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:866 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:18.664856Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for frankenredis (hash: c48d98f255166749)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:18.664920Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:22.934772Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz2...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:22.934829Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis -> /data/projects/frankenredis on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:32.746425Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 9811ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:32.746505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-bench -> /data/projects/frankenredis/crates/fr-bench on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:34.628350Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1881ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:34.628448Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-command -> /data/projects/frankenredis/crates/fr-command on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:36.511748Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1883ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:36.511831Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-config -> /data/projects/frankenredis/crates/fr-config on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:38.425192Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1913ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:38.425272Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-conformance -> /data/projects/frankenredis/crates/fr-conformance on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:40.299693Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1874ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:40.299782Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-eventloop -> /data/projects/frankenredis/crates/fr-eventloop on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:42.183446Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1883ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:42.183529Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-expire -> /data/projects/frankenredis/crates/fr-expire on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:44.033077Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1849ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:44.033163Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-persist -> /data/projects/frankenredis/crates/fr-persist on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:45.861903Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1828ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:45.862000Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-protocol -> /data/projects/frankenredis/crates/fr-protocol on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:47.750882Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1888ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:47.750995Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-repl -> /data/projects/frankenredis/crates/fr-repl on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:49.624986Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1873ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:49.625063Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-runtime -> /data/projects/frankenredis/crates/fr-runtime on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:51.552895Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1927ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:51.553000Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-sentinel -> /data/projects/frankenredis/crates/fr-sentinel on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:53.418992Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1865ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:53.419083Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-server -> /data/projects/frankenredis/crates/fr-server on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:55.227736Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1808ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:55.227818Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-store -> /data/projects/frankenredis/crates/fr-store on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:57.112369Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1884ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:07:57.112428Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 143811 files, 7693618 bytes in 34167ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:02.777289Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo test -p fr-store random_key_index_rebuilds_lazily_and_reaches_live_keys_uhthd -- --nocapture[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:02.777355Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/frankenredis-cod-b -> /data/projects/frankenredis/.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded autocfg v1.5.0
+  Downloaded cfg-if v1.0.4
+  Downloaded bitflags v2.11.1
+  Downloaded bit-set v0.8.0
+  Downloaded errno v0.3.14
+  Downloaded fnv v1.0.7
+  Downloaded equivalent v1.0.2
+  Downloaded fastrand v2.4.1
+  Downloaded bit-vec v0.8.0
+  Downloaded foldhash v0.1.5
+  Downloaded getrandom v0.3.4
+  Downloaded rand_xorshift v0.4.0
+  Downloaded quick-error v1.2.3
+  Downloaded unarray v0.1.4
+  Downloaded wait-timeout v0.2.1
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.9.5
+  Downloaded once_cell v1.21.4
+  Downloaded rusty-fork v0.3.1
+  Downloaded serde_core v1.0.228
+  Downloaded getrandom v0.4.2
+  Downloaded num-traits v0.2.19
+  Downloaded tempfile v3.27.0
+  Downloaded indexmap v2.14.0
+  Downloaded rand v0.9.4
+  Downloaded hashbrown v0.17.0
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded rustix v1.1.4
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling zerocopy v0.8.48
+   Compiling rustix v1.1.4
+   Compiling bitflags v2.11.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling autocfg v1.5.0
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling equivalent v1.0.2
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling hashbrown v0.17.0
+   Compiling bit-vec v0.8.0
+   Compiling regex-syntax v0.8.10
+   Compiling unarray v0.1.4
+   Compiling foldhash v0.1.5
+   Compiling fr-expire v0.1.0 (/data/projects/frankenredis/crates/fr-expire)
+   Compiling bit-set v0.8.0
+   Compiling num-traits v0.2.19
+   Compiling fr-persist v0.1.0 (/data/projects/frankenredis/crates/fr-persist)
+   Compiling fr-sentinel v0.1.0 (/data/projects/frankenredis/crates/fr-sentinel)
+   Compiling indexmap v2.14.0
+   Compiling wait-timeout v0.2.1
+   Compiling rand_core v0.9.5
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.99s
+     Running unittests src/lib.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/fr_store-eb6b7930eb97aea1)
+
+running 1 test
+test tests::random_key_index_rebuilds_lazily_and_reaches_live_keys_uhthd ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 0.09s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/bulk_member_isomorphism.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/bulk_member_isomorphism-9f97c29410d1fcc5)
+     Running tests/encoding_matrix.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/encoding_matrix-70ca390255aa24d3)
+     Running tests/hash_field_ttl.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/hash_field_ttl-15ec6a993914cb86)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/metamorphic.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic-d5e5348853c1c724)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_bit.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_bit-a7c2e2073cf3365e)
+     Running tests/metamorphic_bitop.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_bitop-9ad147198cf86941)
+     Running tests/metamorphic_hash.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_hash-e97bec51cb3964e6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_advanced.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_hash_advanced-46abc4f00e723b6b)
+     Running tests/metamorphic_hash_field_ttl.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_hash_field_ttl-caa3283260be8aba)
+     Running tests/metamorphic_hash_numeric.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_hash_numeric-928e6c47a109f7f1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+     Running tests/metamorphic_keys.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_keys-50400c6a75f19360)
+     Running tests/metamorphic_list.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_list-052186cf943dc332)
+     Running tests/metamorphic_list_advanced.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_list_advanced-63d2963784babc23)
+     Running tests/metamorphic_numeric.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_numeric-4ff71cb48da09041)
+     Running tests/metamorphic_set.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_set-f19692387d535739)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_set_advanced.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_set_advanced-fe8a25ea4f9e7a1b)
+     Running tests/metamorphic_stream.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_stream-87834f14b54c0cab)
+     Running tests/metamorphic_string.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_string-8053205536d8a4d0)
+     Running tests/metamorphic_string_advanced.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_string_advanced-a819a287ad56fcf1)
+     Running tests/metamorphic_swapdb.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_swapdb-4108577375ed2009)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+     Running tests/metamorphic_zset.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_zset-bf632bffd337afa7)
+     Running tests/metamorphic_zset_advanced.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_zset_advanced-20deed4cf8577965)
+     Running tests/metamorphic_zset_geo.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/metamorphic_zset_geo-e9cad543cf517d32)
+     Running tests/pfadd_empty.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/pfadd_empty-63c239c0cb4e5c65)
+     Running tests/randomkey_panic_test.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/randomkey_panic_test-239a3d539a735b10)
+     Running tests/sdiff_type.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/sdiff_type-833f0f765b9655cc)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+     Running tests/sinter_opt.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/sinter_opt-00c873e684e4b9ea)
+     Running tests/sunionstore_dirty.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/sunionstore_dirty-d629a23ee6f14a8b)
+     Running tests/zadd_bug.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/zadd_bug-adaa6e31428b7033)
+     Running tests/zadd_empty_leak.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/zadd_empty_leak-3a8c209fbe1af234)
+     Running tests/zincrby_nan_leak.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/zincrby_nan_leak-0cb6f8f23793aa16)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zremrangebyrank_bug.rs (.rch-target-hz2-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/zremrangebyrank_bug-5d5c224448ed2728)
+  [2m2026-06-20T00:08:22.537284Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 19759ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:22.537593Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:22.537607Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:24.653141Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2115ms (1 files, 12929 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:08:24.653173Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 12929 bytes in 2115ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz2 (66.2s)

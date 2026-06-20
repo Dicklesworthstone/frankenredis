@@ -1,0 +1,12 @@
+================================================================
+  data-type        fr/redis RSS    fr/redis used_memory
+  keyspace           1.367x         0.805x
+  string_1k          0.900x         0.964x
+  list               1.218x         0.391x
+  hash               1.317x         0.838x
+  set                1.400x         0.562x
+  zset               1.854x         0.620x
+  stream             0.977x         1.096x
+FAIL — 1 data-type(s) RAM-regressed vs baseline > 15.0%:
+  zset: RSS ratio 1.579 -> 1.854 (+17.4% worse)
+Current memory baseline still captured to .bench-history/memory_baseline.latest.json

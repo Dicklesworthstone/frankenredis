@@ -167,11 +167,12 @@ shipped levers), but the **per-KEY keyspace-dict overhead is the real RAM gap (1
 remaining is the keyspace-dict compaction (uhthd, in-progress, already 4.49x->1.79x). All structural;
 no recent-lever regression -> NO REVERT.
 
-**Latest uhthd boxed-key update (cod-b, 2026-06-19):** default `memory_baseline_capture.py`
-scale-200k keyspace RSS improved from **1.688x** Redis to **1.348x** Redis
-(`fr_rss` 30.3 MB -> 24.4 MB). This is a keep, but not a closeout: Redis remains lighter on
-keyspace RSS. Raw bundle:
-`artifacts/optimization/frankenredis-uhthd-boxed-keys/20260619T0557Z/`.
+**Latest uhthd status (cod-b, 2026-06-20):** boxed canonical keys remain a keep from the previous
+pass, but the follow-on inline-small `StoreKey` enum was rejected and reverted. Direct A/B regressed
+scale-200k keyspace RSS from **1.169x** Redis to **1.465x** Redis and worsened six of seven absolute
+FrankenRedis RSS cells. The rebuilt reverted control sample is **1.246x** Redis on keyspace RSS and
+**2 wins / 5 losses / 0 neutral** across memory cells, so keyspace RAM remains open. Raw bundle:
+`artifacts/optimization/frankenredis-uhthd-smallkey/20260620T0001Z/`.
 
 ## GET/SET pipeline-depth scaling (MEASURED 2026-06-19, fresh servers)
 | Workload | depth 1 | depth 16 | depth 128 |
@@ -197,8 +198,9 @@ WINS (measured vs redis 7.2.4):
 GAPS (measured, structural, each scoped — NONE a recent-lever regression -> NO REVERTS):
 1. **Large-value SET writes**: 0.12-0.42x (worsens with size) — safe-Rust zero-fill framing tax
    (read side already qesp3-optimized; residual needs MaybeUninit/unsafe or move-out-of-read_buf). GET fine.
-2. **Keyspace-dict RAM**: latest default harness 1.35x RSS (prior 300k readiness table 1.79x) —
-   uhthd in-progress; boxed canonical keys are a measured keep, but Redis is still lighter.
+2. **Keyspace-dict RAM**: latest reverted-control harness 1.25x RSS (prior boxed-key gate 1.35x,
+   prior 300k readiness table 1.79x) — uhthd in-progress; boxed canonical keys are a measured
+   keep, inline-small key wrapping is a measured rejection, and Redis is still lighter.
 3. **zset/hash RDB-decode build**: 1.62x / 1.18x — dual-structure (uybhq) / field-rebuild; next lever = zset bulk-build.
 
 SHIP GUIDANCE: for the typical Redis workload (pipelined small-value GET/SET/hash, moderate

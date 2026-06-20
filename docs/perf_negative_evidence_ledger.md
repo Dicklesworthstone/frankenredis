@@ -866,3 +866,50 @@ Retry condition: do not retry generic CRLF `memchr` scanning, byte-by-byte line-
 line scanner micro-specialization unless a fresh profile names `fr-protocol::read_line` or CRLF
 search self-time as a dominant parser cost and a low-CV current-vs-control bench shows no P128
 regression.
+
+## MEASURED cod-b uhthd inline-small StoreKey pass (2026-06-20) — REJECTED
+
+Scope: `frankenredis-uhthd`, a keyspace-RAM experiment replacing boxed key storage with an enum
+that inlined keys up to 15 bytes and heap-boxed longer keys. This was the arena/exotic-layout
+angle from the keyspace dict RAM gap: remove the small-key heap allocation for Redis-benchmark-like
+short keys without changing SCAN/RANDOMKEY behavior. Focused `fr-store` guards passed while the
+candidate was present, but release RSS head-to-head against Redis 7.2.4 regressed too many memory
+cells. The source hunk was reverted; no production code from this lever shipped.
+
+Build and proof:
+- Baseline/reverted builds:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`.
+- Memory harness: `scripts/memory_baseline_capture.py` against vendored Redis 7.2.4
+  (`legacy_redis_code/redis/src/redis-server`) and the rebuilt FrankenRedis release binary,
+  scale 200k, high non-colliding ports.
+- Correctness gates after reverting:
+  `cargo fmt --check`, `rch exec -- cargo check --workspace --all-targets`,
+  `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`, and
+  `rch exec -- cargo test -p fr-conformance -- --nocapture` all passed.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-uhthd-smallkey/20260620T0001Z/summary.json`.
+
+| memory cell | baseline fr/redis RSS | candidate fr/redis RSS | candidate fr RSS delta | reverted-control fr/redis RSS |
+|---|---:|---:|---:|---:|
+| keyspace | 1.169 | 1.465 | +2,883,584 B | 1.246 |
+| string_1k | 0.879 | 0.894 | +90,112 B | 0.893 |
+| list | 1.186 | 1.399 | +90,112 B | 1.206 |
+| hash | 1.392 | 1.410 | +208,896 B | 1.375 |
+| set | 1.075 | 1.243 | +294,912 B | 1.222 |
+| zset | 1.834 | 1.579 | -405,504 B | 1.720 |
+| stream | 0.974 | 0.977 | +585,728 B | 0.979 |
+
+Win/loss/neutral:
+- Lever absolute FrankenRedis RSS score vs same-run baseline: **1 win / 6 losses / 0 neutral**.
+  The only absolute RSS win was zset, while the target keyspace cell regressed by 25.3%
+  Redis-relative and about 2.9 MB absolute.
+- Redis-relative score after the rejected candidate: **2 wins / 5 losses / 0 neutral**; unchanged
+  count, worse target cell.
+- Reverted-control score after rebuilding from reverted source: **2 wins / 5 losses / 0 neutral**,
+  RSS geomean `1.210x`; `uhthd` remains open because keyspace RSS is still heavier than Redis.
+
+Retry condition: do not retry inline-small-key enums, tagged key wrappers, or per-entry key
+inlining in the current `HashMap<StoreKey, Entry>` shape unless a new layout proof shows the table
+entry does not grow and a fresh same-worker memory gate improves the keyspace cell. The next viable
+`uhthd` lever needs a deeper keyspace-dict representation change: lower table metadata, split
+fingerprints/keys, or a SCAN/RANDOMKEY design-level tradeoff with explicit semantics review.

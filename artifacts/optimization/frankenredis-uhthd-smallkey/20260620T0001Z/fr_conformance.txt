@@ -1,0 +1,741 @@
+  [2m2026-06-20T00:18:26.996081Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:866 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:27.189720Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for frankenredis (hash: c48d98f255166749)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:27.189782Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:30.354348Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-a...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:30.354416Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis -> /data/projects/frankenredis on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:33.614256Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3259ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:33.614328Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-bench -> /data/projects/frankenredis/crates/fr-bench on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:34.068577Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 454ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:34.068648Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-command -> /data/projects/frankenredis/crates/fr-command on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:34.600819Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 532ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:34.600896Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-config -> /data/projects/frankenredis/crates/fr-config on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:35.115695Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 514ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:35.115825Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-conformance -> /data/projects/frankenredis/crates/fr-conformance on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:35.634271Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 518ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:35.634348Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-eventloop -> /data/projects/frankenredis/crates/fr-eventloop on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:36.255776Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 621ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:36.255863Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-expire -> /data/projects/frankenredis/crates/fr-expire on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:36.748402Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 492ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:36.748485Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-persist -> /data/projects/frankenredis/crates/fr-persist on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:37.203830Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 455ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:37.203914Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-protocol -> /data/projects/frankenredis/crates/fr-protocol on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:37.700307Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 496ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:37.700405Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-repl -> /data/projects/frankenredis/crates/fr-repl on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:38.204250Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 503ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:38.204330Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-runtime -> /data/projects/frankenredis/crates/fr-runtime on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:38.773965Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 569ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:38.774048Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-sentinel -> /data/projects/frankenredis/crates/fr-sentinel on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:39.291744Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 517ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:39.291816Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-server -> /data/projects/frankenredis/crates/fr-server on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:39.871459Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 579ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:39.871547Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-store -> /data/projects/frankenredis/crates/fr-store on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:40.344268Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 472ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:40.344310Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 143822 files, 7701825 bytes in 9981ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:42.375861Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo test -p fr-conformance -- --nocapture[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:18:42.375910Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/frankenredis-cod-b -> /data/projects/frankenredis/.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded yoke-derive v0.8.2
+  Downloaded hex v0.4.3
+  Downloaded crypto-common v0.2.1
+  Downloaded itoa v1.0.18
+  Downloaded cfg-if v1.0.4
+  Downloaded cpufeatures v0.3.0
+  Downloaded utf8_iter v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded equivalent v1.0.2
+  Downloaded zmij v1.0.21
+  Downloaded writeable v0.6.3
+  Downloaded digest v0.11.2
+  Downloaded displaydoc v0.2.6
+  Downloaded foldhash v0.1.5
+  Downloaded hybrid-array v0.4.10
+  Downloaded sha2 v0.11.0
+  Downloaded litemap v0.8.2
+  Downloaded potential_utf v0.1.5
+  Downloaded zerofrom v0.1.8
+  Downloaded icu_provider v2.2.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded icu_locale v2.2.0
+  Downloaded serde_core v1.0.228
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded write16 v1.0.0
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded utf16_iter v1.0.5
+  Downloaded synstructure v0.13.2
+  Downloaded icu_properties v2.2.0
+  Downloaded zerovec-derive v0.11.3
+  Downloaded quote v1.0.45
+  Downloaded zerotrie v0.2.4
+  Downloaded icu_collections v2.2.0
+  Downloaded yoke v0.8.3
+  Downloaded tinystr v0.8.3
+  Downloaded smallvec v1.15.2
+  Downloaded unicode-ident v1.0.24
+  Downloaded indexmap v2.14.0
+  Downloaded serde_derive v1.0.228
+  Downloaded typenum v1.20.0
+  Downloaded memchr v2.8.0
+  Downloaded serde v1.0.228
+  Downloaded icu_locale_data v2.2.0
+  Downloaded hashbrown v0.17.0
+  Downloaded zerovec v0.11.6
+  Downloaded icu_properties_data v2.2.0
+  Downloaded serde_json v1.0.149
+  Downloaded syn v2.0.117
+  Downloaded icu_collator_data v2.2.0
+  Downloaded libc v0.2.185
+  Downloaded icu_normalizer v2.2.0
+  Downloaded icu_locale_core v2.2.0
+  Downloaded icu_collator v2.2.0
+  Downloaded const-oid v0.10.2
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling stable_deref_trait v1.2.1
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling typenum v1.20.0
+   Compiling utf8_iter v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+   Compiling icu_locale_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_collator_data v2.2.0
+   Compiling libc v0.2.185
+   Compiling utf16_iter v1.0.5
+   Compiling equivalent v1.0.2
+   Compiling const-oid v0.10.2
+   Compiling smallvec v1.15.2
+   Compiling hashbrown v0.17.0
+   Compiling write16 v1.0.0
+   Compiling cfg-if v1.0.4
+   Compiling foldhash v0.1.5
+   Compiling cpufeatures v0.3.0
+   Compiling serde v1.0.228
+   Compiling hex v0.4.3
+   Compiling indexmap v2.14.0
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling synstructure v0.13.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_locale v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_collator v2.2.0
+   Compiling fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+   Compiling fr-conformance v0.1.0 (/data/projects/frankenredis/crates/fr-conformance)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.29s
+     Running unittests src/lib.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/fr_conformance-309aeff1b593b173)
+
+running 194 tests
+test log_contract::tests::golden_live_log_events_validate_for_every_fixture ... ok
+test log_contract::tests::live_log_output_path_is_deterministic ... ok
+test log_contract::tests::live_oracle_replay_templates_are_deterministic ... ok
+test log_contract::tests::golden_packet_logs_validate_for_every_packet_family ... ok
+test log_contract::tests::replay_templates_are_deterministic ... ok
+test log_contract::tests::unknown_packet_family_is_rejected ... ok
+test log_contract::tests::runtime_evidence_conversion_emits_valid_structured_log_event ... ok
+test log_contract::tests::runtime_evidence_conversion_rejects_empty_artifact_refs ... ok
+test phase2c_schema::tests::all_required_packet_files_have_presence_bits ... ok
+test phase2c_schema::tests::optimization_gate_missing_root_is_not_ready ... ok
+test log_contract::tests::append_structured_log_jsonl_appends_lines ... ok
+test phase2c_schema::tests::discovers_phase2c_packet_dirs ... ok
+test phase2c_schema::tests::missing_mandatory_field_marks_packet_not_ready ... ok
+test phase2c_schema::tests::valid_packet_is_ready_for_impl ... ok
+test tests::blocking_multi_client_fixture_loads_with_send_only_and_read_pending ... ok
+test phase2c_schema::tests::packet_validation_parallel_path_is_deterministic ... ok
+test phase2c_schema::tests::optimization_gate_validates_canonical_round_artifacts ... ok
+test phase2c_schema::tests::tree_validation_includes_all_packets ... ok
+test tests::conformance_core_cluster ... ok
+test tests::conformance_core_copy ... ok
+test tests::conformance_core_client ... ok
+test tests::conformance_core_bitmap ... ok
+test tests::conformance_core_hash ... ok
+test tests::conformance_core_expiry ... ok
+test tests::conformance_core_function ... ok
+test tests::conformance_core_geo ... ok
+test tests::conformance_core_blocking ... ok
+test tests::conformance_core_migrate ... ok
+test tests::conformance_core_module_sentinel ... ok
+test tests::conformance_core_list ... ok
+test tests::conformance_core_object ... ok
+test tests::conformance_core_replication ... ok
+test tests::conformance_core_pubsub ... ok
+test tests::conformance_core_debug ... ok
+test tests::conformance_core_generic ... ok
+test tests::conformance_core_wait ... ok
+test tests::conformance_core_config ... ok
+test tests::conformance_core_scan ... ok
+test tests::conformance_protocol_fixture_exposes_expected_hardened_threat_drift ... ok
+test tests::conformance_core_sort ... ok
+test tests::conformance_core_set ... ok
+test tests::conformance_errors_fixture_passes ... ok
+test tests::conformance_errors_fixture_passes_in_hardened_mode ... ok
+test tests::conformance_core_transaction ... ok
+test tests::differential_report_summarizes_reason_codes_deterministically ... ok
+test tests::expected_frame_array_kind_deserializes_and_maps_to_resp_array ... ok
+test tests::expected_frame_null_array_kind_deserializes_and_maps_to_resp_null_array ... ok
+test tests::expected_frame_bulk_not_contains_all_rejects_forbidden_substrings ... ok
+test tests::expected_frame_bulk_contains_all_matches_bulk_payload_substrings ... ok
+test tests::expected_frame_simple_contains_all_matches_simple_payload_substrings ... ok
+test tests::fr_p2c_001_f_adversarial_reason_codes_are_stable ... ok
+test tests::fr_p2c_001_f_differential_fixture_passes ... ok
+test tests::fr_p2c_001_f_metamorphic_repeated_fixture_runs_are_deterministic ... ok
+test tests::conformance_protocol_fixture_passes ... ok
+test tests::fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code ... ok
+test tests::fr_p2c_001_fixture_maps_to_packet_family_in_structured_logs ... ok
+test tests::fr_p2c_003_f_adversarial_error_families_are_stable ... ok
+test tests::fr_p2c_003_f_differential_dispatch_fixture_passes ... ok
+test tests::fr_p2c_003_fixture_maps_to_packet_family_in_structured_logs ... ok
+test tests::fr_p2c_003_f_metamorphic_repeated_fixture_runs_are_deterministic ... ok
+test tests::fr_p2c_002_f_differential_protocol_fixture_passes ... ok
+test tests::fr_p2c_004_f_adversarial_auth_reason_codes_are_stable ... ok
+test tests::fr_p2c_001_workflow_hook_is_active_in_live_oracle_matrix ... ok
+test tests::core_replication_live_oracle_suite_is_active_in_matrix ... ok
+test tests::fr_p2c_002_f_metamorphic_protocol_fixture_runs_are_deterministic ... ok
+test tests::conformance_replay_fixture_passes ... ok
+test tests::conformance_replay_fixture_passes_in_hardened_mode ... ok
+test tests::conformance_fixture_core_passes ... ok
+test tests::fr_p2c_004_fixture_packet_family_maps_to_packet_004 ... ok
+test tests::fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs ... ok
+test tests::fr_p2c_004_u006_property_acl_deny_index_is_monotonic ... ok
+test tests::fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs ... ok
+test tests::fr_p2c_004_f_differential_auth_mode_split_contract_is_stable ... ok
+test tests::fr_p2c_004_f_metamorphic_auth_entrypoints_converge_to_same_session_state ... ok
+test tests::fr_p2c_004_f_metamorphic_shadowed_hello_options_preserve_effective_state ... ok
+test tests::fr_p2c_004_u_acl_requires_auth_after_setuser_with_password ... ok
+test tests::fr_p2c_004_u_acl_setuser_deluser_lifecycle ... ok
+test tests::fr_p2c_004_u_acl_whoami_strict_vs_hardened_mode_split ... ok
+test tests::fr_p2c_004_u010_config_requirepass_bridge_mode_split_is_stable ... ok
+test tests::fr_p2c_005_e003_roundtrip_preserves_aof_record_order_and_payloads ... ok
+test tests::fr_p2c_005_e004_metamorphic_appending_records_preserves_prefix ... ok
+test tests::fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable ... ok
+test tests::fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable ... ok
+test tests::fr_p2c_005_fixture_packet_family_maps_to_packet_005 ... ok
+test tests::fr_p2c_005_fixture_maps_to_packet_family_in_structured_logs ... ok
+test tests::fr_p2c_006_f_handshake_contract_vectors_are_enforced ... ok
+test tests::fr_p2c_006_f_differential_fixture_passes ... ok
+test tests::conformance_core_connection ... ok
+test tests::conformance_core_stream ... ok
+test tests::fr_p2c_006_f_handshake_fixture_runs_are_deterministic ... ok
+test tests::fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks ... ok
+test tests::fr_p2c_006_f_wait_metamorphic_ack_monotonicity_holds ... ok
+test tests::fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold ... ok
+test tests::fr_p2c_006_fixture_packet_family_maps_to_packet_006 ... ok
+test tests::fr_p2c_007_fixture_packet_family_maps_to_packet_007 ... ok
+test tests::conformance_core_hyperloglog ... ok
+test tests::fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable ... ok
+test tests::fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles ... ok
+test tests::fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable ... ok
+test tests::fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs ... ok
+test tests::fr_p2c_006_workflow_hook_is_active_in_live_oracle_matrix ... ok
+test tests::fr_p2c_007_u007_client_mode_flags_transition_and_logs ... ok
+test tests::fr_p2c_008_f_adversarial_expire_reason_codes_are_stable ... ok
+test tests::fr_p2c_008_fixture_packet_family_maps_to_packet_008 ... ok
+test tests::fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic ... ok
+test tests::fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs ... ok
+test tests::fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs ... ok
+test tests::fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds ... ok
+test tests::fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable ... ok
+test tests::fr_p2c_008_f_differential_fixture_passes ... ok
+test tests::fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths ... ok
+test tests::fr_p2c_009_e011_runtime_rejects_invalid_tls_operational_knob ... ok
+test tests::fr_p2c_009_e013_strict_runtime_tls_rejection_matches_expected_threat_contract ... ok
+test tests::fr_p2c_004_f_differential_core_acl_fixture_passes ... ok
+test tests::fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract ... ok
+test tests::fr_p2c_008_u009b_keys_glob_class_edge_semantics_are_stable ... ok
+test tests::fr_p2c_008_u009d_malformed_glob_classes_do_not_fallback_to_literal_brackets ... ok
+test tests::fr_p2c_008_u009c_keys_glob_baseline_patterns_are_stable ... ok
+test tests::fr_p2c_009_f_adversarial_tls_reason_codes_are_stable ... ok
+test tests::fr_p2c_009_fixture_packet_family_maps_to_packet_009 ... ok
+test tests::fr_p2c_009_f_differential_mode_split_contract_is_stable ... ok
+test tests::fr_p2c_009_f_metamorphic_non_allowlisted_rejection_is_deterministic ... ok
+test tests::live_oracle_dedicated_connection_classifier_matches_replication_handshakes ... ok
+test tests::live_oracle_no_reply_classifier_matches_internal_replconf_frames ... ok
+test tests::fr_p2c_005_e001_replay_fixture_passes_with_schema_contract ... ok
+test tests::fr_p2c_005_f_differential_replay_fixture_passes ... ok
+test tests::conformance_core_zset ... ok
+test tests::fr_p2c_005_e002_replay_fixture_runs_are_deterministic ... ok
+test tests::fr_p2c_005_f_metamorphic_noop_records_preserve_outcomes ... ok
+test tests::conformance_core_scripting ... ok
+test tests::live_redis_container_dump_restore_roundtrip_matches_upstream ... ok
+test tests::live_redis_bitpos_bit_modifier_matches_upstream ... ok
+test tests::live_oracle_audit_requires_matrix_coverage_or_exemptions_for_fixture_and_workflow_gaps ... ok
+[live-oracle:core_expiry_stable_subset] total=86 passed=86 failed=0
+test tests::live_redis_core_expiry_matches_runtime ... ok
+test tests::conformance_core_pfdebug ... ok
+[live-oracle:core_errors] total=144 passed=144 failed=0
+test tests::live_redis_core_errors_matches_runtime ... ok
+test tests::live_redis_aof_reemit_loadrdb_matches_upstream ... ok
+[live-oracle:core_migrate] total=51 passed=51 failed=0
+test tests::live_redis_core_migrate_matches_runtime ... ok
+[live-oracle:core_cluster] total=82 passed=82 failed=0
+test tests::live_redis_core_cluster_matches_runtime ... ok
+[live-oracle:core_config] total=166 passed=165 failed=1
+[live-oracle:core_config] 1 mismatches (not asserting — opt in via FR_CONFORMANCE_LIVE_ORACLE_STRICT=1): [CaseOutcome { name: "config_get_save", passed: false, expected: Array(Some([BulkString(Some([115, 97, 118, 101])), BulkString(Some([]))])), actual: Array(Some([BulkString(Some([115, 97, 118, 101])), BulkString(Some([51, 54, 48, 48, 32, 49, 32, 51, 48, 48, 32, 49, 48, 48, 32, 54, 48, 32, 49, 48, 48, 48, 48]))])), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }]
+test tests::live_redis_core_config_matches_runtime ... ok
+[live-oracle:core_module_sentinel] total=61 passed=61 failed=0
+test tests::live_redis_core_module_sentinel_matches_runtime ... ok
+[live-oracle:core_persistence] total=5 passed=5 failed=0
+test tests::live_redis_core_persistence_matches_runtime ... ok
+[live-oracle:core_function] total=87 passed=86 failed=1
+[live-oracle:core_function] 1 mismatches (not asserting — opt in via FR_CONFORMANCE_LIVE_ORACLE_STRICT=1): [CaseOutcome { name: "function_list_libraryname_filter_match", passed: false, expected: Array(Some([Array(Some([BulkString(Some([108, 105, 98, 114, 97, 114, 121, 95, 110, 97, 109, 101])), BulkString(Some([109, 117, 108, 116, 105, 108, 105, 98])), BulkString(Some([101, 110, 103, 105, 110, 101])), BulkString(Some([76, 85, 65])), BulkString(Some([102, 117, 110, 99, 116, 105, 111, 110, 115])), Array(Some([Array(Some([BulkString(Some([110, 97, 109, 101])), BulkString(Some([102, 117, 110, 99, 95, 97])), BulkString(Some([100, 101, 115, 99, 114, 105, 112, 116, 105, 111, 110])), BulkString(None), BulkString(Some([102, 108, 97, 103, 115])), Array(Some([]))])), Array(Some([BulkString(Some([110, 97, 109, 101])), BulkString(Some([102, 117, 110, 99, 95, 98])), BulkString(Some([100, 101, 115, 99, 114, 105, 112, 116, 105, 111, 110])), BulkString(None), BulkString(Some([102, 108, 97, 103, 115])), Array(Some([]))]))]))]))])), actual: Array(Some([Array(Some([BulkString(Some([108, 105, 98, 114, 97, 114, 121, 95, 110, 97, 109, 101])), BulkString(Some([109, 117, 108, 116, 105, 108, 105, 98])), BulkString(Some([101, 110, 103, 105, 110, 101])), BulkString(Some([76, 85, 65])), BulkString(Some([102, 117, 110, 99, 116, 105, 111, 110, 115])), Array(Some([Array(Some([BulkString(Some([110, 97, 109, 101])), BulkString(Some([102, 117, 110, 99, 95, 98])), BulkString(Some([100, 101, 115, 99, 114, 105, 112, 116, 105, 111, 110])), BulkString(None), BulkString(Some([102, 108, 97, 103, 115])), Array(Some([]))])), Array(Some([BulkString(Some([110, 97, 109, 101])), BulkString(Some([102, 117, 110, 99, 95, 97])), BulkString(Some([100, 101, 115, 99, 114, 105, 112, 116, 105, 111, 110])), BulkString(None), BulkString(Some([102, 108, 97, 103, 115])), Array(Some([]))]))]))]))])), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }]
+test tests::live_redis_core_function_matches_runtime ... ok
+[live-oracle:core_hyperloglog] total=118 passed=118 failed=0
+test tests::live_redis_core_hyperloglog_matches_runtime ... ok
+[live-oracle:core_pubsub] total=78 passed=78 failed=0
+test tests::live_redis_core_pubsub_matches_runtime ... ok
+[live-oracle:core_acl] total=130 passed=130 failed=0
+test tests::live_redis_core_acl_matches_runtime ... ok
+[live-oracle:core_scripting] total=272 passed=272 failed=0
+test tests::live_redis_core_scripting_matches_runtime ... ok
+[live-oracle:core_geo] total=101 passed=101 failed=0
+test tests::live_redis_core_geo_matches_runtime ... ok
+[live-oracle:core_bitmap] total=110 passed=110 failed=0
+test tests::live_redis_core_bitmap_matches_runtime ... ok
+[live-oracle:core_connection] total=41 passed=41 failed=0
+test tests::live_redis_core_connection_matches_runtime ... ok
+[live-oracle:core_pfdebug] total=50 passed=50 failed=0
+test tests::live_redis_core_pfdebug_matches_runtime ... ok
+[live-oracle:core_scan] total=107 passed=107 failed=0
+test tests::live_redis_core_scan_matches_runtime ... ok
+[live-oracle:core_sort] total=88 passed=88 failed=0
+test tests::live_redis_core_sort_matches_runtime ... ok
+test tests::live_redis_function_dump_restore_roundtrip_matches_upstream ... ok
+test tests::conformance_core_server ... ok
+test tests::live_redis_core_transaction_matches_runtime ... ok
+test tests::live_redis_core_debug_matches_runtime ... ok
+test tests::live_redis_info_persistence_aof_rewrite_counters_match_runtime ... ok
+test tests::live_redis_rdb_lzf_save_loads_under_upstream ... ok
+test tests::live_redis_rdb_corpus_decodes_cleanly ... ok
+test tests::live_redis_stream_dump_restore_roundtrip_matches_upstream ... ok
+test tests::live_redis_rdb_reemit_loadrdb_matches_upstream ... ok
+[live-oracle:core_transaction] total=192 passed=192 failed=0
+[live-oracle:core_debug] total=57 passed=57 failed=0
+test tests::live_redis_string_dump_restore_roundtrip_matches_upstream ... ok
+test tests::live_redis_xautoclaim_matches_upstream ... ok
+test tests::multi_client_fixture_format_loads_correctly ... ok
+test tests::run_fixture_accepts_structured_log_persistence_toggle ... ok
+test tests::run_protocol_fixture_persists_mode_selected_by_harness_config ... ok
+test tests::run_protocol_fixture_persists_structured_logs_when_enabled ... ok
+test tests::run_replay_fixture_allows_structured_log_persistence_toggle ... ok
+test tests::runtime_for_harness_config_selects_mode ... ok
+test tests::smoke_harness_finds_oracle_and_fixtures ... ok
+test tests::structured_log_enforcement_accepts_valid_runtime_event ... ok
+test tests::structured_log_enforcement_persists_when_path_is_provided ... ok
+test tests::structured_log_enforcement_rejects_invalid_runtime_event ... ok
+test tests::threat_expectation_accepts_matching_event ... ok
+test tests::threat_expectation_allows_omitted_optional_fields ... ok
+test tests::threat_expectation_matches_any_event_in_batch ... ok
+test tests::threat_expectation_rejects_severity_mismatch ... ok
+test tests::threat_expectation_rejects_unexpected_event ... ok
+test tests::live_redis_zset_algebra_option_parser_matches_upstream ... ok
+test tests::live_redis_xtrim_limit_clause_matches_upstream ... ok
+[live-oracle:core_hash] total=137 passed=137 failed=0
+test tests::live_redis_core_hash_matches_runtime ... ok
+[live-oracle:core_set] total=164 passed=164 failed=0
+test tests::live_redis_core_set_matches_runtime ... ok
+[live-oracle:fr_p2c_006_replication_journey] transport error: wait_reports_zero_without_replica_acks: redis did not reply before timeout
+test tests::live_redis_fr_p2c_006_replication_journey_matches_runtime ... ok
+[live-oracle:protocol_negative] transport error: redis did not reply before timeout
+test tests::live_redis_protocol_negative_matches_runtime ... ok
+[live-oracle:core_client] total=124 passed=124 failed=0
+test tests::live_redis_core_client_matches_runtime ... ok
+[live-oracle:core_strings] total=294 passed=294 failed=0
+test tests::live_redis_core_strings_matches_runtime ... ok
+[live-oracle:core_zset] total=324 passed=324 failed=0
+test tests::live_redis_core_zset_matches_runtime ... ok
+[live-oracle:core_list] total=206 passed=206 failed=0
+test tests::live_redis_core_list_matches_runtime ... ok
+[live-oracle:core_generic] total=232 passed=232 failed=0
+test tests::live_redis_core_generic_matches_runtime ... ok
+[live-oracle:core_replication] total=38 passed=30 failed=8
+test tests::live_redis_core_replication_stable_matches_runtime ... ok
+[live-oracle:core_replication] 8 mismatches (not asserting — opt in via FR_CONFORMANCE_LIVE_ORACLE_STRICT=1): [CaseOutcome { name: "psync_returns_fullresync", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 0"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "psync_with_replid_returns_fullresync", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 0"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "psync_with_full_replid", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 14"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "psync_with_zero_offset", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 14"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "psync_case_insensitive", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 28"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "psync_wrong_arity_too_many", passed: false, expected: SimpleString("FULLRESYNC 585f895502d7f5385bb2518c78c9587fb40088b4 28"), actual: SimpleString("FULLRESYNC 8d00c9f47c4c636981ed5d11c6db907689e5f732 0"), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "role_returns_master", passed: false, expected: Array(Some([BulkString(Some([109, 97, 115, 116, 101, 114])), Integer(42), Array(Some([]))])), actual: Array(Some([BulkString(Some([109, 97, 115, 116, 101, 114])), Integer(0), Array(Some([]))])), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }, CaseOutcome { name: "role_case_insensitive", passed: false, expected: Array(Some([BulkString(Some([109, 97, 115, 116, 101, 114])), Integer(42), Array(Some([]))])), actual: Array(Some([BulkString(Some([109, 97, 115, 116, 101, 114])), Integer(0), Array(Some([]))])), detail: Some("frame mismatch"), reason_code: None, replay_cmd: None, artifact_refs: [] }]
+test tests::live_redis_core_copy_matches_runtime has been running for over 60 seconds
+test tests::live_redis_core_object_matches_runtime has been running for over 60 seconds
+test tests::live_redis_core_stream_matches_runtime has been running for over 60 seconds
+[live-oracle:core_stream] total=217 passed=217 failed=0
+test tests::live_redis_core_stream_matches_runtime ... ok
+[live-oracle:core_object] total=116 passed=116 failed=0
+test tests::live_redis_core_object_matches_runtime ... ok
+[live-oracle:core_copy] total=102 passed=102 failed=0
+test tests::live_redis_core_copy_matches_runtime ... ok
+
+test result: ok. 194 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 200.17s
+
+     Running unittests src/bin/adversarial_triage.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/adversarial_triage-b126bdc873289bde)
+
+running 8 tests
+test tests::case_outcome_debug_compatibility ... ok
+test tests::classify_text_dispatch_reason_code_prefix_routes_to_dispatch_bead ... ok
+test tests::classify_text_dispatch_validation ... ok
+test tests::classify_text_eventloop_contract ... ok
+test tests::classify_text_parser_abuse ... ok
+test tests::classify_text_replication_state ... ok
+test tests::classify_text_unknown_subcommand_routes_to_dispatch_bead ... ok
+test tests::parse_args_supports_overrides ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/adversarial_triage_orchestrator.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/adversarial_triage_orchestrator-2a11710ff4a1dce3)
+
+running 3 tests
+test tests::parse_args_rejects_unknown_flag ... ok
+test tests::command_tokens_wrap_with_rch_when_requested ... ok
+test tests::parse_args_accepts_explicit_runner ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test tests::parse_args_accepts_round_flag ... ok
+test tests::parse_round_rejects_invalid_value ... ok
+test tests::shell_escape_quotes_special_tokens ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+     Running unittests src/bin/conformance_benchmark_runner.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/conformance_benchmark_runner-ff2e51ec375f8267)
+     Running unittests src/bin/emit_log_contract_goldens.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/emit_log_contract_goldens-0ef222d82ac98b7b)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test tests::evaluate_budget_deduplicates_quarantine_candidates ... ok
+test tests::evaluate_budget_detects_packet_floor_violation ... ok
+test tests::evaluate_budget_passes_when_thresholds_hold ... ok
+test tests::parse_packet_coverage_floors_requires_object ... ok
+test tests::write_quarantine_candidates_clears_stale_entries_on_clean_run ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test tests::command_tokens_wrap_with_rch_when_requested ... ok
+     Running unittests src/bin/live_oracle_budget_gate.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/live_oracle_budget_gate-6f39513822239f5e)
+     Running unittests src/bin/live_oracle_budget_orchestrator.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/live_oracle_budget_orchestrator-c6f725bda0984699)
+test tests::parse_args_accepts_runner_and_single_positional ... ok
+test tests::parse_args_rejects_wrong_arity ... ok
+test tests::rch_executable_uses_real_home_path_when_available ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test tests::packet_id_mapping_matches_contract ... ok
+test tests::dedup_sorted_is_stable ... ok
+test tests::primary_reason_codes_sort_by_count_then_key ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/live_oracle_bundle_summarizer.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/live_oracle_bundle_summarizer-62c0dc7f6b272d8d)
+     Running unittests src/bin/live_oracle_diff.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/live_oracle_diff-0c2dc32dda4ab5e4)
+
+running 5 tests
+test tests::case_filter_is_command_mode_only ... ok
+test tests::json_failure_carries_replay_and_artifact_metadata ... ok
+test tests::parse_args_rejects_case_without_name ... ok
+test tests::parse_args_defaults_host_and_port ... ok
+test tests::parse_args_supports_optional_flags ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+test tests::run_fingerprint_is_stable ... ok
+test tests::shell_escape_quotes_spaces_and_single_quotes ... ok
+test tests::suite_command_tokens_forward_matrix_case_filters ... ok
+test tests::matrix_case_names_are_deserialized_for_filtered_suites ... ok
+test tests::baseline_matrix_matches_legacy_suite_order ... ok
+test tests::parity_matrix_is_a_strict_superset_of_baseline ... ok
+test tests::parse_args_positional_override_matches_script_contract ... ok
+test tests::parse_args_supports_flags_and_positionals ... ok
+     Running unittests src/bin/live_oracle_orchestrator.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/live_oracle_orchestrator-71b22cdfc790c8c4)
+test tests::parse_args_supports_matrix_manifest_and_suite_filters ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/phase2c_schema_gate.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/phase2c_schema_gate-987bebd91f3ef83e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/raptorq_artifact_gate.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/raptorq_artifact_gate-8fbeb84237fe7ad3)
+
+running 2 tests
+test tests::artifact_id_is_compatible_with_script_transform ... ok
+test tests::phase2c_target_filter_matches_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/raptorq_artifact_orchestrator.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/raptorq_artifact_orchestrator-802cf6f25725050f)
+
+running 3 tests
+test tests::command_tokens_wrap_with_rch ... ok
+test tests::parse_args_accepts_runner_override ... ok
+test tests::parse_args_treats_unknown_flags_as_forwarded ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test tests::parse_args_accepts_manifest_and_json_out ... ok
+test tests::default_corpus_validates_without_violations ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test golden_logs_exist_and_validate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test live_path_builder_is_stable ... ok
+test append_jsonl_creates_and_appends_lines ... ok
+test live_goldens_exist_and_match_expected_payloads ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test wrappers_delegate_to_expected_binaries ... ok
+test wrappers_do_not_embed_legacy_orchestration_logic ... ok
+test benchmark_scripts_and_checked_in_baselines_stay_in_sync ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 99 tests
+test core_cluster_conformance ... ok
+test core_client_conformance ... ok
+test core_bitmap_conformance ... ok
+test core_blocking_conformance ... ok
+test core_acl_conformance ... ok
+test core_command_edges_conformance ... ok
+     Running unittests src/bin/user_journey_corpus_gate.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/user_journey_corpus_gate-608850744e053159)
+     Running tests/log_contract_goldens.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/log_contract_goldens-c5b252f3b90e09b2)
+     Running tests/log_contract_live.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/log_contract_live-e19fa3bbecc6a86b)
+     Running tests/script_wrapper_contract.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/script_wrapper_contract-2f1ff2861e363e26)
+     Running tests/smoke.rs (.rch-target-ovh-a-pool-f5b5d1781f31790509fdf7a789f9cce6/debug/deps/smoke-fe59d53a00922335)
+test core_config_conformance ... ok
+test core_acl_log_failed_auth_surface_live_redis_matches_runtime ... ok
+test core_client_setinfo_live_redis_matches_runtime ... ok
+test core_blocking_multi_client_live_redis_matches_runtime ... ok
+test core_client_unblock_live_redis_matches_runtime ... ok
+test core_config_rewrite_live_redis_matches_runtime ... ok
+test core_copy_conformance ... ok
+test core_connection_conformance ... ok
+test core_debug_conformance ... ok
+test core_errors_conformance ... ok
+test core_connection_hello_live_redis_matches_runtime ... ok
+test core_expiry_conformance ... ok
+test core_client_pause_live_redis_matches_runtime ... ok
+test core_function_conformance ... ok
+test core_errors_live_redis_matches_runtime ... ok
+test core_expiry_live_redis_matches_runtime ... ok
+test core_function_dump_restore_roundtrip_live_redis_matches_runtime ... ok
+test core_generic_conformance ... ok
+test core_geo_conformance ... ok
+test core_acl_live_redis_matches_runtime ... ok
+test core_hash_conformance ... ok
+test core_copy_live_redis_matches_runtime ... ok
+test core_hyperloglog_conformance ... ok
+test core_connection_cluster_mode_live_redis_matches_runtime ... ok
+test core_list_conformance ... ok
+test core_config_live_redis_matches_runtime ... ok
+test core_migrate_conformance ... ok
+test core_client_live_redis_matches_runtime ... ok
+test core_module_sentinel_conformance ... ok
+test core_migrate_live_redis_matches_runtime ... ok
+test core_object_conformance ... ok
+test core_function_live_redis_matches_runtime ... ok
+test core_module_sentinel_live_redis_matches_runtime ... ok
+test core_pfdebug_conformance ... ok
+test core_pubsub_conformance ... ok
+test core_list_live_redis_matches_runtime ... ok
+test core_pubsub_multi_client_live_redis_matches_runtime ... ok
+test core_replication_conformance ... ok
+test core_pubsub_live_redis_matches_runtime ... ok
+test core_scan_conformance ... ok
+test core_connection_live_redis_matches_runtime ... ok
+test core_scripting_conformance ... ok
+test core_pfdebug_live_redis_matches_runtime ... ok
+test core_server_command_info_live_redis_matches_runtime ... ok
+test core_server_command_list_filterby_module_live_redis_matches_runtime ... ok
+test core_scripting_live_redis_matches_runtime ... ok
+test core_scan_live_redis_matches_runtime ... ok
+test core_server_config_rewrite_live_redis_matches_runtime ... ok
+test core_cluster_disabled_surface_live_redis_matches_runtime ... ok
+test core_server_move_same_db_live_redis_matches_runtime ... ok
+test core_set_conformance ... ok
+test core_hyperloglog_live_redis_matches_runtime ... ok
+test core_sort_conformance ... ok
+test core_client_no_touch_object_idletime_live_redis_matches_runtime ... ok
+test core_stream_conformance ... ok
+test core_sort_live_redis_matches_runtime ... ok
+test core_strings_conformance ... ok
+test core_server_conformance ... ok
+test core_transaction_conformance ... ok
+test core_debug_live_redis_matches_runtime ... ok
+test core_wait_conformance ... ok
+test core_client_tracking_live_redis_matches_runtime ... ok
+test core_zset_conformance ... ok
+test core_wait_live_redis_matches_runtime ... ok
+test fr_p2c_001_e2e_contract_smoke ... ok
+test fr_p2c_002_e2e_contract_smoke ... ok
+test fr_p2c_003_e2e_contract_smoke ... ok
+test fr_p2c_004_e2e_contract_smoke ... ok
+test fr_p2c_005_e2e_contract_smoke ... ok
+test fr_p2c_006_e2e_contract_smoke ... ok
+test fr_p2c_006_replication_handshake_e2e_contract_smoke ... ok
+test fr_p2c_007_cluster_disabled_surface_live_redis_matches_runtime ... ok
+test fr_p2c_007_e2e_contract_smoke ... ok
+test fr_p2c_008_e2e_contract_smoke ... ok
+test fr_p2c_009_e2e_contract_smoke ... ok
+test redis_config_argument_splitter_conformance_matrix ... ok
+test redis_config_file_parser_conformance_matrix ... ok
+test smoke_report_is_stable ... ok
+test core_transaction_live_redis_matches_runtime ... ok
+test core_geo_live_redis_matches_runtime ... ok
+test core_hash_live_redis_matches_runtime ... ok
+test core_command_edges_live_redis_matches_runtime ... ok
+test core_bitmap_live_redis_matches_runtime ... ok
+test core_set_live_redis_matches_runtime ... ok
+test core_generic_live_redis_matches_runtime ... ok
+test core_client_reply_live_redis_matches_runtime ... ok
+test core_zset_live_redis_matches_runtime ... ok
+test core_strings_live_redis_matches_runtime ... ok
+test core_replication_live_redis_matches_runtime ... ok
+test core_object_live_redis_matches_runtime has been running for over 60 seconds
+test core_server_info_live_redis_matches_runtime has been running for over 60 seconds
+test core_server_live_redis_matches_runtime has been running for over 60 seconds
+test core_stream_live_redis_matches_runtime has been running for over 60 seconds
+test core_stream_live_redis_matches_runtime ... ok
+test core_server_live_redis_matches_runtime ... ok
+test core_object_live_redis_matches_runtime ... ok
+test core_server_info_live_redis_matches_runtime ... ok
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 126.18s
+
+   Doc-tests fr_conformance
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  [2m2026-06-20T00:24:20.826560Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 338450ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:24:20.826825Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:24:20.826847Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:24:21.318245Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 491ms (1 files, 12929 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T00:24:21.318276Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 12929 bytes in 491ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-a (354.3s)

@@ -110,20 +110,48 @@ _Note: a point-in-time artifact sweep, not the ratcheted .bench-history baseline
 - Types rated: **7**
 - fr wins (<=1.0x RSS): **2/7**
 - RSS geomean: **1.210x**
+- Latest sample: reverted control after rejecting `frankenredis-uhthd` inline-small `StoreKey`
+  (`artifacts/optimization/frankenredis-uhthd-smallkey/20260620T0001Z/summary.json`).
 
 | data-type | fr/redis RSS | fr/redis used_memory | verdict |
 |---|---|---|---|
-| hash | 1.239 | 0.838 | loss |
-| keyspace | 1.348 | 0.805 | loss |
-| list | 1.169 | 0.391 | loss |
-| set | 1.184 | 0.562 | loss |
-| stream | 0.978 | 1.096 | WIN |
-| string_1k | 0.892 | 0.964 | WIN |
-| zset | 1.883 | 0.620 | loss |
+| hash | 1.375 | 0.838 | loss |
+| keyspace | 1.246 | 0.805 | loss |
+| list | 1.206 | 0.391 | loss |
+| set | 1.222 | 0.562 | loss |
+| stream | 0.979 | 1.096 | WIN |
+| string_1k | 0.893 | 0.964 | WIN |
+| zset | 1.720 | 0.620 | loss |
 
-**RAM gaps (fr heavier):** zset=1.88x, keyspace=1.35x, hash=1.24x, set=1.18x, list=1.17x.
-The zset ratio worsened in the latest run because Redis RSS fell more than fr; fr absolute RSS
-improved by 73,728 B in that cell.
+**RAM gaps (fr heavier):** zset=1.72x, hash=1.38x, keyspace=1.25x, set=1.22x, list=1.21x.
+The latest `uhthd` inline-small-key layout did not ship: it regressed keyspace RSS from 1.169x
+to 1.465x in the direct A/B and worsened six of seven absolute FrankenRedis RSS cells.
+
+## Targeted Gauntlet: frankenredis-uhthd Inline-Small StoreKey
+
+- Commit candidate: none kept. The candidate changed `StoreKey` from `Box<[u8]>` to an enum that
+  inlined keys up to 15 bytes and heap-boxed longer keys; the production hunk was reverted.
+- Build/bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+  `rch exec -- cargo build --release -p fr-server -p fr-bench`, followed by
+  `scripts/memory_baseline_capture.py` against vendored Redis 7.2.4.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-uhthd-smallkey/20260620T0001Z/summary.json`.
+- Validation after revert: `cargo fmt --check`, workspace `cargo check`, workspace `cargo clippy
+  -- -D warnings`, and `cargo test -p fr-conformance -- --nocapture` passed.
+
+| memory cell | baseline fr/redis RSS | candidate fr/redis RSS | candidate absolute fr RSS delta | verdict |
+|---|---:|---:|---:|---|
+| keyspace | 1.169 | 1.465 | +2,883,584 B | rejected target regression |
+| string_1k | 0.879 | 0.894 | +90,112 B | worse |
+| list | 1.186 | 1.399 | +90,112 B | worse |
+| hash | 1.392 | 1.410 | +208,896 B | worse |
+| set | 1.075 | 1.243 | +294,912 B | worse |
+| zset | 1.834 | 1.579 | -405,504 B | lone win |
+| stream | 0.974 | 0.977 | +585,728 B | worse |
+
+Lever score: **1/6/0** absolute FrankenRedis RSS win/loss/neutral. Redis-relative memory score
+after reverting remains **2/5/0** vs Redis 7.2.4; `uhthd` is still open, but this key-inlining
+shape is negative evidence.
 
 ## Targeted Gauntlet: frankenredis-upx5x EXISTS Encoded Reply
 
