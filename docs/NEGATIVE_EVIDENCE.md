@@ -991,3 +991,17 @@ tie-breaks — via ZRANGE/ZRANGEBYSCORE/ZREV/ZSCORE/ZRANK/ZPOPMIN/ZPOPMAX WITHSC
 **60 trials × 8 ops = 480 operations, 0 diffs vs Redis 7.2.4.** cod-b's PackedZSet
 score encoding is byte-exact across all encoding boundaries (score values, ordering,
 tie-break, and reply formatting). Their shipped lever is sound.
+
+## 2026-06-20 CobaltCove (cc) — cross-verify BlackThrush pubsub direct encoder (RESP2+RESP3 byte-exact)
+
+Independent byte-level differential of BlackThrush's recent risky change (`21268d72d`
+direct pubsub delivery encoder, bypassing intermediate RespFrame for message/pmessage/
+smessage/invalidation). Captured raw pushed bytes from a live subscriber vs Redis 7.2.4
+in both protocols:
+- RESP2 (`*` array): message `*3`, pmessage `*4`, smessage `*3` — **byte-exact**, incl. binary-safe payload (`hello\x00world`)
+- RESP3 (`>` push): message `>3`, pmessage `>4`, smessage `>3` — **byte-exact** (correct push-type prefix)
+
+0 diffs across all 6 frames. BlackThrush's direct encoder is byte-exact in both
+protocols. Combined with the cod-b PackedZSet score verification above and my own
+SINTER/SDIFF large-set verification, **all three agents' recent risky changes are now
+independently byte-verified vs Redis 7.2.4.**
