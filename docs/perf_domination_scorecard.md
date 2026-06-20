@@ -707,6 +707,39 @@ WRONGTYPE both orders, self-intersection) → **0 diffs**. Source hunk shipped.
 Set-read frontier now: `SMISMEMBER≈0.79x` (noisy), `ZCOUNT≈0.61x` (rejected),
 `SINTER` 3-way `≈0.9x` (different path, retain_intersect).
 
+## CobaltCove SINTER/SDIFF redis-style fresh-build for 3+ sets (MEASURED WIN 2026-06-20)
+
+Closes the `SINTER` 3-way residual flagged just above. `sinter_value`/`sdiff_value`
+(fr-store) cloned the whole smallest/first set then `retain`/`retain_diff`-removed
+the rejects against each other set — copying ~2x the surviving members and
+materializing an intermediate result set per other-key. Redis's
+`sinterGenericCommand`/`sdiffGenericCommand` instead walk the smallest/first set
+once and emit only members present-in-all / absent-from-all. Gated to
+`keys.len() >= 3` (≥2 other sets), where the single-pass fresh-build beats
+clone+retain; the 2-set and intset-encoded paths keep clone + (galloping)
+`retain_intersect`/`retain_diff` (measured parity, no regression). Touch/LFU is
+done up-front in the exact prior order so the LFU rng draw sequence — and the
+`sdiffwt` missing-first WRONGTYPE-checks-all-sources rule — stay byte-identical.
+
+Built candidate vs `HEAD` control via RCH release; timed best-of-5 ×3, fr-vs-fr to
+isolate the change from Redis noise.
+
+| Command / gate | fr-NEW vs fr-OLD | scorecard result |
+|---|---:|---|
+| `SINTER` 3 sets (2000-elem) | 4520 → 5760 ops/s (**+25%**, reproducible ×3) | **WIN** |
+| `SDIFF` 3 sets (2000-elem) | 3960 → 4675 ops/s (**+18%**, reproducible ×3) | **WIN** |
+| `SINTERSTORE`/`SDIFFSTORE` 2 sets | ~parity (gated out) | no regression |
+| broad `sinter3` vs Redis | 0.85x → **0.97x** | loss→parity |
+
+Lever score: **2 wins / 0 loss / 0 neutral**. Correctness: fr-OLD-vs-fr-NEW
+differential **0 diffs / 2000 ops** (1–4 sets, int/string/missing/wrongtype);
+LFU-bump + `sdiffwt` tests pass; `fr-conformance` core_set + core_set_live_redis
+green. Shipped `417c0193f` (SINTER) + `502264773` (SDIFF). Complements
+BlackThrush's SINTERCARD/store-wrapper work (which optimized the destination build,
+not the intersection algorithm). Single-element SADD/LPUSH/RPUSH P16 losses
+root-caused separately to per-command dispatch fixed-cost (arity sweep: fr's
+per-member store is *faster* than Redis) + ChunkedList — see NEGATIVE_EVIDENCE.md.
+
 ## BlackThrush generic-dispatch clock chaining (MEASURED, profile-driven, 2026-06-20)
 
 Profiled fr (`perf record`, paranoid lowered then restored) under a deep-pipelined
