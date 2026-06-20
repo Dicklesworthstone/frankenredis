@@ -605,3 +605,37 @@ and
 The profile-backed decision path is recorded in
 `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054407Z-profile-current-spop/`.
 Next release-readiness target in this command family is list-write throughput, not SPOP.
+
+## Cod-a zset DUMP score-entry shortcut rejection (MEASURED 2026-06-20)
+
+Release-readiness impact: no code keep and no readiness improvement. The
+`dump@p128` family remains a major Redis-relative gap.
+
+Target: `fr-bench --workload dump`, c50, p128, keyspace 10000, compact
+integer-scored zsets, vendored Redis 7.2.4. Release binaries were built with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a` via
+`rch exec -- cargo build --release -p fr-server -p fr-bench`.
+
+Profile route: BlackThrush's shared DUMP profile named `Store::dump_key` and
+listpack score-entry encode/reparse as part of the loss. Cod-a's local kernel
+`perf` was blocked by `perf_event_paranoid=4`.
+
+| Gate | Ratio | Release-readiness impact |
+|---|---:|---|
+| baseline current/control vs Redis 7.2.4 | 0.616569x fr/redis | DUMP gap confirmed; Redis CV 5.27% means routing evidence, not publication-grade |
+| dirty score-integer candidate vs saved control | 1.080504x candidate/control | positive first pass, but not sufficient |
+| dirty score-integer candidate vs Redis 7.2.4 | 0.569797x candidate/redis | still well below Redis; Redis CV 16.78% noisy |
+| stronger confirmation vs saved control, 500k requests, 9 trials | 0.955895x candidate/control | rejected current form |
+
+Artifacts:
+`artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T061700Z-baseline/`,
+`artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062635Z-dirty-candidate-ab/`,
+and
+`artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062741Z-candidate-control-confirm/`.
+Correctness guard passed:
+`cargo test -p fr-store zset_score_int_listpack_fastpath_is_byte_identical_to_string_form`.
+
+The dirty `fr-store` hunk was under BlackThrush's active reservation, so cod-a
+did not stage, commit, or revert it. Next release-readiness route for DUMP is
+structural retained/cached compact-zset DUMP payloads or avoiding per-DUMP
+dual-index rebuild, not more score-formatting shortcuts.

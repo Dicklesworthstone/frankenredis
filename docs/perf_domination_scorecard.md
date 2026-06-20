@@ -143,6 +143,31 @@ hgetall@p128, hset@p1, hset@p128, hset@p16, incr@p128, incr@p16, integer-get@p12
 integer-get@p16, lpush@p128, lpush@p16, lrange@p16, mixed@p1, set@p16, smembers@p128,
 smembers@p16, zrange-withscores@p128, zrange-withscores@p16. Skipped: mixed@p128._
 
+## Focused zset DUMP score-entry shortcut rejection (`frankenredis-zset-listpack-score-zero-copy-z56kl`)
+
+- Date: 2026-06-20, cod-a.
+- Target: `fr-bench --workload dump`, c50, p128, keyspace 10000, compact
+  integer-scored zsets.
+- Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+- Profile route: shared BlackThrush `dump@p128` profile named `Store::dump_key`
+  and listpack score-entry encode/reparse under the broader zset DUMP loss.
+  Local kernel `perf` was blocked by `perf_event_paranoid=4`.
+- Decision: **REJECT current form / no cod-a source kept**. Correctness guard
+  passed, but the stronger low-CV confirmation regressed throughput.
+
+| gate | artifact | ratio | cv | verdict |
+|---|---|---:|---|---|
+| baseline vs Redis 7.2.4 | `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T061700Z-baseline/summary.txt` | 0.616569 fr/redis | redis 5.27%, fr 3.13% | gap confirmed, Redis side slightly noisy |
+| dirty candidate vs saved control | `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062635Z-dirty-candidate-ab/summary.txt` | 1.080504 candidate/control | 4.73% / 4.96% | supporting win only |
+| dirty candidate vs Redis 7.2.4 | same | 0.569797 candidate/redis | redis 16.78% | noisy Redis leg, not a keep claim |
+| confirmation vs saved control | `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062741Z-candidate-control-confirm/summary.txt` | 0.955895 candidate/control | 3.71% / 2.38% | rejected |
+
+Scorecard impact: `dump@p128` remains a major measured loss. The next viable
+route is structural retained/cached compact-zset DUMP representation or avoiding
+per-DUMP rebuild from the zset's dual in-memory indexes, not another isolated
+score-formatting micro-shortcut.
+
 ## Focused pass195 residual confirmation (`frankenredis-15lug`, Redis C client)
 
 - Artifact: `artifacts/optimization/frankenredis-15lug-cv-confirm/20260620T042556Z/redis_benchmark_p16_c50_n150k_trials7.txt`.

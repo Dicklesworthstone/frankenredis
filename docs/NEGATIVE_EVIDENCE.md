@@ -34,6 +34,37 @@ GET levers unless a fresh profile names them with low-variance timing. The
 biggest confirmed losses in this pass remain store-owned list/set/zset writes,
 plus BlackThrush's separate DUMP zset-listpack re-encode gap.
 
+## 2026-06-20 cod-a `frankenredis-zset-listpack-score-zero-copy-z56kl` zset DUMP score fast path
+
+Harness: custom `fr-bench --workload dump`, 50 clients, pipeline 128, keyspace
+10000, vendored Redis 7.2.4 `redis-server`. Release binaries were built via
+`rch` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+
+Profile route: BlackThrush's shared `dump@p128` profile named `lzf`,
+`Store::dump_key`, and listpack score-entry encode/reparse work. Local kernel
+`perf` was blocked in this pass by `perf_event_paranoid=4`, and the generic
+`scripts/profile_hot_path.sh` path is not suitable for this workload because it
+drives `redis-benchmark`, not the custom zset-prefilled `fr-bench dump` workload.
+
+| artifact | variant | ratio | cv | verdict |
+|---|---|---:|---|---|
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T061700Z-baseline/summary.txt` | current/control vs Redis | 0.616569 fr/redis | redis 5.27%, fr 3.13% | routing loss; Redis side slightly noisy |
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062635Z-dirty-candidate-ab/summary.txt` | dirty integer-score fast path vs saved control | 1.080504 candidate/control | control 4.73%, candidate 4.96% | supporting win, not enough alone |
+| same | dirty integer-score fast path vs Redis | 0.569797 candidate/redis | redis 16.78% | Redis leg too noisy; not a keep claim |
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062741Z-candidate-control-confirm/summary.txt` | dirty integer-score fast path vs saved control, 500k requests, 9 trials | 0.955895 candidate/control | control 3.71%, candidate 2.38% | **rejected current form** |
+
+Guard run:
+`AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo test -p fr-store zset_score_int_listpack_fastpath_is_byte_identical_to_string_form -- --nocapture`
+passed. Correctness was not the rejection reason.
+
+Decision: do not keep or extend this score-integer shortcut from the current
+mixed evidence. The stronger low-CV confirmation regressed throughput by 4.4%
+against the saved pre-fastpath control. The dirty `fr-store` source was under
+BlackThrush's active reservation, so cod-a recorded evidence only and did not
+stage, commit, or revert that peer-owned hunk. Retry only with an isolated
+retained-listpack or cached-DUMP representation that avoids rebuilding the whole
+compact zset listpack, then prove it with same-current A/B before Redis claims.
+
 ## 2026-06-20 cod-a `frankenredis-15lug.1` SPOP parser ordering
 
 Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved

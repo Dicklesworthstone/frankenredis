@@ -29,6 +29,7 @@ turns). Keep claims honest — mark which.
 | SWAR/SIMD on memory-bound byte loops (max/copy/fill, HLL register-max) | ~1.0x (0.94x for HLL) | only COMPUTE-bound loops win (popcount/CRC/bitwise = 4–13x). Check compute-vs-memory first. Clean-crate compute kernels already done. |
 | used_memory via counting-allocator | ~7% throughput hit + wrong target | estimate_memory_usage_bytes MODELS redis; counting-alloc measures fr's actual RAM (a different number). RSS lags frees. Don't "fix" the model with real accounting. |
 | zadd 8% pipelined gap | WONTFIX (x1zbp) | distributed across dispatch, no single hot spot. |
+| zset DUMP integer-score listpack shortcut in `Store::dump_key` | mixed then rejected: 1.0805x candidate/control in first low-CV A/B, then 0.9559x candidate/control in stronger 500k/9-trial confirmation | Correctness guard passed, but throughput did not hold. The real DUMP gap is structural compact-zset listpack rebuild/serialization, not just skipping score string reparse. Do not extend this micro-lever without an isolated retained-listpack/cached-DUMP representation and same-current A/B proof. |
 
 ## Real residual gaps (structural; mind ownership before touching)
 | Gap | Ratio | Owner / bead | Note |
@@ -1230,3 +1231,43 @@ Kept final candidate:
 Decision: keep the front-loaded no-count keyed-pop exact route. Do not retry the exact-packet-only
 SPOP addition; it was too small and still below Redis parity. The next measured gaps in this family
 are list writes (`LPUSH`/`RPUSH`), not SPOP storage or parser reshuffling.
+
+## MEASURED cod-a zset DUMP score-entry shortcut rejection (2026-06-20) -- NO SOURCE KEPT BY COD-A
+
+Scope: `frankenredis-zset-listpack-score-zero-copy-z56kl` evidence lane plus dirty
+`fr-store` candidate marked `frankenredis-dump-zset-score-int`. The targeted loss
+was `fr-bench --workload dump` at 50 clients, pipeline 128, keyspace 10000, where
+the workload preloads compact int-scored zsets and then times `DUMP`.
+
+Profile route:
+- BlackThrush's shared `dump@p128` sample reported FrankenRedis at roughly
+  `153k ops/s` vs Redis `366k ops/s` (`0.42x`) and attributed server self-time
+  to `lzf`, `Store::dump_key`, `encode_listpack_entry`, score formatting/reparse,
+  and CRC.
+- Local kernel `perf` was blocked for cod-a by `perf_event_paranoid=4`.
+- `scripts/profile_hot_path.sh` was not used as a proof path for this workload
+  because it drives vendored `redis-benchmark`; the zset-prefilled DUMP workload
+  is custom `fr-bench`.
+
+Baseline and A/B evidence:
+
+| artifact | gate | ratio | cv | verdict |
+|---|---|---:|---|---|
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T061700Z-baseline/summary.txt` | current/control vs Redis 7.2.4 | 0.616569 fr/redis | redis 5.27%, fr 3.13% | routing loss, Redis side slightly noisy |
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062635Z-dirty-candidate-ab/summary.txt` | dirty candidate vs saved control | 1.080504 candidate/control | control 4.73%, candidate 4.96% | supporting win only |
+| same | dirty candidate vs Redis 7.2.4 | 0.569797 candidate/redis | redis 16.78% | Redis leg too noisy for keep claim |
+| `artifacts/optimization/frankenredis-z56kl-store-dump-score-entry/20260620T062741Z-candidate-control-confirm/summary.txt` | dirty candidate vs saved control, 500k requests, 9 trials | 0.955895 candidate/control | control 3.71%, candidate 2.38% | rejected current form |
+
+Correctness guard:
+`AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo test -p fr-store zset_score_int_listpack_fastpath_is_byte_identical_to_string_form -- --nocapture`
+passed; byte identity was not the rejection reason.
+
+Decision: no cod-a source keep. The active dirty `crates/fr-store/src/lib.rs`
+hunk was under BlackThrush's exclusive reservation, so cod-a did not stage,
+commit, or revert it. The measured result says the micro-shortcut is not enough:
+current-form score-integer direct encoding regressed the stronger confirmation
+gate and leaves DUMP well below Redis. Next DUMP attempt should attack a deeper
+representation, such as retaining/caching the compact zset listpack payload or a
+single-pass DUMP-side representation that avoids rebuilding from `IndexMap` plus
+`BTreeMap` for every DUMP. Do not add more score-formatting shortcuts unless a
+fresh profile names them and a same-current A/B stays positive.
