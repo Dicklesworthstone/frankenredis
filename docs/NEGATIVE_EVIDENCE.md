@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-ohsk5` INCR store-probe consolidation
+
+Harness: per-crate release builds for `fr-server` and `fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`, with isolated
+target dirs under `/data/projects/.rch-targets/frankenredis-cod-b-*`.
+Candidate/control A/B used `fr-bench`, P16, c50, n300k, trials=7 against fresh
+FrankenRedis servers. Redis-relative rows used vendored Redis 7.2.4
+`redis-benchmark`, P16, c50, n150k, trials=7 through `scripts/bench_vs_redis.py`.
+
+| artifact | variant | command | ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5-incr-store-probe-codb/20260620T105145Z/summary.md` | candidate vs current-control | incr | 0.9886 | rejected, neutral |
+| same | candidate vs current-control | set | 0.9377 | regression |
+| same | candidate vs current-control | get | 0.9558 | regression/noisy |
+| same | candidate vs current-control | hset | 0.8146 | regression/noisy |
+| `artifacts/optimization/frankenredis-ohsk5-incr-store-probe-codb/20260620T105145Z/candidate_vs_redis.txt` | rejected candidate vs Redis 7.2.4 | incr/set/get/hset/lpush/rpush/sadd/zadd | 0.78 / 1.57 / 0.66 / 1.85 / 0.75 / 0.78 / 0.91 / 0.74 | mixed; candidate did not improve target |
+| `artifacts/optimization/frankenredis-ohsk5-incr-store-probe-codb/20260620T105145Z/control_vs_redis.txt` | current-control vs Redis 7.2.4 | incr/set/get/hset/lpush/rpush/sadd/zadd | 0.94 / 1.04 / 1.00 / 1.06 / 0.71 / 0.81 / 0.87 / 0.79 | current residuals are list/set/zset writes |
+
+Decision: the INCR candidate collapsed `drop_if_expired` + `key_has_expiry` into
+a single expiry probe before the mutable entry lookup, duplicating the expired-key
+side effects. Correctness-focused `fr-store incr` tests and `cargo check -p
+fr-store --all-targets` passed, but the measured A/B did not pay and softened
+guard workloads. The source hunk was reverted before commit. Do not retry this
+standalone INCR expiry-probe consolidation; the open measured losses are still
+`lpush`, `rpush`, `sadd`, and `zadd`, with `incr` near the parity floor on current
+control.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` non-store GET probes
 
 Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved

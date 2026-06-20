@@ -43,6 +43,42 @@ open throughput risks are `zadd`, `sadd`, `rpush`, `lpush`, and `get`; the
 largest four are store/data-structure lanes and were not edited here because
 `fr-store/src/lib.rs` was reserved by another agent.
 
+## 2026-06-20 cod-b addendum: INCR store-probe consolidation rejected
+
+Per-crate release builds were made with `rch exec -- cargo build --release -p
+fr-server -p fr-bench` in isolated target dirs under
+`/data/projects/.rch-targets/frankenredis-cod-b-*`. The candidate collapsed the
+INCR path's separate expiry probes before the mutable entry lookup; focused
+`fr-store incr` tests and `cargo check -p fr-store --all-targets` passed, but the
+benchmark did not.
+
+Candidate vs current-control (`fr-bench`, P16/c50/n300k/trials7):
+
+| workload | candidate/control | verdict |
+|---|---:|---|
+| incr | 0.9886 | rejected, neutral |
+| set | 0.9377 | regression |
+| get | 0.9558 | regression/noisy |
+| hset | 0.8146 | regression/noisy |
+
+Current-control vs Redis 7.2.4 (`redis-benchmark`, P16/c50/n150k/trials7):
+
+| command | fr/redis | verdict |
+|---|---:|---|
+| incr | 0.94 | near parity |
+| set | 1.04 | win |
+| get | 1.00 | neutral |
+| hset | 1.06 | win |
+| lpush | 0.71 | loss |
+| rpush | 0.81 | loss |
+| sadd | 0.87 | loss |
+| zadd | 0.79 | loss |
+
+Readiness impact: no score improvement. The INCR source hunk was reverted before
+commit. The measured release risks remain list/set/zset write paths rather than
+the scalar INCR expiry-probe path. Artifact:
+`artifacts/optimization/frankenredis-ohsk5-incr-store-probe-codb/20260620T105145Z/`.
+
 ## Throughput head-to-head (pipeline depth 16) — MEASURED
 
 | Workload | fr ops/s | redis ops/s | fr/redis | cv fr/redis | Verdict |
