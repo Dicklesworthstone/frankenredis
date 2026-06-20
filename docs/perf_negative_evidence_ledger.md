@@ -1083,3 +1083,147 @@ Rejected candidate sweep:
 Decision: do not ship the missing-key expiry-map short-circuit. Next code work should target the
 actual `SPOP` nil/write-pop runtime shape with profiling or a same-worker current-vs-control gate,
 not generic expiry lookup pruning.
+
+## MEASURED cod-a 15lug.1 SPOP exact-parser ordering (2026-06-20) -- CANDIDATE KEPT
+
+Scope: `frankenredis-15lug.1`. This pass targeted the remaining vendored Redis 7.2.4
+`redis-benchmark -t spop` loss from the prior 15lug residual sweep. The kept lever is in
+`crates/fr-server/src/main.rs`: accept no-count `SPOP key` in the exact keyed-pop packet parser,
+then try that keyed-pop parser immediately after the exact `GET` parser instead of after the long
+keyed-values and miscellaneous exact-parser ladder. This preserves the same borrowed runtime/store
+SPOP implementation and leaves `SPOP key count` on the generic path.
+
+Fresh baseline before code changes:
+- Artifact: `artifacts/optimization/frankenredis-15lug-1/20260620T053608Z-baseline/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+- Harness: vendored `redis-benchmark`, P16, c50, n150k, 7 interleaved trials.
+
+| command | median fr/redis | trials | verdict |
+|---|---:|---|---|
+| spop | 0.75 | 0.77, 0.73, 0.77, 0.70, 0.75, 0.74, 0.78 | loss |
+| lpush | 0.78 | 0.78, 0.79, 0.76, 0.76, 0.79, 0.80, 0.77 | loss |
+| rpush | 0.91 | 0.81, 0.92, 0.93, 0.91, 0.88, 0.84, 0.91 | neutral |
+
+First candidate, exact-parser inclusion only:
+- Artifact: `artifacts/optimization/frankenredis-15lug-1/20260620T053837Z-spop-exact-parser-candidate/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+
+| command | median fr/redis | trials | verdict |
+|---|---:|---|---|
+| spop | 0.86 | 0.80, 0.82, 0.85, 0.86, 0.94, 0.94, 0.93 | improved but still below 0.9x |
+| lpush | 0.78 | 0.78, 0.89, 0.93, 0.70, 0.78, 0.78, 0.72 | loss |
+| rpush | 0.91 | 0.97, 0.84, 0.94, 0.94, 0.91, 0.90, 0.86 | neutral |
+
+Same-host control/candidate A/B:
+- Artifact: `artifacts/optimization/frankenredis-15lug-1/20260620T054137Z-control-candidate-ab/summary.txt`.
+- Counted runs: control 1, candidate 2, candidate 3, control 5.
+- Invalid runs: control 4 and 4b were discarded because Redis failed to bind the selected port;
+  no throughput result was counted from those launches.
+
+| variant | command | median fr/redis | verdict |
+|---|---|---:|---|
+| control 1 | spop | 0.75 | loss |
+| control 1 | lpush | 0.79 | loss |
+| control 1 | rpush | 0.82 | loss |
+| candidate 2 | spop | 0.83 | improved but still below 0.9x |
+| candidate 2 | lpush | 0.76 | loss |
+| candidate 2 | rpush | 0.89 | loss |
+| candidate 3 | spop | 0.93 | win vs parity floor |
+| candidate 3 | lpush | 0.76 | loss |
+| candidate 3 | rpush | 0.89 | loss |
+| control 5 | spop | 0.68 | loss |
+| control 5 | lpush | 0.84 | loss |
+| control 5 | rpush | 0.93 | neutral |
+
+Profile after exact-parser inclusion:
+- Command: `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a scripts/profile_hot_path.sh -t spop -P 16 -n 2000000 -c 50 -s 6 -r 100000`.
+- Perf data: `/data/tmp/claude-1000/profile_hot_path_4149131.data`.
+- Throughput during profile: `799680.12 requests per second`.
+- Hotspots: `process_buffered_frames` 12.03% self / 22.16% inclusive,
+  `execute_plain_keyed_pop_borrowed` 1.58% self / 5.47% inclusive,
+  `parse_borrowed_multibulk_action` 1.93% self / 3.40% inclusive,
+  `parse_command_args_borrowed_into` 1.45% self / 2.32% inclusive, and failed exact-parser probes
+  such as `parse_borrowed_plain_echo_packet`, `parse_borrowed_plain_xlen_packet`, and
+  `parse_borrowed_plain_keyed_values10_packet`. This routed the second lever toward parser ordering
+  rather than store data-structure changes.
+
+Kept combined candidate, exact-parser inclusion plus early keyed-pop ordering:
+- Artifact: `artifacts/optimization/frankenredis-15lug-1/20260620T054808Z-early-keyed-pop-candidate/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+
+| command | median fr/redis | trials | verdict |
+|---|---:|---|---|
+| spop | 1.03 | 1.07, 0.86, 1.02, 1.04, 1.05, 0.93, 1.03 | win |
+| lpop | 1.02 | 0.89, 1.08, 1.02, 1.00, 1.04, 1.34, 0.95 | win |
+| rpop | 1.00 | 1.05, 1.12, 0.81, 0.88, 1.01, 0.98, 1.00 | neutral |
+| lpush | 0.75 | 0.71, 0.85, 0.73, 0.86, 0.68, 0.75, 0.87 | loss |
+| rpush | 0.91 | 0.87, 0.87, 0.91, 1.06, 0.97, 0.85, 0.91 | neutral |
+
+Confirmation run:
+- Artifact: `artifacts/optimization/frankenredis-15lug-1/20260620T054843Z-early-keyed-pop-confirm/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+
+| command | median fr/redis | trials | verdict |
+|---|---:|---|---|
+| spop | 1.04 | 0.93, 1.04, 0.90, 1.06, 0.89, 1.11, 1.15 | confirmed win |
+| lpush | 0.78 | 0.76, 0.80, 0.80, 0.78, 0.82, 0.77, 0.74 | residual loss |
+| rpush | 0.89 | 0.99, 0.85, 0.90, 0.89, 0.87, 0.92, 0.86 | residual loss/noisy floor |
+
+Decision: keep the exact keyed-pop SPOP parser plus early keyed-pop parser ordering. The focused
+SPOP residual moved from a fresh 0.75x baseline and prior 0.81x residual confirmation to 1.03x and
+1.04x Redis-relative medians. Do not treat this as a list-push fix: `LPUSH` remains below the 0.9x
+floor in every cod-a focused run, and `RPUSH` is noisy around the floor. Next target should be the
+list push path, not another SPOP parser lever.
+
+## MEASURED cod-b fresh-restart 15lug.1 SPOP front-loaded keyed-pop route (2026-06-20) -- CANDIDATE KEPT
+
+Scope: `frankenredis-15lug.1`. This fresh restart re-verified the SPOP lane under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b` and vendored Redis 7.2.4
+`redis-benchmark`, P16, c50, n150k. The first attempted lever only added SPOP to the existing
+late exact keyed-pop packet parser; it was rejected. The kept lever moves the no-count keyed-pop
+exact parser up to just after the PING/GET exact parsers and before the high-arity keyed-value
+writer ladder, and includes exact `SPOP key` recognition there. `SPOP key count` remains on the
+generic path.
+
+Baseline before cod-b changes:
+- Artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T053450Z-baseline/current_vs_redis_redis_benchmark.txt`.
+- Result: `spop` median **0.77x** vs Redis 7.2.4; `lpush` **0.77x**, `rpush` **0.86x**.
+
+Rejected exact-packet-only candidate:
+- Same-current artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054210Z-candidate-control/candidate_vs_control_redis_benchmark.txt`.
+- Redis artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054238Z-candidate-redis/candidate_vs_redis_redis_benchmark.txt`.
+- Result: SPOP improved only **1.02x** vs current-control and stayed **0.78x** vs Redis; source hunk
+  was reverted before the second candidate.
+
+Profile route:
+- Artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054407Z-profile-current-spop/perf_report_no_children.txt`.
+- Top self samples: `process_buffered_frames` **14.01%**, `parse_command_args_borrowed_into`
+  **1.85%**, `execute_plain_keyed_pop_borrowed` **1.71%**,
+  `plain_borrowed_default_key_write_allows` **1.52%**, `parse_borrowed_multibulk_action`
+  **1.24%**, and `Store::spop` only **0.38%**. This rejected set-storage tinkering and routed the
+  kept lever toward parser ordering.
+
+Kept final candidate:
+- Five-command guard artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055254Z-final-five-command/`.
+- SPOP-focused confirmation artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055340Z-final-spop-focused/`.
+
+| gate | command | median ratio | trials | verdict |
+|---|---|---:|---|---|
+| final/current-control | spop | 1.25 | 7 | keep |
+| final/current-control | lpop | 1.11 | 7 | guard win |
+| final/current-control | rpop | 1.08 | 7 | guard win |
+| final/current-control | lpush | 1.00 | 7 | no regression |
+| final/current-control | rpush | 1.04 | 7 | no regression |
+| final/Redis 7.2.4 | spop | 1.06 | 7 | SPOP floor cleared |
+| final/Redis 7.2.4 | lpop | 1.03 | 7 | parity/win |
+| final/Redis 7.2.4 | rpop | 1.01 | 7 | parity/win |
+| final/Redis 7.2.4 | lpush | 0.83 | 7 | residual list-write loss |
+| final/Redis 7.2.4 | rpush | 0.85 | 7 | residual list-write loss |
+| SPOP-focused final/current-control | spop | 1.30 | 11 | confirmed keep |
+| SPOP-focused final/Redis 7.2.4 | spop | 1.00 | 11 | confirmed parity |
+
+Decision: keep the front-loaded no-count keyed-pop exact route. Do not retry the exact-packet-only
+SPOP addition; it was too small and still below Redis parity. The next measured gaps in this family
+are list writes (`LPUSH`/`RPUSH`), not SPOP storage or parser reshuffling.

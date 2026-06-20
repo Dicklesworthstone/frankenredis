@@ -531,3 +531,44 @@ Rejected candidate: early-returning from `Store::drop_if_expired` on absent keys
 `spop` (`0.81x` before and after) and made `lpush`/`rpush` fall below 0.9x in the focused
 candidate sweep. The source hunk was reverted. Next release-readiness target from `15lug` is
 the `SPOP` nil/write-pop runtime path, with the broader `fr-bench` matrix losses tracked separately.
+
+Follow-up cod-a SPOP parser-ordering keep (`frankenredis-15lug.1`, 2026-06-20):
+
+| Command | baseline fr/redis | kept candidate fr/redis | confirmation fr/redis | Release-readiness impact |
+|---|---:|---:|---:|---|
+| `spop` | 0.75 | 1.03 | 1.04 | SPOP parity-floor loss cleared |
+| `lpop` | n/a | 1.02 | n/a | no-count pop side path stays at parity/win |
+| `rpop` | n/a | 1.00 | n/a | no-count pop side path stays neutral |
+| `lpush` | 0.78 | 0.75 | 0.78 | still a release-readiness perf risk |
+| `rpush` | 0.91 | 0.91 | 0.89 | noisy around parity floor |
+
+Artifacts:
+`artifacts/optimization/frankenredis-15lug-1/20260620T054808Z-early-keyed-pop-candidate/bench_vs_redis_p16_c50_n150k_trials7.txt`
+and
+`artifacts/optimization/frankenredis-15lug-1/20260620T054843Z-early-keyed-pop-confirm/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+Profile route:
+`/data/tmp/claude-1000/profile_hot_path_4149131.data` showed the remaining SPOP cost in
+`process_buffered_frames` and failed exact-parser probes ahead of keyed pop, so the kept change
+is parser inclusion plus earlier keyed-pop ordering in `crates/fr-server/src/main.rs`.
+
+Cod-b fresh-restart confirmation of the SPOP route (`frankenredis-15lug.1`, 2026-06-20):
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---:|---:|---|
+| current baseline vs Redis 7.2.4 | `spop` | 0.77x | confirmed pre-fix loss |
+| exact-packet-only candidate vs Redis 7.2.4 | `spop` | 0.78x | rejected; still below parity floor |
+| final front-loaded keyed-pop vs current-control | `spop` | 1.25x | keep-grade same-current win |
+| final front-loaded keyed-pop vs current-control | `lpop` / `rpop` | 1.11x / 1.08x | pop-family guard wins |
+| final front-loaded keyed-pop vs current-control | `lpush` / `rpush` | 1.00x / 1.04x | no list-write regression |
+| final front-loaded keyed-pop vs Redis 7.2.4 | `spop` | 1.06x | SPOP release floor cleared |
+| final front-loaded keyed-pop vs Redis 7.2.4 | `lpop` / `rpop` | 1.03x / 1.01x | parity/win |
+| final front-loaded keyed-pop vs Redis 7.2.4 | `lpush` / `rpush` | 0.83x / 0.85x | residual list-write risk |
+| final SPOP-focused 11-trial confirmation vs Redis 7.2.4 | `spop` | 1.00x | confirmed parity |
+
+Artifacts:
+`artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055254Z-final-five-command/`
+and
+`artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055340Z-final-spop-focused/`.
+The profile-backed decision path is recorded in
+`artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054407Z-profile-current-spop/`.
+Next release-readiness target in this command family is list-write throughput, not SPOP.

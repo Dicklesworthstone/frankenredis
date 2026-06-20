@@ -2737,6 +2737,31 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some((cmd, packet)) =
+                    parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
+                {
+                    // (frankenredis-15lug.1) Put the no-count pop exact parser
+                    // before the high-arity keyed-value writers. Redis-benchmark
+                    // SPOP is the canonical `*2 $4 SPOP key` packet, and paying
+                    // the whole values ladder before reaching this parser showed
+                    // up in the SPOP perf profile.
+                    if let Some(response) =
+                        runtime.execute_plain_keyed_pop_borrowed(cmd, packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
@@ -4697,26 +4722,6 @@ fn process_buffered_frames(
                         &[packet.member],
                         ts,
                     ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_keyed_pop_borrowed(cmd, packet.key, ts)
-                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9335,10 +9340,11 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
     ))
 }
 
-// (frankenredis-t9w2a) no-count single-key pops LPOP/RPOP/ZPOPMIN/ZPOPMAX
+// (frankenredis-t9w2a) no-count single-key pops LPOP/RPOP/SPOP/ZPOPMIN/ZPOPMAX
 // (`*2 $len CMD key`), reusing the verified-live execute_plain_keyed_pop_borrowed.
-// SPOP is excluded (returns a RANDOM member — not byte-exact verifiable). The
-// count form (arity 3) falls through to the generic path.
+// SPOP is property-verifiable rather than byte-exact, but the borrowed executor
+// calls the same store pop routine as the generic handler. The count form
+// (arity 3) falls through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_pop_packet<'a>(
     input: &'a [u8],
@@ -9353,6 +9359,8 @@ fn parse_borrowed_plain_keyed_pop_packet<'a>(
             (PlainKeyedPopCmd::Lpop, 4usize)
         } else if name.eq_ignore_ascii_case(b"RPOP") {
             (PlainKeyedPopCmd::Rpop, 4)
+        } else if name.eq_ignore_ascii_case(b"SPOP") {
+            (PlainKeyedPopCmd::Spop, 4)
         } else {
             return None;
         }
@@ -19843,6 +19851,47 @@ mod tests {
                 &cfg
             )
             .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_accepts_spop_key_only() {
+        let input = b"*2\r\n$4\r\nsPoP\r\n$3\r\nset\r\n*1\r\n$4\r\nPING\r\n";
+        let (cmd, parsed) =
+            crate::parse_borrowed_plain_keyed_pop_packet(input, &ParserConfig::default())
+                .expect("canonical SPOP key packet should parse");
+
+        assert_eq!(cmd, fr_runtime::PlainKeyedPopCmd::Spop);
+        assert_eq!(parsed.key, b"set");
+        assert_eq!(parsed.consumed, b"*2\r\n$4\r\nsPoP\r\n$3\r\nset\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_defers_spop_count_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*3\r\n$4\r\nSPOP\r\n$1\r\ns\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "count form stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*2\r\n$4\r\nSPOP\r\n$1\r\ns\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(b"*2\r\n$4\r\nSPOP\r\n$2\r\ns\r\n", &cfg)
+                .is_none(),
             "malformed key bulk bodies stay on the generic parser"
         );
     }

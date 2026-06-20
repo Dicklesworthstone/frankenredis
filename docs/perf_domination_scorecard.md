@@ -117,6 +117,56 @@ Rejected candidate: an early return in `Store::drop_if_expired` for missing keys
 the focused `SPOP` loss (`spop` stayed 0.81x) and introduced focused `lpush`/`rpush` losses in the
 candidate sweep, so the source hunk was reverted.
 
+## Focused SPOP parser-ordering keep (`frankenredis-15lug.1`, Redis C client)
+
+- Artifacts:
+  - Baseline: `artifacts/optimization/frankenredis-15lug-1/20260620T053608Z-baseline/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+  - Kept candidate: `artifacts/optimization/frankenredis-15lug-1/20260620T054808Z-early-keyed-pop-candidate/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+  - Confirmation: `artifacts/optimization/frankenredis-15lug-1/20260620T054843Z-early-keyed-pop-confirm/bench_vs_redis_p16_c50_n150k_trials7.txt`.
+- Harness: vendored `redis-benchmark`, P16, c50, n150k, 7 interleaved trials.
+- Kept change: exact no-count `SPOP key` keyed-pop parser plus early keyed-pop parser ordering in
+  `crates/fr-server/src/main.rs`.
+- Profile route: `/data/tmp/claude-1000/profile_hot_path_4149131.data` showed
+  `process_buffered_frames` and failed exact-parser probes ahead of keyed pop as the residual
+  SPOP cost.
+
+| command | baseline fr/redis | kept candidate fr/redis | confirmation fr/redis | verdict |
+|---|---:|---:|---:|---|
+| spop | 0.75 | 1.03 | 1.04 | SPOP floor fixed |
+| lpop | not measured | 1.02 | not measured | parity/win side effect |
+| rpop | not measured | 1.00 | not measured | neutral side effect |
+| lpush | 0.78 | 0.75 | 0.78 | residual loss, separate target |
+| rpush | 0.91 | 0.91 | 0.89 | noisy around floor |
+
+### Cod-b fresh-restart confirmation (`frankenredis-15lug.1`)
+
+- Final artifacts:
+  `artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055254Z-final-five-command/`
+  and
+  `artifacts/optimization/frankenredis-15lug-spop-frontload-pop/20260620T055340Z-final-spop-focused/`.
+- Rejected exact-only artifact:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054238Z-candidate-redis/candidate_vs_redis_redis_benchmark.txt`.
+- Profile route:
+  `artifacts/optimization/frankenredis-15lug-spop-exact-packet/20260620T054407Z-profile-current-spop/perf_report_no_children.txt`
+  showed `Store::spop` at only 0.38% self; the work stayed in parser ordering.
+
+| gate | command | median ratio | verdict |
+|---|---|---:|---|
+| current baseline vs Redis 7.2.4 | spop | 0.77 | confirmed loss |
+| exact-packet-only candidate vs Redis 7.2.4 | spop | 0.78 | rejected |
+| final vs current-control | spop | 1.25 | keep |
+| final vs current-control | lpush/rpush | 1.00 / 1.04 | no regression |
+| final vs Redis 7.2.4 | spop | 1.06 | parity/win |
+| final SPOP-focused vs current-control, 11 trials | spop | 1.30 | confirmed keep |
+| final SPOP-focused vs Redis 7.2.4, 11 trials | spop | 1.00 | confirmed parity |
+
+SPOP is no longer a focused parity-floor loss on this gate. `LPUSH`/`RPUSH`
+remain residual list-write gaps in the Redis-relative guard and should be
+handled as a separate measured lane.
+
+Scorecard impact: the focused `SPOP` parity-floor loss is cleared for the Redis C-client gate.
+The remaining measured P16/c50 residual in this lane is list push, especially `LPUSH`, not SPOP.
+
 ## Throughput — latest release sweep (`artifacts/optimization/coralox-pass195-current-main-profile/standard_sweep_p16_c50_n300k_reps5.txt`)
 
 - Commands: **19**, fr faster on **13/19**
