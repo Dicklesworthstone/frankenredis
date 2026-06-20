@@ -223,3 +223,30 @@ cells, but current/control was noisy. Low-CV confirmation rejected the lever:
 
 Lever score: **1/1/2** win/loss/neutral. The parser line-scanner rewrite is not a contributor to
 the project’s GET/SET Redis-relative wins and should not be retried without fresh profile evidence.
+
+## Cod-b cached borrowed write-gate verification (MEASURED 2026-06-20)
+
+Follow-up for `frankenredis-ohsk5`: the previously coded cached borrowed write gate
+(`d14e2b330`) is no longer pending. Current `HEAD` was measured against an inverse-control worktree
+with only that commit reverted, and against vendored Redis 7.2.4.
+
+| Gate | Workload | Ratio | CV / trial quality | Verdict |
+|---|---|---:|---|---|
+| current / inverse-control (`fr-bench`) | SET P16 | 1.117x | current 2.93%, control 4.00% | keep-grade win |
+| current / inverse-control (`fr-bench`) | HSET P16 | 1.058x | current 8.92%, control 3.04% | noisy support only |
+| current / inverse-control (`redis-benchmark`) | SET/HSET/MSET P16 | 1.05x / 0.99x / 1.01x | 7 interleaved trials | no regression, limited claim |
+| current / Redis 7.2.4 (`redis-benchmark`) | SET/HSET/MSET P16 | 1.02x / 0.95x / 0.96x | 7 interleaved trials | parity floor, not domination |
+
+Decision: keep the cached gate. It delivers a clean SET P16 current/control win and does not show a
+focused write-family regression, but HSET/MSET remain Redis-relative losses by the 3% score band.
+
+Latest broad quick matrix from `.bench-history/comprehensive_bench.latest.json`:
+
+| score set | wins | losses | neutral | notes |
+|---|---:|---:|---:|---|
+| all 39 cells | 22 | 15 | 2 | 34 cells exceeded 5% fr CV; route-only evidence |
+| stable cells only | 3 | 2 | 0 | wins: GET@P1, INTEGER-GET@P1, SET@P1; losses: INCR@P1, MIXED@P1 |
+
+Release-performance frontier after this pass: `MIXED@P1` is the largest stable loss
+(`0.434x` fr/redis), then `INCR@P1` (`0.951x`). Noisy P16/P128 losses need a quieter rerun before
+they are valid code targets.

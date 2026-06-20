@@ -913,3 +913,61 @@ inlining in the current `HashMap<StoreKey, Entry>` shape unless a new layout pro
 entry does not grow and a fresh same-worker memory gate improves the keyspace cell. The next viable
 `uhthd` lever needs a deeper keyspace-dict representation change: lower table metadata, split
 fingerprints/keys, or a SCAN/RANDOMKEY design-level tradeoff with explicit semantics review.
+
+## MEASURED cod-b ohsk5 cached borrowed write gate (2026-06-20) -- KEEP, residual losses remain
+
+Scope: `frankenredis-ohsk5`, verification of previously coded commit
+`d14e2b330` ("cached borrowed write gate, code-first batch-test pending"). The lever caches the
+default borrowed-write predicate once per buffered multibulk batch for exact SET/MSET/HSET fast
+paths instead of rescanning auth/ACL/session/server state for every borrowed write command. The
+inverse-control worktree was current `HEAD` with only `d14e2b330` reverted; no production source
+was changed in this pass.
+
+Build and proof:
+- Current build:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`.
+- Inverse-control build:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b-ohsk5-control rch exec -- cargo build --release -p fr-server -p fr-bench`.
+- Oracle: vendored Redis 7.2.4, `legacy_redis_code/redis/src/redis-server` and
+  `legacy_redis_code/redis/src/redis-benchmark`, both reporting 7.2.4.
+- Proof bundle:
+  `artifacts/optimization/frankenredis-ohsk5-cached-write-gate/20260620T015044Z/`.
+- Correctness gate:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture`
+  passed: lib tests, bin tests, smoke tests, and doctests all green.
+
+Focused current-vs-inverse-control `fr-bench` gate (P16/c50/n300k, 5 trials):
+
+| workload | control ops/s | control cv | current ops/s | current cv | current/control | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| SET P16 | 983,672 | 4.00% | 1,098,604 | 2.93% | 1.117 | keep-grade win |
+| HSET P16 | 858,384 | 3.04% | 908,586 | 8.92% | 1.058 | noisy support only |
+
+`redis-benchmark` current-vs-inverse-control (P16/c50/n150k, 7 interleaved trials) did not show a
+clean multi-command speedup: SET 1.05x median, HSET 0.99x, MSET 1.01x. This does not invalidate the
+clean SET `fr-bench` win, but it limits the claim.
+
+Current HEAD vs Redis 7.2.4, same `redis-benchmark` gate:
+
+| command | fr/redis median | trials | verdict |
+|---|---:|---|---|
+| SET | 1.02x | 0.93, 1.12, 0.97, 1.07, 1.04, 1.02, 0.87 | neutral by 3% band |
+| HSET | 0.95x | 1.12, 0.84, 0.89, 0.95, 1.17, 1.14, 0.94 | Redis-relative loss |
+| MSET | 0.96x | 1.01, 0.95, 0.96, 0.93, 0.90, 1.03, 1.13 | Redis-relative loss |
+
+Win/loss/neutral:
+- Lever keep gate vs inverse control: **1 keep-grade win / 0 keep-grade losses / 1 noisy support**.
+  The SET P16 gain is clean and above the keep threshold; the HSET gain is not clean enough to
+  claim as a keeper by itself.
+- Narrow Redis-relative command-family score: **0 wins / 2 losses / 1 neutral** by a 3% band.
+  All three commands remain at or above the project parity floor used by `bench_vs_redis.py`
+  (median ratio >= 0.9x), but HSET/MSET are still not dominating Redis.
+- Broad quick `.bench-history` score against Redis 7.2.4:
+  **22 wins / 15 losses / 2 neutral** across all 39 cells, but **34/39 cells were noisy** under
+  the 5% CV rule. Stable cells only: **3 wins / 2 losses / 0 neutral** (`GET@P1`,
+  `INTEGER-GET@P1`, `SET@P1` wins; `INCR@P1`, `MIXED@P1` losses).
+
+Decision: keep the existing cached borrowed write gate; the original pending benchmark proof is now
+complete. Do not claim broad domination from this pass. Next `ohsk5` work should target measured
+stable losses, especially `MIXED@P1` and `INCR@P1`, or rerun the noisy P16/P128 gaps on a quieter
+worker before spending code on them.

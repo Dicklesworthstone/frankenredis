@@ -1,0 +1,10 @@
+COMMAND: /usr/bin/python3 /data/projects/frankenredis/scripts/bench_vs_redis.py 31941 31942 --bench /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark --trials 7 --n 150000 --pipeline 16 --clients 50 --tests set,hset,mset
+loadavg=12.99  (high load -> absolute rps noisy; ratio stays stable)
+  fr:31942 exe=/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis sha=00000000 connected_slaves=0
+  redis:31941 exe=/data/projects/.rch-targets/frankenredis-cod-b-ohsk5-control/release/frankenredis sha=00000000 connected_slaves=0
+======================================================================
+set                median ratio=1.05x  (trials: 1.06, 0.99, 1.12, 0.97, 1.05, 1.06, 0.93)
+hset               median ratio=0.99x  (trials: 0.94, 0.88, 0.99, 1.03, 1.05, 0.99, 0.95)
+mset               median ratio=1.01x  (trials: 1.04, 1.05, 1.05, 0.96, 1.01, 0.99, 0.97)
+======================================================================
+fr at parity-or-faster on all tested commands (median ratio >= 0.9x) vs redis 7.2.4

@@ -439,3 +439,27 @@ confirmation.
 Decision: revert h6ppr. The final lever score is **1 win / 1 loss / 2 neutral**, and the clean
 P128 GET regression is enough to reject the scanner rewrite. Redis-relative GET/SET remains
 favorable on this harness after reverting; the pass adds negative evidence only.
+
+## Cod-b cached borrowed write gate proof (MEASURED 2026-06-20)
+
+Follow-up for `frankenredis-ohsk5`: `d14e2b330` was explicitly left "batch-test pending"; this pass
+completed that proof against current `HEAD`, an inverse-control worktree with only `d14e2b330`
+reverted, and vendored Redis 7.2.4.
+
+| Workload / gate | Ratio | Release-readiness impact |
+|---|---:|---|
+| SET P16 current/inverse-control (`fr-bench`, n300k, 5 trials) | 1.117x | keep-grade win; gate remains shipped |
+| HSET P16 current/inverse-control (`fr-bench`, n300k, 5 trials) | 1.058x | noisy support only; current CV 8.92% |
+| SET P16 current/Redis (`redis-benchmark`, n150k, 7 trials) | 1.02x | neutral by 3% band |
+| HSET P16 current/Redis (`redis-benchmark`, n150k, 7 trials) | 0.95x | Redis-relative loss remains |
+| MSET P16 current/Redis (`redis-benchmark`, n150k, 7 trials) | 0.96x | Redis-relative loss remains |
+
+Validation: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`
+for current, a sibling target for the inverse-control, and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture`
+passed end-to-end.
+
+Latest quick Redis 7.2.4 scorecard from `.bench-history/comprehensive_bench.latest.json`:
+**22 wins / 15 losses / 2 neutral** across all 39 workload/depth cells, but **34 cells are noisy**.
+Stable cells only: **3 wins / 2 losses / 0 neutral**. Stable losses to target next:
+`mixed@p1 = 0.434x` and `incr@p1 = 0.951x`.
