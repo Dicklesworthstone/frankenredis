@@ -887,3 +887,19 @@ are (a) dispatch-bound micro-costs in fr-runtime (`ohsk5`, BlackThrush), (b)
 structural RAM/RDB levers (`uhthd` keyspace + PackedZSet = cod-b; ChunkedList list
 DUMP; fr-persist direct-emit = cod-a), or (c) already-declined (geodist format,
 zcount). No further clean cc lever this pass.
+
+### Hash-value RAM is keyspace-dominated, NOT a PackedStrMap lever (cc follow-up)
+Investigated the per-type RAM losses. Clean pipe-load (NOT Lua eval — a 600k-HSET
+single `eval` blew mimalloc to a false 15x; pipe-load is the truth) of 2000 hashes
+× 300 listpack fields: fr RSS +29MB vs redis +13MB (~2.2x). But `PackedStrMap` is
+already a pure flat `Vec<u8>` arena (varint-len field+value inline, no per-entry
+index) — i.e. structurally equivalent to a redis listpack. The 2.2x is **keyspace
+overhead**: ~2000 keys × fr's heavy per-key cost (ordered_keys + dict + Arc
+side-indices, the `uhthd` 4.49–5.4x gap) ≈ 14MB, plus `Vec` doubling slack on the
+buffers (~1.3x). Listpack hashes cap at `hash-max-listpack-entries` (≤512), so a
+hash can't be made large enough for its buffer to dominate the keyspace term —
+**fr's listpack-hash RAM gap is inherently the keyspace gap (`uhthd`, cod-b), not a
+separable hash-storage lever.** The only cc-separable micro-improvement would be
+`shrink_to_fit` on settled hash buffers (saves the ~1.3x Vec slack on the
+buffer-only portion), but that's a small net-RSS fraction and a build-speed/RAM
+tradeoff on a mutable structure. Do not chase PackedStrMap for hash RAM.
