@@ -1329,3 +1329,40 @@ waste vein in `execute_frame_internal` is exhausted after clock-chaining (genclo
 (command_table_index, classify_command, foldhash command-name hash,
 parse_command_args_borrowed_into, dispatch_with_client_context) are necessary
 per-command work, not removable waste. Score: **0 win / 0 loss / 1 declined**.
+
+## `modification_count` sidecar (shrink hot `Entry` 48→40B) — MEASURED LOSS, reverted (CobaltCove 2026-06-20)
+
+Lever: remove the per-`Entry` `modification_count: u64` (the WATCH/HLL-cache/
+mem-estimate epoch) from the hot keyspace struct and keep it in a sparse
+`key_modification_counts: HashMap<StoreKey,u64>` sidecar. Freshly-SET keys start
+at epoch 0 with no sidecar row (pay 0 bytes); a row is allocated only on the
+first overwrite/in-place-mutation/removal. Intent: cut 8B/key off the hot
+`Entry` to attack the keyspace RSS gap (kv015 / 4.49x dict-RAM family). WATCH
+correctness was verified sound: the public `key_modification_count` returns 0 for
+absent keys (existence checked separately) and the sidecar count is strictly
+monotonic per key identity (delete bumps, never resets), so WATCH never
+under-aborts; HLL/mem caches `.remove(key)` on delete. Compiled clean.
+
+A/B (fr-OLD = HEAD a8b6c3a63, fr-NEW = sidecar, 1M keys × 64B / 200k keys × 32B,
+mimalloc default, single-thread server):
+- **`used_memory` (the reported INFO/scorecard metric): UNCHANGED** — it is a
+  MODELED estimate (estimate_memory_usage_bytes, formula over key+value), blind to
+  the Rust struct size. The headline RAM metric does not move at all.
+- **RSS write-once** (large write-once keyspace = the 4.49x scenario): NEW
+  ~16–20 MB / ~7% LOWER (the Entry shrink is real). WIN, but RSS is noisy
+  (mimalloc page retention) and untracked-precisely.
+- **RSS full-overwrite churn**: NEW ~+50 MB HIGHER — 1M sidecar rows mimalloc
+  won't release. REGRESSION for churn workloads.
+- **Overwrite-SET throughput** (best-of-6 timed fixed 1.6M-SET replay, ×3 runs):
+  OLD 720–759k sets/s vs NEW 477–634k — NEW's *best* (634k) is below OLD's
+  *worst* (720k): ~-16% best-of-best, ~-25% mean. The extra keyspace-key hash +
+  probe on the sidecar on every overwrite taxes the hot write path. Clean,
+  reproducible REGRESSION.
+
+Verdict: trading a noisy ~7% write-once-RSS win (that doesn't even move the
+reported `used_memory`) for a -16..-25% SET-overwrite throughput regression +50MB
+churn-RSS regression is a net loss. Reverted. The Entry-shrink *idea* is sound
+but the sidecar tax on the hot write path kills it; a real version would need
+WATCH to stop relying on a per-key counter (Redis dirties watching clients
+directly — fr-runtime redesign, not a fr-store sidecar). Score: **0 win / 1 loss
+(reverted) / 0 declined**.
