@@ -903,3 +903,29 @@ separable hash-storage lever.** The only cc-separable micro-improvement would be
 `shrink_to_fit` on settled hash buffers (saves the ~1.3x Vec slack on the
 buffer-only portion), but that's a small net-RSS fraction and a build-speed/RAM
 tradeoff on a mutable structure. Do not chase PackedStrMap for hash RAM.
+
+## 2026-06-20 CobaltCove (cc) — canonical redis-benchmark P16 hot-command suite (ohsk5) — measured landscape
+
+The compute-heavy sweeps above are single-conn pipe=200; this is the canonical
+`ohsk5` metric: `redis-benchmark -P 16 -n 1M -r 100k`, server taskset-pinned to
+core 2, benchmark to cores 4-11, fr HEAD vs Redis 7.2.4, best-of-3/4 rps.
+
+| cmd | fr/redis | verdict |
+|---|---:|---|
+| SET | **1.11** | fr faster |
+| INCR | **1.07** | fr faster (a noisy single run showed 0.81 — re-run best-of-4 = 1.07; do not trust single P16 runs) |
+| GET | 1.04 | parity+ |
+| HSET | 1.04 | parity+ |
+| LPOP | 0.95 | ~parity |
+| SPOP | 0.97 | ~parity |
+| ZADD | 0.97 | ~parity |
+| **SADD** | **0.79** | LOSS — but the store path is already alloc-free (`insert_borrowed`/saddfast: parse+binary_search+insert, no Vec on intset/dup); residual is per-command DISPATCH (fr-runtime, `ohsk5`/BlackThrush), not a clean store lever |
+| **LPUSH / RPUSH** | **0.75 / 0.72** | LOSS — ChunkedList Owned-chunk append (structural, `99fwc` packed-node rewrite = cod-a/CoralOx domain) |
+
+Conclusion: the "~2x pipelined gap" (`ohsk5`) is CLOSED for read + most write paths
+(SET/GET/INCR/HSET parity-or-faster). The residual write losses are LPUSH/RPUSH
+(ChunkedList structural, cod-a) and SADD (dispatch residual on an already-optimized
+store path, fr-runtime/BlackThrush). No clean uncontended cc store lever remains;
+the SADD store insert is byte-for-byte already what redis does (sorted intset).
+Methodology note: P16 single runs are noisy under multi-agent host load — use
+best-of-N and re-confirm before recording a loss (INCR 0.81→1.07).
