@@ -20913,7 +20913,10 @@ impl Store {
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let hash = hash_from_flat_entries(decode_listpack_strings(&listpack)?)?;
+                // Zero-copy span build (see hash_from_listpack_spans): avoids the N
+                // transient owned Vec<u8> that decode_listpack_strings allocates only
+                // for the builder to copy into the hash's arena and drop.
+                let hash = hash_from_listpack_spans(&listpack)?;
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -20964,25 +20967,32 @@ impl Store {
             RDB_TYPE_SET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let members = decode_listpack_strings(&listpack)?;
-                if members.is_empty() {
+                // Decode the members as ZERO-COPY spans (borrowed ranges into the
+                // listpack blob; integer entries render to inline bytes) instead of
+                // exploding to N owned Vec<u8> via decode_listpack_strings. The bulk
+                // build (from_unique_str_members) copies each member into the set's
+                // own storage either way, so the per-member owned Vec was pure
+                // transient alloc churn — the same elimination the QUICKLIST_2 RESTORE
+                // arm already does. Byte-identical: spans preserve listpack order and
+                // bytes. (BlackThrush: RESTORE decode zero-copy span build)
+                let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                    .map_err(|_| StoreError::InvalidDumpPayload)?;
+                if spans.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                // Dedup-check then BULK-build. The per-member GenericSet::insert
-                // ran a lookup (PackedStrSet probe is O(n)) before each append =>
-                // O(n^2), which dominated RESTORE of a listpack set (perf:
-                // PackedStrSet::insert 50%). from_unique_str_members appends each
-                // member with no lookup (O(n)); insertion order — the only
-                // observable order for a listpack set — is unchanged. RESTORE still
-                // rejects a duplicate member, which insert detected via its false
-                // return.
+                let members: Vec<&[u8]> =
+                    spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                // Dedup-check then BULK-build. from_unique_str_members appends each
+                // member with no lookup (O(n)); insertion order — the only observable
+                // order for a listpack set — is unchanged. RESTORE still rejects a
+                // duplicate member.
                 {
                     let mut seen = HashSet::with_capacity_and_hasher(
                         members.len(),
                         foldhash::quality::RandomState::default(),
                     );
                     for member in &members {
-                        if !seen.insert(member.as_slice()) {
+                        if !seen.insert(*member) {
                             return Err(StoreError::InvalidDumpPayload);
                         }
                     }
@@ -22397,6 +22407,34 @@ fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreEr
     }
     drop(seen);
     Ok(HashFieldMap::from_unique_pairs(pairs))
+}
+
+/// Span-based (zero-copy) twin of [`hash_from_flat_entries`] for the listpack
+/// RESTORE path. Decodes the listpack to borrowed spans and bulk-builds via
+/// `from_unique_pairs_borrowed` instead of exploding to N owned `Vec<u8>` that
+/// the builder would only copy and drop. Byte-identical for a valid
+/// (duplicate-free) dump. (BlackThrush: RESTORE decode zero-copy span build)
+fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError> {
+    let spans = fr_persist::listpack::decode_value_spans(listpack)
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    if !spans.len().is_multiple_of(2) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let refs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(listpack)).collect();
+    let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(refs.len() / 2);
+    for pair in refs.chunks_exact(2) {
+        pairs.push((pair[0], pair[1]));
+    }
+    let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+        std::collections::HashSet::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+    if !pairs.iter().all(|(field, _)| seen.insert(*field)) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    drop(seen);
+    Ok(HashFieldMap::from_unique_pairs_borrowed(&pairs))
 }
 
 fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError> {

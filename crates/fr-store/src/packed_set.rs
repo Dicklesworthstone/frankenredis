@@ -507,6 +507,36 @@ impl HashFieldMap {
         }
     }
 
+    /// Borrowed-input twin of [`Self::from_unique_pairs`] for the RESTORE/RDB-load
+    /// path: the field/value bytes are COPIED into the packed/hash storage by
+    /// `append`/`insert` either way, so taking borrowed slices (e.g. zero-copy
+    /// listpack spans) avoids materialising N transient owned `Vec<u8>` per hash
+    /// just to drop them after the copy. Byte-identical to building the owned
+    /// `Vec<(Vec<u8>,Vec<u8>)>` and calling `from_unique_pairs`.
+    /// Caller MUST guarantee the pairs have no duplicate fields.
+    /// (BlackThrush: RESTORE decode zero-copy span build)
+    #[must_use]
+    pub fn from_unique_pairs_borrowed(pairs: &[(&[u8], &[u8])]) -> Self {
+        let to_hash = pairs.len() > PACKED_MAX_ENTRIES
+            || pairs
+                .iter()
+                .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
+        if to_hash {
+            let mut h = CompactFieldMap::new();
+            for (field, value) in pairs {
+                h.insert(field, value);
+            }
+            HashFieldMap::Hash(h)
+        } else {
+            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            let mut p = PackedStrMap::with_capacity(bytes);
+            for (field, value) in pairs {
+                p.append(field, value);
+            }
+            HashFieldMap::Packed(p)
+        }
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
