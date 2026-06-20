@@ -390,7 +390,18 @@ pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError>
     let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1; // terminator is at total_bytes - 1
     let mut cursor = LISTPACK_HEADER_SIZE;
-    let mut entries = Vec::new();
+    // The header's element count is exact whenever it isn't the UNKNOWN sentinel
+    // (i.e. <= u16::MAX-1 elements — the overwhelmingly common compact case for
+    // hash/set/zset/quicklist-node listpacks). Pre-size the result so the entries
+    // are collected in one allocation instead of growing from empty
+    // (~log2(n) realloc+copies per decoded listpack on the bulk RDB-load path).
+    // The sentinel case (count > 65534) keeps the default and just grows.
+    // Capacity never affects content => decoded entries are byte-identical.
+    let mut entries = if num_elements == LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::new()
+    } else {
+        Vec::with_capacity(usize::from(num_elements))
+    };
     while cursor < end {
         let (entry, consumed) = decode_entry(data, cursor)?;
         entries.push(entry);
