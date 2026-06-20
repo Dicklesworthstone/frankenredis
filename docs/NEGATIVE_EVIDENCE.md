@@ -860,3 +860,30 @@ Byte-exact: fr-OLD vs fr-NEW3 differential 0 diffs / 2000 ops (1–4 sets,
 int/string/missing/wrongtype); LFU-bump tests pass; `fr-conformance` core_set +
 core_set_live_redis green (99 passed). Complements BlackThrush's store-wrapper
 `a3310a98d` (which optimized only the destination build, not the intersection).
+
+## 2026-06-20 CobaltCove (cc) — wide head-to-head (GEO / collection-read / string) — NO clean lever, surface saturated
+
+Probed less-covered families to find a fresh algorithmic gap (fr HEAD `502264773`
+vs Redis 7.2.4, pipelined ×100, best-of-9). All compute-heavy paths are at parity;
+the only sub-parity cells are sub-5µs dispatch-bound micro-commands (constant
+per-command machinery in fr-runtime dispatch, not removable algorithmic waste —
+the `ohsk5` domain), so none clear the Score≥2.0 bar.
+
+| command | ratio fr/redis | note |
+|---|---:|---|
+| GEOSEARCH BYRADIUS / BYBOX (500-member) | 1.01 / 1.00 | parity — do not chase |
+| GEOPOS / GEOHASH | 1.07 / 0.88 | geopos faster; geohash sub-µs dispatch |
+| GEODIST | 0.60 | sub-5µs; `{:.4}` dragon-format ~28% already DECLINED on round-half-to-even byte-exactness risk (ledger) + dispatch |
+| HGETALL / HKEYS / SMEMBERS (1–2k) | 1.01 / 0.99 / 0.99 | parity — collection reads not a gap |
+| HRANDFIELD n=50 | 1.11 | fr faster |
+| ZRANGEBYLEX / ZRANGE BYSCORE+LIMIT | 1.00 / 1.02 | parity |
+| OBJECT ENCODING / GETRANGE-mid / SETRANGE | 0.81 / 0.79 / 0.84 | all sub-2µs dispatch-bound |
+| BITCOUNT range | 1.14 | fr faster |
+
+Conclusion: the clean (non-contended, non-structural) algorithmic perf surface is
+exhausted. fr is parity-or-faster on every compute-heavy command across set/zset
+algebra, GEO queries, collection reads, and string ops. Remaining sub-parity cells
+are (a) dispatch-bound micro-costs in fr-runtime (`ohsk5`, BlackThrush), (b)
+structural RAM/RDB levers (`uhthd` keyspace + PackedZSet = cod-b; ChunkedList list
+DUMP; fr-persist direct-emit = cod-a), or (c) already-declined (geodist format,
+zcount). No further clean cc lever this pass.
