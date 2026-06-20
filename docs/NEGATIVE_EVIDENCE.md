@@ -4,6 +4,42 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-uhthd` compact tagged PackedZSet score evidence
+
+Harness: per-crate release builds for `fr-server` and `fr-bench`, with the
+cod-b target root `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+plus the memory baseline harness against vendored Redis 7.2.4. Artifact:
+`artifacts/optimization/frankenredis-uhthd-packed-zset-score-codb/20260620T1915Z/`.
+
+Measured candidate: encode exact integer `PackedZSet` scores as a compact tagged payload
+(`i8`/`i16`/`i32`) and retain raw `f64` bytes for fractional, large, infinite,
+and NaN scores. This targets the zset RSS gap where Redis listpack can store
+common integer scores compactly while FrankenRedis previously used eight score
+bytes for every packed zset member.
+
+| gate | ratios vs Redis 7.2.4 | verdict |
+|---|---|---|
+| current-control memory | hash/keyspace/list/set/stream/string_1k/zset = 1.422 / 1.405 / 1.396 / 1.093 / 0.978 / 0.931 / 1.619 | zset target loss confirmed |
+| rebuilt candidate memory | hash/keyspace/list/set/stream/string_1k/zset = 1.205 / 1.365 / 1.195 / 1.259 / 0.980 / 0.891 / 1.456 | keep for zset; residual zset loss remains |
+| best candidate memory run | hash/keyspace/list/set/stream/string_1k/zset = 1.249 / 1.489 / 1.127 / 1.141 / 0.968 / 0.924 / 1.271 | supporting target win only |
+| failed-ratchet rerun | keyspace/string/list/hash/set/zset/stream = 1.417 / 0.928 / 1.338 / 1.468 / 1.526 / 1.292 / 0.981 | negative evidence; do not claim non-target cells |
+| ZADD throughput guard | median 0.93x candidate/Redis, trials 0.93 / 1.01 / 0.59 under loadavg 43.46 | above parity floor, noisy guard |
+
+Correctness/guard evidence: packed-zset iteration preserves score/member sort
+order and zero canonicalization; raw-f64 fallback preserves fractional and
+non-finite score behavior. Validation recorded for RCH release build,
+`cargo check -p fr-store --all-targets`, `cargo test -p fr-store zset --
+--nocapture`, `cargo clippy -p fr-store --all-targets -- -D warnings`,
+`cargo test -p fr-conformance -- --nocapture`, touched-file rustfmt, and
+targeted `ubs`.
+
+Decision: evidence supports keeping the compact score encoding once the
+peer-owned source hunk lands. This narrows zset memory, but it is not domination:
+final rebuilt zset RSS is still `1.456x` Redis and the broad memory score remains
+2 wins / 5 losses / 0 neutral. Do not retry this byte-level score compaction for
+non-integer-heavy zsets without fresh A/B proof; the next `uhthd` target should
+be deeper zset/keyspace layout.
+
 ## 2026-06-20 cod-a `frankenredis-ohsk5` pubsub direct encoder keep and pending-client rejection
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through

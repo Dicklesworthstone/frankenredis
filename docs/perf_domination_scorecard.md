@@ -1,5 +1,36 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b compact tagged PackedZSet score storage (`frankenredis-uhthd`, 2026-06-20)
+
+- Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+- Harness: memory baseline capture against vendored Redis 7.2.4, with a ZADD
+  throughput guard for the target command surface.
+- Measured candidate: exact integer packed-zset scores use a tagged
+  `i8`/`i16`/`i32` payload instead of always storing raw `f64` bytes.
+  Fractional, large, infinite, and NaN scores remain raw `f64`.
+- Artifact directory:
+  `artifacts/optimization/frankenredis-uhthd-packed-zset-score-codb/20260620T1915Z/`.
+
+| memory gate | hash | keyspace | list | set | stream | string_1k | zset | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| current-control / Redis | 1.422 | 1.405 | 1.396 | 1.093 | 0.978 | 0.931 | 1.619 | zset loss confirmed |
+| rebuilt candidate / Redis | 1.205 | 1.365 | 1.195 | 1.259 | 0.980 | 0.891 | 1.456 | zset improved, still loss |
+| best candidate / Redis | 1.249 | 1.489 | 1.127 | 1.141 | 0.968 | 0.924 | 1.271 | supporting target win |
+
+ZADD throughput guard vs Redis 7.2.4: median `0.93x` (`0.93 / 1.01 / 0.59`)
+under high load, so no clear throughput regression claim. A failed-ratchet memory
+rerun is retained as negative evidence because list/hash/set moved worse by more
+than 15% while zset stayed improved; the only keep claim is the target zset RSS
+movement.
+
+Scorecard impact: zset memory moved from `1.619x` to `1.456x` Redis-relative in
+the final rebuilt pass (`0.793x` candidate/control on the target cell). This is
+supporting evidence for the peer-owned source hunk, not domination. The final
+memory classification is still
+**2 wins / 5 losses / 0 neutral** across the seven cells; remaining structural
+targets are zset/keyspace/list/hash/set layout.
+
 ## Focused cod-a pubsub fanout direct encoder (`frankenredis-ohsk5`, 2026-06-20)
 
 - Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with

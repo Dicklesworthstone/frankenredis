@@ -10,6 +10,37 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-b addendum: compact zset score storage narrows RSS gap
+
+Release-readiness impact: measured cod-b source hunk for packed zset memory
+density, currently peer-owned in the shared worktree. Exact integer `PackedZSet`
+scores use a tagged `i8`/`i16`/`i32` payload; fractional, large, infinite, and
+NaN scores continue to use raw `f64` bytes. The semantic surface is unchanged:
+decoded score ordering, zero canonicalization, member tie-breaking, and raw-score
+fallback behavior remain the same.
+
+Build/harness: per-crate `rch` release build for `fr-server`/`fr-bench` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`; memory
+baseline capture against vendored Redis 7.2.4. Artifact:
+`artifacts/optimization/frankenredis-uhthd-packed-zset-score-codb/20260620T1915Z/`.
+
+| memory gate | hash | keyspace | list | set | stream | string_1k | zset | readiness impact |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| current-control / Redis | 1.422 | 1.405 | 1.396 | 1.093 | 0.978 | 0.931 | 1.619 | zset RSS loss confirmed |
+| rebuilt candidate / Redis | 1.205 | 1.365 | 1.195 | 1.259 | 0.980 | 0.891 | 1.456 | keep; zset narrowed but still loss |
+| best candidate / Redis | 1.249 | 1.489 | 1.127 | 1.141 | 0.968 | 0.924 | 1.271 | supporting target win only |
+
+Throughput guard: ZADD candidate/Redis median was `0.93x` with trials
+`0.93 / 1.01 / 0.59` under high load, so it stays above the parity floor but is
+not a domination claim. A separate failed-ratchet memory rerun is retained as
+negative evidence because non-target list/hash/set cells worsened; do not use it
+to claim broad memory wins.
+
+Readiness target after this pass: zset RSS improved from `1.619x` to `1.456x`
+Redis-relative in the final rebuilt pass, but the scorecard remains
+**2 wins / 5 losses / 0 neutral** across memory cells. Continue with deeper
+zset/keyspace representation work rather than another score-byte micro-lever.
+
 ## 2026-06-20 cod-a addendum: direct pubsub encoder narrows fanout gap
 
 Release-readiness impact: source hunk shipped for pubsub delivery. The hot path
