@@ -12770,71 +12770,107 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        // Touch/LFU first (Pass A): first key, then the remaining keys in
+        // argument order, returning WRONGTYPE at the first non-set exactly as the
+        // previous clone-then-retain_diff loop did (frankenredis-sdiffwt: a
+        // missing first source still type-checks every remaining source), and
+        // drawing the LFU rng per existing key in the same sequence so the LFU
+        // bumps stay byte-identical. The difference itself is computed afterwards
+        // from immutable borrows. (frankenredis-sdifffresh)
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(first_key) {
             self.next_rand()
         } else {
             0
         };
-        let mut result = match self.entries.get_mut(first_key) {
+        match self.entries.get_mut(first_key) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let res = s.clone();
+                Value::Set(_) => {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     entry.touch(now_ms);
-                    res
                 }
                 _ => return Err(StoreError::WrongType),
             },
-            // (frankenredis-sdiffwt) A missing first source does NOT short-circuit:
-            // upstream sdiffGenericCommand still lookupKeyRead+checkType's every
-            // remaining source, so a later wrong-type key reports WRONGTYPE rather
-            // than an empty result. Start empty and fall into the type-checking
-            // loop below (which skips missing and errors on non-set).
-            None => Box::new(SetValue::new()),
-        };
+            None => {}
+        }
         for key in keys.iter().skip(1) {
-            if result.is_empty() {
-                if self.entries.contains_key(*key) {
-                    let rand_sample = if lfu_tracking_enabled {
-                        self.next_rand()
-                    } else {
-                        0
-                    };
-                    if let Some(entry) = self.entries.get_mut(*key) {
-                        if let Value::Set(_) = &entry.value {
-                            if lfu_tracking_enabled {
-                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                            }
-                            entry.touch(now_ms);
-                        } else {
-                            return Err(StoreError::WrongType);
-                        }
-                    }
-                }
+            if !self.entries.contains_key(*key) {
                 continue;
             }
-            if self.entries.contains_key(*key) {
-                let rand_sample = if lfu_tracking_enabled {
-                    self.next_rand()
-                } else {
-                    0
-                };
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    match &entry.value {
-                        Value::Set(s) => {
-                            result.retain_diff(s);
-                            if lfu_tracking_enabled {
-                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                            }
-                            entry.touch(now_ms);
+            let rand_sample = if lfu_tracking_enabled {
+                self.next_rand()
+            } else {
+                0
+            };
+            if let Some(entry) = self.entries.get_mut(*key) {
+                match &entry.value {
+                    Value::Set(_) => {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
-                        _ => return Err(StoreError::WrongType),
+                        entry.touch(now_ms);
                     }
+                    _ => return Err(StoreError::WrongType),
                 }
             }
         }
+
+        // Compute first - (union of the other sets). With >=2 other sets and a
+        // hashtable-encoded first set, walk the first set once and emit only
+        // members absent from every other set, mirroring redis's
+        // sdiffGenericCommand and the >=3-set SINTER fresh-build — this avoids
+        // cloning the whole first set then running a retain_diff pass per other
+        // set. With a single other set (2-key SDIFF) or an intset first, keep the
+        // clone + (galloping) retain_diff path. A missing first source yields the
+        // empty difference. Output order = first set's iteration order in both
+        // paths. (frankenredis-sdifffresh)
+        let Some(first) = self.entries.get(first_key).and_then(|e| match &e.value {
+            Value::Set(s) => Some(s),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        let result: Box<SetValue> = match first.as_generic() {
+            Some(base) if keys.len() >= 3 => {
+                let mut out = GenericSet::with_capacity_and_hasher(
+                    base.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+                'member: for member in base.iter() {
+                    for key in keys.iter().skip(1) {
+                        let in_other = self
+                            .entries
+                            .get(*key)
+                            .and_then(|e| match &e.value {
+                                Value::Set(s) => Some(s.contains(member)),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        if in_other {
+                            continue 'member;
+                        }
+                    }
+                    out.insert(member.to_vec());
+                }
+                Box::new(SetValue::Generic(out))
+            }
+            _ => {
+                let mut res = first.as_ref().clone();
+                for key in keys.iter().skip(1) {
+                    if res.is_empty() {
+                        break;
+                    }
+                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                        Value::Set(s) => Some(s),
+                        _ => None,
+                    }) {
+                        res.retain_diff(s);
+                    }
+                }
+                Box::new(res)
+            }
+        };
         if result.is_empty() {
             Ok(None)
         } else {
