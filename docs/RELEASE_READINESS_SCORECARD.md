@@ -71,9 +71,12 @@ and `fr-store` rustfmt all passed. The read-only packed-zset RSS probe with
 6,250 zsets x 32 members measured Redis data-RSS `4.58 MB` vs FrankenRedis
 `8.11 MB`, or `1.77x` fr/Redis. This is negative release-readiness evidence:
 the compact score hunk can narrow one target cell, but zset memory is still a
-material Redis-relative loss and needs a deeper layout change. Targeted `ubs`
-remains nonzero on pre-existing file-wide findings in `packed_set.rs`, including
-false-positive JWT `decode` hits on existing `cfm_decode` helpers.
+material Redis-relative loss and needs a deeper layout change. The matching
+read-only ZADD throughput guard measured median `0.77x` fr/Redis at P16/c50/n150k
+over five trials (`0.77 / 0.64 / 0.79 / 0.82 / 0.74`), so ZADD remains below the
+`0.9x` parity floor in this recheck. Targeted `ubs` remains nonzero on
+pre-existing file-wide findings in `packed_set.rs`, including false-positive JWT
+`decode` hits on existing `cfm_decode` helpers.
 
 ## 2026-06-20 cod-a addendum: direct pubsub encoder narrows fanout gap
 

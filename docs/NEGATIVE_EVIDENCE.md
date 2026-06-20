@@ -95,6 +95,12 @@ probe says the remaining representation gap is larger than the committed final
 baseline cell; next work must remove deeper per-key/member overhead rather than
 another score-byte tweak.
 
+Read-only ZADD throughput guard on the same cod-a binary, Redis benchmark P16,
+c50, n150k, trials5, loadavg `11.21`: median `0.77x` fr/Redis with trials
+`0.77 / 0.64 / 0.79 / 0.82 / 0.74`. Verdict: negative evidence against using
+the compact-score hunk as a throughput/readiness claim; ZADD remains below the
+`0.9x` parity floor in this recheck.
+
 Targeted `ubs` on `crates/fr-store/src/packed_set.rs` returned nonzero on
 file-wide legacy/static-analysis findings, including false-positive JWT
 `decode` hits on existing `cfm_decode` helpers plus existing unwrap/clone/index

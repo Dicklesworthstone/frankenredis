@@ -72,9 +72,13 @@ cod-a recheck on the same shared hunk:
 - Read-only packed-zset RSS probe, 6,250 small zsets x 32 members:
   Redis data-RSS `4.58 MB`, FrankenRedis data-RSS `8.11 MB`, ratio `1.77x`
   fr/Redis.
+- Read-only ZADD throughput guard on the same cod-a binary, Redis benchmark P16,
+  c50, n150k, trials5, loadavg `11.21`: median `0.77x` fr/Redis with trials
+  `0.77 / 0.64 / 0.79 / 0.82 / 0.74`.
 - Verdict: negative evidence for domination. Keep the compact-score hunk only as
   a narrow target-density improvement; the next measured memory lever needs to
-  remove deeper zset/keyspace/member overhead.
+  remove deeper zset/keyspace/member overhead, and ZADD throughput remains below
+  the `0.9x` parity floor in this recheck.
 - Targeted `ubs` returned nonzero on file-wide legacy/static-analysis findings
   in `packed_set.rs`, including false-positive JWT `decode` hits on existing
   `cfm_decode` helpers. Compiler/clippy/fmt/zset/conformance gates were clean.
