@@ -48,6 +48,47 @@ the deeper list-write primitive rather than the promotion threshold: front-chunk
 fill, batched command mutation, or a quicklist-style builder that preserves
 small-list locality.
 
+## 2026-06-20 cod-b addendum: packed-list direct prepend rejected
+
+Per-crate release builds were made with `rch exec -- cargo build --release -p
+fr-server -p fr-bench` in isolated target dirs under
+`/data/projects/.rch-targets/frankenredis-cod-b-lpush-*`. The candidate replaced
+`PackedList::push_front`'s temporary encoded `Vec` plus front `splice` with a
+direct reserve/resize/copy-within prepend. It preserved the packed byte layout
+and passed focused store gates, but the benchmark did not pay.
+
+Current-control vs Redis 7.2.4 (`redis-benchmark`, P16/c50/n150k/trials7):
+
+| command | fr/redis | verdict |
+|---|---:|---|
+| lpush | 0.7548 | loss |
+| rpush | 0.8371 | loss |
+| sadd | 0.8162 | loss |
+| zadd | 0.8204 | loss |
+| set | 1.0204 | neutral |
+| get | 1.0321 | win |
+| hset | 1.0696 | win |
+| incr | 1.0261 | neutral |
+
+Candidate vs current-control:
+
+| workload | candidate/control | verdict |
+|---|---:|---|
+| lpush | 0.9784 | rejected, no material gain |
+| rpush | 1.0374 | noisy guard win; untouched path |
+| sadd | 1.0061 | neutral |
+| zadd | 1.0208 | neutral |
+| set | 1.0000 | neutral |
+| get | 1.0268 | neutral |
+| hset | 0.9936 | neutral |
+| incr | 0.9290 | guard loss/noisy |
+
+Readiness impact: no score improvement. The LPUSH source hunk was reverted
+before commit. The residual release risks remain list/set/zset writes; the LPUSH
+gap is not explained by the tiny `PackedList::push_front` temporary allocation
+alone. Artifact:
+`artifacts/optimization/frankenredis-ohsk5-packedlist-prepend-codb/20260620T112000Z/`.
+
 ## 2026-06-20 cod-b addendum: non-store GET probes did not ship
 
 Per-crate `rch` release builds and Redis C-client interleaved benches were run

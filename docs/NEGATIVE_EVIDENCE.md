@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-ohsk5` packed-list direct prepend
+
+Harness: per-crate release builds for `fr-server` and `fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`, with isolated
+target dirs under `/data/projects/.rch-targets/frankenredis-cod-b-lpush-*`.
+Candidate/control and Redis-relative rows used vendored Redis 7.2.4
+`redis-benchmark`, P16, c50, n150k, trials=7 against fresh servers.
+
+Candidate: replace `PackedList::push_front`'s temporary encoded `Vec` plus
+`Vec::splice(0..0, enc)` with a direct reserve/resize/copy-within prepend. This
+kept the same packed byte layout and passed `cargo check -p fr-store --all-targets`,
+the `list_equivalent_to_vecdeque` focused property test, and touched-file
+`rustfmt --edition 2024 --check`, but did not produce a keepable LPUSH win.
+
+| artifact | variant | command | ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5-packedlist-prepend-codb/20260620T111500Z/control_vs_redis.txt` | current-control vs Redis 7.2.4 | lpush/rpush/sadd/zadd/set/get/hset/incr | 0.7548 / 0.8371 / 0.8162 / 0.8204 / 1.0204 / 1.0321 / 1.0696 / 1.0261 | residual write losses remain |
+| `artifacts/optimization/frankenredis-ohsk5-packedlist-prepend-codb/20260620T112000Z/candidate_control.txt` | direct prepend candidate vs current-control | lpush | 0.9784 | rejected, no material gain |
+| same | direct prepend candidate vs current-control | rpush/sadd/zadd/set/get/hset/incr | 1.0374 / 1.0061 / 1.0208 / 1.0000 / 1.0268 / 0.9936 / 0.9290 | mixed/noisy guards; code path only targeted LPUSH |
+| `artifacts/optimization/frankenredis-ohsk5-packedlist-prepend-codb/20260620T112000Z/candidate_vs_redis.txt` | rejected candidate vs Redis 7.2.4 | lpush/rpush/sadd/zadd/set/get/hset/incr | 0.7435 / 0.9106 / 0.9006 / 0.8058 / 1.0280 / 1.0657 / 1.0135 / 0.9866 | LPUSH and ZADD still losses |
+
+Decision: reject and revert the `PackedList::push_front` hunk before commit. The
+allocation-free front prepend did not close the LPUSH gap; the measured list
+write problem is deeper than `Vec::splice`'s temporary allocation. Do not retry
+this standalone packed-list direct-prepend micro-lever. Next list-write attempts
+need a larger storage representation change, a batch-aware list push primitive,
+or fresh profile evidence that names a different LPUSH/RPUSH hotspot.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` INCR store-probe consolidation
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through
