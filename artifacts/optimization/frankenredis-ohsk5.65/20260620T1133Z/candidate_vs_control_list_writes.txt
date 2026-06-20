@@ -1,0 +1,9 @@
+candidate_vs_control via redis-benchmark; candidate=19743 control=19742 n=200000 P=16 c=50 trials=7
+lpush    median candidate/control=1.104 trials=1.093, 1.114, 1.068, 1.104, 1.036, 1.215, 1.167
+  raw cand=778210.12 ctrl=711743.81; cand=787401.56 ctrl=706713.81; cand=751879.69 ctrl=704225.31; cand=800000.00 ctrl=724637.69; cand=724637.69 ctrl=699300.69; cand=843881.88 ctrl=694444.50; cand=858369.12 ctrl=735294.06
+rpush    median candidate/control=1.013 trials=0.944, 1.109, 1.017, 1.013, 1.033, 0.933, 0.991
+  raw cand=793650.75 ctrl=840336.12; cand=836820.12 ctrl=754717.00; cand=843881.88 ctrl=829875.50; cand=847457.62 ctrl=836820.12; cand=823045.25 ctrl=796812.81; cand=840336.12 ctrl=900900.88; cand=862069.00 ctrl=869565.19
+sadd     median candidate/control=1.027 trials=1.036, 0.889, 1.103, 0.970, 1.098, 0.987, 1.027
+  raw cand=909090.94 ctrl=877193.00; cand=738007.38 ctrl=829875.50; cand=896860.94 ctrl=813008.12; cand=851063.81 ctrl=877193.00; cand=934579.44 ctrl=851063.81; cand=877193.00 ctrl=888888.94; cand=892857.12 ctrl=869565.19
+zadd     median candidate/control=1.030 trials=1.052, 1.030, 1.136, 1.000, 0.993, 1.040, 0.982
+  raw cand=749063.69 ctrl=711743.81; cand=749063.69 ctrl=727272.69; cand=800000.00 ctrl=704225.31; cand=729927.06 ctrl=729927.06; cand=738007.38 ctrl=743494.44; cand=724637.69 ctrl=696864.12; cand=727272.69 ctrl=740740.69

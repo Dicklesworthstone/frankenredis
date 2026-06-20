@@ -10,6 +10,40 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-a addendum: front-biased list chunks improve LPUSH, residual remains
+
+Release-readiness impact: source hunk shipped for `LPUSH`, but the Redis-relative
+gap is not fully closed. The front chunk of large lists now uses a front-biased
+physical order, making repeated `LPUSH` append to the Vec tail instead of
+shifting the active chunk on every push.
+
+Per-crate `rch` release builds and Redis C-client benches were run under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. Harness:
+vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n200k, seven trials for the
+matrix; n300k, eleven trials for focused LPUSH confirmation.
+
+| gate | command | ratio | readiness impact |
+|---|---|---:|---|
+| current-control vs Redis 7.2.4 | lpush | 0.72 | pre-existing release-readiness loss |
+| current-control vs Redis 7.2.4 | rpush / sadd / zadd | 0.81 / 0.84 / 0.78 | pre-existing residual losses |
+| candidate vs Redis 7.2.4 | lpush | 0.85 | improved, still below 0.9x floor |
+| candidate vs Redis 7.2.4 | rpush / sadd / zadd | 0.89 / 0.86 / 0.74 | residual losses/noise, not hunk target |
+| candidate vs current-control | lpush | 1.104 | keep |
+| candidate vs current-control | rpush / sadd / zadd | 1.013 / 1.027 / 1.030 | neutral guards |
+| focused candidate vs current-control | lpush | 1.170 | confirmed keep |
+
+Correctness gates passed: targeted rustfmt for `crates/fr-store/src/packed_set.rs`,
+`cargo check -p fr-store --all-targets`, `cargo test -p fr-store list --
+--nocapture`, `cargo clippy -p fr-store --all-targets -- -D warnings`, and
+`cargo test -p fr-conformance -- --nocapture`. Live list guards passed against
+Redis 7.2.4: `scripts/list_differ.py --iters 500 --seed 65065` and
+`scripts/list_quicklist_dump_differ.py 19741 19743`.
+
+Readiness target after this pass: `LPUSH` improved from 0.72x to 0.85x but
+remains a measured loss. Next work should target the remaining list-write CPU
+floor and the separate `zadd`/set residuals; do not repeat packed-list promotion
+thresholds without a fresh profile.
+
 ## 2026-06-20 cod-a addendum: ohsk5 INCR route neutral, LPUSH front-promotion rejected
 
 Release-readiness impact: evidence update only; no source hunk shipped.

@@ -1,0 +1,1 @@
+PASS — multi-node quicklist (all-PACKED-node) DUMP/RESTORE byte-exact vs redis 7.2.4 [guards g7ag5 + 1z4ba large-element PACKED-node fix, DUMP + RDB-save encoders]

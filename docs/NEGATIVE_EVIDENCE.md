@@ -32,6 +32,54 @@ this standalone packed-list direct-prepend micro-lever. Next list-write attempts
 need a larger storage representation change, a batch-aware list push primitive,
 or fresh profile evidence that names a different LPUSH/RPUSH hotspot.
 
+## 2026-06-20 cod-a `frankenredis-ohsk5.65` front-biased list chunk keep
+
+Harness: per-crate release builds for `fr-server` and `fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. Redis-relative
+rows used vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n200k, seven
+trials through `scripts/bench_vs_redis.py`. Direct candidate/control rows used
+the same `redis-benchmark` client against simultaneously resident control
+(`19742`) and candidate (`19743`) FrankenRedis binaries.
+
+Alien route: cache-aware deque/list layout rather than another threshold tweak.
+The kept hunk makes an active front `ListChunk::Owned` store logical order
+reversed, so repeated `LPUSH` uses `Vec::push` at the physical tail instead of
+`Vec::insert(0, ...)` shifting the whole chunk. Iteration, reverse iteration,
+random access, DUMP quicklist export, and arbitrary mutation normalize/translate
+the representation back to logical order.
+
+| artifact | variant | command | median ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5.65/20260620T1133Z/control_vs_redis_list_writes.txt` | current-control vs Redis 7.2.4 | lpush | 0.72 | confirmed loss |
+| same | current-control vs Redis 7.2.4 | rpush | 0.81 | confirmed loss |
+| same | current-control vs Redis 7.2.4 | sadd | 0.84 | confirmed loss/noisy |
+| same | current-control vs Redis 7.2.4 | zadd | 0.78 | confirmed loss |
+| `artifacts/optimization/frankenredis-ohsk5.65/20260620T1133Z/candidate_vs_redis_list_writes.txt` | candidate vs Redis 7.2.4 | lpush | 0.85 | win vs current, still below Redis |
+| same | candidate vs Redis 7.2.4 | rpush | 0.89 | improved, still below Redis |
+| same | candidate vs Redis 7.2.4 | sadd | 0.86 | neutral/residual loss |
+| same | candidate vs Redis 7.2.4 | zadd | 0.74 | residual loss; direct A/B says no source regression |
+| `artifacts/optimization/frankenredis-ohsk5.65/20260620T1133Z/candidate_vs_control_list_writes.txt` | candidate vs current-control | lpush | 1.104 | keep: direct A/B win |
+| same | candidate vs current-control | rpush | 1.013 | neutral guard |
+| same | candidate vs current-control | sadd | 1.027 | neutral guard |
+| same | candidate vs current-control | zadd | 1.030 | neutral guard |
+| `artifacts/optimization/frankenredis-ohsk5.65/20260620T1133Z/candidate_vs_control_lpush_confirm.txt` | focused confirmation vs current-control | lpush | 1.170 | confirmed keep |
+
+Correctness/guard evidence: `rustfmt --edition 2024 --check
+crates/fr-store/src/packed_set.rs`, `cargo check -p fr-store --all-targets`,
+`cargo test -p fr-store list -- --nocapture`, `cargo clippy -p fr-store
+--all-targets -- -D warnings`, and `cargo test -p fr-conformance --
+--nocapture` all passed; the rustfmt check was local and the cargo gates ran via
+`rch`. Live differential guards also passed: `scripts/list_differ.py --oracle 19741 --fr
+19743 --iters 500 --seed 65065` and
+`scripts/list_quicklist_dump_differ.py 19741 19743`.
+
+Decision: keep the front-biased `ListChunk` layout. It does not fully close
+LPUSH (`0.85x` vs Redis remains a release-readiness loss), but it is a measured
+same-run LPUSH improvement with neutral guards. Next list work should continue
+deeper into Redis-relative list-write residuals rather than repeating packed-list
+promotion thresholds.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` INCR store-probe consolidation
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through

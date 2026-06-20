@@ -2213,6 +2213,9 @@ enum ListChunk {
         /// Exact listpack byte length if known. `0` means a mutable path touched
         /// the chunk and the value must be recomputed before append/seal.
         lp_bytes: u64,
+        /// True when physical order is reversed so repeated LPUSH can append at
+        /// the Vec tail instead of shifting the whole front chunk.
+        front_biased: bool,
     },
     Listpack {
         bytes: Arc<Vec<u8>>,
@@ -2226,6 +2229,16 @@ impl ListChunk {
         Self::Owned {
             elems: Arc::new(elems),
             lp_bytes,
+            front_biased: false,
+        }
+    }
+
+    fn from_front_vec(elems: Vec<Vec<u8>>) -> Self {
+        let lp_bytes = owned_listpack_bytes(&elems);
+        Self::Owned {
+            elems: Arc::new(elems),
+            lp_bytes,
+            front_biased: true,
         }
     }
 
@@ -2249,7 +2262,19 @@ impl ListChunk {
 
     fn get(&self, idx: usize) -> Option<&[u8]> {
         match self {
-            Self::Owned { elems, .. } => elems.get(idx).map(Vec::as_slice),
+            Self::Owned {
+                elems,
+                front_biased,
+                ..
+            } => {
+                if *front_biased {
+                    elems
+                        .get(elems.len().checked_sub(1 + idx)?)
+                        .map(Vec::as_slice)
+                } else {
+                    elems.get(idx).map(Vec::as_slice)
+                }
+            }
             Self::Listpack { bytes, entries } => {
                 entries.get(idx).map(|entry| entry.as_bytes(bytes))
             }
@@ -2265,9 +2290,18 @@ impl ListChunk {
             *self = Self::from_vec(elems);
         }
         match self {
-            Self::Owned { elems, lp_bytes } => {
+            Self::Owned {
+                elems,
+                lp_bytes,
+                front_biased,
+            } => {
                 *lp_bytes = 0;
-                Arc::make_mut(elems)
+                let elems = Arc::make_mut(elems);
+                if *front_biased {
+                    elems.reverse();
+                    *front_biased = false;
+                }
+                elems
             }
             Self::Listpack { .. } => unreachable!("packed listpack node was materialized"),
         }
@@ -2280,7 +2314,12 @@ impl ListChunk {
     /// again; a later in-place mutation (`make_mut`) transparently re-materializes
     /// it. No-op for an already-`Listpack`/empty chunk or an over-budget encode.
     fn seal_if_owned(&mut self, fill: i64) {
-        let Self::Owned { elems, lp_bytes } = self else {
+        let Self::Owned {
+            elems,
+            lp_bytes,
+            front_biased,
+        } = self
+        else {
             return;
         };
         if elems.is_empty() {
@@ -2292,7 +2331,11 @@ impl ListChunk {
         if list_node_exceeds_limit(fill, *lp_bytes, elems.len() as u64) {
             return;
         }
-        let slices: Vec<&[u8]> = elems.iter().map(Vec::as_slice).collect();
+        let slices: Vec<&[u8]> = if *front_biased {
+            elems.iter().rev().map(Vec::as_slice).collect()
+        } else {
+            elems.iter().map(Vec::as_slice).collect()
+        };
         if let Some(blob) = fr_persist::encode_listpack_strings_blob(&slices)
             && let Ok(spans) = fr_persist::listpack::decode_value_spans(&blob)
         {
@@ -2302,7 +2345,9 @@ impl ListChunk {
 
     fn accepts_append(&mut self, elem: &[u8], fill: i64) -> bool {
         match self {
-            Self::Owned { elems, lp_bytes } => {
+            Self::Owned {
+                elems, lp_bytes, ..
+            } => {
                 if elems.is_empty() {
                     return true;
                 }
@@ -2329,11 +2374,21 @@ impl ListChunk {
                 .collect();
             *self = Self::from_vec(elems);
         }
-        if let Self::Owned { elems, lp_bytes } = self {
+        if let Self::Owned {
+            elems,
+            lp_bytes,
+            front_biased,
+        } = self
+        {
             if *lp_bytes == 0 {
                 *lp_bytes = owned_listpack_bytes(elems);
             }
-            Arc::make_mut(elems).push(elem);
+            let elems = Arc::make_mut(elems);
+            if *front_biased {
+                elems.insert(0, elem);
+            } else {
+                elems.push(elem);
+            }
             *lp_bytes += added;
         }
     }
@@ -2347,18 +2402,38 @@ impl ListChunk {
                 .collect();
             *self = Self::from_vec(elems);
         }
-        if let Self::Owned { elems, lp_bytes } = self {
+        if let Self::Owned {
+            elems,
+            lp_bytes,
+            front_biased,
+        } = self
+        {
             if *lp_bytes == 0 {
                 *lp_bytes = owned_listpack_bytes(elems);
             }
-            Arc::make_mut(elems).insert(0, elem);
+            let elems = Arc::make_mut(elems);
+            if !*front_biased {
+                elems.reverse();
+                *front_biased = true;
+            }
+            elems.push(elem);
             *lp_bytes += added;
         }
     }
 
     fn iter(&self) -> ListChunkIter<'_> {
         match self {
-            Self::Owned { elems, .. } => ListChunkIter::Owned(elems.iter()),
+            Self::Owned {
+                elems,
+                front_biased,
+                ..
+            } => {
+                if *front_biased {
+                    ListChunkIter::OwnedRev(elems.iter().rev())
+                } else {
+                    ListChunkIter::Owned(elems.iter())
+                }
+            }
             Self::Listpack { bytes, entries } => ListChunkIter::Listpack {
                 bytes,
                 entries: entries.iter(),
@@ -2368,9 +2443,17 @@ impl ListChunk {
 
     fn iter_from(&self, start: usize) -> ListChunkIter<'_> {
         match self {
-            Self::Owned { elems, .. } => {
+            Self::Owned {
+                elems,
+                front_biased,
+                ..
+            } => {
                 let start = start.min(elems.len());
-                ListChunkIter::Owned(elems[start..].iter())
+                if *front_biased {
+                    ListChunkIter::OwnedRev(elems[..elems.len() - start].iter().rev())
+                } else {
+                    ListChunkIter::Owned(elems[start..].iter())
+                }
             }
             Self::Listpack { bytes, entries } => {
                 let start = start.min(entries.len());
@@ -2384,7 +2467,17 @@ impl ListChunk {
 
     fn iter_rev(&self) -> ListChunkRevIter<'_> {
         match self {
-            Self::Owned { elems, .. } => ListChunkRevIter::Owned(elems.iter().rev()),
+            Self::Owned {
+                elems,
+                front_biased,
+                ..
+            } => {
+                if *front_biased {
+                    ListChunkRevIter::Owned(elems.iter())
+                } else {
+                    ListChunkRevIter::OwnedRev(elems.iter().rev())
+                }
+            }
             Self::Listpack { bytes, entries } => ListChunkRevIter::Listpack {
                 bytes,
                 entries: entries.iter().rev(),
@@ -2516,7 +2609,7 @@ impl ChunkedList {
             front.seal_if_owned(fill);
         }
         self.chunks
-            .push_front(ListChunk::from_vec(Vec::from([elem])));
+            .push_front(ListChunk::from_front_vec(Vec::from([elem])));
         self.len += 1;
     }
 
@@ -2734,6 +2827,7 @@ impl<'a> Iterator for ChunkedListIter<'a> {
 
 enum ListChunkIter<'a> {
     Owned(std::slice::Iter<'a, Vec<u8>>),
+    OwnedRev(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
     Listpack {
         bytes: &'a [u8],
         entries: std::slice::Iter<'a, ListpackValueSpan>,
@@ -2746,6 +2840,7 @@ impl<'a> Iterator for ListChunkIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
+            Self::OwnedRev(iter) => iter.next().map(Vec::as_slice),
             Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
         }
     }
@@ -2775,7 +2870,8 @@ impl<'a> Iterator for ChunkedListRevIter<'a> {
 }
 
 enum ListChunkRevIter<'a> {
-    Owned(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
+    Owned(std::slice::Iter<'a, Vec<u8>>),
+    OwnedRev(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
     Listpack {
         bytes: &'a [u8],
         entries: std::iter::Rev<std::slice::Iter<'a, ListpackValueSpan>>,
@@ -2788,6 +2884,7 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
+            Self::OwnedRev(iter) => iter.next().map(Vec::as_slice),
             Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
         }
     }
@@ -3294,10 +3391,22 @@ impl ListValue {
                     let first_len = entries.first()?.as_bytes(bytes).len();
                     (Cow::Borrowed(bytes.as_slice()), entries.len(), first_len)
                 }
-                ListChunk::Owned { elems, .. } if !elems.is_empty() => {
-                    let slices: Vec<&[u8]> = elems.iter().map(Vec::as_slice).collect();
+                ListChunk::Owned {
+                    elems,
+                    front_biased,
+                    ..
+                } if !elems.is_empty() => {
+                    let slices: Vec<&[u8]> = if *front_biased {
+                        elems.iter().rev().map(Vec::as_slice).collect()
+                    } else {
+                        elems.iter().map(Vec::as_slice).collect()
+                    };
                     let blob = fr_persist::encode_listpack_strings_blob(&slices)?;
-                    let first_len = elems.first()?.len();
+                    let first_len = if *front_biased {
+                        elems.last()?.len()
+                    } else {
+                        elems.first()?.len()
+                    };
                     (Cow::Owned(blob), elems.len(), first_len)
                 }
                 _ => return None,
