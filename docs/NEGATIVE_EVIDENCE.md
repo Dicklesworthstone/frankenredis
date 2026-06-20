@@ -967,3 +967,16 @@ notably 1.5-2.9x faster on BITOP/PFCOUNT-multi/PFMERGE). The three sub-parity ce
 are all sub-2µs single-element commands whose obvious algorithmic optimization is
 already present (PFCOUNT cache = twdut); residual is fr-runtime dispatch
 (`ohsk5`/BlackThrush). No clean uncontended cc lever in bitmap/HLL.
+
+## 2026-06-20 CobaltCove (cc) — SINTER/SDIFF fresh-build large-hashtable correctness verification
+
+Closed a verification gap in my shipped SINTER/SDIFF fresh-build (`417c0193f`/`502264773`):
+the fresh-build path only activates for **Generic (listpack/hashtable) sets at 3+ keys**,
+but my initial differential used only small (≤60-member, intset) sets. Re-verified on the
+exact target path — 150 trials × {SINTER,SDIFF,SINTERSTORE,SDIFFSTORE} over 3–4 sets of
+200/600/1500 string members (forcing hashtable encoding), **900 operations**:
+- **fr-OLD vs fr-NEW (clone+retain vs fresh-build): 0 exact diffs** (byte-identical incl. member order)
+- **fr-NEW vs Redis 7.2.4: 0 membership diffs** (SINTER/SDIFF results + stored dst SMEMBERS)
+
+The fresh-build is now proven byte-exact across the full set-encoding spectrum (intset →
+listpack → hashtable) and both result delivery (read) and stored-destination paths.
