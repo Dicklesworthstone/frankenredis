@@ -1305,3 +1305,26 @@ bar. Real lever would be a ZLEXCOUNT dispatch borrow fast-path (cold-command
 vein, fr-runtime), which is a separate, largely-exhausted domain. Absolute cost
 is sub-5µs/call on a rarely-hot command → low Impact×Confidence/Effort. No source
 hunk written. Score for this lever: **0 win / 0 loss / 1 declined-pre-build**.
+
+## GEODIST float formatting — DECLINED on byte-exactness risk (BlackThrush 2026-06-20)
+
+Re-profiling the post-cmdname binary (mix incl GEODIST) showed
+`flt2dec::strategy::dragon::format_exact` at ~4% — `geo_distance_reply`'s
+`format!("{normalized:.4}")` (fr-command). Rust's `{:.4}` runs the dragon
+correctly-rounded fixed-precision algorithm; ~28% of GEODIST's per-call cost is
+this formatter.
+
+A faster integer-scaling path (`(d * 10000.0).round() as i64` then manual digit
+emit, reusing the e4fu8 branchless decimal-length) would skip dragon entirely —
+BUT `f64::round` is half-AWAY-from-zero while Rust `{:.4}` and Redis `%.4f` both
+round half-to-EVEN, so the scaling path would byte-DIVERGE from vendored Redis on
+exact `.00005` boundaries. GEODIST output must stay byte-exact (it is today), and
+replicating `%.4f` round-half-to-even by hand is ~what dragon already does.
+GEODIST is also one cheap, rarely-hot command (the 4% is an artifact of the
+1/7-geodist micro-mix; geodist absolute cost is <0.5 ms/100 ops). Low
+Impact×Confidence/Effort + correctness risk → NOT pursued. The eager-per-command
+waste vein in `execute_frame_internal` is exhausted after clock-chaining (genclock,
+-85M instr) and lazy command_name (-168M instr); residual dispatch hot functions
+(command_table_index, classify_command, foldhash command-name hash,
+parse_command_args_borrowed_into, dispatch_with_client_context) are necessary
+per-command work, not removable waste. Score: **0 win / 0 loss / 1 declined**.
