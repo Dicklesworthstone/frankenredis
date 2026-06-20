@@ -12443,22 +12443,39 @@ impl Store {
             None => return Ok(0),
         };
 
+        // (frankenredis-sintercard-resolve-once) Resolve every OTHER set's
+        // reference a SINGLE time instead of re-hashing its keyspace key inside
+        // the per-member loop. The prior body called `self.entries.get(*key)`
+        // for every (member, other-key) pair — M*K keyspace dict lookups (key
+        // hashing + bucket probe + Box deref) layered on top of the unavoidable
+        // M*K set-membership probes. Redis holds direct robj pointers to the
+        // member sets, so it pays only the membership probes. Every key is
+        // present here (has_empty was false) and all mutable LFU/touch bumps
+        // already happened above, so these immutable borrows coexist with
+        // `min_set`. Visited order and the resulting count are unchanged →
+        // byte-identical reply.
+        let mut other_sets: Vec<&SetValue> = Vec::with_capacity(keys.len().saturating_sub(1));
+        for (i, key) in keys.iter().enumerate() {
+            if i == min_idx {
+                continue;
+            }
+            match self.entries.get(*key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => other_sets.push(s.as_ref()),
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => return Ok(0),
+            }
+        }
+
         if !declustered {
             // Original sequential path (small sets / no LIMIT): byte-identical.
             let mut count = 0_u64;
             'members: for member in min_set.iter() {
                 let member = member.as_ref();
-                for (i, key) in keys.iter().enumerate() {
-                    if i == min_idx {
-                        continue;
-                    }
-                    match self.entries.get(*key) {
-                        Some(entry) => match &entry.value {
-                            Value::Set(s) if s.contains(member) => {}
-                            Value::Set(_) => continue 'members,
-                            _ => return Err(StoreError::WrongType),
-                        },
-                        None => return Ok(0),
+                for s in &other_sets {
+                    if !s.contains(member) {
+                        continue 'members;
                     }
                 }
                 count = count.saturating_add(1);
@@ -12480,21 +12497,10 @@ impl Store {
             idx = (idx + walk_stride) % min_card;
             let member = member.as_ref();
             let mut in_all = true;
-            for (i, key) in keys.iter().enumerate() {
-                if i == min_idx {
-                    continue;
-                }
-                match self.entries.get(*key) {
-                    Some(entry) => match &entry.value {
-                        Value::Set(s) => {
-                            if !s.contains(member) {
-                                in_all = false;
-                                break;
-                            }
-                        }
-                        _ => return Err(StoreError::WrongType),
-                    },
-                    None => return Ok(0),
+            for s in &other_sets {
+                if !s.contains(member) {
+                    in_all = false;
+                    break;
                 }
             }
             if in_all {

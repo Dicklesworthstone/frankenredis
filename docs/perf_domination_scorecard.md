@@ -558,3 +558,36 @@ No source hunk remains. Current measured set-read frontier from this pass:
 still a known rejected constant-factor gap. Next route should be set layout,
 probe specialization, or no-LIMIT intersection counting rather than direct reply
 encoding.
+
+## BlackThrush SINTERCARD resolve-other-sets-once (MEASURED WIN 2026-06-20)
+
+Closes the `SINTERCARD` set-read loss cell flagged in the broad refresh above
+(`0.62x`). `Store::sintercard` (fr-store) re-called `self.entries.get(*key)` —
+a full keyspace dict lookup (key hash + bucket probe + `Box` deref) — for **every
+`(member × other-key)` pair**, i.e. `M*K` keyspace lookups layered on top of the
+unavoidable `M*K` set-membership probes. `sinter_value` already resolves each set
+once via `retain_intersect`; SINTERCARD did not. The fix resolves
+`other_sets: Vec<&SetValue>` a single time before the member loop (both the
+sequential and de-clustered LIMIT paths), so the hot loop pays only the
+membership probe. All keys are present at that point (`has_empty` was false) and
+every mutable LFU/touch bump already happened, so the immutable borrows coexist
+with `min_set`; visited order and the count are unchanged → byte-identical.
+
+Built candidate + clean control via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-bt rch exec -- cargo build --release -p fr-server --bin frankenredis`;
+benched `scripts/broad_command_headtohead.py` P200/trials=11 against vendored
+Redis 7.2.4, 3 interleaved runs each, same redis instance.
+
+| Command / gate | candidate vs Redis | control vs Redis | scorecard result |
+|---|---:|---:|---|
+| `sintercard` (run 1/2/3) | 1.09x / 1.08x / 1.28x | 0.73x / 0.62x / 0.73x | **WIN — loss→domination** |
+| `sintercard` fr-side ms | ~10–11 ms | ~17–18.8 ms | ~40% faster fr-side |
+| `sinter3` (untouched guard) | 0.87–0.96x | 0.86–0.92x | unchanged (no collateral) |
+| `smismember` (noisy guard) | 0.82–0.90x | 0.74–1.17x | unchanged/noisy |
+
+Lever score: **1 win / 0 loss / 0 neutral**. Correctness: differential vs Redis
+7.2.4 across 15 edge cases (2/3 sets, `LIMIT 0/5/20/3`, intset + listpack-small
+encodings, both de-clustered and sequential paths, missing key both orders,
+WRONGTYPE both orders, self-intersection) → **0 diffs**. Source hunk shipped.
+Set-read frontier now: `SMISMEMBER≈0.79x` (noisy), `ZCOUNT≈0.61x` (rejected),
+`SINTER` 3-way `≈0.9x` (different path, retain_intersect).
