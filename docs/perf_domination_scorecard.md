@@ -632,3 +632,39 @@ neutral, confirming no regression); the win surfaces under real pipelined
 saturation, which is the ohsk5 scenario. Lever score: **1 win / 0 loss / 0
 neutral** (server-CPU). Helps the entire generic long tail + RPUSH/SADD/ZADD
 writes (they dispatch through the same path).
+
+## BlackThrush lazy command_name (MEASURED, profile-driven, 2026-06-20)
+
+Re-profiled the post-genclock binary (perf record under deep-pipelined cold-command
+load): `clock_gettime` had dropped from ~12% to ~2.5% (genclock fix confirmed), and
+a fresh systemic cost surfaced — **`Utf8Chunks::next` at ~1.8%** of pipelined CPU,
+from `String::from_utf8_lossy(&argv[0])` built EAGERLY per command in
+`execute_frame_internal` as `command_name`. Every one of its 8 consumers is a cold
+rejection/error branch (NOAUTH threat reason, ACL NOPERM command/key/channel,
+command-time-budget warn) — none runs for a normal successful command — yet the
+per-command UTF-8 lossy scan of argv[0] ran for every dispatched command.
+
+Fix: replaced the eager `let command_name = &command_name_lossy` with a closure
+`let command_name = || String::from_utf8_lossy(&argv[0])` and call `command_name()`
+at the 8 cold sites. `argv` is a shared `&[Vec<u8>]` so the closure copies the
+reference (no borrow conflict with the `&mut self` dispatch). Byte-identical: the
+closure yields the exact same Cow; error messages unchanged.
+
+Correctness: `acl_command` (2) + `unauthenticated` (1) + `noauth` (1) fr-runtime
+tests green; builds clean.
+
+MEASURED — `perf stat -e instructions`, FIXED 2.4M-command cold mix, candidate
+(cmdname) vs control (genclock = prior HEAD), 4 rounds:
+
+| round | control instr | candidate instr |
+|---|---:|---:|
+| 1 | 21,639,590,175 | 21,475,321,153 |
+| 2 | 21,649,396,509 | 21,475,093,556 |
+| 3 | 21,635,635,904 | 21,471,814,939 |
+| 4 | 21,647,441,348 | 21,476,582,455 |
+
+**-168 M instructions (-0.78%), ~70 instr/cmd, all 4 rounds with non-overlapping
+bands** (control ~21,643 M ±7 M, candidate ~21,475 M ±2 M). Lever score: **1 win /
+0 loss / 0 neutral** (server-CPU). Helps every dispatched command. Cumulative
+fr-runtime dispatch reduction this session (genclock + cmdname): ~21,720 M →
+21,475 M ≈ **-1.1% instructions/cmd** vs pre-session baseline.

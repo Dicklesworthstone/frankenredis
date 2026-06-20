@@ -15773,8 +15773,14 @@ impl Runtime {
         };
 
         let special_command = classify_runtime_special_command(&argv[0]);
-        let command_name_lossy = String::from_utf8_lossy(&argv[0]);
-        let command_name = &command_name_lossy;
+        // (frankenredis-cmdname-lazy) `command_name` is consumed only in cold
+        // rejection/error branches (NOAUTH, ACL NOPERM, command-time-budget warn).
+        // Defer the per-command UTF-8 lossy scan of argv[0] — profiled at ~1.8% of
+        // pipelined CPU in `Utf8Chunks::next` — behind a closure instead of
+        // building the Cow eagerly for every dispatched command. `argv` is a
+        // shared `&[Vec<u8>]`, so the closure copies the reference (no borrow
+        // conflict with the `&mut self` dispatch below).
+        let command_name = || String::from_utf8_lossy(&argv[0]);
 
         match special_command {
             Some(RuntimeSpecialCommand::Auth) => {
@@ -15835,7 +15841,7 @@ impl Runtime {
                 reason_code: "auth.noauth_gate_violation",
                 reason: format!(
                     "rejected '{}' prior to dispatch while unauthenticated",
-                    command_name
+                    command_name()
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
@@ -15853,17 +15859,17 @@ impl Runtime {
             let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| command_name.to_ascii_lowercase());
+                .unwrap_or_else(|| command_name().to_ascii_lowercase());
             let (acl_reason, log_reason, object, reason_code, threat_reason, reply) =
                 match permission_error {
                     AclCommandPermissionError::Command => (
                         DispatchAclPermissionReason::Command,
                         "command",
-                        command_name.to_ascii_uppercase(),
+                        command_name().to_ascii_uppercase(),
                         "auth.noperm_gate_violation",
                         format!(
                             "rejected '{}' prior to dispatch due to insufficient ACL permissions",
-                            command_name
+                            command_name()
                         ),
                         RespFrame::Error(format!(
                             "NOPERM User {acl_command_user} has no permissions to run the '{acl_command_fullname}' command",
@@ -15879,7 +15885,7 @@ impl Runtime {
                             "auth.noperm_key_gate_violation",
                             format!(
                                 "rejected '{}' prior to dispatch because key '{}' is outside the user's ACL patterns",
-                                command_name, key_name
+                                command_name(), key_name
                             ),
                             RespFrame::Error("NOPERM No permissions to access a key".to_string()),
                         )
@@ -15893,7 +15899,7 @@ impl Runtime {
                             "auth.noperm_channel_gate_violation",
                             format!(
                                 "rejected '{}' prior to dispatch because channel '{}' is outside the user's ACL channel patterns",
-                                command_name, channel_name
+                                command_name(), channel_name
                             ),
                             RespFrame::Error(
                                 "NOPERM No permissions to access a channel".to_string(),
@@ -16305,7 +16311,7 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command '{}' took {}us, exceeding budget {}ms",
-                    command_name, elapsed_us, self.server.command_time_budget_ms
+                    command_name(), elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv),
                 output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging
