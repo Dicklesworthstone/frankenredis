@@ -929,6 +929,8 @@ store path, fr-runtime/BlackThrush). No clean uncontended cc store lever remains
 the SADD store insert is byte-for-byte already what redis does (sorted intset).
 Methodology note: P16 single runs are noisy under multi-agent host load — use
 best-of-N and re-confirm before recording a loss (INCR 0.81→1.07).
+Addendum: **MSET (10 keys/cmd, P16) fr 236k vs redis 175k = 1.35x fr faster** —
+multi-key writes are fr-dominant, no lever. Completes the P16 hot-command set.
 
 ## 2026-06-20 CobaltCove (cc) — bitmap + HyperLogLog families — fr dominates heavy ops, no new lever
 
