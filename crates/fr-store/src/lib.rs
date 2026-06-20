@@ -6131,6 +6131,40 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
+        // (frankenredis-get-single-lookup) When the DB holds NO key with a TTL
+        // and LFU eviction sampling is off (the default LRU config), a GET can
+        // never lazily expire its key and consumes no RNG, so the
+        // `drop_if_expired` exists-probe + expiry-map probe inside
+        // `record_keyspace_lookup` are pure overhead layered on top of the value
+        // `get_mut` — three hash+probes per GET. Collapse to ONE `entries`
+        // lookup that serves both keyspace hit/miss accounting and the value
+        // fetch. Byte-identical: a TTL-less key cannot evict, so
+        // `record_keyspace_lookup` would have returned the same hit/miss (bumping
+        // the identical counter) with no lazy-expiry eviction / propagation /
+        // notification, and with LFU off `touch_access` reads no RNG (the
+        // `rand_sample` argument is unused on the LRU path).
+        if self.count_expiring_keys() == 0 && !self.lfu_tracking_enabled() {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    if !entry.value.is_string_like() {
+                        return Err(StoreError::WrongType);
+                    }
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    let value = entry
+                        .value
+                        .string_bytes()
+                        .expect("string-like value exposes bytes");
+                    Ok(Some(value))
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(None)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }

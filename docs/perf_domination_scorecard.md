@@ -705,3 +705,39 @@ loss / 0 neutral** (server-CPU). Biggest relative win this session, on the hotte
 commands. Open hot-path follow-ups for CobaltCove (ohsk5, their core): per-command
 `effective_output_hard_limit` client-class HashMap lookups, `run_active_expire_cycle`
 no-op stats-struct construction (~6.8%).
+
+## BlackThrush GET single keyspace lookup (MEASURED, hot-path, 2026-06-20)
+
+Continuing the pure GET/SET hot-path profile: `get_string_bytes` did THREE
+key hash+probes per GET — `record_keyspace_lookup`→`drop_if_expired` probes
+`entries` (existence) AND the expiry map (`expiry_ms`), then `entries.get_mut`
+probes a third time for the value. Redis's `lookupKeyRead` does it in one.
+
+Fix: when `count_expiring_keys() == 0` (no key in the DB carries a TTL) AND LFU
+sampling is off (the default LRU config), a GET can never lazily expire its key
+and consumes no RNG, so collapse to a SINGLE `entries.get_mut` that serves both
+keyspace hit/miss accounting and the value fetch. Falls to the unchanged
+drop_if_expired path when any TTL key exists or LFU is on. Byte-identical: a
+TTL-less key cannot evict, so the same hit/miss counter moves with no
+eviction/propagation/notification, and LFU-off `touch_access` reads no RNG.
+
+Correctness: differential vs Redis 7.2.4 — **0 diffs** over GET hit/miss/WRONGTYPE,
+STRLEN/GETRANGE, **INFO keyspace_hits/misses parity in BOTH the no-TTL fast path
+(6/3) and the with-TTL slow path (3/1)**, plus a lazily-expired key (GET nil +
+EXISTS 0). fr-store keyspace_hit / lazy_expire unit tests green.
+
+MEASURED — `perf stat -e instructions`, FIXED 1.5M GET/SET (7:3, no TTL keys),
+candidate vs control (prior HEAD = pubsub), 6 rounds:
+
+| round | control instr | candidate instr |
+|---|---:|---:|
+| 1 | 2,471,853,548 | 2,276,674,928 |
+| 2 | 2,471,706,213 | 2,277,061,488 |
+| 3 | 2,472,030,005 | 2,277,509,363 |
+| 4 | 2,471,922,447 | 2,288,981,490 |
+| 5 | 2,491,072,620 | 2,297,095,997 |
+| 6 | 2,490,174,335 | 2,288,100,404 |
+
+**-195 M instructions (-7.9%), ~130 instr/cmd, all 6 rounds non-overlapping**
+(control ≥2,471 M, candidate ≤2,297 M). Lever score: **1 win / 0 loss / 0 neutral**
+(server-CPU). Biggest single win this session, on the hottest command (GET).
