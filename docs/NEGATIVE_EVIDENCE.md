@@ -932,6 +932,20 @@ best-of-N and re-confirm before recording a loss (INCR 0.81→1.07).
 Addendum: **MSET (10 keys/cmd, P16) fr 236k vs redis 175k = 1.35x fr faster** —
 multi-key writes are fr-dominant, no lever. Completes the P16 hot-command set.
 
+Addendum 2 — **SADD arity sweep PROVES the 0.79x is per-command DISPATCH, not store**
+(200k SADD cmds, 100k keyspace, best-of-4 wall time, fr HEAD vs redis):
+| members/cmd | fr | redis | fr/redis throughput |
+|---:|---:|---:|---:|
+| 1 | 0.326s | 0.237s | **0.73x (loss)** |
+| 8 | 0.659s | 0.762s | **1.16x (fr faster)** |
+| 16 | 1.100s | 1.356s | **1.23x (fr faster)** |
+The gap exists ONLY at arity 1 and INVERTS to fr-faster by arity 8 — definitive
+proof that fr's per-member set-insert work is faster than redis, and the
+single-member 0.79x is entirely fr-runtime **per-command dispatch fixed-cost**
+(amortized away by batching). Not a store lever (saddfast is already optimal); it's
+`ohsk5` dispatch territory (BlackThrush). redis-benchmark's default 1-member SADD
+is the worst case for any per-command fixed-cost difference.
+
 ## 2026-06-20 CobaltCove (cc) — bitmap + HyperLogLog families — fr dominates heavy ops, no new lever
 
 Probed the previously-unbenched bitmap/HLL families (pipelined ×50, best-of-9,
