@@ -6023,19 +6023,6 @@ impl Store {
         }
     }
 
-    fn set_entry(&self, set: GenericSet, now_ms: u64) -> Entry {
-        let set = SetValue::from_index_set(set, self.set_max_intset_entries);
-        let mut entry = Entry::new(Value::Set(Box::new(set)), now_ms);
-        Self::refresh_set_encoding_flags(
-            &mut entry,
-            self.set_max_intset_entries,
-            self.set_max_listpack_entries,
-            self.set_max_listpack_value,
-        );
-        Self::promote_set_algebra_intset_overflow(&mut entry, self.set_max_intset_entries);
-        entry
-    }
-
     /// (frankenredis-sunionstore-direct) Build a set Entry from an already-built
     /// `SetValue` (e.g. a SUNION result), re-deriving the encoding from the final
     /// membership exactly as `set_entry` does. An `Int` SetValue is already the
@@ -12155,8 +12142,30 @@ impl Store {
     }
 
     pub fn sinter(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        if keys.is_empty() {
+        let Some(result) = self.sinter_value(keys, now_ms)? else {
             return Ok(Vec::new());
+        };
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
+        v.sort();
+        Ok(v)
+    }
+
+    /// (BlackThrush) SINTER result as a `SetValue` (no sorted-`Vec` flatten) so
+    /// SINTERSTORE stores it directly instead of round-tripping the membership
+    /// through a sorted `Vec<Vec<u8>>` + re-collect + re-derive — mirrors the
+    /// sunionstore-direct pattern (was the lone non-parity set-algebra store: the
+    /// `sinter()` path sorts a Vec the stored set never needs, then rebuilds the
+    /// set from it). The preamble (expiry drop, WRONGTYPE, LFU bump, touch,
+    /// smallest-as-base, retain_intersect) is identical to the prior inline
+    /// `sinter` body, so SINTER's reply is unchanged. Returns `None` when the
+    /// intersection is empty (a missing source, or an emptied result).
+    fn sinter_value(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Option<Box<SetValue>>, StoreError> {
+        if keys.is_empty() {
+            return Ok(None);
         }
         for key in keys {
             self.drop_if_expired(key, now_ms);
@@ -12206,7 +12215,7 @@ impl Store {
                     }
                 }
             }
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let rand_sample = if lfu_tracking_enabled {
@@ -12226,7 +12235,7 @@ impl Store {
                 }
                 _ => return Err(StoreError::WrongType),
             },
-            None => return Ok(Vec::new()),
+            None => return Ok(None),
         };
 
         for (i, key) in keys.iter().enumerate() {
@@ -12271,9 +12280,11 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
-        Ok(v)
+        if result.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
     }
 
     pub fn sintercard(
@@ -12581,8 +12592,27 @@ impl Store {
     }
 
     pub fn sdiff(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        let Some(first_key) = keys.first().copied() else {
+        let Some(result) = self.sdiff_value(keys, now_ms)? else {
             return Ok(Vec::new());
+        };
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
+        v.sort();
+        Ok(v)
+    }
+
+    /// (BlackThrush) SDIFF result as a `SetValue` (no sorted-`Vec` flatten) so
+    /// SDIFFSTORE stores it directly instead of round-tripping through a sorted
+    /// `Vec<Vec<u8>>` + re-collect — mirrors the sunionstore-direct pattern.
+    /// Preamble (expiry drop, WRONGTYPE, LFU bump, touch, first-as-base,
+    /// retain_diff) is identical to the prior inline `sdiff`, so SDIFF's reply is
+    /// unchanged. Returns `None` for an empty difference.
+    fn sdiff_value(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Option<Box<SetValue>>, StoreError> {
+        let Some(first_key) = keys.first().copied() else {
+            return Ok(None);
         };
         for key in keys {
             self.drop_if_expired(key, now_ms);
@@ -12655,9 +12685,11 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
-        Ok(v)
+        if result.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
     }
 
     pub fn spop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -13000,14 +13032,19 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        let result = self.sinter(keys, now_ms)?;
-        let count = result.len();
+        // (BlackThrush) Build+store the intersection SetValue directly via
+        // sinter_value, mirroring sunionstore-direct: the prior path went through
+        // sinter()'s sorted Vec<Vec<u8>> then re-collected it into a fresh set —
+        // a wasted sort (the stored set needs no order) plus an extra full re-hash.
+        // set_value_entry re-derives the encoding from membership, so OBJECT
+        // ENCODING is byte-identical to the prior Vec->GenericSet->from_index_set.
+        let value = self.sinter_value(keys, now_ms)?;
+        let count = value.as_ref().map_or(0, |v| v.len());
         let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
-        if !result.is_empty() {
-            let set: GenericSet = result.into_iter().collect();
-            let entry = self.set_entry(set, now_ms);
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            let entry = self.set_value_entry(*value, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -13063,14 +13100,17 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        let result = self.sdiff(keys, now_ms)?;
-        let count = result.len();
+        // (BlackThrush) Build+store the difference SetValue directly via
+        // sdiff_value (mirrors sunionstore-direct) instead of sdiff()'s sorted
+        // Vec<Vec<u8>> round-trip + re-collect. set_value_entry re-derives the
+        // encoding from membership => OBJECT ENCODING byte-identical.
+        let value = self.sdiff_value(keys, now_ms)?;
+        let count = value.as_ref().map_or(0, |v| v.len());
         let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
-        if !result.is_empty() {
-            let set: GenericSet = result.into_iter().collect();
-            let entry = self.set_entry(set, now_ms);
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            let entry = self.set_value_entry(*value, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
