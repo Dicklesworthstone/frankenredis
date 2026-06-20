@@ -18650,9 +18650,7 @@ impl Store {
                         if fits_listpack {
                             let result: Vec<(Vec<u8>, Vec<u8>)> = h
                                 .iter()
-                                .filter(|(field, _)| {
-                                    pattern.is_none_or(|pat| glob_match(pat, field))
-                                })
+                                .filter(|(field, _)| scan_pattern_matches(pattern, field))
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             return Ok((0, result));
@@ -18681,9 +18679,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
-                            if let Some(pat) = pattern
-                                && !glob_match(pat, field)
-                            {
+                            if !scan_pattern_matches(pattern, field) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -18751,9 +18747,7 @@ impl Store {
                         if is_listpack_or_intset {
                             let result: Vec<Vec<u8>> = s
                                 .iter()
-                                .filter(|member| {
-                                    pattern.is_none_or(|pat| glob_match(pat, member.as_ref()))
-                                })
+                                .filter(|member| scan_pattern_matches(pattern, member.as_ref()))
                                 .map(|m| m.into_owned())
                                 .collect();
                             return Ok((0, result));
@@ -18779,9 +18773,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
-                            if let Some(pat) = pattern
-                                && !glob_match(pat, member.as_ref())
-                            {
+                            if !scan_pattern_matches(pattern, member.as_ref()) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -18844,9 +18836,7 @@ impl Store {
                         if fits_listpack {
                             let result: Vec<(Vec<u8>, f64)> = zs
                                 .iter_asc()
-                                .filter(|(member, _)| {
-                                    pattern.is_none_or(|pat| glob_match(pat, member))
-                                })
+                                .filter(|(member, _)| scan_pattern_matches(pattern, member))
                                 .map(|(m, s)| (m.to_vec(), s))
                                 .collect();
                             return Ok((0, result));
@@ -18873,11 +18863,13 @@ impl Store {
                         let window = zs.index_slice_asc_adaptive(start, batch_size);
                         let examined = window.len();
                         let result: Vec<(Vec<u8>, f64)> = match pattern {
-                            Some(pat) => window
+                            Some(pat) if pat != b"*" => window
                                 .into_iter()
                                 .filter(|(member, _)| glob_match(pat, member))
                                 .collect(),
-                            None => window,
+                            // exact `*` (or None) = no-filter shortcut: keep all,
+                            // including the empty member (redis use_pattern semantics).
+                            _ => window,
                         };
                         let pos = start + examined;
 
@@ -25791,6 +25783,23 @@ fn prefix_range_end(prefix: &[u8]) -> Option<Vec<u8>> {
         end.pop();
     }
     None
+}
+
+/// SCAN-family (`SCAN`/`HSCAN`/`SSCAN`/`ZSCAN`) MATCH filter with redis's
+/// no-filter shortcut: an exact single `*` (or an absent pattern) matches EVERY
+/// element — including the empty member/field/key — WITHOUT invoking the glob
+/// matcher, mirroring `scanGenericCommand`'s
+/// `use_pattern = !(patlen == 1 && pat[0] == '*')`. For any other pattern, defer
+/// to [`glob_match`] (stringmatchlen semantics — where `*` does NOT match the
+/// empty string; that case is reached only via this shortcut, never the matcher).
+/// Without this, `HSCAN/SSCAN/ZSCAN key 0 MATCH *` wrongly dropped empty members.
+#[inline]
+fn scan_pattern_matches(pattern: Option<&[u8]>, item: &[u8]) -> bool {
+    match pattern {
+        None => true,
+        Some(p) if p == b"*" => true,
+        Some(p) => glob_match(p, item),
+    }
 }
 
 pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
@@ -45493,7 +45502,11 @@ mod tests {
         #[test]
         fn golden_glob_match_star_any() {
             assert!(glob_match(b"*", b"anything"));
-            assert!(glob_match(b"*", b""));
+            // `*` does NOT match the empty string at the matcher level — redis
+            // stringmatchlen("*","")==0 (and PSUBSCRIBE `*` must not match an empty
+            // channel). The empty member/key is included only via the SCAN/KEYS
+            // no-filter shortcut (scan_pattern_matches), never glob_match. (z9dc3)
+            assert!(!glob_match(b"*", b""));
         }
 
         #[test]
@@ -46493,7 +46506,11 @@ mod tests {
 
             #[test]
             fn mr_glob_star_matches_all(s in prop::collection::vec(any::<u8>(), 0..32)) {
-                prop_assert!(glob_match(b"*", &s), "* must match any string");
+                // `*` matches every NON-empty string; the empty string is matched only
+                // via the SCAN/KEYS no-filter shortcut, never the matcher itself
+                // (redis stringmatchlen("*","")==0). (z9dc3)
+                prop_assert_eq!(glob_match(b"*", &s), !s.is_empty(),
+                    "* matches any non-empty string; empty only via the scan shortcut");
             }
 
             #[test]
