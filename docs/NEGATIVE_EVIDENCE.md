@@ -929,3 +929,25 @@ store path, fr-runtime/BlackThrush). No clean uncontended cc store lever remains
 the SADD store insert is byte-for-byte already what redis does (sorted intset).
 Methodology note: P16 single runs are noisy under multi-agent host load — use
 best-of-N and re-confirm before recording a loss (INCR 0.81→1.07).
+
+## 2026-06-20 CobaltCove (cc) — bitmap + HyperLogLog families — fr dominates heavy ops, no new lever
+
+Probed the previously-unbenched bitmap/HLL families (pipelined ×50, best-of-9,
+fr HEAD vs Redis 7.2.4):
+
+| cmd | fr/redis | note |
+|---|---:|---|
+| BITOP AND/OR/XOR (3-4KB) | 1.54 / 2.10 / 2.18 | **fr much faster** (SWAR) |
+| BITCOUNT full | 1.54 | fr faster |
+| PFCOUNT 2-key (merge+estimate) | 2.86 | **fr much faster** |
+| PFMERGE | 1.81 | fr faster |
+| BITPOS | 0.99 | parity |
+| PFCOUNT 1-key | 0.59 | sub-2µs; cache ALREADY implemented (`twdut`: `hll_cache_read` returns O(1) on valid header cache) — residual is dispatch + 3-pass header validation, not algorithmic |
+| SETBIT (single bit) | 0.55 | sub-2µs dispatch micro |
+| BITFIELD (incrby+get) | 0.76 | sub-2µs dispatch micro |
+
+Conclusion: fr is parity-or-faster on every compute-heavy bitmap/HLL op (and
+notably 1.5-2.9x faster on BITOP/PFCOUNT-multi/PFMERGE). The three sub-parity cells
+are all sub-2µs single-element commands whose obvious algorithmic optimization is
+already present (PFCOUNT cache = twdut); residual is fr-runtime dispatch
+(`ohsk5`/BlackThrush). No clean uncontended cc lever in bitmap/HLL.
