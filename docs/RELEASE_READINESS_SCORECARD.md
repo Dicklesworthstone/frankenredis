@@ -495,3 +495,39 @@ Focused current-vs-Redis 7.2.4 after revert, c4 and 7 trials:
 Focused score: **1 win / 1 loss / 2 neutral / 5 noisy**. Clean cells only:
 **1 win / 1 loss / 2 neutral**. Release-readiness target from this pass is `INCR@P1`; `MIXED@P1`
 is no longer a clean loss on the focused rerun and should be remeasured quietly before code work.
+
+## Cod-b 15lug residual confirmation + rejected missing-key expiry short-circuit (MEASURED 2026-06-20)
+
+Release-readiness impact: evidence update only; no production source hunk shipped.
+
+Ratcheted `fr-bench` matrix, `trials=7`, `requests=200000`, current HEAD vs Redis 7.2.4:
+
+| Gate | Result | Release-readiness impact |
+|---|---:|---|
+| Stable cells | 7 wins / 6 losses / 2 neutral | not dominating |
+| Noisy/skipped cells | 23 noisy / 1 skipped | rerun before claims |
+| Ratchet | 5 regressions vs prior baseline | blocks release perf claim |
+
+Stable losses now recorded in `.bench-history/comprehensive_bench.latest.json`:
+`dump@p128=0.375x`, `mixed@p16=0.347x`, `dump@p1=0.716x`, `lpush@p1=0.806x`,
+`hget@p1=0.937x`, `incr@p1=0.959x`.
+
+Focused pass195 residual sweep with vendored `redis-benchmark`, P16, c50, n150k, 7 interleaved
+trials:
+
+| Command | fr/redis | Release-readiness impact |
+|---|---:|---|
+| `incr` | 1.12 | old residual not confirmed |
+| `lpush` | 0.91 | neutral |
+| `rpush` | 1.03 | old residual not confirmed |
+| `spop` | 0.81 | confirmed parity-floor loss |
+| `lrange_100` | 1.08 | old residual not confirmed |
+| `lrange_500` | 1.24 | old residual not confirmed |
+| `lrange_600` | 1.15 | favorable guard |
+| `ping_inline` | 1.01 | neutral |
+| `ping_mbulk` | 0.93 | peer fix holds above parity floor |
+
+Rejected candidate: early-returning from `Store::drop_if_expired` on absent keys did not improve
+`spop` (`0.81x` before and after) and made `lpush`/`rpush` fall below 0.9x in the focused
+candidate sweep. The source hunk was reverted. Next release-readiness target from `15lug` is
+the `SPOP` nil/write-pop runtime path, with the broader `fr-bench` matrix losses tracked separately.

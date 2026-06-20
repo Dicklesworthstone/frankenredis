@@ -58,21 +58,64 @@ HSET `1.06x`, ZADD `0.84x`; with neutral band 0.90-1.00x, **2/1/1**. ZADD remain
 - Targeted 100k-key timing: SET load `0.963x`; first full `SCAN COUNT 1000` `0.985x`; warm full SCAN `1.039x`.
 - Measurement caveat: old `299xx` runs can collide with peer benchmark ports and produce invalid all-equal RSS. Use distinct high-port pairs via `FR_BENCH_PORT_BASE`.
 
-## Throughput (fr/redis ops/sec; >=1.0 = fr wins)
+## Throughput (fr-bench matrix vs Redis 7.2.4; >=1.0 = fr wins)
 
-- Cells rated: **3** (excluding 33 noisy cv>5% cells)
-- fr wins (>=1.0x): **1/3** (33%)
-- Throughput geomean: **0.981x**
+- Latest capture: `.bench-history/comprehensive_bench.latest.json`, `trials=7`, `requests=200000`.
+- Cells rated: **15** stable cells (excluding 23 noisy `fr_cv_pct>5%` cells and 1 skipped cell).
+- Stable score: **7 wins / 6 losses / 2 neutral**.
+- Stable-cell throughput geomean: **0.952x**.
+- Ratchet status: **FAIL** vs prior baseline; regressions were `integer-get@p1`, `lpush@p1`,
+  `dump@p1`, `dump@p128`, and `mixed@p16`.
 
 | workload@depth | fr/redis | fr cv% | verdict |
-|---|---|---|---|
-| hset@p1 | 0.901 | 4.3 | loss |
-| incr@p1 | 0.993 | 2.11 | loss |
-| set@p1 | 1.054 | 2.81 | WIN |
+|---|---:|---:|---|
+| dump@p1 | 0.716 | 1.81 | loss |
+| dump@p128 | 0.375 | 3.74 | loss |
+| get@p1 | 1.069 | 3.06 | WIN |
+| hget@p1 | 0.937 | 4.99 | loss |
+| hgetall@p16 | 1.321 | 3.76 | WIN |
+| incr@p1 | 0.959 | 3.60 | loss |
+| integer-get@p1 | 1.024 | 3.84 | neutral |
+| lpush@p1 | 0.806 | 3.98 | loss |
+| lrange@p1 | 1.122 | 2.62 | WIN |
+| lrange@p128 | 1.966 | 4.42 | WIN |
+| mixed@p16 | 0.347 | 1.80 | loss |
+| set@p1 | 1.008 | 3.83 | neutral |
+| set@p128 | 1.704 | 4.60 | WIN |
+| smembers@p1 | 1.218 | 2.90 | WIN |
+| zrange-withscores@p1 | 1.064 | 4.06 | WIN |
 
-**Throughput gaps (fr slower):** hset@p1=0.90x, incr@p1=0.99x
+**Stable throughput gaps:** dump@p128=0.38x, mixed@p16=0.35x, dump@p1=0.72x,
+lpush@p1=0.81x, hget@p1=0.94x, incr@p1=0.96x.
 
-_Noisy (excluded): dump@p1, dump@p128, dump@p16, get@p1, get@p128, get@p16, hget@p1, hget@p128, hget@p16, hgetall@p1, hgetall@p128, hgetall@p16, hset@p128, hset@p16, incr@p128, incr@p16, lpush@p1, lpush@p128, lpush@p16, lrange@p1, lrange@p128, lrange@p16, mixed@p1, mixed@p128, mixed@p16, set@p128, set@p16, smembers@p1, smembers@p128, smembers@p16, zrange-withscores@p1, zrange-withscores@p128, zrange-withscores@p16_
+_Noisy (excluded): dump@p16, get@p128, get@p16, hget@p128, hget@p16, hgetall@p1,
+hgetall@p128, hset@p1, hset@p128, hset@p16, incr@p128, incr@p16, integer-get@p128,
+integer-get@p16, lpush@p128, lpush@p16, lrange@p16, mixed@p1, set@p16, smembers@p128,
+smembers@p16, zrange-withscores@p128, zrange-withscores@p16. Skipped: mixed@p128._
+
+## Focused pass195 residual confirmation (`frankenredis-15lug`, Redis C client)
+
+- Artifact: `artifacts/optimization/frankenredis-15lug-cv-confirm/20260620T042556Z/redis_benchmark_p16_c50_n150k_trials7.txt`.
+- Harness: vendored `redis-benchmark`, P16, c50, n150k, 7 interleaved trials, current HEAD before
+  the rejected candidate.
+- Focused score by 3% band: **5 wins / 1 loss / 3 neutral**.
+- Parity-floor losses (`<0.9x`): **spop only**, at 0.81x.
+
+| command | median fr/redis | verdict |
+|---|---:|---|
+| incr | 1.12 | WIN |
+| lpush | 0.91 | neutral |
+| rpush | 1.03 | WIN |
+| spop | 0.81 | loss |
+| lrange_100 | 1.08 | WIN |
+| lrange_500 | 1.24 | WIN |
+| lrange_600 | 1.15 | WIN |
+| ping_inline | 1.01 | neutral |
+| ping_mbulk | 0.93 | neutral |
+
+Rejected candidate: an early return in `Store::drop_if_expired` for missing keys did not improve
+the focused `SPOP` loss (`spop` stayed 0.81x) and introduced focused `lpush`/`rpush` losses in the
+candidate sweep, so the source hunk was reverted.
 
 ## Throughput — latest release sweep (`artifacts/optimization/coralox-pass195-current-main-profile/standard_sweep_p16_c50_n300k_reps5.txt`)
 

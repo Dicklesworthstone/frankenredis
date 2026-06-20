@@ -1032,3 +1032,54 @@ Correctness gates after reverting:
 - `cargo fmt --check` passed.
 - `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo test -p fr-conformance -- --nocapture`
   passed: 194 lib tests, conformance bins, 99 smoke tests, and doctests green.
+
+## MEASURED cod-b 15lug residual CV confirmation + missing-key expiry candidate (2026-06-20) -- CANDIDATE REJECTED
+
+Scope: `frankenredis-15lug`. This pass first ran the project ratcheted `fr-bench` matrix against
+vendored Redis 7.2.4, then confirmed the pass195 residual commands with vendored
+`redis-benchmark`. The code lever tested after the focused sweep was deliberately small: return
+from `Store::drop_if_expired` immediately when `entries.get(key)` is absent, avoiding an
+`expiry_deadlines` probe on missing-key write-pop commands such as benchmark `SPOP myset`.
+
+Official `.bench-history` matrix:
+- Command:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b python3 scripts/perf_baseline_capture.py legacy_redis_code/redis/src/redis-server /data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis /data/projects/.rch-targets/frankenredis-cod-b/release/fr-bench --trials 7`.
+- Result: ratchet **FAIL**, but baseline was captured to `.bench-history/comprehensive_bench.latest.json`.
+- Stable score: **7 wins / 6 losses / 2 neutral**, with 23 noisy cells and `mixed@p128` skipped.
+- Clean losses: `dump@p128=0.375x`, `mixed@p16=0.347x`, `dump@p1=0.716x`,
+  `lpush@p1=0.806x`, `hget@p1=0.937x`, `incr@p1=0.959x`.
+- Ratchet regressions vs prior baseline: `integer-get@p1 -9.9%`, `lpush@p1 -7.5%`,
+  `dump@p1 -6.0%`, `dump@p128 -18.5%`, `mixed@p16 -72.2%`.
+
+Focused pass195 residual sweep, current HEAD before the rejected candidate:
+- Artifact:
+  `artifacts/optimization/frankenredis-15lug-cv-confirm/20260620T042556Z/redis_benchmark_p16_c50_n150k_trials7.txt`.
+- Harness: vendored `redis-benchmark`, P16, c50, n150k, 7 interleaved trials.
+
+| command | median fr/redis | trials | verdict |
+|---|---:|---|---|
+| incr | 1.12 | 1.08, 1.18, 1.12, 1.15, 1.08, 1.11, 1.17 | win |
+| lpush | 0.91 | 0.91, 0.93, 0.89, 0.98, 0.87, 0.96, 0.80 | neutral |
+| rpush | 1.03 | 1.29, 0.91, 1.18, 1.03, 1.00, 0.98, 1.06 | win |
+| spop | 0.81 | 0.81, 0.75, 0.85, 0.76, 0.78, 0.93, 0.90 | loss |
+| lrange_100 | 1.08 | 1.31, 1.26, 1.08, 1.02, 0.88, 1.13, 1.02 | win |
+| lrange_500 | 1.24 | 1.21, 1.18, 0.73, 1.31, 1.25, 1.32, 1.24 | win |
+| lrange_600 | 1.15 | 1.15, 1.14, 1.17, 1.43, 1.03, 1.02, 1.47 | win |
+| ping_inline | 1.01 | 0.80, 1.16, 1.14, 1.06, 0.92, 1.01, 0.86 | neutral |
+| ping_mbulk | 0.93 | 0.82, 0.79, 0.94, 1.03, 0.93, 0.86, 0.96 | neutral |
+
+Focused score by 3% band: **5 wins / 1 loss / 3 neutral**. Only `spop` is below the 0.9x parity
+floor from the old pass195 residual list; `lrange_500`, `rpush`, `incr`, and `ping_mbulk` are not
+confirmed as chase targets on this focused gate.
+
+Rejected candidate sweep:
+- Artifact:
+  `artifacts/optimization/frankenredis-15lug-cv-confirm/20260620T043401Z-candidate/redis_benchmark_p16_c50_n150k_trials7.txt`.
+- Candidate build:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`.
+- Result: `spop` remained **0.81x**; `lpush` fell to **0.77x** and `rpush` to **0.88x** in the
+  focused sweep. The candidate hunk was reverted before committing.
+
+Decision: do not ship the missing-key expiry-map short-circuit. Next code work should target the
+actual `SPOP` nil/write-pop runtime shape with profiling or a same-worker current-vs-control gate,
+not generic expiry lookup pruning.
