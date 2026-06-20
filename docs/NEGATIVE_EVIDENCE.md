@@ -758,3 +758,63 @@ server-free per-crate encoder A/B is a clear win (`1.0789x`). Do not count this
 as DUMP parity or reload domination: Redis still wins the end-to-end zset DUMP
 and reload gates. Next routes are `fr-store::dump_key` structural retained/cached
 compact-zset payloads and RESTORE/decode listpack rebuild costs.
+
+## 2026-06-20 cod-a kept ZADD plain-owned store fast path; runtime-only shortcut rejected
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, same-host fresh processes,
+P16, c50, n150k, interleaved trials, `connected_slaves=0`. Release binaries
+were built through RCH under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+
+Fresh Redis-relative refresh before this lever confirmed the active losses:
+
+| artifact | command | fr/redis | verdict |
+|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2102Z-current-list-set-zset-refresh/current_vs_redis_p16_c50_n150k_trials7.txt` | lpush | 0.80x | LOSS |
+| same | rpush | 0.85x | LOSS |
+| same | sadd | 0.87x | LOSS |
+| same | zadd | 0.73x | LOSS |
+| same | set | 1.01x | parity |
+| same | get | 1.04x | win |
+| same | hset | 1.03x | win |
+| same | incr | 1.03x | win |
+
+Rejected attempt: changing the runtime plain-ZADD borrowed path to call the
+generic default store option engine more directly. Same-window A/B showed a
+target regression, so the hunk was reverted.
+
+| artifact | command | candidate/control | candidate/redis | control/redis | verdict |
+|---|---|---:|---:|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2106Z-zadd-plain-store-candidate/candidate_control_redis_p16_c50_n150k_trials9.txt` | zadd | 0.9662x | 0.6927x | 0.7231x | rejected loss |
+
+Kept lever: add `Store::zadd_plain_owned` for flagless `ZADD key score member
+...` after the runtime parser already owns member buffers. The store fast path
+skips the option engine, builds a single-member zset without an insert/search
+round trip, de-duplicates missing-key multi-member input without extra member
+clones, and uses insert-result enums so unchanged scores avoid write touches.
+
+| artifact | command | candidate/control | candidate/redis | control/redis | verdict |
+|---|---|---:|---:|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T2139Z-zadd-plain-owned-store-final/candidate_control_redis_p16_c50_n150k_trials9.txt` | zadd | 1.1075x | 0.8021x | 0.7537x | kept win |
+| same | sadd | 1.0179x | 0.9268x | 0.8642x | neutral/win guard |
+| same | lpush | 0.9827x | 0.7944x | 0.8218x | neutral guard; still Redis loss |
+| same | rpush | 1.0178x | 0.8636x | 0.8471x | neutral/win guard; still Redis loss |
+| same | set | 1.0207x | 1.0138x | 1.0438x | neutral/win guard |
+| same | get | 1.0000x | 0.9786x | 0.9613x | neutral guard |
+| same | hset | 0.9932x | 1.0068x | 0.9934x | neutral guard |
+| same | incr | 1.0496x | 1.0208x | 1.0680x | neutral/win guard |
+
+Correctness/quality:
+
+- Focused store equivalence test passed:
+  `cargo test -p fr-store zadd_plain_owned_matches_default_option_engine -- --nocapture`.
+- `cargo check -p fr-store -p fr-runtime --all-targets` passed via RCH.
+- `cargo fmt -p fr-store -p fr-runtime --check` and `git diff --check` passed.
+- `cargo clippy -p fr-store -p fr-runtime -p fr-server --all-targets -- -D warnings` passed via RCH.
+- `cargo test -p fr-conformance -- --nocapture` passed via RCH; `core_zset`
+  live oracle reported `324/324`.
+
+Decision: keep the store-level fast path. This is a real measured target win,
+but not release domination: ZADD remains below Redis 7.2.4 (`0.8021x`). Next
+routes should attack deeper sorted-set storage/index costs and the independent
+list/set write losses rather than retrying runtime-only ZADD dispatch shortcuts.

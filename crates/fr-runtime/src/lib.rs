@@ -8510,8 +8510,8 @@ impl Runtime {
     /// whose first token is not a flag keyword; any score that fails to parse
     /// (with the exact upstream `string2d` semantics) makes this return None so
     /// the generic handler emits the precise error. Mirrors the generic plain
-    /// branch: `store.zadd_with_options` with all-false options, reply is the
-    /// count of newly added members. Skips argv materialization + generic
+    /// branch: `store.zadd_plain_owned` with no options, reply is the count of
+    /// newly added members. Skips argv materialization + generic
     /// dispatch + the post-Ok bookkeeping block (all no-op in plain mode).
     /// (frankenredis-ev067)
     pub fn execute_plain_zadd_borrowed(
@@ -8556,19 +8556,8 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.zadd_with_options(
-            key,
-            members,
-            fr_store::ZaddOptions {
-                nx: false,
-                xx: false,
-                gt: false,
-                lt: false,
-                ch: false,
-            },
-            now_ms,
-        ) {
-            Ok((count, _changed)) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+        let reply = match self.server.store.zadd_plain_owned(key, members, now_ms) {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
@@ -15910,7 +15899,8 @@ impl Runtime {
                             "auth.noperm_key_gate_violation",
                             format!(
                                 "rejected '{}' prior to dispatch because key '{}' is outside the user's ACL patterns",
-                                command_name(), key_name
+                                command_name(),
+                                key_name
                             ),
                             RespFrame::Error("NOPERM No permissions to access a key".to_string()),
                         )
@@ -15924,7 +15914,8 @@ impl Runtime {
                             "auth.noperm_channel_gate_violation",
                             format!(
                                 "rejected '{}' prior to dispatch because channel '{}' is outside the user's ACL channel patterns",
-                                command_name(), channel_name
+                                command_name(),
+                                channel_name
                             ),
                             RespFrame::Error(
                                 "NOPERM No permissions to access a channel".to_string(),
@@ -16336,7 +16327,9 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command '{}' took {}us, exceeding budget {}ms",
-                    command_name(), elapsed_us, self.server.command_time_budget_ms
+                    command_name(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv),
                 output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging

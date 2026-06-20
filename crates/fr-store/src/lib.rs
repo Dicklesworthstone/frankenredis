@@ -10,8 +10,8 @@ mod packed_set;
 #[allow(dead_code)]
 mod keyspace_dict;
 use packed_set::{
-    GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetIter,
-    RestoredListNode, RetainedListpackChunk,
+    GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
+    PackedZSetIter, RestoredListNode, RetainedListpackChunk,
 };
 
 use fr_expire::evaluate_expiry;
@@ -616,6 +616,33 @@ enum SortedSetInner {
     Full(FullSortedSet),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZSetInsertResult {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+impl ZSetInsertResult {
+    fn added_count(self) -> usize {
+        usize::from(matches!(self, Self::Added))
+    }
+
+    fn changed_count(self) -> usize {
+        usize::from(matches!(self, Self::Updated))
+    }
+}
+
+impl From<PackedZSetInsertResult> for ZSetInsertResult {
+    fn from(value: PackedZSetInsertResult) -> Self {
+        match value {
+            PackedZSetInsertResult::Added => Self::Added,
+            PackedZSetInsertResult::Updated => Self::Updated,
+            PackedZSetInsertResult::Unchanged => Self::Unchanged,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FullSortedSet {
     /// member -> score. foldhash (not SipHash) for fast ZSCORE/ZADD/ZINCRBY
@@ -932,6 +959,10 @@ impl FullSortedSet {
     }
 
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
+        matches!(self.insert_result(member, score), ZSetInsertResult::Added)
+    }
+
+    fn insert_result(&mut self, member: Vec<u8>, score: f64) -> ZSetInsertResult {
         let score = canonicalize_zero_score(score);
         // (frankenredis-ug50u) Existing-member score update: bump the score in the
         // dict IN PLACE via `get_mut` rather than `dict.insert(member.clone())`,
@@ -945,7 +976,7 @@ impl FullSortedSet {
             Some((_idx, existing_member, slot)) => {
                 let old_score = *slot;
                 if old_score.total_cmp(&score).is_eq() {
-                    return false;
+                    return ZSetInsertResult::Unchanged;
                 }
                 *slot = score;
                 Some((old_score, Arc::clone(existing_member)))
@@ -969,7 +1000,7 @@ impl FullSortedSet {
             } else {
                 self.ordered.insert(new_sm);
             }
-            return false;
+            return ZSetInsertResult::Updated;
         }
         let member: SharedZSetMember = member.into();
         self.dict.insert(Arc::clone(&member), score);
@@ -980,7 +1011,7 @@ impl FullSortedSet {
         } else {
             self.ordered.insert(new_sm);
         }
-        true
+        ZSetInsertResult::Added
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
@@ -1233,11 +1264,43 @@ impl SortedSet {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> bool {
+        matches!(
+            self.insert_with_limits_result(member, score, max_listpack_entries, max_listpack_value),
+            ZSetInsertResult::Added
+        )
+    }
+
+    fn insert_with_limits_result(
+        &mut self,
+        member: Vec<u8>,
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> ZSetInsertResult {
         let score = canonicalize_zero_score(score);
         self.maybe_promote_for_insert(&member, max_listpack_entries, max_listpack_value);
         match &mut self.inner {
-            SortedSetInner::Packed(p) => p.insert(&member, score),
-            SortedSetInner::Full(f) => f.insert(member, score),
+            SortedSetInner::Packed(p) => p.insert_result(&member, score).into(),
+            SortedSetInner::Full(f) => f.insert_result(member, score),
+        }
+    }
+
+    fn from_single_with_limits(
+        member: Vec<u8>,
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if max_listpack_entries >= 1 && member.len() <= max_listpack_value {
+            Self {
+                inner: SortedSetInner::Packed(PackedZSet::from_single(member, score)),
+            }
+        } else {
+            Self {
+                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(vec![(
+                    member, score,
+                )])),
+            }
         }
     }
 
@@ -13258,6 +13321,104 @@ impl Store {
 
         self.zadd_with_options(key, members.to_vec(), ZaddOptions::default(), now_ms)
             .map(|(added, _changed)| added)
+    }
+
+    /// Fast path for flagless `ZADD key score member [score member ...]` callers
+    /// that already own the member buffers. This preserves the default ZADD
+    /// contract but skips the option engine and its extra score/member probes.
+    pub fn zadd_plain_owned(
+        &mut self,
+        key: &[u8],
+        members: Vec<(f64, Vec<u8>)>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+
+        if !self.entries.contains_key(key) {
+            let mut iter = members.into_iter();
+            let Some((score, member)) = iter.next() else {
+                return Ok(0);
+            };
+            let zs = if iter.len() == 0 {
+                SortedSet::from_single_with_limits(
+                    member,
+                    canonicalize_zero_score(score),
+                    zset_max_entries,
+                    zset_max_value,
+                )
+            } else {
+                let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+                    HashMap::with_capacity_and_hasher(
+                        iter.len() + 1,
+                        foldhash::quality::RandomState::default(),
+                    );
+                let mut added = 1_usize;
+                let mut changed = 0_usize;
+                latest.insert(member, canonicalize_zero_score(score));
+                for (score, member) in iter {
+                    let score = canonicalize_zero_score(score);
+                    match latest.insert(member, score) {
+                        Some(old_score) => {
+                            if !old_score.total_cmp(&score).is_eq() {
+                                changed += 1;
+                            }
+                        }
+                        None => added += 1,
+                    }
+                }
+                let zs = SortedSet::from_unique_pairs_with_limits(
+                    latest.into_iter().collect(),
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+                self.internal_entries_insert(key.to_vec(), entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((added + changed) as u64);
+                return Ok(added);
+            };
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok(1);
+        }
+
+        let (added, changed, touched) = {
+            let Some(entry) = self.entries.get_mut(key) else {
+                return Ok(0);
+            };
+            let Value::SortedSet(zs) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for (score, member) in members {
+                let result =
+                    zs.insert_with_limits_result(member, score, zset_max_entries, zset_max_value);
+                added += result.added_count();
+                changed += result.changed_count();
+            }
+            let touched = added > 0 || changed > 0;
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+            }
+            (added, changed, touched)
+        };
+        if touched {
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+        }
+        Ok(added)
     }
 
     /// ZADD with NX/XX/GT/LT/CH options.
@@ -32431,6 +32592,48 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         assert_eq!(store.zscore(b"z4", b"a", 0).unwrap(), Some(3.0));
+    }
+
+    #[test]
+    fn zadd_plain_owned_matches_default_option_engine() {
+        use super::ZaddOptions;
+
+        let mut fast = Store::new();
+        let mut slow = Store::new();
+        let initial = vec![
+            (1.0, b"a".to_vec()),
+            (2.0, b"a".to_vec()),
+            (-0.0, b"zero".to_vec()),
+            (0.5, b"b".to_vec()),
+        ];
+
+        let slow_initial = slow
+            .zadd_with_options(b"z", initial.clone(), ZaddOptions::default(), 0)
+            .unwrap();
+        assert_eq!(
+            fast.zadd_plain_owned(b"z", initial, 0).unwrap(),
+            slow_initial.0
+        );
+
+        let update = vec![
+            (2.0, b"a".to_vec()),
+            (3.0, b"a".to_vec()),
+            (4.0, b"c".to_vec()),
+        ];
+        let slow_update = slow
+            .zadd_with_options(b"z", update.clone(), ZaddOptions::default(), 1)
+            .unwrap();
+        assert_eq!(
+            fast.zadd_plain_owned(b"z", update, 1).unwrap(),
+            slow_update.0
+        );
+
+        assert_eq!(
+            fast.zget_members_with_scores(b"z", 1).unwrap(),
+            slow.zget_members_with_scores(b"z", 1).unwrap()
+        );
+        assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
+        assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
     }
 
     #[test]

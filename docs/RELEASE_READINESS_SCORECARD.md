@@ -1085,3 +1085,43 @@ Gates: `rch` focused fr-persist zset tests, `cargo fmt -p fr-persist --check`,
 failed because the clean detached worktree did not include the untracked
 vendored Redis command metadata on the remote worker; release build/bench
 fallback used the local vendored Redis symlink and isolated target subdir.
+
+## Cod-a ZADD plain-owned fast path kept (MEASURED 2026-06-20)
+
+Release-readiness impact: ZADD write readiness improved, but it remains below
+Redis 7.2.4 and is still a release perf risk. The runtime-only ZADD shortcut was
+rejected and reverted; the store-level owned-member fast path was kept.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| fresh current vs Redis 7.2.4 | `lpush` | 0.80x | release perf risk remains |
+| fresh current vs Redis 7.2.4 | `rpush` | 0.85x | release perf risk remains |
+| fresh current vs Redis 7.2.4 | `sadd` | 0.87x | release perf risk remains |
+| fresh current vs Redis 7.2.4 | `zadd` | 0.73x | target release perf risk |
+| runtime-only candidate vs control | `zadd` | 0.9662x | rejected regression |
+| final store fast-path candidate vs control | `zadd` | 1.1075x | kept measured win |
+| final store fast-path candidate vs Redis 7.2.4 | `zadd` | 0.8021x | improved but still below Redis |
+| final store fast-path candidate vs Redis 7.2.4 | `set/get/hset/incr` | 1.0138x / 0.9786x / 1.0068x / 1.0208x | guards neutral-to-win |
+
+Proof bundle:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2102Z-current-list-set-zset-refresh/`,
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2106Z-zadd-plain-store-candidate/`,
+and
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2139Z-zadd-plain-owned-store-final/`.
+
+Kept hunk: `fr-runtime` routes flagless parsed ZADD to
+`Store::zadd_plain_owned`; `fr-store` adds the owned-member default-ZADD path and
+insert-result tracking for sorted sets; packed zsets can direct-build one-member
+sets and report added/updated/unchanged insert outcomes.
+
+Gates: RCH focused store equivalence test passed; RCH check for `fr-store` and
+`fr-runtime` all targets passed; `cargo fmt -p fr-store -p fr-runtime --check`
+and `git diff --check` passed; RCH clippy for `fr-store`, `fr-runtime`, and
+`fr-server` passed; RCH `cargo test -p fr-conformance -- --nocapture` passed,
+including live-oracle `core_zset` 324/324. Final `ubs` on the changed Rust
+files still exits nonzero on pre-existing broad inventories in these large
+modules, but the avoidable new `expect` was removed before the final run.
+
+Next readiness targets: deeper sorted-set storage/index cost, `RPUSH`/`LPUSH`
+list write cost, and `SADD` storage/probe cost. Do not retry the rejected
+runtime-only ZADD shortcut without a new profile.

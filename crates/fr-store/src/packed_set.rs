@@ -3611,6 +3611,13 @@ pub struct PackedZSet {
     len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedZSetInsertResult {
+    Added,
+    Updated,
+    Unchanged,
+}
+
 #[allow(dead_code)]
 impl PackedZSet {
     #[must_use]
@@ -3656,6 +3663,18 @@ impl PackedZSet {
             zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
             zset.len += 1;
         }
+        zset
+    }
+
+    #[must_use]
+    pub fn from_single(member: Vec<u8>, score: f64) -> Self {
+        let mut zset = Self {
+            buf: Vec::with_capacity(member.len().saturating_add(10)),
+            len: 1,
+        };
+        write_varint(&mut zset.buf, member.len());
+        zset.buf.extend_from_slice(&member);
+        zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
         zset
     }
 
@@ -3716,17 +3735,28 @@ impl PackedZSet {
     /// ZADD a single member; returns true if it was newly added (false = score
     /// updated). Re-positions the member to keep `(score, member)` order.
     pub fn insert(&mut self, member: &[u8], score: f64) -> bool {
-        let existed = if let Some((rs, re, _)) = self.locate(member) {
+        matches!(
+            self.insert_result(member, score),
+            PackedZSetInsertResult::Added
+        )
+    }
+
+    pub fn insert_result(&mut self, member: &[u8], score: f64) -> PackedZSetInsertResult {
+        let score = canon_zero(score);
+        let result = if let Some((rs, re, old_score)) = self.locate(member) {
+            if old_score.total_cmp(&score).is_eq() {
+                return PackedZSetInsertResult::Unchanged;
+            }
             self.buf.drain(rs..re);
             self.len -= 1;
-            true
+            PackedZSetInsertResult::Updated
         } else {
-            false
+            PackedZSetInsertResult::Added
         };
         let off = self.insert_offset(member, score);
         self.buf.splice(off..off, Self::encode(member, score));
         self.len += 1;
-        !existed
+        result
     }
 
     /// ZREM a member; returns true if it was present.

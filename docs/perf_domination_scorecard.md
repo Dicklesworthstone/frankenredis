@@ -888,3 +888,49 @@ and local `cargo test -p fr-conformance -- --nocapture` passed using the
 vendored Redis symlink. Lever score: **1 win / 0 loss / 0 neutral** for
 fr-persist encode, but release score still carries DUMP/reload risk until
 `fr-store::dump_key` and RESTORE decode are attacked.
+
+## BlackThrush ZADD plain-owned store fast path (MEASURED, 2026-06-20)
+
+Fresh write-family refresh against Redis 7.2.4 still had the major losses in
+list/set/zset writes: `lpush` 0.80x, `rpush` 0.85x, `sadd` 0.87x, `zadd` 0.73x
+from
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2102Z-current-list-set-zset-refresh/current_vs_redis_p16_c50_n150k_trials7.txt`.
+
+Rejected first pass: the runtime-only plain-ZADD shortcut regressed the target
+cell in same-window A/B (`zadd` candidate/control 0.9662x, candidate/Redis
+0.6927x, control/Redis 0.7231x), so it was reverted. Artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2106Z-zadd-plain-store-candidate/candidate_control_redis_p16_c50_n150k_trials9.txt`.
+
+Kept scoped lever: `Store::zadd_plain_owned` handles flagless ZADD after the
+runtime parser already owns member buffers. It skips the generic option engine,
+direct-builds single-member sorted sets, de-dupes missing-key multi-member input
+without extra member clones, and returns insert-result enums so unchanged scores
+avoid write touches.
+
+Measured A/B, same host, fresh control/candidate/Redis processes, P16, c50,
+n150k, 9 interleaved trials:
+
+| command | candidate/control | candidate/Redis | control/Redis | verdict |
+|---|---:|---:|---:|---|
+| zadd | **1.1075x** | 0.8021x | 0.7537x | kept target win |
+| sadd | 1.0179x | 0.9268x | 0.8642x | neutral/win guard |
+| lpush | 0.9827x | 0.7944x | 0.8218x | neutral guard |
+| rpush | 1.0178x | 0.8636x | 0.8471x | neutral/win guard |
+| set | 1.0207x | 1.0138x | 1.0438x | neutral/win guard |
+| get | 1.0000x | 0.9786x | 0.9613x | neutral guard |
+| hset | 0.9932x | 1.0068x | 0.9934x | neutral guard |
+| incr | 1.0496x | 1.0208x | 1.0680x | neutral/win guard |
+
+Artifact:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260620T2139Z-zadd-plain-owned-store-final/candidate_control_redis_p16_c50_n150k_trials9.txt`.
+
+Quality gates: focused store equivalence test passed; RCH `cargo check -p
+fr-store -p fr-runtime --all-targets` passed; `cargo fmt -p fr-store -p
+fr-runtime --check` and `git diff --check` passed; RCH `cargo clippy -p
+fr-store -p fr-runtime -p fr-server --all-targets -- -D warnings` passed; RCH
+`cargo test -p fr-conformance -- --nocapture` passed, including live-oracle
+`core_zset` 324/324.
+
+Lever score: **1 win / 1 rejected loss / 0 neutral**. Release status improves
+for ZADD but remains below Redis; next high-EV routes are deeper sorted-set
+storage/index work plus independent `LPUSH`/`RPUSH` and `SADD` write paths.
