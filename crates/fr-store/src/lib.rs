@@ -20555,10 +20555,18 @@ impl Store {
                     let mut entry_count = 0usize;
                     for (member, score) in zs.iter_asc() {
                         encode_listpack_entry(&mut encoded, member);
-                        encode_listpack_entry(
-                            &mut encoded,
-                            redis_score_to_string(score).as_bytes(),
-                        );
+                        // Integer scores (the common case) encode directly into the
+                        // listpack, skipping the f64->decimal-string->reparse->i64 round
+                        // trip the string form pays. Byte-identical (see
+                        // zset_score_listpack_integer). (frankenredis-dump-zset-score-int)
+                        if let Some(int_score) = zset_score_listpack_integer(score) {
+                            encode_listpack_integer_entry(&mut encoded, int_score);
+                        } else {
+                            encode_listpack_entry(
+                                &mut encoded,
+                                redis_score_to_string(score).as_bytes(),
+                            );
+                        }
                         entry_count += 2;
                     }
                     encode_rdb_string(&mut buf, &finish_listpack_entries(encoded, entry_count)?);
@@ -22259,6 +22267,29 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+/// Integer-valued zset score eligible for direct listpack integer encoding.
+/// Mirrors fr-persist's already-gated `zset_listpack_integer_score`: for a
+/// finite integer-valued score in `[-1e18, 1e18]`, Redis's `d2string`
+/// (`format_redis_double`) emits the plain canonical i64 decimal, which
+/// `encode_listpack_entry` would re-parse and int-encode identically — so
+/// `encode_listpack_integer_entry(score as i64)` is byte-IDENTICAL while
+/// skipping the f64-format + decimal-reparse round trip. Outside this range
+/// (or non-integer), fall back to the string form. (frankenredis-dump-zset-score-int)
+fn zset_score_listpack_integer(score: f64) -> Option<i64> {
+    if score.fract() == 0.0 && (-1e18..=1e18).contains(&score) && score.is_finite() {
+        let int_score = score as i64;
+        // Negative zero is the one trap: `d2string(-0.0)` is "-0" (non-canonical →
+        // string-encoded by Redis), NOT "0" (int-encoded). Guard it so the fast
+        // path stays byte-identical to the string form.
+        if int_score == 0 && score.is_sign_negative() {
+            return None;
+        }
+        Some(int_score)
+    } else {
+        None
+    }
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
@@ -38171,6 +38202,45 @@ mod tests {
                 crate::long_double_text_is_valid(good),
                 "expected {:?} to be a valid long double",
                 String::from_utf8_lossy(good),
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant, clippy::excessive_precision)]
+    fn zset_score_int_listpack_fastpath_is_byte_identical_to_string_form() {
+        // The DUMP zset-listpack score fast path
+        // (zset_score_listpack_integer + encode_listpack_integer_entry) MUST emit
+        // byte-IDENTICAL listpack bytes to the prior string form
+        // (encode_listpack_entry(redis_score_to_string(score))) for EVERY score —
+        // including the negative-zero trap and the int/string boundary.
+        // (frankenredis-dump-zset-score-int)
+        let mut scores: Vec<f64> = vec![
+            0.0, -0.0, 1.0, -1.0, 42.0, -42.0, 127.0, 128.0, -128.0, 4095.0, 4096.0,
+            -4096.0, -4097.0, 32767.0, 32768.0, 8_388_607.0, 8_388_608.0, 2_147_483_647.0,
+            2_147_483_648.0, 17179869184.0, 1e18, -1e18, 1e17, -1e17, 999_999_999_999.0,
+            // non-integer / out-of-range → must take the string fallback
+            3.14, -2.5, 0.1, 0.000001, -0.0007, 1.5, 2.5, 1e20, 1.5e300, -1.5e300,
+            123456789.123456789, f64::INFINITY, f64::NEG_INFINITY,
+            1e18 + 1.0, -1e18 - 1.0, 9.2e18,
+        ];
+        // Add every integer in a dense band to exercise all listpack int widths.
+        for i in -5000i64..=5000 {
+            scores.push(i as f64);
+        }
+        for &score in &scores {
+            let mut want = Vec::new();
+            super::encode_listpack_entry(&mut want, redis_score_to_string(score).as_bytes());
+            let mut got = Vec::new();
+            if let Some(int_score) = super::zset_score_listpack_integer(score) {
+                super::encode_listpack_integer_entry(&mut got, int_score);
+            } else {
+                super::encode_listpack_entry(&mut got, redis_score_to_string(score).as_bytes());
+            }
+            assert_eq!(
+                want, got,
+                "score {score} (d2string={:?}) diverged",
+                redis_score_to_string(score)
             );
         }
     }
