@@ -4,6 +4,56 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-a `frankenredis-ohsk5` pubsub direct encoder keep and pending-client rejection
+
+Harness: per-crate release builds for `fr-server` and `fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. Pubsub
+fanout proof used saved pre-hunk FrankenRedis control binaries, the candidate
+release binary, and vendored Redis 7.2.4. Metric is delivered subscriber-message
+throughput.
+
+Alien route: allocation-free hot-path serialization. The kept hunk bypasses
+intermediate `RespFrame` construction for delivered pubsub messages and encodes
+`message`, `pmessage`, `smessage`, and client-tracking `invalidate` pushes
+directly into each connection's write buffer. A direct byte-equivalence unit test
+pins RESP2 and RESP3 output against the existing frame encoder.
+
+| artifact | variant | topology | median ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/candidate_control_pubsub_fanout_32x4000_v2.txt` | pending-client `HashSet` to `Vec` candidate vs current-control | 32 subscribers, 4000 messages, pipe 32, trials 7 | 0.9963 candidate/control | rejected; no material gain |
+| same | rejected pending-client candidate vs Redis 7.2.4 | same | 0.9575 candidate/redis; 0.9610 control/redis | no gap closure |
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/direct_encoder_pubsub_fanout_32x4000.txt` | direct pubsub encoder candidate vs current-control | 32 subscribers, 4000 messages, pipe 32, trials 7 | 1.0614 candidate/control | keep; primary gate |
+| same | direct pubsub encoder candidate vs Redis 7.2.4 | same | 0.9967 candidate/redis; 0.9390 control/redis | nearly closes primary Redis gap |
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/direct_encoder_pubsub_fanout_32x4000_confirm.txt` | direct pubsub encoder confirmation | 32 subscribers, 4000 messages, pipe 32, trials 5 | 1.0150 candidate/control; 0.9411 candidate/redis | confirmed modest same-control win; Redis gap remains |
+| `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/direct_encoder_pubsub_fanout_64x3000_confirm.txt` | direct pubsub encoder confirmation | 64 subscribers, 3000 messages, pipe 32, trials 5 | 1.0242 candidate/control; 0.9770 candidate/redis | confirmed modest same-control win; gap narrowed |
+
+Discarded harness note: the first
+`candidate_control_pubsub_fanout_32x4000.txt` run used a byte-by-byte subscriber
+parser and failed delivery-completeness checks. It is retained as failed harness
+evidence only; the buffered-parser v2 artifact is the valid rejection gate.
+
+Crate-bench note: the literal requested `cargo bench --release -p fr-bench`
+failed because this Cargo toolchain rejects `--release` for `cargo bench`.
+The valid bench-profile command, `cargo bench -p fr-bench`, passed via `rch`
+after building `fr-server` on the same remote worker and pinning `FR_SERVER_BIN`.
+The broad crate bench is not the pubsub keep gate; it is recorded in the artifact
+summary as crate-level smoke/context.
+
+Correctness/guard evidence: `cargo fmt --check -p fr-command -p fr-server`,
+`cargo check -p fr-command -p fr-server --all-targets`,
+`cargo test -p fr-command direct_pubsub_encoder_matches_frame_encoder_bytes --
+--nocapture`, `cargo clippy -p fr-command -p fr-server --all-targets -- -D
+warnings`, and `cargo test -p fr-conformance -- --nocapture` all passed. The
+conformance run completed with the usual non-strict replication live-oracle
+replid/offset mismatches printed as non-asserting diagnostics, and the Rust test
+suite exited 0.
+
+Decision: keep the direct encoder and revert the pending-client `Vec` hunk. This
+is a measured pubsub fanout improvement, but not full domination: confirmations
+still show `0.9411x` and `0.9770x` Redis-relative medians, so pubsub remains a
+release-readiness watch area.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` cached write-gate extension rejection
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through

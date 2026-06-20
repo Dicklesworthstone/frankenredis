@@ -1,0 +1,49 @@
+Topology: SUBS=32 MESSAGES=4000 PIPE=32 TRIALS=7
+Redis=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+Control=/data/projects/frankenredis/artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/frankenredis-control
+Candidate=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis
+trial 1 order=['redis', 'control', 'candidate']
+  redis: 360875.08 delivered-msg/s
+  control: 334762.79 delivered-msg/s
+  candidate: 368627.36 delivered-msg/s
+  ratios: candidate/control=1.1012 candidate/redis=1.0215 control/redis=0.9276
+trial 2 order=['control', 'candidate', 'redis']
+  control: 338869.89 delivered-msg/s
+  candidate: 340845.38 delivered-msg/s
+  redis: 374866.14 delivered-msg/s
+  ratios: candidate/control=1.0058 candidate/redis=0.9092 control/redis=0.9040
+trial 3 order=['candidate', 'redis', 'control']
+  candidate: 364059.05 delivered-msg/s
+  redis: 367932.33 delivered-msg/s
+  control: 350800.13 delivered-msg/s
+  ratios: candidate/control=1.0378 candidate/redis=0.9895 control/redis=0.9534
+trial 4 order=['redis', 'control', 'candidate']
+  redis: 363629.15 delivered-msg/s
+  control: 360961.67 delivered-msg/s
+  candidate: 359682.02 delivered-msg/s
+  ratios: candidate/control=0.9965 candidate/redis=0.9891 control/redis=0.9927
+trial 5 order=['control', 'candidate', 'redis']
+  control: 358365.84 delivered-msg/s
+  candidate: 325050.80 delivered-msg/s
+  redis: 343013.52 delivered-msg/s
+  ratios: candidate/control=0.9070 candidate/redis=0.9476 control/redis=1.0448
+trial 6 order=['candidate', 'redis', 'control']
+  candidate: 369582.95 delivered-msg/s
+  redis: 343548.18 delivered-msg/s
+  control: 333328.63 delivered-msg/s
+  ratios: candidate/control=1.1088 candidate/redis=1.0758 control/redis=0.9703
+trial 7 order=['redis', 'control', 'candidate']
+  redis: 352104.80 delivered-msg/s
+  control: 332542.26 delivered-msg/s
+  candidate: 334906.63 delivered-msg/s
+  ratios: candidate/control=1.0071 candidate/redis=0.9512 control/redis=0.9444
+summary
+  redis median=360875.08 samples=360875.08,374866.14,367932.33,363629.15,343013.52,343548.18,352104.80
+  control median=338869.89 samples=334762.79,338869.89,350800.13,360961.67,358365.84,333328.63,332542.26
+  candidate median=359682.02 samples=368627.36,340845.38,364059.05,359682.02,325050.80,369582.95,334906.63
+  median candidate/control=1.0614
+  median candidate/redis=0.9967
+  median control/redis=0.9390
+  paired candidate/control=1.1012,1.0058,1.0378,0.9965,0.9070,1.1088,1.0071
+  paired candidate/redis=1.0215,0.9092,0.9895,0.9891,0.9476,1.0758,0.9512
+  paired control/redis=0.9276,0.9040,0.9534,0.9927,1.0448,0.9703,0.9444

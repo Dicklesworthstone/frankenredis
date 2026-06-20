@@ -10,6 +10,40 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-a addendum: direct pubsub encoder narrows fanout gap
+
+Release-readiness impact: source hunk shipped for pubsub delivery. The hot path
+now encodes delivered `message`, `pmessage`, `smessage`, and RESP3 invalidation
+pushes directly into each connection write buffer instead of allocating an
+intermediate `RespFrame` and re-walking it for serialization.
+
+Per-crate `rch` release builds used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. The custom
+fanout harness compared saved current-control, candidate, and vendored Redis
+7.2.4 on delivered subscriber-messages per second.
+
+| gate | topology | ratio | readiness impact |
+|---|---|---:|---|
+| current-control vs Redis 7.2.4 | 32 subscribers, 4000 messages, pipe 32, trials 7 | 0.9390 | pre-existing pubsub fanout loss |
+| direct encoder vs current-control | same | 1.0614 | keep |
+| direct encoder vs Redis 7.2.4 | same | 0.9967 | primary shape near parity |
+| direct encoder vs current-control | 32 subscribers, 4000 messages, pipe 32, trials 5 | 1.0150 | confirm modest win |
+| direct encoder vs Redis 7.2.4 | same | 0.9411 | Redis-relative loss remains |
+| direct encoder vs current-control | 64 subscribers, 3000 messages, pipe 32, trials 5 | 1.0242 | confirm modest win |
+| direct encoder vs Redis 7.2.4 | same | 0.9770 | narrowed residual loss |
+
+Negative evidence from the same pass: changing pending pubsub client collection
+from `HashSet` to `Vec` measured `0.9963x` candidate/control and was reverted.
+The first byte-by-byte subscriber harness attempt failed delivery-completeness
+checks and is retained only as failed-harness evidence.
+
+Correctness gates passed: `cargo fmt --check -p fr-command -p fr-server`,
+`cargo check -p fr-command -p fr-server --all-targets`, focused direct-encoder
+unit test, `cargo clippy -p fr-command -p fr-server --all-targets -- -D
+warnings`, and `cargo test -p fr-conformance -- --nocapture`. Readiness target
+after this pass: pubsub fanout is improved and sometimes near parity, but still
+not consistently above Redis; keep looking for deeper fanout/delivery wins.
+
 ## 2026-06-20 cod-a addendum: front-biased list chunks improve LPUSH, residual remains
 
 Release-readiness impact: source hunk shipped for `LPUSH`, but the Redis-relative

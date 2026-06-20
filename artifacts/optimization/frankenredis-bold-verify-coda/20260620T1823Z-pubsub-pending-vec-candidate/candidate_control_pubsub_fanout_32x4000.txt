@@ -1,0 +1,5 @@
+Topology: SUBS=32 MESSAGES=4000 PIPE=32 TRIALS=7
+Redis=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+Control=/data/projects/frankenredis/artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/frankenredis-control
+Candidate=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis
+trial 1 order=['redis', 'control', 'candidate']

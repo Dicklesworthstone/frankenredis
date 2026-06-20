@@ -1,5 +1,37 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-a pubsub fanout direct encoder (`frankenredis-ohsk5`, 2026-06-20)
+
+- Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+- Harness: custom pubsub fanout gate against saved FrankenRedis current-control,
+  direct-encoder candidate, and vendored Redis 7.2.4. Metric is delivered
+  subscriber-messages per second.
+- Kept change: direct pubsub message encoding into `fr-server` connection write
+  buffers, avoiding intermediate `RespFrame` allocation and re-encoding in the
+  delivery hot path.
+- Rejected change in the same pass: pending-pubsub client collection
+  `HashSet<u64>` to `Vec<u64>` measured `0.9963x` candidate/control and was
+  reverted.
+- Artifact directory:
+  `artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/`.
+
+| topology | control/redis | candidate/control | candidate/redis | verdict |
+|---|---:|---:|---:|---|
+| 32 subscribers, 4000 messages, pipe 32, trials 7 | 0.9390 | 1.0614 | 0.9967 | primary keep; Redis gap nearly closed |
+| 32 subscribers, 4000 messages, pipe 32, trials 5 | 0.9272 | 1.0150 | 0.9411 | confirm modest win; still below Redis |
+| 64 subscribers, 3000 messages, pipe 32, trials 5 | 0.9539 | 1.0242 | 0.9770 | confirm modest win; gap narrowed |
+
+Scorecard impact: pubsub fanout moved from a measured Redis-relative loss into
+near-parity on the primary shape, but confirmations still sit below Redis. Count
+this as a keep and a narrowed release gap, not a completed domination cell.
+
+Crate-bench smoke: `cargo bench --release -p fr-bench` was attempted and failed
+because this Cargo rejects `--release` for `cargo bench`; the valid optimized
+bench-profile command `cargo bench -p fr-bench` passed via `rch` after pinning
+`FR_SERVER_BIN`. That broad Criterion run is context only and did not include
+the pubsub fanout workload.
+
 ## Focused cod-b non-store GET probes (`frankenredis-ohsk5`, 2026-06-20)
 
 - Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with

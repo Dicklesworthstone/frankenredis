@@ -3,7 +3,7 @@
 pub mod lua_eval;
 pub use lua_eval::eval_script;
 
-use fr_protocol::RespFrame;
+use fr_protocol::{RespFrame, encode_aggregate_header, encode_bulk_string_slice};
 use fr_store::{
     BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
@@ -23108,6 +23108,53 @@ pub fn pubsub_message_to_frame_for_protocol(
     }
 }
 
+/// Encode a `PubSubMessage` directly into the output buffer for hot delivery
+/// paths that should not allocate an intermediate `RespFrame`.
+pub fn encode_pubsub_message_for_protocol_into(
+    msg: PubSubMessage,
+    resp_protocol_version: i64,
+    out: &mut Vec<u8>,
+) {
+    let resp3 = resp_protocol_version == 3;
+    match msg {
+        PubSubMessage::Message { channel, data } => {
+            out.extend_from_slice(if resp3 { b">3\r\n" } else { b"*3\r\n" });
+            encode_bulk_string_slice(Some(b"message"), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        } => {
+            out.extend_from_slice(if resp3 { b">4\r\n" } else { b"*4\r\n" });
+            encode_bulk_string_slice(Some(b"pmessage"), false, out);
+            encode_bulk_string_slice(Some(&pattern), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::SMessage { channel, data } => {
+            out.extend_from_slice(if resp3 { b">3\r\n" } else { b"*3\r\n" });
+            encode_bulk_string_slice(Some(b"smessage"), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::Invalidate { keys } => {
+            out.extend_from_slice(if resp3 { b">2\r\n" } else { b"*2\r\n" });
+            encode_bulk_string_slice(Some(b"invalidate"), false, out);
+            if keys.is_empty() {
+                encode_bulk_string_slice(None, resp3, out);
+            } else {
+                encode_aggregate_header(keys.len(), false, out);
+                for key in keys {
+                    encode_bulk_string_slice(Some(&key), false, out);
+                }
+            }
+        }
+    }
+}
+
 /// Drain all pending Pub/Sub messages from the store and convert to RESP frames.
 pub fn drain_pubsub_messages(store: &mut Store) -> Vec<RespFrame> {
     store
@@ -27810,7 +27857,10 @@ mod tests {
     use std::net::TcpStream;
     use std::time::Instant;
 
-    use super::{cluster_invalid_setslot_action_error, posix_locale_to_bcp47, sort_alpha_compare};
+    use super::{
+        cluster_invalid_setslot_action_error, encode_pubsub_message_for_protocol_into,
+        posix_locale_to_bcp47, sort_alpha_compare,
+    };
     use fr_protocol::RespFrame;
     use icu_collator::{Collator, options::AlternateHandling, options::CollatorOptions};
     use icu_locale_core::Locale;
@@ -48820,6 +48870,46 @@ mod tests {
             ])
         );
         assert!(frame.to_bytes().starts_with(b">3\r\n"));
+    }
+
+    #[test]
+    fn direct_pubsub_encoder_matches_frame_encoder_bytes() {
+        let messages = vec![
+            fr_store::PubSubMessage::Message {
+                channel: b"ch1".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::PMessage {
+                pattern: b"ch*".to_vec(),
+                channel: b"ch1".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::SMessage {
+                channel: b"shard".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec(), b"foo:2".to_vec()],
+            },
+            fr_store::PubSubMessage::Invalidate { keys: Vec::new() },
+        ];
+
+        for message in messages {
+            for protocol in [2, 3] {
+                let mut direct = Vec::new();
+                encode_pubsub_message_for_protocol_into(message.clone(), protocol, &mut direct);
+
+                let frame = pubsub_message_to_frame_for_protocol(message.clone(), protocol);
+                let mut framed = Vec::new();
+                if protocol == 3 {
+                    frame.encode_into_resp3(&mut framed);
+                } else {
+                    frame.encode_into(&mut framed);
+                }
+
+                assert_eq!(direct, framed, "protocol={protocol} message={message:?}");
+            }
+        }
     }
 
     #[test]

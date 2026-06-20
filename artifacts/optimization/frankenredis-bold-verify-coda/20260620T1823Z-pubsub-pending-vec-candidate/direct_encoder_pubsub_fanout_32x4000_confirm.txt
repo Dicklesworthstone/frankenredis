@@ -1,0 +1,39 @@
+Topology: SUBS=32 MESSAGES=4000 PIPE=32 TRIALS=5
+Redis=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+Control=/data/projects/frankenredis/artifacts/optimization/frankenredis-bold-verify-coda/20260620T1823Z-pubsub-pending-vec-candidate/frankenredis-control
+Candidate=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis
+trial 1 order=['control', 'candidate', 'redis']
+  control: 338747.53 delivered-msg/s
+  candidate: 341046.92 delivered-msg/s
+  redis: 319038.74 delivered-msg/s
+  ratios: candidate/control=1.0068 candidate/redis=1.0690 control/redis=1.0618
+trial 2 order=['candidate', 'redis', 'control']
+  candidate: 342291.66 delivered-msg/s
+  redis: 365326.12 delivered-msg/s
+  control: 343831.64 delivered-msg/s
+  ratios: candidate/control=0.9955 candidate/redis=0.9369 control/redis=0.9412
+trial 3 order=['redis', 'control', 'candidate']
+  redis: 368176.84 delivered-msg/s
+  control: 333543.40 delivered-msg/s
+  candidate: 343815.30 delivered-msg/s
+  ratios: candidate/control=1.0308 candidate/redis=0.9338 control/redis=0.9059
+trial 4 order=['control', 'candidate', 'redis']
+  control: 328991.57 delivered-msg/s
+  candidate: 354634.54 delivered-msg/s
+  redis: 354434.14 delivered-msg/s
+  ratios: candidate/control=1.0779 candidate/redis=1.0006 control/redis=0.9282
+trial 5 order=['candidate', 'redis', 'control']
+  candidate: 357796.84 delivered-msg/s
+  redis: 383414.33 delivered-msg/s
+  control: 357706.07 delivered-msg/s
+  ratios: candidate/control=1.0003 candidate/redis=0.9332 control/redis=0.9329
+summary
+  control median=338747.53 samples=338747.53,343831.64,333543.40,328991.57,357706.07
+  candidate median=343815.30 samples=341046.92,342291.66,343815.30,354634.54,357796.84
+  redis median=365326.12 samples=319038.74,365326.12,368176.84,354434.14,383414.33
+  median candidate/control=1.0150
+  median candidate/redis=0.9411
+  median control/redis=0.9272
+  paired candidate/control=1.0068,0.9955,1.0308,1.0779,1.0003
+  paired candidate/redis=1.0690,0.9369,0.9338,1.0006,0.9332
+  paired control/redis=1.0618,0.9412,0.9059,0.9282,0.9329

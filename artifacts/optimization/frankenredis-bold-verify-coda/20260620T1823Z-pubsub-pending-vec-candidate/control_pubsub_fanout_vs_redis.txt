@@ -1,0 +1,4 @@
+pubsub_fanout SUBS=16 MESSAGES=2500 PIPE=16 TRIALS=5
+redis port=46379 msg_per_sec median=1019572.97 samples=957198.07,1026087.50,1015413.86,1134695.06,1019572.97
+frankenredis port=47379 msg_per_sec median=1078766.86 samples=1118643.93,1290035.36,1039287.35,1037117.29,1078766.86
+frankenredis/redis median_ratio=1.0581 paired=1.1687,1.2572,1.0235,0.9140,1.0581
