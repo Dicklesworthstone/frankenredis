@@ -4,6 +4,50 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-ohsk5` cached write-gate extension rejection
+
+Harness: per-crate release builds for `fr-server` and `fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`. The requested
+shared target dir `/data/projects/.rch-targets/frankenredis-cod-b` had stale
+nightly artifacts after an `rch` fallback, so the measured builds used fresh
+cod-b-suffixed target dirs without deleting anything:
+`frankenredis-cod-b-current-20260620T1139Z` for current-control and
+`frankenredis-cod-b-cached-gate-candidate-20260620T1147Z` for the candidate.
+Redis-relative rows used vendored Redis 7.2.4 `redis-benchmark`, P16, c50,
+n150k, trials=7.
+
+Candidate: extend the existing per-buffered-batch borrowed write-gate cache from
+SET/HSET/MSET exact packets to SADD/LPUSH/RPUSH and flagless ZADD exact packet
+fast paths. This targeted the shared conservative gate scan in the residual
+write cluster without changing store layout or generic fallback behavior.
+`cargo fmt --package fr-server --package fr-runtime -- --check`,
+`cargo check -p fr-server --all-targets`, and
+`cargo check -p fr-runtime --all-targets` passed via `rch` while the candidate
+was applied.
+
+Profiling note: a manual `perf record` attempt against ZADD was blocked by the
+host kernel (`perf_event_paranoid=4`). The zero-sized data file and stderr are
+recorded under
+`artifacts/optimization/frankenredis-ohsk5-codb-sadd-zadd/20260620T1141Z-profile-zadd/`.
+No synthetic profile claim is made.
+
+| artifact | variant | command | ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5-codb-sadd-zadd/20260620T1140Z-current/current_vs_redis.txt` | current-control vs Redis 7.2.4 | lpush/rpush/sadd/zadd | 0.6854 / 0.7895 / 0.8284 / 0.7824 | residual write losses confirmed |
+| same | current-control vs Redis 7.2.4 | set/get/hset/incr | 0.99 / 0.98 / 1.07 / 0.99 | scalar/read guards at parity or better |
+| `artifacts/optimization/frankenredis-ohsk5-codb-sadd-zadd/20260620T1149Z-candidate-control/candidate_vs_control.txt` | cached gate candidate vs current-control | lpush/rpush/sadd/zadd | 0.96 / 1.01 / 1.02 / 1.03 | rejected; noise-scale and LPUSH soft down |
+| same | cached gate candidate vs current-control | set/get/hset/incr | 1.01 / 1.03 / 1.01 / 1.06 | guard neutral/noisy |
+| `artifacts/optimization/frankenredis-ohsk5-codb-sadd-zadd/20260620T1150Z-candidate-redis/candidate_vs_redis.txt` | rejected candidate vs Redis 7.2.4 | lpush/rpush/sadd/zadd | 0.6608 / 0.8041 / 0.8571 / 0.7740 | release gaps remain |
+| same | rejected candidate vs Redis 7.2.4 | set/get/hset/incr | 1.03 / 1.00 / 1.01 / 1.02 | non-target guards remain fine |
+
+Decision: reject and revert the runtime/server source hunk before commit. The
+candidate did not materially move SADD/ZADD and made the biggest LPUSH gap
+slightly worse in the same-current gate. Do not retry borrowed write-gate cache
+extension as a standalone lever; the remaining list/set/zset write losses need a
+larger mutation/storage or parser-ordering primitive with fresh proof. Final
+reverted-source conformance passed via `rch exec -- cargo test -p fr-conformance
+-- --nocapture`.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` packed-list direct prepend
 
 Harness: per-crate release builds for `fr-server` and `fr-bench` through

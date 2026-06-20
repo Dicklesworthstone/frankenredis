@@ -44,6 +44,47 @@ remains a measured loss. Next work should target the remaining list-write CPU
 floor and the separate `zadd`/set residuals; do not repeat packed-list promotion
 thresholds without a fresh profile.
 
+## 2026-06-20 cod-b addendum: cached write-gate extension rejected
+
+Release-readiness impact: no source hunk shipped and no score improvement. The
+candidate tried to extend the existing per-buffered-batch borrowed write-gate
+cache from SET/HSET/MSET exact packets to SADD/LPUSH/RPUSH/ZADD exact packets.
+It passed `cargo fmt --package fr-server --package fr-runtime -- --check`,
+`cargo check -p fr-server --all-targets`, and
+`cargo check -p fr-runtime --all-targets` via `rch`, but the measured
+same-current win was too small and LPUSH softened.
+
+Current-control vs Redis 7.2.4 (`redis-benchmark`, P16/c50/n150k/trials7):
+
+| command | fr/redis | verdict |
+|---|---:|---|
+| lpush | 0.6854 | confirmed loss |
+| rpush | 0.7895 | confirmed loss |
+| sadd | 0.8284 | confirmed loss |
+| zadd | 0.7824 | confirmed loss |
+| set | 0.99 | neutral |
+| get | 0.98 | neutral |
+| hset | 1.07 | win |
+| incr | 0.99 | neutral |
+
+Candidate vs current-control:
+
+| command | candidate/control | readiness impact |
+|---|---:|---|
+| lpush | 0.96 | soft regression/no keep |
+| rpush | 1.01 | noise-scale |
+| sadd | 1.02 | noise-scale |
+| zadd | 1.03 | noise-scale |
+| set/get/hset/incr | 1.01 / 1.03 / 1.01 / 1.06 | guards neutral/noisy |
+
+Candidate vs Redis 7.2.4 left the release gaps open: `lpush/rpush/sadd/zadd =
+0.6608 / 0.8041 / 0.8571 / 0.7740`. The hunk was reverted before commit.
+`perf record` on ZADD was blocked by `perf_event_paranoid=4`; the blocked
+profile artifact is recorded under
+`artifacts/optimization/frankenredis-ohsk5-codb-sadd-zadd/20260620T1141Z-profile-zadd/`.
+Next release-readiness target remains a deeper list/set/zset mutation primitive,
+not another borrowed write-gate cache extension.
+
 ## 2026-06-20 cod-a addendum: ohsk5 INCR route neutral, LPUSH front-promotion rejected
 
 Release-readiness impact: evidence update only; no source hunk shipped.
