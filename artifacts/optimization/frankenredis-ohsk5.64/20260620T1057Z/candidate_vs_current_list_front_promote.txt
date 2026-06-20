@@ -1,0 +1,12 @@
+loadavg=6.36  (high load -> absolute rps noisy; ratio stays stable)
+  fr:31993 exe=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis sha=00000000 connected_slaves=0
+  redis:31992 exe=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis (deleted) sha=00000000 connected_slaves=0
+======================================================================
+lpush              median ratio=0.95x  (trials: 0.88, 0.95, 0.93, 1.02, 0.93, 1.03, 1.09)
+rpush              median ratio=1.05x  (trials: 1.06, 1.11, 0.99, 0.93, 1.04, 1.08, 1.05)
+sadd               median ratio=1.03x  (trials: 1.03, 0.92, 1.03, 0.91, 1.08, 1.08, 0.87)
+zadd               median ratio=0.97x  (trials: 0.99, 0.97, 1.05, 0.97, 1.00, 0.96, 0.92)
+incr               median ratio=1.01x  (trials: 1.00, 0.98, 1.02, 1.03, 1.03, 0.90, 1.01)
+set                median ratio=0.99x  (trials: 0.95, 1.03, 1.03, 0.99, 0.94, 1.03, 0.99)
+======================================================================
+fr at parity-or-faster on all tested commands (median ratio >= 0.9x) vs redis 7.2.4

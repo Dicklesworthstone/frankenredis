@@ -10,6 +10,44 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-a addendum: ohsk5 INCR route neutral, LPUSH front-promotion rejected
+
+Release-readiness impact: evidence update only; no source hunk shipped.
+
+Per-crate `rch` release builds and Redis C-client interleaved benches were run
+under `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, seven trials.
+
+Fresh current/Redis matrix from this pass:
+
+| command | fr/redis | verdict |
+|---|---:|---|
+| incr | 0.98 | neutral; the suspected INCR invalidation-cache route was not confirmed |
+| set | 0.99 | neutral |
+| sadd | 0.90 | parity-floor loss/noisy edge |
+| lpush | 0.72 | confirmed release-readiness loss |
+| rpush | 0.82 | confirmed release-readiness loss |
+| zadd | 0.75 | confirmed release-readiness loss |
+
+Rejected candidate: early promotion of packed lists to chunked storage for
+`LPUSH` did not improve the saved current-control:
+
+| gate | command | ratio | release-readiness impact |
+|---|---|---:|---|
+| candidate vs current-control | lpush | 0.95 | rejected; not a win |
+| candidate vs current-control | rpush / sadd / zadd / incr / set | 1.05 / 1.03 / 0.97 / 1.01 / 0.99 | noise-scale guards |
+| candidate vs Redis 7.2.4 | lpush | 0.73 | still a major loss |
+| candidate vs Redis 7.2.4 | rpush / sadd / zadd / incr / set | 0.90 / 0.90 / 0.78 / 1.04 / 1.08 | list/zset residuals remain |
+
+Guards passed before rejection: targeted `fr-store` list equivalence tests and
+`cargo check -p fr-store --all-targets` via `rch`; final reverted-source
+conformance also passed with `rch exec -- cargo test -p fr-conformance --
+--nocapture`. The hunk was reverted because it failed the same-current
+performance gate, not because of a correctness failure. Readiness target remains
+the deeper list-write primitive rather than the promotion threshold: front-chunk
+fill, batched command mutation, or a quicklist-style builder that preserves
+small-list locality.
+
 ## 2026-06-20 cod-b addendum: non-store GET probes did not ship
 
 Per-crate `rch` release builds and Redis C-client interleaved benches were run

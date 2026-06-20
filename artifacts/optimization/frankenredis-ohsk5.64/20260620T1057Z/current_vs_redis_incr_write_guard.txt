@@ -1,0 +1,12 @@
+loadavg=19.28  (high load -> absolute rps noisy; ratio stays stable)
+  fr:31992 exe=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis sha=00000000 connected_slaves=0
+  redis:31991 exe=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+incr               median ratio=0.98x  (trials: 0.95, 1.06, 0.97, 0.96, 1.00, 0.98, 1.03)
+set                median ratio=0.99x  (trials: 1.46, 0.95, 0.99, 1.03, 1.08, 0.95, 0.96)
+sadd               median ratio=0.90x  (trials: 0.91, 0.93, 0.91, 0.84, 0.87, 0.90, 0.84)
+lpush              median ratio=0.72x  (trials: 0.75, 0.77, 0.71, 0.68, 0.67, 0.80, 0.72)  <-- below 0.9x
+rpush              median ratio=0.82x  (trials: 0.86, 0.83, 0.82, 0.75, 0.72, 0.84, 0.75)  <-- below 0.9x
+zadd               median ratio=0.75x  (trials: 0.72, 0.90, 0.87, 0.72, 0.75, 0.75, 0.74)  <-- below 0.9x
+======================================================================
+below-0.9x: [('lpush', 0.7216981094066038), ('rpush', 0.8172588890785112), ('zadd', 0.7487922761723027)]

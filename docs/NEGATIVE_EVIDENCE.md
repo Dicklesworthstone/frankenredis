@@ -31,6 +31,50 @@ standalone INCR expiry-probe consolidation; the open measured losses are still
 `lpush`, `rpush`, `sadd`, and `zadd`, with `incr` near the parity floor on current
 control.
 
+## 2026-06-20 cod-a `frankenredis-ohsk5.64` INCR/list-write pivot and LPUSH front-promotion rejection
+
+Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, seven
+interleaved trials through `scripts/bench_vs_redis.py`. FrankenRedis release
+binaries were built per crate through `rch exec -- cargo build --release -p
+fr-server -p fr-bench` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. Current
+control stayed resident on port 31992 while the candidate ran on 31993, so the
+candidate/control gate isolated the source hunk from Redis-side variance.
+
+Initial route: BlackThrush's inbox note suggested the `INCR` write-invalidation
+path might still be a loss. The fresh current/Redis gate did not reproduce that
+as the largest gap, so no cache-invalidation hunk was attempted.
+
+| artifact | variant | command | median ratio | verdict |
+|---|---|---|---:|---|
+| `artifacts/optimization/frankenredis-ohsk5.64/20260620T1057Z/current_vs_redis_incr_write_guard.txt` | current vs Redis 7.2.4 | incr | 0.98 | neutral; no INCR cache-guard source attempt |
+| same | current vs Redis 7.2.4 | set | 0.99 | neutral |
+| same | current vs Redis 7.2.4 | sadd | 0.90 | parity-floor loss/noisy edge |
+| same | current vs Redis 7.2.4 | lpush | 0.72 | confirmed loss; pivot target |
+| same | current vs Redis 7.2.4 | rpush | 0.82 | confirmed loss |
+| same | current vs Redis 7.2.4 | zadd | 0.75 | confirmed loss |
+| `artifacts/optimization/frankenredis-ohsk5.64/20260620T1057Z/candidate_vs_current_list_front_promote.txt` | early `LPUSH` packed-list front promotion vs current-control | lpush | 0.95 | rejected; no win |
+| same | early `LPUSH` packed-list front promotion vs current-control | rpush/sadd/zadd/incr/set | 1.05 / 1.03 / 0.97 / 1.01 / 0.99 | noise-scale guard cells |
+| `artifacts/optimization/frankenredis-ohsk5.64/20260620T1057Z/candidate_vs_redis_list_front_promote.txt` | early `LPUSH` packed-list front promotion vs Redis 7.2.4 | lpush | 0.73 | still a loss |
+| same | early `LPUSH` packed-list front promotion vs Redis 7.2.4 | rpush/sadd/zadd/incr/set | 0.90 / 0.90 / 0.78 / 1.04 / 1.08 | residual list/zset losses; scalar writes fine |
+
+Guard runs before rejection: `cargo test -p fr-store --lib
+list_value_deque_equivalent_to_vecdeque_after_promotion`, `cargo test -p
+fr-store --lib list_value_cow_mutations_preserve_independent_order`, and `cargo
+check -p fr-store --all-targets` all passed via `rch`. Final reverted-source
+conformance guard also passed via `rch exec -- cargo test -p fr-conformance --
+--nocapture`. Correctness was not the rejection reason.
+
+Decision: revert/not ship the early front-promotion hunk in
+`crates/fr-store/src/packed_set.rs`. It did not close the measured LPUSH gap and
+was slightly worse than the saved current-control. Do not retry "promote packed
+lists earlier on front insert" as a standalone lever unless a fresh profile
+names `PackedList::push_front` byte shifting on a workload larger than this
+P16/c50 benchmark. The next list-write route should target the actual mutation
+primitive: chunk/front-fill layout, command-path batching, or a quicklist-style
+node builder that avoids per-element packed front shifts without sacrificing the
+small-list locality that this rejected hunk disturbed.
+
 ## 2026-06-20 cod-b `frankenredis-ohsk5` non-store GET probes
 
 Harness: vendored Redis 7.2.4 `redis-benchmark`, P16, c50, n150k, interleaved
