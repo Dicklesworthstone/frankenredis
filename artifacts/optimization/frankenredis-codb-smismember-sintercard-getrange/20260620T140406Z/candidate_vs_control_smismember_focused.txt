@@ -1,0 +1,4 @@
+fr:43213 redis:43214  pipe=2000 trials=21
+cmd                fr_ms redis_ms  ratio  verdict
+smismember         268.7    257.0   0.96  ~
+LOSSES(<0.9x): []

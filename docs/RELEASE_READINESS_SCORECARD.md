@@ -900,3 +900,28 @@ Next readiness target from this pass is the write-family storage path:
 `RPUSH`, `LPUSH`, `SADD`, and deeper `ZADD` index/storage work. The reverted
 ZADD parser-side borrowed-member shortcut should not be retried as a standalone
 lever.
+
+## Cod-b SMISMEMBER direct reply rejection (MEASURED 2026-06-20)
+
+Release-readiness impact: evidence update only; no code keep. The attempted
+borrowed `SMISMEMBER` direct socket-buffer encoder passed a narrow RESP2/RESP3
+wire parity test, but failed the measured release A/B gate and was reverted.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| clean control vs Redis 7.2.4, broad | `smismember` | 0.79x | release perf risk remains |
+| clean control vs Redis 7.2.4, broad | `sintercard` | 0.62x | release perf risk remains |
+| clean control vs Redis 7.2.4, broad | `zcount` | 0.61x | release perf risk remains; prior lever rejected |
+| candidate vs control, broad | `smismember` | 1.03x | neutral, below keep threshold |
+| candidate vs control, focused pipe=2000 trials=21 | `smismember` | 0.96x | rejected regression |
+| candidate vs Redis 7.2.4, focused | `smismember` | 0.99x | neutral standalone, not enough to override A/B loss |
+| control vs Redis 7.2.4, focused | `smismember` | 0.93x | focused risk remains |
+
+Proof bundle:
+`artifacts/optimization/frankenredis-codb-smismember-sintercard-getrange/20260620T140406Z/`.
+Profiling was blocked by `kernel.perf_event_paranoid=4`; the direct `perf stat`
+failure is captured in that bundle. Conformance gate:
+`AGENT_NAME=CobaltCove rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo test -p fr-conformance -- --nocapture`
+passed after the source hunk was reverted. Next readiness target is the deeper
+`SINTERCARD`/`SMISMEMBER` set representation and membership-probe path, not
+reply-frame materialization alone.

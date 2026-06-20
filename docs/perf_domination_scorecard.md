@@ -513,3 +513,25 @@ member ownership for unchanged scores, but the 9-trial guard produced
 worse than the 0.77x pre-edit refresh. The source hunk was reverted. Next ZADD
 route should be storage/index complexity reduction, not parser-side member
 borrowing.
+
+## Cod-b SMISMEMBER direct-encoder rejection (MEASURED 2026-06-20)
+
+Focused follow-up for the current broad set-read frontier. A direct
+`SMISMEMBER` network encoder avoided per-flag `RespFrame::Integer`
+materialization while keeping the same `Store::smismember` call, metrics, and
+keyspace accounting. The source hunk was reverted after timing.
+
+| Command / gate | candidate ratio vs Redis | control ratio vs Redis | candidate/control | scorecard result |
+|---|---:|---:|---:|---|
+| `smismember`, broad control refresh | n/a | 0.79x | n/a | baseline loss |
+| `sintercard`, broad control refresh | n/a | 0.62x | n/a | baseline loss, untouched |
+| `zcount`, broad control refresh | n/a | 0.61x | n/a | baseline loss, prior lever rejected |
+| `smismember`, broad candidate/control | n/a | n/a | 1.03x | neutral |
+| `smismember`, focused pipe=2000 trials=21 | 0.99x | 0.93x | 0.96x | rejected loss |
+
+Lever score: **0 wins / 1 loss / 1 neutral** on the `SMISMEMBER` target cell.
+No source hunk remains. Current measured set-read frontier from this pass:
+`SINTERCARD=0.62x`, `SMISMEMBER=0.79x` in the broad refresh, with `ZCOUNT=0.61x`
+still a known rejected constant-factor gap. Next route should be set layout,
+probe specialization, or no-LIMIT intersection counting rather than direct reply
+encoding.

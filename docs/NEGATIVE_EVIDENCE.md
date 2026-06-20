@@ -470,3 +470,40 @@ same "borrow existing member/no-op score" fast path without a profile proving
 owned member materialization is the dominant cost. The live frontier from the
 fresh refresh remains list writes (`LPUSH`/`RPUSH`), `SADD`, and deeper `ZADD`
 storage/index work rather than parser-side no-op shortcuts.
+
+## 2026-06-20 cod-b rejected SMISMEMBER direct reply encoding
+
+Harness: vendored Redis 7.2.4 plus saved FrankenRedis control binary, same host
+ports, `scripts/broad_command_headtohead.py`, release builds through
+`AGENT_NAME=CobaltCove rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b cargo build --release -p fr-server -p fr-bench`.
+The control binary SHA256 was
+`9ae333a67212c1d5d7275a62b8c2e3c2fba7bbd0c3fc53ed7d1f0cf3e5c015c8`; the
+candidate binary SHA256 was
+`d636b9021c947de32b2adfedc8d62049188dceaf5d1f0ac9a6616c80aa33c1ca`.
+
+Candidate idea: add `execute_plain_smismember_borrowed_into`, mirroring the
+existing `ZMSCORE` direct encoder, so the network fast path writes the integer
+array directly into `conn.write_buf` instead of allocating one `RespFrame` per
+returned flag. This followed the alien/optimization pass as a branch-elision and
+reply-materialization lever on the current `SMISMEMBER` loss cell.
+
+Profiling note: local hardware-counter profiling was blocked by
+`kernel.perf_event_paranoid = 4`; see
+`artifacts/optimization/frankenredis-codb-smismember-sintercard-getrange/20260620T140406Z/perf_event_paranoid_block.txt`.
+This decision therefore uses same-run release A/B timing.
+
+| artifact | command | ratio vs Redis 7.2.4 | candidate/control | verdict |
+|---|---|---:|---:|---|
+| `artifacts/optimization/frankenredis-codb-smismember-sintercard-getrange/20260620T140406Z/control_vs_redis_broad.txt` | `smismember` control broad | 0.79x | n/a | baseline loss |
+| same | `sintercard` control broad | 0.62x | n/a | baseline loss; not addressed |
+| same | `zcount` control broad | 0.61x | n/a | baseline loss; prior compact-count lever already rejected |
+| `.../candidate_vs_control_broad.txt` | `smismember` broad | n/a | 1.03x | neutral, not enough to keep |
+| `.../candidate_vs_control_smismember_focused.txt` | `smismember` focused, pipe=2000 trials=21 | n/a | 0.96x | loss/rejected |
+| `.../candidate_vs_redis_smismember_focused.txt` | `smismember` candidate focused | 0.99x | n/a | neutral vs Redis, failed same-run A/B |
+| `.../control_vs_redis_smismember_focused.txt` | `smismember` control focused | 0.93x | n/a | focused control still below Redis |
+
+Decision: reject and keep no production hunk. The exact same-run focused A/B is
+the controlling evidence: the direct encoder was slower than the saved control
+(`0.96x`). Do not retry `SMISMEMBER` reply-frame elimination alone; the next
+route should attack set membership/storage layout, hash probing, or `SINTERCARD`
+no-LIMIT set-intersection cost rather than only socket-buffer encoding.
