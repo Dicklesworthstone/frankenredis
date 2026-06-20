@@ -6219,6 +6219,13 @@ impl Runtime {
     }
 
     pub fn pubsub_sub_count(&self, client_id: u64) -> usize {
+        // (frankenredis-pubsub-empty-fast) Skip both per-client hash probes when
+        // no client holds any channel/pattern subscription (O(1) is_empty).
+        if self.server.pubsub_client_channels.is_empty()
+            && self.server.pubsub_client_patterns.is_empty()
+        {
+            return 0;
+        }
         self.server
             .pubsub_client_channels
             .get(&client_id)
@@ -6231,6 +6238,11 @@ impl Runtime {
     }
 
     pub fn pubsub_shard_sub_count(&self, client_id: u64) -> usize {
+        // (frankenredis-pubsub-empty-fast) Skip the per-client hash probe when no
+        // client holds any shard subscription (O(1) is_empty).
+        if self.server.pubsub_client_shard_channels.is_empty() {
+            return 0;
+        }
         self.server
             .pubsub_client_shard_channels
             .get(&client_id)
@@ -6239,6 +6251,19 @@ impl Runtime {
 
     /// Returns true if a given client ID has any active pub/sub subscriptions.
     pub fn is_pubsub_client(&self, client_id: u64) -> bool {
+        // (frankenredis-pubsub-empty-fast) O(1) global short-circuit: when no
+        // client anywhere holds a channel/pattern/shard subscription, this
+        // client cannot be a pub/sub client. Skips up to three per-client
+        // HashMap hash+probes on the per-command hot path (profiled ~4-7% of
+        // GET/SET CPU via effective_output_hard_limit) for the overwhelmingly
+        // common no-subscriber workload. Byte-identical: every empty map yields
+        // the same `false` through the slow path below.
+        if self.server.pubsub_client_channels.is_empty()
+            && self.server.pubsub_client_patterns.is_empty()
+            && self.server.pubsub_client_shard_channels.is_empty()
+        {
+            return false;
+        }
         self.pubsub_sub_count(client_id) > 0
             || self
                 .server

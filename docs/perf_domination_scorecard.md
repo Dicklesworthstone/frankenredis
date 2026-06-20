@@ -668,3 +668,40 @@ bands** (control ~21,643 M ±7 M, candidate ~21,475 M ±2 M). Lever score: **1 w
 0 loss / 0 neutral** (server-CPU). Helps every dispatched command. Cumulative
 fr-runtime dispatch reduction this session (genclock + cmdname): ~21,720 M →
 21,475 M ≈ **-1.1% instructions/cmd** vs pre-session baseline.
+
+## BlackThrush pubsub empty-map fast-path (MEASURED, hot-path profile, 2026-06-20)
+
+First profile of the PURE GET/SET hot path (3 parallel saturating blasters →
+single-threaded server CPU-bound) — distinct from this session's cold-cmd
+profiles. It exposed ~11% of GET/SET CPU in **per-command pub/sub bookkeeping**
+for a client that never subscribed: `is_pubsub_client` 4.19% + `pubsub_sub_count`
+3.40% + (via `effective_output_hard_limit` 2.72%), each doing up to 3 per-client
+`HashMap<u64,_>` hash+probes to classify a normal client (redis uses O(1)
+`c->flags`).
+
+Fix: O(1) global short-circuit in `is_pubsub_client` / `pubsub_sub_count` /
+`pubsub_shard_sub_count` — when the relevant `pubsub_client_*` maps are globally
+empty (no client anywhere subscribed = the overwhelmingly common case), no client
+can be a subscriber, so return false/0 without the per-client probe. Byte-identical
+(empty map yields the same result through the slow path).
+
+Correctness: `cargo test -p fr-runtime --lib pubsub` (13) green; byte-identical by
+construction.
+
+MEASURED — `perf stat -e instructions`, FIXED 1.5M-command GET/SET mix (7 GET : 3
+SET), candidate (pubsub) vs control (prior HEAD = cmdname), 5 rounds:
+
+| round | control instr | candidate instr |
+|---|---:|---:|
+| 1 | 2,534,586,349 | 2,466,543,227 |
+| 2 | 2,535,692,748 | 2,466,318,022 |
+| 3 | 2,535,762,178 | 2,466,733,736 |
+| 4 | 2,535,525,933 | 2,466,903,789 |
+| 5 | 2,535,377,403 | 2,465,322,380 |
+
+**-69 M instructions (-2.7%), ~46 instr/cmd, all 5 rounds non-overlapping bands**
+(control ~2,535.5 M ±0.2 M, candidate ~2,466.4 M ±0.6 M). Lever score: **1 win / 0
+loss / 0 neutral** (server-CPU). Biggest relative win this session, on the hottest
+commands. Open hot-path follow-ups for CobaltCove (ohsk5, their core): per-command
+`effective_output_hard_limit` client-class HashMap lookups, `run_active_expire_cycle`
+no-op stats-struct construction (~6.8%).
