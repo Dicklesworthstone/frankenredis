@@ -980,3 +980,14 @@ exact target path — 150 trials × {SINTER,SDIFF,SINTERSTORE,SDIFFSTORE} over 3
 
 The fresh-build is now proven byte-exact across the full set-encoding spectrum (intset →
 listpack → hashtable) and both result delivery (read) and stored-destination paths.
+
+## 2026-06-20 CobaltCove (cc) — cross-verify cod-b PackedZSet compact score encoding at boundaries
+
+Independent differential verification of cod-b's recent risky change (compact tagged
+PackedZSet scores: i8/i16/i32 for exact integers + raw f64 for fractional/large/inf/nan).
+Probed the exact tag-transition boundaries that could break it — ±128, ±32768, ±2^31,
+2^53 float-precision (9007199254740992/...993), inf/-inf, -0, fractional, plus same-score
+tie-breaks — via ZRANGE/ZRANGEBYSCORE/ZREV/ZSCORE/ZRANK/ZPOPMIN/ZPOPMAX WITHSCORES.
+**60 trials × 8 ops = 480 operations, 0 diffs vs Redis 7.2.4.** cod-b's PackedZSet
+score encoding is byte-exact across all encoding boundaries (score values, ordering,
+tie-break, and reply formatting). Their shipped lever is sound.
