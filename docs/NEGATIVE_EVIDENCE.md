@@ -4,6 +4,41 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-20 cod-b `frankenredis-uhthd` current-control memory scorecard
+
+Harness: clean detached worktree at `d568ff5f0`, minimized Redis oracle payload
+for RCH transfer, fail-closed remote build
+`RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`
+on `vmi1152480`, followed by fresh-process
+`scripts/memory_baseline_capture.py` against vendored Redis 7.2.4 with
+`FR_BENCH_PORT_BASE=45251`.
+
+No source hunk shipped in this pass. The relevant store files were actively
+reserved by CobaltCove (`crates/fr-store/src/lib.rs`,
+`crates/fr-store/src/keyspace_dict.rs`, and later `crates/fr-store/src/packed_set.rs`),
+so this is a measured routing/scorecard update, not a code-change claim.
+
+| data type | fr/redis RSS | fr/redis used_memory | verdict |
+|---|---:|---:|---|
+| zset | 1.728 | 0.619 | largest current RSS loss |
+| hash | 1.562 | 0.838 | loss |
+| keyspace | 1.403 | 0.805 | `uhthd` loss remains |
+| set | 1.303 | 0.562 | loss |
+| list | 1.078 | 0.391 | small loss |
+| stream | 0.978 | 1.096 | RSS win; modeled memory loss |
+| string_1k | 0.903 | 0.964 | win |
+
+Score: **2 wins / 5 losses / 0 neutral** vs Redis 7.2.4 on RSS. Ratchet
+status: pass, no regressions versus the prior tracked baseline. The measured
+next targets are zset/hash/keyspace layout, but do not retry the rejected
+inline-small key or sparse sidecar modification-count families without new
+A/B evidence.
+
+RCH negative evidence: copying the full untracked Redis oracle into a detached
+worktree made remote sync time out at 30s and fail closed under
+`RCH_REQUIRE_REMOTE=1`; a minimized payload (`src/commands`, `redis-server`,
+`redis-cli`) synced in 37.49s and produced the valid remote release build.
+
 ## 2026-06-20 cod-b `frankenredis-uhthd` compact tagged PackedZSet score evidence
 
 Harness: per-crate release builds for `fr-server` and `fr-bench`, with the

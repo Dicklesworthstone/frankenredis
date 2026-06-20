@@ -1,5 +1,33 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b current-control memory scorecard (`frankenredis-uhthd`, 2026-06-20)
+
+- Build: fail-closed remote `rch` build on `vmi1152480`:
+  `RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --release -p fr-server -p fr-bench`.
+- Harness: `scripts/memory_baseline_capture.py` against vendored Redis 7.2.4,
+  fresh process per data type, `FR_BENCH_PORT_BASE=45251`, scale 200k.
+- Raw JSON was generated at `.bench-history/memory_baseline.latest.json` in the
+  worktree but not committed because that path was actively reserved by
+  CobaltCove; the measured ratios are recorded below and in the Beads comment.
+- Source decision: no hunk shipped. `fr-store` keyspace/packed-set source was
+  under active CobaltCove reservations, so this pass records current-control
+  evidence and routes the next source swing.
+
+| data type | fr/redis RSS | fr/redis used_memory | verdict |
+|---|---:|---:|---|
+| zset | 1.728 | 0.619 | largest RSS loss |
+| hash | 1.562 | 0.838 | loss |
+| keyspace | 1.403 | 0.805 | `uhthd` loss remains |
+| set | 1.303 | 0.562 | loss |
+| list | 1.078 | 0.391 | small loss |
+| stream | 0.978 | 1.096 | RSS win |
+| string_1k | 0.903 | 0.964 | win |
+
+Scorecard impact: current memory score is **2 wins / 5 losses / 0 neutral** on
+RSS. The highest-value remaining work is not another Entry-tail or key-inline
+micro-lever; it is zset/hash/keyspace representation work with same-current
+A/B proof once the store files are free.
+
 ## Focused cod-b compact tagged PackedZSet score storage (`frankenredis-uhthd`, 2026-06-20)
 
 - Build: `rch exec -- cargo build --release -p fr-server -p fr-bench`, with

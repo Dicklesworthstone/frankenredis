@@ -10,6 +10,29 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-20 cod-b addendum: current memory score remains 2 wins / 5 losses
+
+Release-readiness impact: evidence update only. A clean detached worktree at
+`d568ff5f0` was built with fail-closed remote RCH on `vmi1152480` using
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`. The memory
+baseline harness compared the release `frankenredis` binary with vendored
+Redis 7.2.4 using fresh server pairs per data type.
+
+| data type | fr/redis RSS | fr/redis used_memory | readiness impact |
+|---|---:|---:|---|
+| zset | 1.728 | 0.619 | largest remaining RAM loss |
+| hash | 1.562 | 0.838 | loss |
+| keyspace | 1.403 | 0.805 | `uhthd` still open |
+| set | 1.303 | 0.562 | loss |
+| list | 1.078 | 0.391 | small loss |
+| stream | 0.978 | 1.096 | RSS win |
+| string_1k | 0.903 | 0.964 | win |
+
+Ratchet passed with no memory regressions versus the tracked baseline. No source
+hunk shipped in this pass because the relevant store files were under active
+agent reservations. Readiness target remains zset/hash/keyspace representation;
+the scorecard stays **2 wins / 5 losses / 0 neutral** across memory cells.
+
 ## 2026-06-20 cod-b addendum: compact zset score storage narrows RSS gap
 
 Release-readiness impact: measured cod-b source hunk for packed zset memory
