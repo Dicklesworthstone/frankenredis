@@ -1208,3 +1208,20 @@ need differential byte-exactness + P16 A/B vs Redis 7.2.4 the instant disk recov
   large-hashtable differential (0-diff) still holds + SDIFF P16/3-set A/B.
 - `263e3b05a` 99fwc packed-chunk blueprint (cc, design only — implement+bench on recovery).
 cc verification owner for the first two on recovery; no cargo run now (disk-critical).
+
+## 2026-06-21 CobaltCove (cc) — code-review (by inspection, no cargo) of unbenched peer perf commits on main
+Reviewed both perf commits that landed during the build-freeze (live on main, not yet
+benched). Both CORRECT by source inspection:
+- `fdba690e2` SADD arity-1 fast path: new `execute_plain_keyed_values_write_fast_path`
+  wrapper routes `Sadd && values.len()==1` → `execute_plain_sadd_one_borrowed`, ELSE falls
+  through to the generic variadic path (multi-member SADD / LPUSH / RPUSH unaffected — no
+  member-drop). Fast-path body is byte-equivalent to the generic path (same gates,
+  `store.sadd(key,&[member])`, stat/metrics/reply/error-stats). Plain-mode gates + fallback
+  intact. ✓
+- `7b94d4efc` sdiff secondary-lookup reduction (in my sdiff_value Pass A): moves the
+  per-other-key `contains_key` INSIDE the `lfu_tracking_enabled` branch. Verified all cases:
+  LFU-on missing→continue (rng-sequence preserved), LFU-off missing→`get_mut(None)` no-op
+  (continue was redundant), existing Set→touch, existing non-Set→WRONGTYPE in order. My
+  fresh-build Pass A byte-exactness + sdiffwt WRONGTYPE ordering preserved. ✓
+Both safe to bench/ship on disk recovery (queued above). Inspection only; full P16 A/B +
+differential still owed on recovery.
