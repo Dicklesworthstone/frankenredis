@@ -1317,3 +1317,23 @@ RESTORE-stickiness loss is **LIST-ONLY** — fix is isolated to the quicklist RE
 (`from_restored_quicklist2_nodes` + the bulk-build encoding re-derivation), no analogous
 hash/zset/set work needed. Verification harness: scripts/list_ops_differ.py (lists) +
 this enc_restore probe (other types, clean).
+
+### list encoding-on-RDB bug (10ovx) — BROADER + BIDIRECTIONAL (cc deepening)
+Probed COPY + DEBUG RELOAD list encoding (build past cap → shrink → check OBJECT ENCODING),
+caps 128/4/-2, n=130/10/400/200 → 60 checks, 2 diffs — both DEBUG RELOAD, OPPOSITE direction
+to the RESTORE finding:
+- **COPY: clean** (encoding + state match redis; the bulk-build COPY path is fine).
+- **DEBUG RELOAD: redis=listpack, fr=quicklist** for a 130→127 list at **cap=128 (redis's
+  actual default) AND cap=4** — redis CONVERTS the crossed-then-shrunk quicklist DOWN to
+  listpack on RDB-load (it now fits), fr OVER-KEEPS quicklist.
+- vs. RESTORE-of-dump (list_ops_differ): fr DOWNGRADES to listpack, redis keeps quicklist.
+
+So fr's list encoding across bulk-build paths is INCONSISTENT with redis and bidirectional:
+COPY✓ / RESTORE✗(fr downgrades) / RELOAD✗(fr over-keeps), and it bites at the **default
+cap=128**, not just exotic configs. Implication for the 10ovx fix: it is NOT a simple
+"preserve quicklist on load" — redis's RDB-LOAD path runs listTypeTryConversion (converts to
+listpack when it fits) while its RESTORE-of-a-multi-node-dump preserves quicklist; fr must
+match BOTH per-path behaviors. This is subtle and bidirectional → definitively needs
+build+test (cannot be safely guessed blind). Harnesses: scripts/list_ops_differ.py (RESTORE
+direction) + the COPY/RELOAD probe here. Bead frankenredis-10ovx scope now covers RESTORE,
+DEBUG RELOAD, and the redis-default cap=128.
