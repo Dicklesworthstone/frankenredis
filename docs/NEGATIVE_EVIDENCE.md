@@ -1020,3 +1020,22 @@ byte-verified vs Redis 7.2.4 — cc SINTER/SDIFF fresh-build (large hashtable se
 cod-b PackedZSet compact scores (encoding boundaries), BlackThrush pubsub direct
 encoder (RESP2+RESP3), and cod-a ZADD plain-store fast path (option matrix). 0 diffs
 across all.
+
+## 2026-06-20 CobaltCove (cc) — profiling environment is fully locked (perf + ptrace), confirmed empirically
+
+To pin the SADD/keyed-values per-command dispatch fixed-cost (arity-sweep-proven, not
+a store cost), I tried every unprivileged profiling path and all are blocked here:
+- **perf**: `kernel.perf_event_paranoid = 4` → hardware counters denied unprivileged.
+- **gdb attach** (`gdb -p PID`): `kernel.yama.ptrace_scope = 1` → "Could not attach to
+  process" (can only trace own children).
+- **gdb child** (`gdb --args fr ...`): allowed by ptrace_scope, but reliable sampling
+  needs non-stop/async-mode scripting; `-ex run` blocks the batch and a clean
+  poor-man's sampler didn't capture frames in the time budget.
+- **valgrind/callgrind**: not installed.
+
+Conclusion: the SADD arity-1 / LPUSH / RPUSH single-element dispatch fixed-cost
+(`ohsk5`) cannot be line-pinned in this sandbox without an operator unblocking
+`perf_event_paranoid<=1` or `ptrace_scope=0`, or installing valgrind. Code-reading
+already showed the SET vs keyed-values borrowed paths are structurally identical and
+the metrics fns equivalent on the fast path, so the residual is diffuse per-command
+machinery, not a single removable line. Routed to BlackThrush (fr-runtime/`ohsk5`).
