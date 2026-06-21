@@ -3623,6 +3623,31 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_bitfield_set_borrowed(
+                        packet.key,
+                        packet.set_arg,
+                        packet.enc_arg,
+                        packet.offset_arg,
+                        packet.value_arg,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -7290,6 +7315,50 @@ fn parse_borrowed_plain_bitfield_get_packet<'a>(
         get_arg,
         enc_arg,
         offset_arg,
+    })
+}
+
+struct BorrowedPlainBitfieldSetPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    set_arg: &'a [u8],
+    enc_arg: &'a [u8],
+    offset_arg: &'a [u8],
+    value_arg: &'a [u8],
+}
+
+/// `BITFIELD key SET <enc> <offset> <value>` single-op fast-path packet. Runtime
+/// keeps the semantic gate narrow and falls back for signed/overflow/multi-op
+/// cases so generic BITFIELD remains authoritative for edge behavior.
+fn parse_borrowed_plain_bitfield_set_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitfieldSetPacket<'a>> {
+    if config.max_array_len < 6 || config.max_bulk_len < b"BITFIELD".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*6\r\n$8\r\n")?;
+    let command = rest.get(..8)?;
+    if !command.eq_ignore_ascii_case(b"BITFIELD") {
+        return None;
+    }
+    let mut cursor = input.len() - rest.len() + 8;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next1) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (set_arg, next2) = parse_borrowed_plain_set_bulk(input, next1, config.max_bulk_len)?;
+    let (enc_arg, next3) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
+    let (offset_arg, next4) = parse_borrowed_plain_set_bulk(input, next3, config.max_bulk_len)?;
+    let (value_arg, consumed) = parse_borrowed_plain_set_bulk(input, next4, config.max_bulk_len)?;
+    Some(BorrowedPlainBitfieldSetPacket {
+        consumed,
+        key,
+        set_arg,
+        enc_arg,
+        offset_arg,
+        value_arg,
     })
 }
 
@@ -17976,6 +18045,47 @@ mod tests {
             )
             .is_none(),
             "BITFIELD_RO bulk-limit errors stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitfield_set_packet_parser_accepts_canonical_write() {
+        let input =
+            b"*6\r\n$8\r\nBITFIELD\r\n$2\r\nbf\r\n$3\r\nSET\r\n$2\r\nu8\r\n$1\r\n0\r\n$1\r\n1\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitfield_set_packet(input, &ParserConfig::default());
+        assert!(
+            parsed.is_some(),
+            "canonical BITFIELD SET packet should parse"
+        );
+        let Some(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.key, b"bf");
+        assert_eq!(parsed.set_arg, b"SET");
+        assert_eq!(parsed.enc_arg, b"u8");
+        assert_eq!(parsed.offset_arg, b"0");
+        assert_eq!(parsed.value_arg, b"1");
+        assert_eq!(parsed.consumed, input.len());
+
+        assert!(
+            crate::parse_borrowed_plain_bitfield_set_packet(
+                b"*06\r\n$8\r\nBITFIELD\r\n",
+                &ParserConfig::default()
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitfield_set_packet(
+                input,
+                &ParserConfig {
+                    max_array_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
         );
     }
 

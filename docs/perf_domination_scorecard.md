@@ -1,5 +1,46 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-a BITFIELD SET borrowed fast path (`frankenredis-ohsk5`, 2026-06-21)
+
+- Build/bench: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+  REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server
+  rch exec -- cargo bench --profile release -p fr-bench --bench
+  bitfield_vs_redis -- BITFIELD_SET_u8_0_1 --noplot`.
+- Retained lever: canonical `BITFIELD key SET uN <offset> <value>` borrowed
+  parser/runtime fast path for unsigned in-range single-op writes only.
+- Source decision: **kept narrow source win; no Redis-domination claim**.
+
+| gate | Redis median | FrankenRedis median | fr/Redis throughput | direct FR delta | verdict |
+|---|---:|---:|---:|---:|---|
+| `vmi1152480` pre-fast-path baseline | `161.70 us` | `333.46 us` | `0.485x` | n/a | target loss |
+| `hz1` candidate row | `129.46 us` | `115.29 us` | `1.123x` | n/a | same-host Redis win, supportive |
+| `vmi1152480` candidate repeat | `99.794 us` | `248.75 us` | `0.401x` | `1.34x` faster by FR medians | source improves, Redis still faster |
+
+Scorecard impact: direct FrankenRedis A/B **1 win / 0 losses / 0 neutral**;
+candidate Redis-relative rows **1 win / 1 loss / 0 neutral**. The release
+BITFIELD write gap is not closed; route next to a store-owned fixed-width
+bitmap mutation primitive or profile-proven direct-reply encoding. Gates:
+fmt/check/clippy for touched crates, focused runtime/server parser tests, and
+full `fr-conformance` via RCH.
+
+## Focused cod-a exact 4-value keyed-write recheck (`frankenredis-ohsk5`, 2026-06-21)
+
+- Build/bench: `keyed_write_vs_redis -- "4v"` with warm
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+- Source decision: **no new parser/server hunk**; existing exact four-value
+  keyed-write recognition does not clear the Redis gap.
+
+| gate | Redis median | FrankenRedis median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_4v` | `66.708 us` | `77.646 us` | `0.859x` | loss |
+| `RPUSH_4v` | `56.087 us` | `77.116 us` | `0.727x` | loss |
+| `SADD_4v` | `46.610 us` | `63.209 us` | `0.737x` | loss |
+
+Scorecard impact: **0 wins / 3 losses / 0 neutral**. Next keyed-write route is
+batch-typed execution or deeper list/set representation, not another exact
+four-value parser probe.
+
 ## Focused cod-b hash DUMP direct-emitter keep (`frankenredis-uhthd`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1

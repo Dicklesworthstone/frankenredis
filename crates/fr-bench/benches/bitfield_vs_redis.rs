@@ -185,10 +185,19 @@ fn bitfield_vs_redis(c: &mut Criterion) {
     group.throughput(Throughput::Elements(COMMANDS_PER_ITER_U64));
 
     for case in [
-        ("BITFIELD_GET_u8_0", b"BITFIELD".as_slice()),
-        ("BITFIELD_RO_GET_u8_0", b"BITFIELD_RO".as_slice()),
+        (
+            "BITFIELD_GET_u8_0",
+            bitfield_get_packet(b"BITFIELD", COMMANDS_PER_ITER),
+        ),
+        (
+            "BITFIELD_RO_GET_u8_0",
+            bitfield_get_packet(b"BITFIELD_RO", COMMANDS_PER_ITER),
+        ),
+        (
+            "BITFIELD_SET_u8_0_1",
+            bitfield_set_packet(COMMANDS_PER_ITER),
+        ),
     ] {
-        let packet = bitfield_get_packet(case.1, COMMANDS_PER_ITER);
         for engine in engines {
             let id = BenchmarkId::new(case.0, engine.name);
             group.bench_with_input(id, &engine, |b, engine| {
@@ -196,7 +205,7 @@ fn bitfield_vs_redis(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     for _ in 0..iters {
-                        client.run_bitfield_packet(&packet, COMMANDS_PER_ITER);
+                        client.run_bitfield_packet(&case.1, COMMANDS_PER_ITER);
                     }
                     start.elapsed()
                 });
@@ -220,6 +229,22 @@ fn bitfield_get_packet(command_name: &[u8], count: usize) -> Vec<u8> {
         b"GET".as_slice(),
         b"u8".as_slice(),
         b"0".as_slice(),
+    ]);
+    let mut packet = Vec::with_capacity(command.len() * count);
+    for _ in 0..count {
+        packet.extend_from_slice(&command);
+    }
+    packet
+}
+
+fn bitfield_set_packet(count: usize) -> Vec<u8> {
+    let command = command(&[
+        b"BITFIELD".as_slice(),
+        b"bf".as_slice(),
+        b"SET".as_slice(),
+        b"u8".as_slice(),
+        b"0".as_slice(),
+        b"1".as_slice(),
     ]);
     let mut packet = Vec::with_capacity(command.len() * count);
     for _ in 0..count {

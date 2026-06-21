@@ -4,6 +4,68 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-ohsk5` BITFIELD SET borrowed fast path mixed keep, Redis gap remains
+
+BOLD-VERIFY extended the prior canonical `BITFIELD GET`/`BITFIELD_RO GET`
+borrowed parser lane to the hot write shape `BITFIELD key SET u8 0 1`. The
+kept server/runtime path recognizes only the canonical single-op `BITFIELD`
+write packet and executes unsigned, in-range `SET` through borrowed argv. Signed
+fields, overflow/wrap/fail behavior, `INCRBY`, `OVERFLOW`, invalid forms, and
+multi-op packets deliberately fall back to the generic BITFIELD handler.
+
+Focused same-worker baseline before the runtime/server fast path, on
+`vmi1152480` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`:
+
+| gate | Redis median | FrankenRedis baseline median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `BITFIELD_SET_u8_0_1` | `161.70 us` | `333.46 us` | `0.485x` | target loss |
+
+Candidate evidence:
+
+| gate | Redis median | FrankenRedis candidate median | fr/Redis throughput | direct FR vs baseline | verdict |
+|---|---:|---:|---:|---:|---|
+| `BITFIELD_SET_u8_0_1`, `hz1` candidate row | `129.46 us` | `115.29 us` | `1.123x` | n/a | same-host Redis win, routing support |
+| `BITFIELD_SET_u8_0_1`, `vmi1152480` repeat | `99.794 us` | `248.75 us` | `0.401x` | `1.34x` faster by FR medians | source improves, Redis still faster |
+
+Decision: **KEEP as a narrow FrankenRedis source win, but no Redis-domination
+claim**. The same-worker direct FR improvement is material (`333.46 -> 248.75
+us`, `383.85 -> 514.58 Kelem/s`), so this is not a ~0-gain revert. However,
+the repeat on the baseline host shows the release BITFIELD write cell remains
+red versus Redis 7.2.4. Next credible write-side route is a store-owned
+fixed-width bitmap mutation primitive or direct encoded reply only after a fresh
+profile proves reply framing, not the store write, dominates. `fr-store` is
+currently owned by the `uhthd` memory bead, so this pass did not widen into that
+file.
+
+Gates: `cargo fmt -p fr-runtime -p fr-server -p fr-bench --check`; RCH
+`cargo check -p fr-runtime -p fr-server -p fr-bench --all-targets`; focused RCH
+runtime and server parser tests; RCH `cargo clippy -p fr-runtime -p fr-server
+-p fr-bench --all-targets -- -D warnings`; RCH `cargo test -p fr-conformance
+-- --nocapture` (194 lib tests, all conformance bins, 99 smoke tests,
+doctests). Non-strict live-oracle drift rows were logged by the harness but did
+not fail.
+
+## 2026-06-21 cod-a `frankenredis-ohsk5` exact 4-value keyed-write recheck remains red
+
+BOLD-VERIFY rechecked the existing exact four-value keyed-write parser coverage
+before adding another shallow parser hunk. No source change was retained for
+this lane because the already-present parser still leaves the list/set write
+rows below Redis 7.2.4 on the focused Criterion gate.
+
+Command:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server rch exec -- cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- "4v" --noplot`.
+
+| gate | Redis median | FrankenRedis median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_4v` | `66.708 us` | `77.646 us` | `0.859x` | loss |
+| `RPUSH_4v` | `56.087 us` | `77.116 us` | `0.727x` | loss |
+| `SADD_4v` | `46.610 us` | `63.209 us` | `0.737x` | loss |
+
+Scorecard: **0 wins / 3 losses / 0 neutral**. Decision: **no new parser hunk**.
+Do not retry exact four-value keyed-write packet recognition without a deeper
+batch-typed execution arena, mutable list/set representation change, or profile
+naming parser dispatch as the residual.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` hash DUMP direct listpack emit kept, Redis gap remains
 
 BOLD-VERIFY targeted the hash-only DUMP encode loss from the collection split
@@ -2521,7 +2583,6 @@ NEXT (for the fixer, likely cod-a or a listpack-encoder pass): DUMP both engines
 this case, decode entry-by-entry, find the element fr encodes 1B larger, align fr's encoder to
 redis byte-for-byte. NOT a clean DUMP-encode-only fix (encoder change → affects all collection
 DUMP, regression risk) — xyyfb stays blocked. No code change kept (instrumentation stashed).
-
 ### s36di DEFINITIVELY root-caused (cc): ChunkedList BUILD node-size accounting over-counts (NOT encoder/DUMP)
 Decisive test: at list-max-listpack-size=-5 (force single node) fr's DUMP of the seed=1 trial=586
 70-element list is **byte-IDENTICAL to redis (6992 B, 1 node, 0 diffs)**. So fr's listpack ENTRY
@@ -2544,3 +2605,16 @@ TWO LATENT bugs found while investigating (separate from s36di; flag for the fr-
    `len < 16_383` / `< 2_097_151` / `< 268_435_455` should be `< 16_384` / `< 2_097_152` /
    `< 268_435_456` (redis lpEncodeBacklen). Only affects entries with encoded data_len exactly at
    those boundaries (≥16 KB) — rare, latent. Both NOT the s36di cause (failing entries are small).
+### dispatch fast-path campaign-stretch — integrated HEAD 1b2b79787 verified (cc)
+Three borrowed read fast paths shipped + verified this stretch (all byte-exact, conformance
+99/99, cmdstat keyspace-parity gate green, no regression):
+- **PFCOUNT** 0.53x → ~1.0x (ac1a968a6) — dispatch overhead eliminated.
+- **GEODIST** 0.61x → 0.75x (bc36053a8) — residual is constant-factor geo compute (byte-exact).
+- **GEOPOS** 0.77x → 1.02x (1b2b79787) — dispatch overhead eliminated + bonus keyspace
+  over-count fix (per-member zscore double-count → record_source_key_lookups + no-stat zmscore).
+Integrated gauntlet confirms all hold parity-or-faster; prior fast paths (GET/TTL/TYPE/HGET/
+cardinality/BITFIELD-GET[peer]) unchanged. Clean dispatch fast-path vein now ~exhausted: the
+simple-lookup cold reads are fast-pathed. Remaining residuals are NOT clean dispatch levers:
+GEOSEARCH ~0.78x (complex multi-option SEARCH, compute-bound), SINTER-small ~0.7-0.8x (multibulk
+set algebra), EXISTS-multikey ~0.8x (already fast-pathed, subtle constant-factor). frankenredis
+ is parity-or-faster across the hot path + all clean cold commands vs Redis 7.2.4, MEASURED.

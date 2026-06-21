@@ -10,6 +10,42 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: BITFIELD SET borrowed fast path mixed
+
+Release-readiness impact: keep the scoped source improvement for canonical
+single-op unsigned `BITFIELD SET`, but do not upgrade the release BITFIELD write
+cell. One candidate host beat Redis; the same host used for the pre-fast-path
+baseline still showed Redis ahead on repeat.
+
+| gate | Redis 7.2.4 median | FrankenRedis median | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| pre-fast-path baseline, `vmi1152480` | `161.70 us` | `333.46 us` | `0.485x` throughput | target loss |
+| candidate, `hz1` | `129.46 us` | `115.29 us` | `1.123x` throughput | focused win; routing support |
+| candidate repeat, `vmi1152480` | `99.794 us` | `248.75 us` | `0.401x` throughput | release loss remains |
+
+Direct FrankenRedis median improved `333.46 -> 248.75 us` on `vmi1152480`
+(`1.34x` faster), so the hunk is not a ~0-gain revert. Readiness score for
+Redis-relative candidate rows is **1 win / 1 loss / 0 neutral**; the conservative
+release posture remains **not closed** until a quiet same-worker run clears
+Redis or a deeper store-owned bitmap mutation primitive lands. Full
+`fr-conformance` is green via RCH.
+
+## 2026-06-21 cod-a addendum: exact 4-value keyed-write recheck remains red
+
+Release-readiness impact: no source hunk shipped for this lane. Existing exact
+four-value keyed-write parsing still leaves all three focused cells below Redis
+7.2.4.
+
+| gate | Redis 7.2.4 median | FrankenRedis median | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/LPUSH_4v` | `66.708 us` | `77.646 us` | `0.859x` throughput | loss |
+| `keyed_write_vs_redis/RPUSH_4v` | `56.087 us` | `77.116 us` | `0.727x` throughput | loss |
+| `keyed_write_vs_redis/SADD_4v` | `46.610 us` | `63.209 us` | `0.737x` throughput | loss |
+
+Readiness score: **0 wins / 3 losses / 0 neutral**. Next route is batch-typed
+keyed-write execution or deeper list/set representation, not another exact
+4-value parser recognition pass.
+
 ## 2026-06-21 cod-b addendum: batch list push helper rejected
 
 Release-readiness impact: no production hunk shipped. A temporary batch

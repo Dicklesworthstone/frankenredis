@@ -551,6 +551,23 @@ impl PlainBitfieldGetCmd {
     }
 }
 
+fn plain_bitfield_set_owned_argv(
+    key: &[u8],
+    set_arg: &[u8],
+    enc_arg: &[u8],
+    offset_arg: &[u8],
+    value_arg: &[u8],
+) -> Vec<Vec<u8>> {
+    vec![
+        b"BITFIELD".to_vec(),
+        key.to_vec(),
+        set_arg.to_vec(),
+        enc_arg.to_vec(),
+        offset_arg.to_vec(),
+        value_arg.to_vec(),
+    ]
+}
+
 /// `SRANDMEMBER key` / `HRANDFIELD key` / `ZRANDMEMBER key` — the no-count
 /// random-read forms that return a single random member as a bulk string (or
 /// nil for a missing/empty container). They lacked a borrow fast path and fell
@@ -13998,6 +14015,178 @@ impl Runtime {
             return false;
         }
         self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    fn can_execute_plain_bitfield_set_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"BITFIELD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Borrowed runtime fast path for the hot single-op write form
+    /// `BITFIELD key SET uN <offset> <value>` when the unsigned value is already
+    /// in range for the field. Overflow modes, signed fields, INCRBY, OVERFLOW,
+    /// multi-op commands, and invalid forms deliberately fall back to the generic
+    /// BITFIELD handler, which owns those Redis edge semantics.
+    pub fn execute_plain_bitfield_set_borrowed(
+        &mut self,
+        key: &[u8],
+        set_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !set_arg.eq_ignore_ascii_case(b"SET") {
+            return None;
+        }
+        let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
+        if signed {
+            return None;
+        }
+        let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
+        let value = parse_i64_arg(value_arg).ok()?;
+        let max_value = if bits == 63 {
+            i64::MAX
+        } else {
+            (1i64 << u32::from(bits)) - 1
+        };
+        if !(0..=max_value).contains(&value) {
+            return None;
+        }
+        if !self.can_execute_plain_bitfield_set_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("bitfield");
+        self.session.last_argv_len_sum = b"BITFIELD".len()
+            + key.len()
+            + set_arg.len()
+            + enc_arg.len()
+            + offset_arg.len()
+            + value_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .bitfield_set(key, bit_offset, bits, value, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(old) => RespFrame::Array(Some(vec![RespFrame::Integer(old)])),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_bitfield_set_borrowed_metrics(
+            key, set_arg, enc_arg, offset_arg, value_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed BITFIELD SET metrics carry five borrowed argv components"
+    )]
+    fn record_plain_bitfield_set_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        set_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_bitfield_set_owned_argv(key, set_arg, enc_arg, offset_arg, value_arg)
+            });
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_bitfield_set_owned_argv(key, set_arg, enc_arg, offset_arg, value_arg)
+            });
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("bitfield", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_bitfield_set_owned_argv(key, set_arg, enc_arg, offset_arg, value_arg)
+            });
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'BITFIELD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Array(Some(vec![RespFrame::Integer(0)])),
+            });
+        }
     }
 
     /// Borrowed runtime fast path for the read-only single-op form
@@ -30817,6 +31006,54 @@ mod tests {
         assert_eq!(
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_bitfield_set_borrowed_matches_generic_for_unsigned_in_range() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        let value = [0xA5_u8; 32];
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"bf", &value]), 1);
+        }
+
+        let fast_reply =
+            fast.execute_plain_bitfield_set_borrowed(b"bf", b"SET", b"u8", b"0", b"1", 2);
+        assert!(
+            fast_reply.is_some(),
+            "BITFIELD SET should take the borrowed fast path"
+        );
+        let Some(fast_reply) = fast_reply else {
+            return;
+        };
+        let generic_reply =
+            generic.execute_frame(command(&[b"BITFIELD", b"bf", b"SET", b"u8", b"0", b"1"]), 2);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast.session.last_command_name, "bitfield");
+        assert_eq!(
+            fast.execute_frame(command(&[b"BITFIELD", b"bf", b"GET", b"u8", b"0"]), 3),
+            generic.execute_frame(command(&[b"BITFIELD", b"bf", b"GET", b"u8", b"0"]), 3)
+        );
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+
+        assert!(
+            fast.execute_plain_bitfield_set_borrowed(b"bf", b"SET", b"i8", b"0", b"1", 4)
+                .is_none(),
+            "signed SET stays on generic overflow/sign-extension logic"
+        );
+        assert!(
+            fast.execute_plain_bitfield_set_borrowed(b"bf", b"SET", b"u8", b"0", b"-1", 4)
+                .is_none(),
+            "overflow/wrap SET stays on generic overflow logic"
         );
     }
 
