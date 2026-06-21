@@ -10,6 +10,23 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: quicklist2 RDB direct emit rejected
+
+Release-readiness impact: no new Redis-relative win claim. The measured
+`fr-persist` QUICKLIST_2 direct-emitter candidate regressed the focused encoder
+gate and was reverted to the buffered borrowed-slice roster while preserving the
+Redis 7.2.4 PLAIN threshold (`1 << 30`).
+
+| gate | control | candidate | candidate/control | readiness impact |
+|---|---:|---:|---:|---|
+| `rdb_codec_quicklist/encode_quicklist_rdb`, same `ovh-a` worker | `23.890 ms`, `12.558 Kelem/s` | `25.465 ms`, `11.781 Kelem/s` | `1.0659x` slower | reject/revert |
+
+Criterion reported the restored direct-emitter path as `+6.5926%` time
+regression (`p=0.00`) and `-6.1849%` throughput. The lever score is
+**0 wins / 1 loss / 0 neutral**. This server-free gate does not update the
+fr/Redis release matrix; a list-specific DEBUG RELOAD/DUMP encode head-to-head
+is still the right Redis-relative proof surface for future quicklist RDB work.
+
 ## 2026-06-21 cod-a addendum: arity-one keyed-write scorecard and packet-id candidate rejected
 
 Release-readiness impact: no production hunk shipped. Current arity-one

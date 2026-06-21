@@ -68,7 +68,7 @@ fn build_entries() -> Vec<RdbEntry> {
     }
     // quicklist lists (>8KiB => multi-node)
     for _ in 0..300 {
-        let l = (0..60)
+        let l = (0..240)
             .map(|j| format!("e{j:02}{}", "x".repeat(40)).into_bytes())
             .collect();
         entries.push(RdbEntry {
@@ -94,6 +94,34 @@ fn build_entries() -> Vec<RdbEntry> {
     entries
 }
 
+fn patterned_bytes(seed: usize, len: usize) -> Vec<u8> {
+    let mut state = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        out.push((state >> 32) as u8);
+    }
+    out
+}
+
+fn build_quicklist_entries() -> Vec<RdbEntry> {
+    let mut entries = Vec::new();
+    for key in 0..300 {
+        let list = (0..180)
+            .map(|member| patterned_bytes(key * 4099 + member, 96))
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("ql:{key:06}").into_bytes(),
+            value: RdbValue::List(list),
+            expire_ms: None,
+        });
+    }
+    entries
+}
+
 fn bench_codec(c: &mut Criterion) {
     let entries = build_entries();
     let encoded = encode_rdb(&entries, &[]);
@@ -108,6 +136,14 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| decode_rdb(std::hint::black_box(&encoded)).unwrap())
     });
     g.finish();
+
+    let quicklist_entries = build_quicklist_entries();
+    let mut quicklist = c.benchmark_group("rdb_codec_quicklist");
+    quicklist.throughput(Throughput::Elements(quicklist_entries.len() as u64));
+    quicklist.bench_function("encode_quicklist_rdb", |b| {
+        b.iter(|| encode_rdb(std::hint::black_box(&quicklist_entries), &[]))
+    });
+    quicklist.finish();
 }
 
 criterion_group!(benches, bench_codec);

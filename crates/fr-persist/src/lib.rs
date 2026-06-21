@@ -1903,25 +1903,22 @@ fn encode_compact_list_quicklist2(
     let budget = thresholds.list_max_listpack_size;
     let mut buf = Vec::new();
     rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
-    // Pre-size the first node's listpack buffer to (a cap of) the per-node byte budget so the
-    // common 1-2 node quicklist is built without realloc churn from empty. Capped at 8 KiB
-    // (a node's listpack is SIZE_SAFETY_LIMIT-bounded); under-reserve is harmless (Vec grows)
-    // and capacity never affects content => byte-identical.
-    // (frankenredis perf: presize quicklist node buffer, code-first batch-test pending)
-    let mut packed_encoded = Vec::with_capacity(budget.min(8192));
-    let mut packed_count = 0usize;
+    // Keep a borrowed slice roster for each PACKED node and let the shared
+    // listpack encoder build the node payload. A direct streaming encoder was
+    // measured slower on the focused quicklist RDB gate, so the buffered path
+    // remains the production path while the 1 GiB threshold below preserves
+    // Redis-compatible PLAIN/PACKED classification.
+    let mut packed: Vec<&[u8]> = Vec::new();
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
-    let flush =
-        |packed_encoded: &mut Vec<u8>, packed_count: &mut usize, buf: &mut Vec<u8>| -> Option<()> {
-            if *packed_count == 0 {
-                return Some(());
-            }
-            let lp = finish_listpack_blob(std::mem::take(packed_encoded), *packed_count)?;
+    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>| -> Option<()> {
+        if !packed.is_empty() {
+            let lp = encode_listpack_strings_blob(packed)?;
             rdb_encode_length(buf, 2); // PACKED
             rdb_encode_string(buf, &lp);
-            *packed_count = 0;
-            Some(())
-        };
+            packed.clear();
+        }
+        Some(())
+    };
     const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
     for item in items {
         if item.len() >= QUICKLIST_PACKED_THRESHOLD {
@@ -1932,22 +1929,21 @@ fn encode_compact_list_quicklist2(
             // path below; node_count counts an over-budget element as its own node either
             // way, so the count stays consistent). Previously `item.len() > budget` made
             // any >8 KiB element a PLAIN node, diverging from redis's DUMP bytes.
-            flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
+            flush(&mut packed, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
             rdb_encode_length(&mut buf, 1); // PLAIN
             rdb_encode_string(&mut buf, item);
             continue;
         }
         let entry_bytes = listpack_entry_encoded_len(item);
-        if packed_count != 0 && packed_bytes + entry_bytes > budget {
-            flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
+        if !packed.is_empty() && packed_bytes + entry_bytes > budget {
+            flush(&mut packed, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
         }
-        encode_listpack_entry(&mut packed_encoded, item);
-        packed_count += 1;
+        packed.push(item.as_slice());
         packed_bytes += entry_bytes;
     }
-    flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
+    flush(&mut packed, &mut buf)?;
     Some(buf)
 }
 
