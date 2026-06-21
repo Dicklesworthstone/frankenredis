@@ -4,6 +4,21 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup pending-bench
+
+DISK-LOW pivot: no new `cargo bench` or `cargo build` was started after the
+disk-low instruction. Code-only lever shipped for `sdiff_value`: secondary SDIFF
+sources no longer pay an unconditional `contains_key` probe before `get_mut`
+when LFU tracking is disabled. The LFU-enabled path keeps the existence
+pre-check so it preserves the prior per-existing-key RNG draw sequence.
+
+Validation status: pending benchmark and post-hunk cargo validation next turn.
+This commit records no Redis-relative throughput ratio for the SDIFF lever.
+Pre-pivot gates on the same file/crate were green (`fr-store` check, focused
+SDIFF tests, `fr-store` clippy, and `fr-conformance`), but the final code-only
+lookup hunk is intentionally carried with a pending-bench note because of the
+disk-low stop.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` compact PackedZSet score tags rejected
 
 Harness: clean HEAD control worktree `43f17ad91`, candidate with only the
@@ -1132,3 +1147,26 @@ peers' (coralox/cod-b). I have reclaimed everything safely mine (6.8G last turn)
 remaining headroom must come from those other-project caches (cross-project decision,
 not frankenredis-cc-actionable). No frankenredis code lever exists and none committed
 unverified under the build-pause.
+
+## 2026-06-21 CobaltCove (cc) — 99fwc LPUSH/RPUSH lever: precise design analysis (cannot implement "well" under build-pause)
+
+Read the actual ChunkedList push path (packed_set.rs:2607 push_back_with_fill /
+push_back_owned / ListChunk:2240). Root cause of LPUSH/RPUSH 0.72-0.75x confirmed at
+source: the **mutable** active chunk is `ListChunk::Owned { elems: Arc<Vec<Vec<u8>>> }`
+— every pushed element is a separate `Vec<u8>` heap allocation. Redis appends into a
+single packed listpack buffer per quicklist node (no per-element alloc). The sealed
+`ListChunk::Listpack { bytes, entries }` packed variant already exists but is only used
+for immutable/sealed chunks.
+
+The `99fwc` lever = give the mutable active chunk a **packed-append representation**
+(growing bytes buffer + spans index, listpack-encoded) so appends are amortized
+contiguous writes instead of per-element Vec allocs. This is NOT a bounded change: it
+touches the entire ChunkedList element surface — push_back_owned/push_front_owned,
+accepts_append (lp_bytes accounting), seal_if_owned, make_mut, pop_front/pop_back, set,
+insert, remove, locate, and both iterators — and must stay byte-exact for list order,
+OBJECT ENCODING, and DUMP/DEBUG (all heavily tested). It requires iterative build+test
+to land safely, which is paused (DISK-LOW). It is also in `packed_set.rs` (actively
+edited by cod-b for uhthd/PackedZSet) and is cod-a's assigned `99fwc` bead. Blind-
+committing a partial rewrite would risk the shared build and list-data correctness, so
+none committed. Owner/next step: cod-a, with build+test, on disk recovery. The simple
+VecDeque variant is already in the rejected-levers ledger (measured 0.53x SLOWER).
