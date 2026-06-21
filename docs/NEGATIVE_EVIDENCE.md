@@ -1399,3 +1399,17 @@ Using my still-warm cc-localbench target (warm benches now permitted; no cold re
   debug_reload_no_persistence_round_trips_in_memory_per_upstream), preserving encoding; the
   earlier reload encoding-divergence is likely a save-vs-nosave mode nuance, not a clear core
   bug — DOWNGRADE its severity vs the RESTORE 10ovx (which is a real cross-engine RESTORE diff).
+
+### 10ovx list RESTORE encoding bug — FIXED (cc, disk recovered)
+Fixed in `ListValue::from_restored_quicklist2_nodes` (packed_set.rs): preserve `quicklist`
+encoding for a multi-node QUICKLIST_2 RDB payload (set forced_quicklist+decided_by_write when
+nodes.len() > 1) instead of re-deriving from total content. redis only emits >1 node once a
+list crossed list-max-listpack-size and preserves that encoding on RESTORE/RDB-load/replica;
+fr was downgrading a crossed-then-shrunk quicklist to listpack. Single-node payloads still
+re-derive (listpack iff they fit the configured cap), so genuinely-small lists are unaffected.
+VERIFIED: fr-store unit tests 654 passed (no hysteresis regression); scripts/list_ops_differ.py
+3394 checks 0 diffs (was failing); scripts/encoding_rdb_differ.py 0 regressions; fr-conformance
+core_list + core_list_live_redis green. The encoding_rdb gate's list RESTORE check is now
+must-pass (catches regressions). RESIDUAL (murky, downgraded severity): DEBUG RELOAD encoding
+— fr round-trips in-memory (preserves) vs redis save+load re-derives; likely a save-vs-nosave
+mode nuance, left as KNOWN in the gate, NOT addressed by this fix.

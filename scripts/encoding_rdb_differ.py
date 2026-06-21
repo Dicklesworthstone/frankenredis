@@ -106,7 +106,9 @@ def main():
             da = red.cmd("DUMP", "k")
             if da is not None:
                 both("DEL", "r"); red.cmd("RESTORE", "r", "0", da); fr.cmd("RESTORE", "r", "0", da)
-                check(f"list_cap{cap}_n{n}_restore", "r", is_known_10ovx=True)
+                check(f"list_cap{cap}_n{n}_restore", "r")  # 10ovx FIXED — must-pass, catches regressions
+            # DEBUG RELOAD stays KNOWN: fr round-trips in-memory (preserves encoding) vs
+            # redis save+load re-derivation — murky save-vs-nosave nuance, not a clear core bug.
             both("DEBUG", "RELOAD"); check(f"list_cap{cap}_n{n}_reload", "k", is_known_10ovx=True)
     print(f"\nTOTAL={total} REGRESSIONS={regressions} KNOWN-10ovx={known}")
     sys.exit(1 if regressions else 0)

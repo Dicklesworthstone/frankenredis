@@ -3379,6 +3379,17 @@ impl ListValue {
     }
 
     pub(crate) fn from_restored_quicklist2_nodes(nodes: Vec<RestoredListNode>) -> Self {
+        // (frankenredis-10ovx) A multi-node QUICKLIST_2 payload WAS a quicklist:
+        // redis only emits >1 node once a list crossed list-max-listpack-size, and
+        // RESTORE/RDB-load/replica-sync preserve that encoding (they build what the
+        // RDB says; they do NOT merge nodes back into a single listpack on load).
+        // fr previously re-derived encoding from total content via
+        // rebuild_growth_state, downgrading a crossed-then-shrunk quicklist (e.g.
+        // 130→pop→127 @ cap=128, 2 nodes) to listpack — diverging from redis's
+        // preserved `quicklist`. Preserve quicklist for multi-node payloads; a
+        // single-node payload still re-derives (listpack iff it fits the configured
+        // list-max-listpack-size, evaluated later in Store::object_encoding).
+        let multi_node = nodes.len() > 1;
         let mut list = ListValue {
             repr: ListRepr::Deque(Arc::new(ChunkedList::from_restored_nodes(nodes))),
             lp_bytes: LIST_LP_OVERHEAD,
@@ -3387,6 +3398,10 @@ impl ListValue {
             decided_by_write: false,
         };
         list.rebuild_growth_state();
+        if multi_node {
+            list.forced_quicklist = true;
+            list.decided_by_write = true;
+        }
         list
     }
 
