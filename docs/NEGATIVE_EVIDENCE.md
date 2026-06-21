@@ -1512,3 +1512,26 @@ collection_reload_headtohead (2000 hash+set+zset, 40 members, fr DEBUG enabled):
 0.337x, DUMP-encode 0.747x, **RESTORE-decode 0.373x** (fr 54.4ms vs redis 20.3ms). The decode
 half is the dominant collection-RDB gap (the "keep-listpack / zero-decode" lever). Next:
 per-type RESTORE profiling to find the slowest type, then bulk-build it (qxfmr/duab9 pattern).
+
+### RESTORE-decode lever — per-type profiled + structural conclusion (cc, disk recovered)
+Per-type DEBUG RELOAD (10k keys × 16 elems, both --enable-debug-command), reload best-of-5:
+| type | fr | redis | ratio (redis/fr) |
+|---|---:|---:|---:|
+| zset | 0.052s | 0.025s | **0.48x** (worst) |
+| hash | 0.054s | 0.031s | **0.57x** |
+| set  | 0.034s | 0.026s | 0.76x |
+| list | 0.033s | 0.026s | 0.79x |
+| str  | 0.011s | 0.011s | 1.00x |
+RESTORE-decode half overall 0.373x; DUMP-encode 0.747x.
+
+Conclusion: the gap is STRUCTURAL, not a bounded inefficiency. fr's hash RESTORE already uses
+`hash_from_listpack_spans` (zero-copy spans) and from_unique_pairs (O(n) bulk-build) — both
+shipped. The residual is that **redis keeps the RDB listpack bytes AS its in-memory small
+collection (zero decode)** while fr decodes into its own packed format (PackedStrMap / PackedZSet
+/ packed_set arena). To close it, fr's small-collection packed encoding would have to BE the
+redis listpack (like fr's LIST chunks already are — lists are the least-bad at 0.79x), making
+RESTORE *and* DUMP zero-copy. That is a big byte-exactness-critical rewrite of PackedStrMap
+(hash, mine) / PackedZSet (zset, cod-b) touching HGETALL/HSCAN/DUMP order + all ops, in the
+contended packed_set.rs — a multi-pass structural lever, not a clean per-turn ship. Highest-value
+target is zset (0.48x, cod-b) then hash (0.57x). Bounded RESTORE-decode optimizations are
+exhausted (zero-copy spans + bulk-build already in).
