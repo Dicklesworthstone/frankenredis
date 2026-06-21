@@ -2376,3 +2376,16 @@ Built origin/main in a clean worktree (no peer WIP), gauntlet vs Redis 7.2.4 + c
   stream hash dumps).
 - Remaining dispatch-bound losses (next fast-path candidates): EXISTS-multikey 0.64x, GEODIST
   0.61x (geo cross-layer), GEOPOS 0.72x, SINTER-small 0.73x, GETBIT 0.78x.
+
+### GEODIST borrowed read fast path — SHIPPED (cc): 0.61x -> 0.75x
+GEODIST lacked a borrowed fast path (generic dispatch). fr-runtime depends on fr-command (no
+cycle), so the fast path calls fr-command's geo helpers directly after making them `pub`
+(geo_decode_score/geo_distance_m/geo_distance_reply/geo_unit_to_meters/record_source_key_lookups).
+execute_plain_geodist_borrowed mirrors the cardinality fast-path machinery + the generic geodist
+compute (one record_source_key_lookups for the key, no-stat zmscore for both members, then
+decode+haversine+geo_distance_reply); WRONGTYPE/bad-unit/bad-arity/>5-args fall back to generic.
+Measured pipe=100 best-of-5: **0.61x -> 0.75x** (+23%; residual is constant-factor geo compute,
+not dispatch — math is already byte-identical to redis). Byte-exact: distances M/KM/MI/FT,
+missing key/member nil, WRONGTYPE, arity, bad-unit, syntax all == redis. Gates: conformance
+smoke 99/99; keyspace_hits/misses + cmdstat_geodist (calls/failed) + errorstat_WRONGTYPE all
+byte-exact vs Redis 7.2.4. Same pattern can later fast-path GEOPOS/GEOSEARCH.

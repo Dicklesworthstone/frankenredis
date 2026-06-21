@@ -3553,6 +3553,31 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_geodist_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_geodist_borrowed(
+                        packet.key,
+                        packet.m1,
+                        packet.m2,
+                        packet.to_meter,
+                        packet.unit,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
@@ -7060,6 +7085,64 @@ fn parse_borrowed_plain_pfcount_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainZcardPacket { consumed, key })
+}
+
+struct BorrowedPlainGeodistPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    m1: &'a [u8],
+    m2: &'a [u8],
+    to_meter: f64,
+    unit: Option<&'a [u8]>,
+}
+
+/// `GEODIST key m1 m2 [unit]` fast-path packet (4- or 5-element multibulk, 7-byte
+/// command token). For the 5-element form the unit is validated here via
+/// `geo_unit_to_meters`; an unknown unit (or any other shape) returns None so the
+/// generic `geodist` handler emits the exact error. The runtime fast path then
+/// serves a pure read. (frankenredis cc GEODIST fast path)
+fn parse_borrowed_plain_geodist_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGeodistPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"GEODIST".len() {
+        return None;
+    }
+    let has_unit = if input.starts_with(b"*5\r\n$7\r\n") {
+        true
+    } else if input.starts_with(b"*4\r\n$7\r\n") {
+        false
+    } else {
+        return None;
+    };
+    let mut cursor = "*4\r\n$7\r\n".len();
+    if input.get(cursor..cursor + 7)?.eq_ignore_ascii_case(b"GEODIST") {
+        cursor += 7;
+    } else {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next1) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (m1, next2) = parse_borrowed_plain_set_bulk(input, next1, config.max_bulk_len)?;
+    let (m2, next3) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
+    let (to_meter, unit, consumed) = if has_unit {
+        let (unit, next4) = parse_borrowed_plain_set_bulk(input, next3, config.max_bulk_len)?;
+        let meters = fr_command::geo_unit_to_meters(unit)?;
+        (meters, Some(unit), next4)
+    } else {
+        (1.0, None, next3)
+    };
+    Some(BorrowedPlainGeodistPacket {
+        consumed,
+        key,
+        m1,
+        m2,
+        to_meter,
+        unit,
+    })
 }
 
 struct BorrowedPlainBitfieldGetPacket<'a> {

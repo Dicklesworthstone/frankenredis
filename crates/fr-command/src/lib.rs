@@ -4865,7 +4865,7 @@ fn geo_decode(bits: u64, long_min: f64, long_max: f64, lat_min: f64, lat_max: f6
 }
 
 #[inline]
-fn geo_decode_score(score: f64) -> Option<(f64, f64)> {
+pub fn geo_decode_score(score: f64) -> Option<(f64, f64)> {
     if !score.is_finite() {
         return None;
     }
@@ -4992,7 +4992,7 @@ fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
 }
 
 #[inline]
-fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
+pub fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
     if eq_ascii_command(unit, b"M") {
         Some(1.0)
     } else if eq_ascii_command(unit, b"KM") {
@@ -5012,7 +5012,7 @@ fn geo_lat_distance_m(lat1: f64, lat2: f64) -> f64 {
 }
 
 #[inline]
-fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+pub fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let lon1r = lon1.to_radians();
     let lon2r = lon2.to_radians();
     let v = ((lon2r - lon1r) / 2.0).sin();
@@ -5316,7 +5316,7 @@ fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f
 }
 
 #[inline]
-fn geo_distance_reply(distance: f64) -> RespFrame {
+pub fn geo_distance_reply(distance: f64) -> RespFrame {
     let normalized = if distance == 0.0 { 0.0 } else { distance };
     RespFrame::BulkString(Some(format!("{normalized:.4}").into_bytes()))
 }
@@ -12752,7 +12752,7 @@ fn incrbyfloat(
 /// and without firing keyspace events. Call BEFORE the store computation so a
 /// later WRONGTYPE/empty result still records the lookups, as upstream does.
 /// Destination keys of the *STORE variants are writes and are NOT counted here.
-fn record_source_key_lookups(store: &mut Store, keys: &[&[u8]], now_ms: u64) {
+pub fn record_source_key_lookups(store: &mut Store, keys: &[&[u8]], now_ms: u64) {
     for &key in keys {
         let _ = store.exists_no_touch(key, now_ms);
     }
