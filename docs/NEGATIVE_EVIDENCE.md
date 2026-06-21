@@ -2003,3 +2003,28 @@ it is not a measured Redis-relative win and could regress repeated
 `RANDOMKEY`-after-write rebuild churn. Retry only with allocator-level counters
 that name retained vector capacity as dominant, or with a full keyspace
 representation change that also resolves the SCAN/RANDOMKEY semantics boundary.
+
+## 2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE state-rebuild bypass rejected
+
+Targeted a fresh Redis-relative loss in the RDB RESTORE quicklist2 path. The
+warm cod-b target dir and vendored Redis 7.2.4 showed a single-node packed
+quicklist2 payload still losing on `restore_quicklist_vs_redis`:
+
+| worker / variant | Redis 7.2.4 mean | FrankenRedis mean | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `hz2` current control | `98.086 us` (`81.561 Kelem/s`) | `131.63 us` (`60.778 Kelem/s`) | `0.745x` | loss |
+| `ovh-a` candidate routing check | `38.710 us` (`206.66 Kelem/s`) | `87.345 us` (`91.591 Kelem/s`) | `0.443x` | rejected |
+
+Lever attempted and reverted: a single retained listpack-node constructor that
+skipped the generic `ChunkedList::from_restored_nodes` directory build and the
+full `ListValue::rebuild_growth_state` encoded-byte pass, setting `lp_bytes`
+from the retained listpack and computing only the raw-byte total needed by the
+existing default encoding flag. Focused `fr-store` check and quicklist2 RESTORE
+tests passed, but the Redis-relative candidate remained a clear loss and the
+worker changed from `hz2` to `ovh-a`, so there was no like-for-like keep proof.
+
+Decision: **NO-SHIP / REVERTED**. Score: **0 wins / 1 Redis-relative loss / 0
+neutral**. Next route should not repeat constructor micro-bypass work; the
+remaining gap needs a deeper RESTORE/RDB decode primitive, likely CRC/listpack
+validation cost, server dispatch overhead around RESTORE, or a broader
+borrowed-payload decode path with same-worker A/B proof.

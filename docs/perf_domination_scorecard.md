@@ -1193,3 +1193,26 @@ storage/index work plus independent `LPUSH`/`RPUSH` and `SADD` write paths.
 Scorecard impact: **0 wins / 0 source losses / 1 rejected hypothesis**. The next
 `uhthd` route remains structural keyspace representation or a deliberate
 SCAN/RANDOMKEY semantics tradeoff, not random-key cache capacity trimming.
+
+## Focused cod-b quicklist2 RESTORE bypass rejection (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: current-control release build on `hz2` used the warm cod-b target dir
+  `/data/projects/.rch-targets/frankenredis-cod-b`; candidate release build and
+  bench were scheduled by `rch` on `ovh-a`.
+- Bench: `cargo bench --profile release -p fr-bench --bench
+  restore_quicklist_vs_redis -- --noplot`.
+- Oracle: vendored Redis 7.2.4.
+- Attempted lever: direct single-listpack RESTORE constructor to bypass generic
+  restored-node directory construction and the encoded-byte growth-state rebuild.
+- Result: rejected and reverted before commit.
+
+| gate | Redis median/mean throughput | FrankenRedis throughput | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `hz2` current control | `81.561 Kelem/s` | `60.778 Kelem/s` | `0.745x` | target loss |
+| `ovh-a` candidate routing check | `206.66 Kelem/s` | `91.591 Kelem/s` | `0.443x` | no-ship |
+
+Scorecard impact: **0 wins / 1 loss / 0 neutral** for the quicklist2 RESTORE
+cell. Focused `fr-store` check and quicklist2 RESTORE tests passed while the
+candidate was present, but the source hunk did not earn a keep proof and was
+reverted. Next target should be a deeper RESTORE decode/validation or dispatch
+primitive with same-worker A/B, not another single-node constructor bypass.

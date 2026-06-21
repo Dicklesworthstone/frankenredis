@@ -1434,3 +1434,20 @@ paying a fresh vector allocation. Retry condition: only revisit with allocator
 profiles/counters naming random-key vector capacity, or fold the sampling index
 into a deeper keyspace representation change with an explicit SCAN semantics
 decision. Score: **0 keep / 0 source regressions / 1 rejected hypothesis**.
+
+## 2026-06-21 cod-b quicklist2 RESTORE single-listpack rebuild bypass - REVERTED
+
+Baseline target gap, using the warm cod-b target dir and vendored Redis 7.2.4:
+
+| worker / gate | Redis 7.2.4 | FrankenRedis | fr/Redis throughput | decision |
+|---|---:|---:|---:|---|
+| `hz2` current control, `restore_quicklist_vs_redis/quicklist2_packed_restore` | `98.086 us`, `81.561 Kelem/s` | `131.63 us`, `60.778 Kelem/s` | `0.745x` | target loss |
+| `ovh-a` candidate routing check, same bench | `38.710 us`, `206.66 Kelem/s` | `87.345 us`, `91.591 Kelem/s` | `0.443x` | no-ship |
+
+Attempted source lever: skip the generic restored-node directory build and
+encoded-byte `rebuild_growth_state` pass for a single retained listpack node.
+Focused `fr-store` check and quicklist2 RESTORE tests passed, but the candidate
+was still far below Redis and lacked a same-worker candidate/control proof
+because `rch` moved the release bench from `hz2` to `ovh-a`. Source hunk was
+manually reverted before commit. Route next to a deeper RESTORE decode, CRC, or
+server dispatch primitive; do not retry this constructor micro-lever.
