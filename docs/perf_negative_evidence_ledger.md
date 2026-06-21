@@ -19,6 +19,16 @@ turns). Keep claims honest — mark which.
   direct-encode header helpers (push_array_header/push_map_header), 30+ borrowed_plain_*
   fast paths in fr-server. decimal_*_len now branchless ilog10 (e4fu8).
 
+## Current cod-b pending-bench code-only lever (2026-06-21)
+| Lever | Result | Why |
+|---|---|---|
+| `frankenredis-uhthd` SDIFF secondary-source lookup reduction | **PENDING BENCH; code shipped under DISK-LOW.** No new cargo bench/build was started after the disk-low instruction. The default non-LFU SDIFF path now avoids the unconditional secondary-source `contains_key` probe and lets `get_mut` serve as the existence test. | This removes one keyspace lookup per secondary SDIFF source in the common non-LFU path. The LFU-enabled path keeps the existence pre-check before `next_rand()` to preserve the prior RNG draw sequence. Non-cargo gates after the hunk: targeted rustfmt and `git diff --check` passed; targeted `ubs crates/fr-store/src/lib.rs` remains nonzero on pre-existing whole-file inventory while its embedded fmt/clippy/check/test-build checks are clean. Next turn must run the Redis 7.2.4 SDIFF/SADD-style throughput gate plus explicit post-hunk cargo validation before claiming a measured win. |
+
+## Current cod-b measured rejection (2026-06-21)
+| Lever | Result | Why |
+|---|---|---|
+| `frankenredis-uhthd` compact tagged `PackedZSet` score storage | **REJECT; source reverted.** Broad fresh-process memory vs Redis 7.2.4 showed a favorable but non-decisive zset move: control `keyspace/string_1k/list/hash/set/zset/stream = 1.516/0.955/1.123/1.336/1.308/1.715/0.929`, candidate `1.728/0.972/1.312/1.367/1.443/1.595/0.970`. The direct packed-zset RSS probe failed the target gate: control `4.59 MB Redis / 7.19 MB fr = 1.57x`, candidate `4.58 MB Redis / 7.25 MB fr = 1.58x` for 6,250 zsets x 32 integer-score members. | The score-byte idea is locally plausible but too small relative to zset per-key/per-member overhead, and the broad candidate run failed the list memory ratchet. Artifact: `artifacts/optimization/frankenredis-uhthd-packed-zset-score-codb/20260621T003043Z/`. Do not retry score-byte tagging as a memory lever without a new profile showing score bytes dominate; route to deeper zset/keyspace layout work. |
+
 ## Rejected levers — measured REGRESSION or no-win (do NOT retry)
 | Lever | Result | Why |
 |---|---|---|

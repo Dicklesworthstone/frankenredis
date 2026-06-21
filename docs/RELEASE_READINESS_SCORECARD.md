@@ -10,6 +10,20 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-b addendum: SDIFF lookup lever pending-bench
+
+Release-readiness impact: pending. Under the disk-low stop, no new cargo
+bench/build was started after this code-only hunk. `sdiff_value` now skips the
+secondary-source `contains_key` pre-probe on the default non-LFU path and uses
+the `get_mut` lookup as the existence test. The LFU path still pre-checks
+existence before drawing RNG, preserving observable LFU sequencing.
+
+Next turn: run the SDIFF/SADD-style Redis 7.2.4 throughput gate and the normal
+explicit post-hunk cargo validation before promoting this from pending to
+measured. Targeted rustfmt and `git diff --check` passed after the hunk; targeted
+UBS remains nonzero on pre-existing whole-file inventory while its embedded
+fmt/clippy/check/test-build checks are clean.
+
 ## 2026-06-21 cod-b addendum: compact PackedZSet score tags rejected
 
 Release-readiness impact: no source hunk shipped for packed-zset score tags.

@@ -12782,8 +12782,8 @@ impl Store {
         } else {
             0
         };
-        match self.entries.get_mut(first_key) {
-            Some(entry) => match &entry.value {
+        if let Some(entry) = self.entries.get_mut(first_key) {
+            match &entry.value {
                 Value::Set(_) => {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -12791,14 +12791,13 @@ impl Store {
                     entry.touch(now_ms);
                 }
                 _ => return Err(StoreError::WrongType),
-            },
-            None => {}
+            }
         }
         for key in keys.iter().skip(1) {
-            if !self.entries.contains_key(*key) {
-                continue;
-            }
             let rand_sample = if lfu_tracking_enabled {
+                if !self.entries.contains_key(*key) {
+                    continue;
+                }
                 self.next_rand()
             } else {
                 0
