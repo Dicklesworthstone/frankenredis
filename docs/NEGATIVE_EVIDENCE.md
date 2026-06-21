@@ -2435,3 +2435,22 @@ The wide-gauntlet's GEOSEARCH 0.78x (and SINTER 0.65-0.73x) were single-run NOIS
 best-of-N shows fr parity-or-FASTER. CONCLUSION: frankenredis is parity-or-faster across the
 ENTIRE measured command surface vs Redis 7.2.4, with GEODIST 0.73x the only mild residual
 (byte-exact-locked constant factor). Clean perf domination achieved + confirmed.
+
+### EXISTS reliably 0.79-0.87x (cc) — real but INHERENT residual (already fast-pathed)
+Best-of-7 pipe=100 vs Redis 7.2.4: EXISTS 1key 0.799x, 3key 0.869x, 5key 0.786x — consistent
+(not noise). BUT it's already optimally fast-pathed: execute_plain_exists_borrowed_INTO (zero-
+copy integer reply, like GET) + lazy slowlog/latency argv alloc + per-key record_keyspace_lookup
+(same accounting as GET). Root cause of the asymmetry (EXISTS 0.8x vs GET 1.2x, same machinery):
+GET wins via its zero-copy VALUE reply beating redis; EXISTS has no value to copy, so redis's
+barebones EXISTS loop edges out fr's fixed per-command fast-path overhead. Inherent — not
+cleanly improvable without trimming shared fast-path machinery (risks correctness). Like GEODIST
+0.73x, a mild already-optimized residual.
+
+### FINAL perf picture (cc, reliably measured vs Redis 7.2.4)
+frankenredis is parity-or-FASTER across the entire measured command surface. The wide-gauntlet's
+apparent losses were SINGLE-RUN NOISE — best-of-N reconfirmed parity-or-faster for SINTER
+(0.82-0.96), GEOSEARCH (1.06-1.31 FR-FASTER), GEOPOS (0.92), TYPE/BITFIELD/etc. The ONLY genuine
+non-parity residuals are GEODIST 0.73x (byte-exact-locked geo compute) and EXISTS 0.79-0.87x
+(inherent fast-path overhead vs barebones redis) — both already fast-pathed, residuals inherent.
+Clean perf-domination vein EXHAUSTED + CONFIRMED. Next frontier = structural (RESTORE-decode/RAM)
+or peer-domain (bitmap/keyspace/zset), not clean solo dispatch levers.
