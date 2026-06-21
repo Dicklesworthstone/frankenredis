@@ -29,19 +29,28 @@ clippy, cargo-check, and test-build sections reported clean. Next turn: run the
 SADD P16/c50 Redis 7.2.4 gate plus focused conformance before upgrading this
 from pending to measured keep/revert.
 
-## 2026-06-21 cod-b addendum: SDIFF lookup lever pending-bench
+## 2026-06-21 cod-b addendum: SDIFF lookup lever measured keep
 
-Release-readiness impact: pending. Under the disk-low stop, no new cargo
-bench/build was started after this code-only hunk. `sdiff_value` now skips the
-secondary-source `contains_key` pre-probe on the default non-LFU path and uses
-the `get_mut` lookup as the existence test. The LFU path still pre-checks
-existence before drawing RNG, preserving observable LFU sequencing.
+Release-readiness impact: positive for the SDIFFSTORE set-algebra row. The
+`sdiff_value` hunk from `7b94d4efc` skips the secondary-source `contains_key`
+pre-probe on the default non-LFU path and uses the `get_mut` lookup as the
+existence test. The LFU path still pre-checks existence before drawing RNG,
+preserving observable LFU sequencing.
 
-Next turn: run the SDIFF/SADD-style Redis 7.2.4 throughput gate and the normal
-explicit post-hunk cargo validation before promoting this from pending to
-measured. Targeted rustfmt and `git diff --check` passed after the hunk; targeted
-UBS remains nonzero on pre-existing whole-file inventory while its embedded
-fmt/clippy/check/test-build checks are clean.
+Measured gate: filtered per-crate Criterion bench
+`cargo bench -p fr-bench --bench set_algebra_vs_redis -- SDIFFSTORE` on
+`RCH_WORKER=ovh-a` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+
+| gate | Redis 7.2.4 | FrankenRedis | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| `set_algebra_vs_redis/SDIFFSTORE`, mean time | `622,693 ns` | `303,346 ns` | `0.487x` time / `2.05x` throughput | keep; not a revert case |
+
+Validation: current `fr-server` release binary
+`sha256=44622477fd90e2c54dde633f454a8624af17b3e83a6d867c5145f70721625cb7`;
+`fr-conformance` passed via rch (`194` lib tests, all bins, `99` smoke tests,
+and doctests). Two earlier bench invocations failed before measurement because
+the remote bench could not see `FR_SERVER_BIN`; they are harness setup failures,
+not release-readiness evidence.
 
 ## 2026-06-21 cod-b addendum: compact PackedZSet score tags rejected
 

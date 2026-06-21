@@ -19,10 +19,10 @@ turns). Keep claims honest — mark which.
   direct-encode header helpers (push_array_header/push_map_header), 30+ borrowed_plain_*
   fast paths in fr-server. decimal_*_len now branchless ilog10 (e4fu8).
 
-## Current cod-b pending-bench code-only lever (2026-06-21)
+## Current cod-b measured keep (2026-06-21)
 | Lever | Result | Why |
 |---|---|---|
-| `frankenredis-uhthd` SDIFF secondary-source lookup reduction | **PENDING BENCH; code shipped under DISK-LOW.** No new cargo bench/build was started after the disk-low instruction. The default non-LFU SDIFF path now avoids the unconditional secondary-source `contains_key` probe and lets `get_mut` serve as the existence test. | This removes one keyspace lookup per secondary SDIFF source in the common non-LFU path. The LFU-enabled path keeps the existence pre-check before `next_rand()` to preserve the prior RNG draw sequence. Non-cargo gates after the hunk: targeted rustfmt and `git diff --check` passed; targeted `ubs crates/fr-store/src/lib.rs` remains nonzero on pre-existing whole-file inventory while its embedded fmt/clippy/check/test-build checks are clean. Next turn must run the Redis 7.2.4 SDIFF/SADD-style throughput gate plus explicit post-hunk cargo validation before claiming a measured win. |
+| `frankenredis-uhthd` SDIFF secondary-source lookup reduction | **KEEP; measured against Redis 7.2.4.** Filtered per-crate Criterion gate `cargo bench -p fr-bench --bench set_algebra_vs_redis -- SDIFFSTORE` on `RCH_WORKER=ovh-a` measured Redis mean `622,693 ns` and FrankenRedis mean `303,346 ns` for each 16-command SDIFFSTORE packet: `0.487x` fr/Redis time, `2.05x` fr/Redis throughput. Current `fr-server` release binary sha256 `44622477fd90e2c54dde633f454a8624af17b3e83a6d867c5145f70721625cb7`. | The default non-LFU SDIFF path now avoids the unconditional secondary-source `contains_key` probe and lets `get_mut` serve as the existence test. The LFU-enabled path keeps the existence pre-check before `next_rand()` to preserve the prior RNG draw sequence. Conformance green via `rch exec -- cargo test -p fr-conformance -- --nocapture`: 194 lib tests, all bin tests, 99 smoke tests, and doctests passed. Two earlier `fr-bench` attempts failed before measuring because `FR_SERVER_BIN` was not available inside the remote worker env; those failures are harness setup noise, not perf evidence. |
 
 ## Current cod-b measured rejection (2026-06-21)
 | Lever | Result | Why |
