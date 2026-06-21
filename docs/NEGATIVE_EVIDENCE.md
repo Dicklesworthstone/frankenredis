@@ -2454,3 +2454,12 @@ non-parity residuals are GEODIST 0.73x (byte-exact-locked geo compute) and EXIST
 (inherent fast-path overhead vs barebones redis) — both already fast-pathed, residuals inherent.
 Clean perf-domination vein EXHAUSTED + CONFIRMED. Next frontier = structural (RESTORE-decode/RAM)
 or peer-domain (bitmap/keyspace/zset), not clean solo dispatch levers.
+
+### adversarial differential of cc fast paths (PFCOUNT/GEODIST/GEOPOS) — 0 diffs (cc)
+30 fast-path/fallback BOUNDARY edge cases vs Redis 7.2.4, byte-exact (0 diffs): PFCOUNT
+cache-hit/cache-invalidated-after-PFADD/multi-key-fallback/missing/wrong-type-string/wrong-type-
+hash/no-arg; GEODIST basic/km/ft/mi/KM-case/same-member/bad-unit/missing-member/missing-key/
+wrong-type/arity-3/arity-6; GEOPOS one/multi/some-missing-nil/all-missing/missing-key/wrong-type/
+no-members; all three under RESP3 (HELLO 3). Confirms the borrowed fast paths I shipped this
+campaign introduce ZERO correctness divergence at the boundary (cache-invalid/wrong-type/arity/
+unit all correctly fall back to or match generic). Perf domination is correctness-safe.
