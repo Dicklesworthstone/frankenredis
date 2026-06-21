@@ -1535,3 +1535,21 @@ RESTORE *and* DUMP zero-copy. That is a big byte-exactness-critical rewrite of P
 contended packed_set.rs — a multi-pass structural lever, not a clean per-turn ship. Highest-value
 target is zset (0.48x, cod-b) then hash (0.57x). Bounded RESTORE-decode optimizations are
 exhausted (zero-copy spans + bulk-build already in).
+
+### zset range-count perf — MEASURED investigation (cc, disk recovered): no clean solo lever
+Deep-pipelined (pipe=100-200) head-to-head vs Redis 7.2.4, scaled N=1000..16000:
+- **ZRANK** flat ~0.7x, **ZCOUNT** flat ~0.5x across all N → CONSTANT-FACTOR, not algorithmic.
+- **ZLEXCOUNT correct usage (equal scores)**: ~0.5x at N=16000 (treap O(log n) rank-diff path
+  IS working/flat); N=1000 warming anomaly (0.15x) but large-N is flat. Constant-factor.
+- **ZLEXCOUNT distinct-score input**: O(n) scan (817ms@N=16000, ratio 0.01x) — fr's
+  `first.score == last.score` guard (lib.rs:1655) drops the treap path to the O(range) BTreeMap
+  scan. This is ZLEXCOUNT MISUSE (undefined per redis docs; redis stays O(log n) via skiplist).
+  Result is byte-correct (matches redis :N), just slow. Generalizing the guard to use treap
+  rank-diff on distinct scores is byte-exactness-RISKY (distinct-score lex semantics) — declined.
+Conclusion: the real-usage gap is a ~0.5x CONSTANT factor = range-parse + 2× treap `rank_of`
+compute (cod-b's SortedSet rank_tree), NOT dispatch (ZCARD's borrowed fast path is 0.94x, so
+dispatch is ~6% of the gap; a ZCOUNT fast path would close ~0.5x→~0.53x, not worth it) and NOT
+algorithmic. Corrects the earlier brief "algorithmic O(n)" hypothesis (that was the distinct-
+score misuse artifact). No clean cc-store/cc-runtime lever; rank_of constant-factor is cod-b's
+treap domain. FLAGGED to cod-b: the distinct-score ZLEXCOUNT O(n) cliff (edge case) + whether
+the treap rank_of constant factor (~2x) can be tightened.
