@@ -2366,3 +2366,13 @@ RANDOMKEY cache trimming, or shallow list-push/batch wrappers from this result.
 Correctness gate: RCH `cargo test -p fr-conformance -- --nocapture` stayed green
 after the current-control pass (194 library tests, all conformance bins, 99
 smoke tests, doctests).
+
+### integrated HEAD 6b09beb1b verified green (cc) — PFCOUNT win holds + peer commits parity-safe
+Built origin/main in a clean worktree (no peer WIP), gauntlet vs Redis 7.2.4 + conformance:
+- conformance smoke 99/99 pass.
+- **PFCOUNT 1.10x** (my ac1a968a6 fast path holds at parity+), **BITFIELD GET 1.06x** (peer
+  42380f982 fast path verified, was 0.62x), GETRANGE 1.00x, GET 1.24 / MGET 1.13 / TTL 1.07 /
+  HGET 1.27 / HGETALL 1.03 — all reads parity+, NO regression from peer commits (bitfield GET,
+  stream hash dumps).
+- Remaining dispatch-bound losses (next fast-path candidates): EXISTS-multikey 0.64x, GEODIST
+  0.61x (geo cross-layer), GEOPOS 0.72x, SINTER-small 0.73x, GETBIT 0.78x.
