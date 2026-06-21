@@ -1481,3 +1481,20 @@ Decision: source hunk reverted before commit. The list-push score is **3 wins /
 7 losses / 0 neutral** vs Redis 7.2.4, and all RPUSH arities remain losses. Do
 not repeat shallow borrowed helper work for LPUSH/RPUSH; the next credible lever
 needs to change the mutable quicklist/chunk layout or batch append primitive.
+
+## 2026-06-21 cod-b uhthd list-push byte-slice helper recheck - REVERTED
+
+Scope: current cod-b checkout, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+vendored Redis 7.2.4, Criterion `keyed_write_vs_redis` filtered to
+`LPUSH_1v|RPUSH_1v|SADD_1v`. `rch` selected `ovh-a` despite the `hz1` worker
+hint, so the result is Redis-relative rejection evidence only.
+
+| command | fr/Redis candidate | decision |
+|---|---:|---|
+| `LPUSH_1v` | `0.796x` | loss |
+| `RPUSH_1v` | `0.706x` | loss |
+| `SADD_1v` | `0.685x` | loss guard |
+
+Focused `fr-store` list tests passed while the candidate was present. The
+byte-slice helper source hunk is not retained. Score: **0 wins / 3 losses / 0
+neutral** on the rechecked arity-one rows.

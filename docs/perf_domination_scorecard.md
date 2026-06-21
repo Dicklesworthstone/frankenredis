@@ -1246,3 +1246,25 @@ Scorecard impact: **0 kept wins / 1 rejected lever**. Redis-relative list-push
 cell score for this candidate was **3 wins / 7 losses / 0 neutral**, with every
 RPUSH arity still below Redis. Next target remains mutable quicklist/chunk
 storage or batch append, not shallow borrowed argument plumbing.
+
+## Focused cod-b list-push byte-slice helper recheck (`frankenredis-uhthd`, 2026-06-21)
+
+- Build/check: per-crate remote release build for `fr-server` and `fr-bench`;
+  focused remote `fr-store` list tests passed.
+- Bench: `cargo bench --profile release -p fr-bench --bench
+  keyed_write_vs_redis -- "(LPUSH_1v|RPUSH_1v|SADD_1v)" --noplot`.
+- Oracle: vendored Redis 7.2.4.
+- Worker: `ovh-a`; `rch` rewrote the requested cod-b target dir to a
+  worker-scoped path, so no same-worker keep claim is made.
+- Decision: source not retained.
+
+| command | Redis 7.2.4 mean throughput | FrankenRedis candidate throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_1v` | `1.5196 Melem/s` | `1.2089 Melem/s` | `0.796x` | loss |
+| `RPUSH_1v` | `1.6650 Melem/s` | `1.1757 Melem/s` | `0.706x` | loss |
+| `SADD_1v` | `1.8399 Melem/s` | `1.2607 Melem/s` | `0.685x` | loss guard |
+
+Scorecard impact: **0 wins / 3 losses / 0 neutral** on the rechecked rows.
+This confirms the shallow borrowed-push wrapper is not a domination lever; keep
+routing list/set writes toward deeper chunk layout, batch append, or dispatch
+work.

@@ -2064,3 +2064,34 @@ borrowed caller-side element plumbing is too shallow; the residual gap is in
 the promoted `ChunkedList` structure and per-element owned-node path. Next route
 must be a deeper mutable packed quicklist node or batch/list-chunk primitive,
 not another `Vec` elision wrapper around the existing push API.
+
+## 2026-06-21 cod-b `frankenredis-uhthd` list-push byte-slice helper recheck rejected
+
+This pass rechecked the same shallow allocation-elision shape against the current
+cod-b worktree after finding a live `fr-store` candidate hunk in the shared
+checkout. The alien-artifact rationale was vectorized/zero-copy tuple flow:
+avoid constructing a temporary `Vec<u8>` for `LPUSH` / `RPUSH` when the target
+list remains in the packed listpack representation. The code path still leaves
+the promoted `ChunkedList` path allocating one owned element per pushed value,
+so it is not a deeper quicklist layout change.
+
+Verification used `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+vendored Redis 7.2.4, and filtered Criterion:
+`rch exec -- cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- "(LPUSH_1v|RPUSH_1v|SADD_1v)" --noplot`.
+`rch` selected `ovh-a` and rewrote the target directory to a worker-scoped path;
+therefore this is a Redis-relative rejection, not a same-worker keep proof.
+
+| command | Redis 7.2.4 mean throughput | FrankenRedis candidate mean throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_1v` | `1.5196 Melem/s` | `1.2089 Melem/s` | `0.796x` | loss |
+| `RPUSH_1v` | `1.6650 Melem/s` | `1.1757 Melem/s` | `0.706x` | loss |
+| `SADD_1v` | `1.8399 Melem/s` | `1.2607 Melem/s` | `0.685x` | loss guard |
+
+Decision: **NO-SHIP / REVERTED**. Focused list correctness passed via remote
+`cargo test -p fr-store lpush -- --nocapture`, but the Redis-relative perf gate
+was **0 wins / 3 losses / 0 neutral**. The source tree is back to HEAD for
+`crates/fr-store/src/lib.rs` and `crates/fr-store/src/packed_set.rs`. Do not
+retry borrowed push wrappers without a same-worker control win; the remaining
+list/set write gap needs a batch append, mutable quicklist/chunk layout, or
+server dispatch primitive.

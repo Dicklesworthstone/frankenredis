@@ -1323,3 +1323,18 @@ caller-side `Vec<u8>` when the list is packed. It was reverted because all
 `RPUSH` arities and small-arity `LPUSH` still lost to Redis. The next release
 readiness target is a deeper mutable quicklist/chunk representation or batch
 append primitive.
+
+## Cod-b list-push byte-slice helper recheck rejected (MEASURED 2026-06-21)
+
+Release-readiness impact: no source hunk shipped. The arity-one recheck on the
+cod-b target dir still leaves the exact hot list/set write cells below Redis.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| candidate vs Redis 7.2.4 | `LPUSH_1v` | 0.796x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `RPUSH_1v` | 0.706x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `SADD_1v` | 0.685x | guard loss remains |
+
+The helper preserved focused list behavior but did not change the release
+frontier. Next readiness target stays the underlying mutable quicklist/chunk
+layout or a batch append/dispatch primitive.
