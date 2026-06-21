@@ -4,6 +4,52 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` hash DUMP direct listpack emit kept, Redis gap remains
+
+BOLD-VERIFY targeted the hash-only DUMP encode loss from the collection split
+gate. The fr-store `DUMP` path for listpack-eligible hashes still built a
+temporary `Vec<&[u8]>` of field/value slices before calling the generic
+listpack encoder, while set/zset DUMP already streamed entries directly.
+
+The kept source adds `encode_hash_listpack_dump` and routes hash-listpack DUMP
+through it. A focused guard compares the new direct emitter byte-for-byte
+against the old flat-entry reference, then decodes the listpack to verify the
+same field/value sequence, including integer-looking and NUL-containing bytes.
+
+Control release build via RCH on `hz2`, binary sha256
+`2366dc30737025a32b6131cd93a2de6ece647913c3d3f247a22f9dee1b4c78d8`.
+Candidate release build via the same warm target dir, binary sha256
+`5963fd29c25b9e2d0899b027eae7a54552ca6804b42ab6f46666bf329d6c45bb`.
+
+Hash-only split check:
+`scripts/collection_reload_headtohead.py <redis_port> <fr_port> --trials 5
+--hashes 2000 --sets 0 --zsets 0 --members 40`, vendored Redis 7.2.4 and
+`/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`.
+
+| gate | control fr median | candidate fr median | Redis median | candidate fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `19.9 ms` | `20.2 ms` | `21.1 ms` | `1.051x` | noisy/parity-to-win |
+| pipelined `DUMP` encode half | `16.3 ms` | `15.4 ms` | `10.9 ms` | `0.709x` | source improves, Redis still faster |
+| pipelined `RESTORE` decode half | `15.3 ms` | `14.9 ms` | `7.0 ms` | `0.466x` | loss |
+
+A stronger candidate rerun (`--trials 9`) reported DUMP encode `12.6 ms` FR vs
+`11.3 ms` Redis (`0.900x` fr/Redis throughput), but FR CV was `14.4%`, so that
+is routing support, not a clean parity claim.
+
+Decision: **KEEP, but no domination claim**. Direct FR DUMP median improved
+`16.3 -> 15.4 ms` (`1.058x` candidate/control) in the low-CV candidate split,
+and all behavior gates passed. The Redis-relative hash persistence lane remains
+red on DUMP and RESTORE. Do not repeat generic hash listpack vector-elision or
+final-buffer/header-in-place variants; the next credible lever needs retained
+hash-listpack representation or RESTORE decode/rebuild.
+
+Gates: `cargo fmt -p fr-store -- --check`; RCH focused `fr-store` test
+`dump_hash_listpack_direct_emit_matches_flat_reference_codb_uhthd`; RCH
+`cargo build --release -p fr-server`; RCH `cargo check -p fr-store
+--all-targets`; RCH `cargo clippy -p fr-store --all-targets -- -D warnings`;
+RCH `cargo test -p fr-conformance -- --nocapture` (194 lib tests, all
+conformance bins, 99 smoke tests, doctests).
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` batch list push helper rejected
 
 BOLD-VERIFY tested the remaining four-value list-write loss with a batch

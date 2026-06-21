@@ -1,5 +1,45 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b hash DUMP direct-emitter keep (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+  cargo build --release -p fr-server`, remote `hz2`.
+- Control binary sha256:
+  `2366dc30737025a32b6131cd93a2de6ece647913c3d3f247a22f9dee1b4c78d8`.
+- Candidate binary sha256:
+  `5963fd29c25b9e2d0899b027eae7a54552ca6804b42ab6f46666bf329d6c45bb`.
+- Source decision: **kept small source win; no Redis-domination claim**.
+
+The lever streams listpack-eligible hash field/value entries directly during
+`DUMP`, replacing the old transient `Vec<&[u8]>` staging array before
+`encode_listpack_strings`.
+
+Hash-only split gate:
+`scripts/collection_reload_headtohead.py <redis_port> <fr_port> --trials 5
+--hashes 2000 --sets 0 --zsets 0 --members 40`.
+
+| Gate | Control FR median | Candidate FR median | Redis median | Candidate fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `19.9 ms` | `20.2 ms` | `21.1 ms` | `1.051x` | noisy/parity-to-win |
+| pipelined `DUMP` encode half | `16.3 ms` | `15.4 ms` | `10.9 ms` | `0.709x` | source improves, Redis still faster |
+| pipelined `RESTORE` decode half | `15.3 ms` | `14.9 ms` | `7.0 ms` | `0.466x` | loss |
+
+Direct FR candidate/control DUMP speedup: `1.058x`. A 9-trial candidate rerun
+reported DUMP `12.6 ms` FR vs `11.3 ms` Redis (`0.900x` fr/Redis), but FR CV
+was `14.4%`, so that row is routing support only.
+
+Scorecard impact: source A/B **1 win / 0 losses / 0 neutral**; Redis split
+**1 noisy win / 2 losses / 0 neutral**. Remaining route: retained
+hash-listpack representation or RESTORE decode/rebuild, not another generic
+listpack vector-elision pass.
+
+Gates: `cargo fmt -p fr-store -- --check`; RCH focused `fr-store` test
+`dump_hash_listpack_direct_emit_matches_flat_reference_codb_uhthd`; RCH release
+build; RCH `cargo check -p fr-store --all-targets`; RCH `cargo clippy -p
+fr-store --all-targets -- -D warnings`; RCH `cargo test -p fr-conformance --
+--nocapture` (194 lib tests, all conformance bins, 99 smoke tests, doctests).
+
 ## Focused cod-b batch list push rejection (`frankenredis-uhthd`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1227854

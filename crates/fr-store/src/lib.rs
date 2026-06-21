@@ -20889,12 +20889,7 @@ impl Store {
                     })
                 {
                     buf.push(RDB_TYPE_HASH_LISTPACK);
-                    let mut pairs = Vec::with_capacity(h.len() * 2);
-                    for (field, value) in h.iter() {
-                        pairs.push(field);
-                        pairs.push(value);
-                    }
-                    encode_rdb_string(&mut buf, &encode_listpack_strings(&pairs)?);
+                    encode_rdb_string(&mut buf, &encode_hash_listpack_dump(h)?);
                 } else {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
@@ -22602,6 +22597,17 @@ fn encode_set_listpack_dump(set: &SetValue) -> Option<Vec<u8>> {
             encode_listpack_entry(&mut encoded_entries, member.as_ref());
             entry_count += 1;
         }
+    }
+    finish_listpack_entries(encoded_entries, entry_count)
+}
+
+fn encode_hash_listpack_dump(hash: &HashFieldMap) -> Option<Vec<u8>> {
+    let mut encoded_entries = Vec::with_capacity(hash.len().saturating_mul(32));
+    let mut entry_count = 0usize;
+    for (field, value) in hash.iter() {
+        encode_listpack_entry(&mut encoded_entries, field);
+        encode_listpack_entry(&mut encoded_entries, value);
+        entry_count += 2;
     }
     finish_listpack_entries(encoded_entries, entry_count)
 }
@@ -26417,7 +26423,7 @@ mod tests {
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
         HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
-        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, HashFieldTtl,
+        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, HashFieldMap, HashFieldTtl,
         HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, LFU_INIT_VAL, LatencySample,
         MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
         NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH,
@@ -26429,8 +26435,8 @@ mod tests {
         Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
         ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
-        encode_intset, encode_length, encode_listpack_strings, encode_set_listpack_dump,
-        estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        encode_hash_listpack_dump, encode_intset, encode_length, encode_listpack_strings,
+        encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
         lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size, redis_score_to_string,
         set_int_to_bytes, ziplist_integer_bytes,
@@ -41518,6 +41524,29 @@ mod tests {
         let owned: Vec<Vec<u8>> = intset.iter().map(|member| member.into_owned()).collect();
         let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
         assert_eq!(direct, encode_listpack_strings(&refs).unwrap());
+        assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
+    }
+
+    #[test]
+    fn dump_hash_listpack_direct_emit_matches_flat_reference_codb_uhthd() {
+        let hash = HashFieldMap::from_unique_pairs_borrowed(&[
+            (b"alpha".as_slice(), b"127".as_slice()),
+            (b"field\0with-nul".as_slice(), b"value\0with-nul".as_slice()),
+            (b"-2".as_slice(), b"hello".as_slice()),
+            (b"longish-field".as_slice(), b"longish-value".as_slice()),
+        ]);
+        let direct = encode_hash_listpack_dump(&hash).expect("hash listpack");
+
+        let mut flat = Vec::with_capacity(hash.len() * 2);
+        let mut owned = Vec::with_capacity(hash.len() * 2);
+        for (field, value) in hash.iter() {
+            flat.push(field);
+            flat.push(value);
+            owned.push(field.to_vec());
+            owned.push(value.to_vec());
+        }
+
+        assert_eq!(direct, encode_listpack_strings(&flat).unwrap());
         assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
     }
 
