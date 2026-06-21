@@ -1,5 +1,23 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b quicklist2 RESTORE span-decode rejection (`frankenredis-uhthd`, 2026-06-21)
+
+- Bench: `restore_quicklist_vs_redis -- quicklist2_packed_restore` with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+- Temporary lever: pre-size `decode_value_spans` from the listpack header and
+  try the string-entry range path before integer fallback.
+- Source decision: **rejected and reverted**.
+
+| gate | Redis median | FrankenRedis median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `hz2` current control | `101.72 us` | `160.18 us` | `0.635x` | target loss |
+| `hz2` candidate | `79.722 us` | `132.25 us` | `0.603x` | ratio worsened; Criterion no-change |
+
+Scorecard impact: **0 wins / 1 loss / 0 neutral**. The narrow retained-span
+decoder micro-lever is not enough; route quicklist2 RESTORE to retained node
+representation, rebuild avoidance, or the active ChunkedList/listpack build
+accounting residual. Post-revert `fr-conformance` is green via RCH.
+
 ## Focused cod-a BITFIELD SET borrowed fast path (`frankenredis-ohsk5`, 2026-06-21)
 
 - Build/bench: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1

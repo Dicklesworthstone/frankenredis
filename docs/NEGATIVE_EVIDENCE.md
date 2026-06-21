@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE listpack-span fast path rejected
+
+BOLD-VERIFY targeted the quicklist2 packed RESTORE loss against Redis 7.2.4.
+The alien-graveyard route was a narrow data-plane decode specialization: avoid
+`Vec` growth from an empty retained-span list and pre-branch string listpack
+entries before falling back to the integer-capable decoder. The temporary hunk
+changed only `fr_persist::listpack::decode_value_spans`; no production source
+remains after this pass.
+
+Focused gate:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo bench --profile release -p fr-bench --bench
+restore_quicklist_vs_redis -- quicklist2_packed_restore --noplot`.
+
+Same-worker `hz2` evidence:
+
+| gate | Redis median | FrankenRedis median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| current control | `101.72 us` | `160.18 us` | `0.635x` | target loss |
+| candidate span prealloc/string prebranch | `79.722 us` | `132.25 us` | `0.603x` | ratio worsened; no stable FR gain |
+
+Criterion marked the candidate FrankenRedis row as **No change in performance
+detected** (`p = 0.81`), even though the raw median moved `160.18 -> 132.25 us`.
+Because Redis moved more in the same run, the user-facing ratio versus Redis
+7.2.4 regressed from `0.635x` to `0.603x`. A repeat request did not stay on
+`hz2` and selected `ovh-a`, where the bench failed because that worker target
+had no `frankenredis` release binary; that row is discarded.
+
+Scorecard: **0 wins / 1 loss / 0 neutral** versus Redis 7.2.4. Decision:
+**REJECT / source reverted**. Do not retry `decode_value_spans` capacity-only
+or string-prebranch micro-tuning for this quicklist2 RESTORE cell without a new
+profile proving the retained-span decoder itself dominates. The next credible
+route is deeper retained quicklist/listpack-node representation, RESTORE
+rebuild avoidance, or the active ChunkedList/listpack build-accounting residual.
+
+Gates while applied: RCH focused `fr-persist` test
+`decode_value_spans_borrows_strings_and_formats_ints` passed. Production code
+was reverted before conformance. Post-revert RCH `cargo test -p fr-conformance
+-- --nocapture` passed: 194 library tests, all conformance bins, 99 smoke tests,
+and doctests green.
+
 ## 2026-06-21 cod-a `frankenredis-ohsk5` BITFIELD SET borrowed fast path mixed keep, Redis gap remains
 
 BOLD-VERIFY extended the prior canonical `BITFIELD GET`/`BITFIELD_RO GET`
