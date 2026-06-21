@@ -3438,6 +3438,26 @@ impl Entry {
         self.set_flag(ENTRY_REDIS_LFU_CLOCK_FIELD, false);
     }
 
+    /// (frankenredis-f16dz) RESTORE ... IDLETIME <secs>: set the LRU access
+    /// clock so OBJECT IDLETIME reports `idle_secs`, mirroring upstream
+    /// cluster.c::restoreCommand -> objectSetLRUOrLFU (LRU branch). Writes the
+    /// same u32 access-ms field object_idletime reads (now minus idle), and
+    /// clears the LFU-clock flag so the LRU read path is taken.
+    fn set_restore_idletime(&mut self, idle_secs: u64, now_ms: u64) {
+        let delta_ms = u32::try_from(idle_secs.saturating_mul(1000)).unwrap_or(u32::MAX);
+        self.last_access_ms = lru_access_millis(now_ms).wrapping_sub(delta_ms);
+        self.clear_redis_lfu_clock_field();
+    }
+
+    /// (frankenredis-f16dz) RESTORE ... FREQ <n>: set the LFU counter so
+    /// OBJECT FREQ reports `freq`, mirroring upstream objectSetLRUOrLFU (LFU
+    /// branch). The last-touch minute is set to now so current_lfu_freq applies
+    /// zero decay and returns the restored value exactly.
+    fn set_restore_lfu_freq(&mut self, freq: u8, now_ms: u64) {
+        self.lfu_freq = freq;
+        self.lfu_last_touch_min = lfu_access_minutes(now_ms);
+    }
+
     fn redis_lfu_clock_field_active(&self) -> bool {
         self.has_flag(ENTRY_REDIS_LFU_CLOCK_FIELD)
     }
@@ -21458,6 +21478,17 @@ impl Store {
                 self.stream_entries_added.remove(key);
                 self.stream_max_deleted_ids.remove(key);
             }
+        }
+        // (frankenredis-f16dz) Apply RESTORE IDLETIME/FREQ to the restored
+        // entry before insertion, mirroring upstream restoreCommand's
+        // objectSetLRUOrLFU. The parser guarantees the two are mutually
+        // exclusive. Previously parsed+validated but never applied, so OBJECT
+        // IDLETIME/FREQ returned defaults instead of the restored value.
+        if let Some(idle_secs) = metadata.idletime_secs {
+            entry.set_restore_idletime(idle_secs, now_ms);
+        }
+        if let Some(freq) = metadata.lfu_freq {
+            entry.set_restore_lfu_freq(freq, now_ms);
         }
         self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         if let Some(last_id) = restored_stream_last_id {

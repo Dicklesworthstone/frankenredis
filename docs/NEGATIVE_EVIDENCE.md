@@ -2463,3 +2463,11 @@ wrong-type/arity-3/arity-6; GEOPOS one/multi/some-missing-nil/all-missing/missin
 no-members; all three under RESP3 (HELLO 3). Confirms the borrowed fast paths I shipped this
 campaign introduce ZERO correctness divergence at the boundary (cache-invalid/wrong-type/arity/
 unit all correctly fall back to or match generic). Perf domination is correctness-safe.
+
+### FIXED frankenredis-f16dz: RESTORE now applies IDLETIME/FREQ (cc)
+RESTORE parsed+validated IDLETIME/FREQ but `restore_key_with_metadata` (fr-store) never applied
+the metadata, so OBJECT IDLETIME/FREQ returned defaults. Fix: apply to the restored Entry before
+insert (mirrors upstream restoreCommand -> objectSetLRUOrLFU) — IDLETIME sets last_access_ms to
+now-idle (LRU read path), FREQ sets lfu_freq + lfu_last_touch_min=now (zero decay). VERIFIED
+byte-exact vs Redis 7.2.4: IDLETIME 0/100/5000 -> 0/100/5000, FREQ 0/50/255 -> 0/50/255,
+no-metadata default unchanged (7/7 diffs=0). fr-store 656 unit tests + conformance 99/99 green.
