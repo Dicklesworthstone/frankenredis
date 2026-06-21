@@ -12,7 +12,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 const HOST: &str = "127.0.0.1";
 const COMMANDS_PER_ITER: usize = 64;
-const ARITIES: [usize; 5] = [1, 5, 8, 12, 16];
+const ARITIES: [usize; 6] = [1, 4, 5, 8, 12, 16];
 const COMMANDS: [&str; 3] = ["LPUSH", "RPUSH", "SADD"];
 
 #[derive(Clone, Copy)]

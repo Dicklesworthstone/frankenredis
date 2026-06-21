@@ -1,5 +1,32 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b exact 4-value keyed-write validation (`frankenredis-hqr5t`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+  cargo build --release -p fr-server -p fr-bench`, remote `vmi1149989`.
+- Focused gate: `keyed_write_vs_redis` Criterion bench filtered to `4v`, 64
+  commands per packet, Redis 7.2.4 oracle from
+  `legacy_redis_code/redis/src/redis-server`.
+- Source decision: no `fr-server` hunk shipped; the exact 4-value parser and
+  focused parser tests were already present. This pass keeps only the missing
+  arity-4 benchmark coverage row.
+
+| Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `LPUSH_4v` | `63.817 us` | `74.493 us` | `1.167x` | `0.857x` | loss |
+| `RPUSH_4v` | `54.537 us` | `74.267 us` | `1.362x` | `0.734x` | loss |
+| `SADD_4v` | `72.654 us` | `60.403 us` | `0.831x` | `1.203x` | win; Redis noisy |
+
+Focused Redis-relative score: **1 win / 2 losses / 0 neutral**. This closes
+the parser-coverage task but does not close list-write release risk. The next
+list-write target is mutable quicklist/chunk layout or batch append/dispatch,
+not another parser arity unless a new profile names parser probes.
+
+Gates: `cargo fmt -p fr-bench -- --check`; RCH focused `fr-server` parser
+tests; RCH release build for `fr-server`/`fr-bench`; focused 4v Criterion gate;
+full RCH `fr-conformance` package green.
+
 ## Focused cod-a BITFIELD GET borrowed fast-path keep (`frankenredis-ohsk5`, 2026-06-21)
 
 - Build: `AGENT_NAME=cod-a

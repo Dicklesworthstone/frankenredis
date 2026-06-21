@@ -4,6 +4,40 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-hqr5t` exact four-value keyed-write parser measured mixed
+
+BOLD-VERIFY targeted the exact four-value keyed-write parser lane. The server
+already contains the exact 4-value parser and focused parser tests; the retained
+change in this pass is benchmark coverage only: `keyed_write_vs_redis` now
+includes arity `4` so the parser family is measured directly. No `fr-server`
+source hunk shipped, and no reverted regression remains.
+
+Focused Redis 7.2.4 gate:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- "4v"
+--noplot`, remote `vmi1149989`.
+
+| Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `LPUSH_4v` | `63.817 us` | `74.493 us` | `1.167x` | `0.857x` | loss |
+| `RPUSH_4v` | `54.537 us` | `74.267 us` | `1.362x` | `0.734x` | loss |
+| `SADD_4v` | `72.654 us` | `60.403 us` | `0.831x` | `1.203x` | win; Redis row noisy |
+
+Scorecard for this pass: **1 win / 2 losses / 0 neutral** vs Redis 7.2.4.
+The exact 4-value parser coverage task is complete, but it is not a list-write
+domination lever. Keep the bench coverage; route `LPUSH`/`RPUSH` residuals to
+mutable quicklist/chunk representation or batch append/dispatch work, not more
+exact-parser arity extension without a fresh profile naming parser probes.
+
+Gates: `cargo fmt -p fr-bench -- --check`; RCH
+`cargo test -p fr-server borrowed_plain_keyed_values4_packet_parser --
+--nocapture` (2 parser tests passed); RCH `cargo build --release -p fr-server
+-p fr-bench`; focused RCH `keyed_write_vs_redis` 4v bench above; RCH
+`cargo test -p fr-conformance -- --nocapture` (194 lib tests, all conformance
+bins, 99 smoke tests, doctests passed). Conformance live-oracle non-strict drift
+rows were logged but did not fail the suite.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` set-algebra STORE overwrite keep
 
 BOLD-VERIFY targeted the remaining focused set-algebra loss after the prior

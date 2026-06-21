@@ -1338,3 +1338,20 @@ cod-b target dir still leaves the exact hot list/set write cells below Redis.
 The helper preserved focused list behavior but did not change the release
 frontier. Next readiness target stays the underlying mutable quicklist/chunk
 layout or a batch append/dispatch primitive.
+
+## Cod-b exact 4-value keyed-write parser row mixed (MEASURED 2026-06-21)
+
+Release-readiness impact: benchmark coverage is now complete for the exact
+4-value parser, but list writes still lose to Redis 7.2.4. No server source hunk
+shipped.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| FrankenRedis vs Redis 7.2.4 throughput | `LPUSH_4v` | `0.857x` | release perf risk remains |
+| FrankenRedis vs Redis 7.2.4 throughput | `RPUSH_4v` | `0.734x` | release perf risk remains |
+| FrankenRedis vs Redis 7.2.4 throughput | `SADD_4v` | `1.203x` | focused win; Redis row noisy |
+
+The parser coverage task is closed by adding arity `4` to
+`keyed_write_vs_redis` and confirming the existing parser tests. The release
+frontier for list writes is still the underlying quicklist/chunk mutation or
+batch append path, not more exact parser arities.
