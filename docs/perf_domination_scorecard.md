@@ -1,5 +1,39 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused set intset width-carry closeout (`frankenredis-set-intset-canonical-noalloc-acetq`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec --
+  cargo build --release -p fr-server`, remote `hz2`.
+- Focused A/B harness: `rdb_codec_set_intset/encode_set_intset_rdb`, 900 set
+  keys x 96 integer members, same-worker `ovh-a`.
+- Retained lever: carry the selected intset width while parsing canonical
+  integer members, then pass it to `encode_intset_blob` instead of scanning the
+  parsed values twice more.
+- Existing guard: compact set intset selection still matches the old
+  parse+`to_string` round-trip oracle for canonical, noncanonical, overflow,
+  whitespace, and invalid-UTF8 members.
+
+| focused gate | current width carry | temporary control | ratio | verdict |
+|---|---:|---:|---:|---|
+| set-intset RDB encode | `788.99 us` / `1.1407 Melem/s` | old width-rescan control `910.44 us` / `988.54 Kelem/s` | `1.1540x` | keep |
+
+Redis 7.2.4 intset-only split check (`collection_reload_headtohead.py`, 2,000
+sets x 40 integer members, `--set-kind int`, 7 trials):
+
+| Redis-relative gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `8.8 ms` | `4.1 ms` | `0.559x` | loss |
+| pipelined `DUMP` encode half | `11.9 ms` | `10.9 ms` | `0.917x` | loss |
+| pipelined `RESTORE` decode half | `10.8 ms` | `4.6 ms` | `0.429x` | loss |
+
+Scorecard impact: focused width-carry A/B **1 win / 0 losses / 0 neutral**;
+Redis-relative split gate **0 wins / 3 losses / 0 neutral**. Combined honest
+score: **1 win / 3 losses / 0 neutral**. Keep the focused encoder win, but
+route remaining set-intset persistence losses to retained intset/load
+representation or RESTORE decode/rebuild rather than more decimal/width-scan
+micro-cleanup.
+
 ## Focused cod-b BOLD-VERIFY rebaseline (`frankenredis-uhthd`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1

@@ -174,6 +174,30 @@ fn build_hash_listpack_entries() -> Vec<RdbEntry> {
     entries
 }
 
+fn build_set_intset_entries() -> Vec<RdbEntry> {
+    let mut entries = Vec::with_capacity(900);
+    for key in 0..900 {
+        let members = (0..96)
+            .map(|member| {
+                let member = i64::from(member);
+                let value = match key % 3 {
+                    0 => member - 48,
+                    1 => (member * 257) - 12_345,
+                    _ => (member * 1_048_573) - 2_147_483_000,
+                };
+                value.to_string().into_bytes()
+            })
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("is:{key:06}").into_bytes(),
+            value: RdbValue::Set(members),
+            expire_ms: None,
+        });
+    }
+    entries
+}
+
 fn bench_codec(c: &mut Criterion) {
     let entries = build_entries();
     let encoded = encode_rdb(&entries, &[]);
@@ -212,6 +236,14 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| encode_rdb(std::hint::black_box(&hash_listpack_entries), &[]))
     });
     hash_listpack.finish();
+
+    let set_intset_entries = build_set_intset_entries();
+    let mut set_intset = c.benchmark_group("rdb_codec_set_intset");
+    set_intset.throughput(Throughput::Elements(set_intset_entries.len() as u64));
+    set_intset.bench_function("encode_set_intset_rdb", |b| {
+        b.iter(|| encode_rdb(std::hint::black_box(&set_intset_entries), &[]))
+    });
+    set_intset.finish();
 }
 
 criterion_group!(benches, bench_codec);

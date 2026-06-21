@@ -4,6 +4,53 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-set-intset-canonical-noalloc-acetq` measured keep, Redis decode still dominates
+
+BOLD-VERIFY revisited the compact set intset RDB encoder after the prior
+allocation-free canonical decimal parser had already been verified byte-exact
+against Redis 7.2.4. The retained follow-up lever carries the intset element
+width while parsing members, then passes it to `encode_intset_blob`, removing
+the old two extra full-value scans used to choose 16/32/64-bit intset width.
+
+Focused gate added in this pass:
+`rdb_codec_set_intset/encode_set_intset_rdb`, 900 set keys, 96 integer members
+per key, mixed 16-bit, 32-bit, and wide signed 32-bit values.
+
+Same-worker A/B used `ovh-a` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`:
+
+| gate | implementation | median time | throughput | decision |
+|---|---|---:|---:|---|
+| focused set-intset RDB encode | current width-carry candidate | `788.99 us` | `1.1407 Melem/s` | keep |
+| same | temporary old width-rescan control | `910.44 us` | `988.54 Kelem/s` | control slower |
+
+Candidate result: retained width carry is `1.1540x` faster than the old
+width-rescan control (`910.44 / 788.99`). Criterion reported the confirmation
+as median time `-13.661%` versus the temporary control. A first current-source
+run on `hz2` measured `937.76 us` / `959.73 Kelem/s`; that is supporting
+routing evidence only because the keep/reject decision uses the same-worker
+`ovh-a` pair above.
+
+Fresh Redis 7.2.4 split check, intset-only
+`scripts/collection_reload_headtohead.py 18195 18196 --trials 7 --hashes 0
+--sets 2000 --zsets 0 --members 40 --set-kind int`, using vendored Redis and
+the warm `/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`
+binary:
+
+| gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `8.8 ms` | `4.1 ms` | `0.559x` | loss |
+| pipelined `DUMP` encode half | `11.9 ms` | `10.9 ms` | `0.917x` | loss |
+| pipelined `RESTORE` decode half | `10.8 ms` | `4.6 ms` | `0.429x` | loss |
+
+Scorecard for this pass: focused width-carry A/B **1 win / 0 losses / 0
+neutral**; Redis-relative split gate **0 wins / 3 losses / 0 neutral**.
+Combined honest score: **1 win / 3 losses / 0 neutral**. Keep the focused
+encoder win and the earlier noalloc canonical parser, but do not claim set
+intset persistence dominance. Remaining release work is retained intset/load
+representation or RESTORE decode/rebuild, not another generic decimal or width
+scan cleanup.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` quick memory rebaseline and set-algebra mixed score
 
 BOLD-VERIFY rechecked the `uhthd` store lane after the rejected exact-capacity,

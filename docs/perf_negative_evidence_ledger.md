@@ -234,12 +234,22 @@ turns). Keep claims honest — mark which.
 - frankenredis-set-intset-canonical-noalloc-acetq / cod-a: `fr-persist`
   compact set intset selection now reuses the shared allocation-free canonical
   decimal parser instead of validating each parsed member by allocating
-  `value.to_string()` and comparing bytes — CODED (reasoned; batch benchmark
-  pending). Guard compares intset selection against the old parse+to_string
-  round-trip oracle across canonical, noncanonical, overflow, whitespace, and
-  invalid-UTF8 members. Retry condition if rejected: only revisit with a fresh
-  integer-heavy compact-set DUMP/RDB profile naming intset canonicalization, not
-  as generic decimal-format cleanup.
+  `value.to_string()` and comparing bytes; the 2026-06-21 follow-up now carries
+  intset element width during that parse and passes it into `encode_intset_blob`,
+  avoiding the old two extra full-value scans — MEASURED KEEP. Focused
+  set-intset `fr-persist` gate
+  (`rdb_codec_set_intset/encode_set_intset_rdb`, 900 sets x 96 integer members,
+  same-worker `ovh-a`) measured current width-carry encode `788.99 us` /
+  `1.1407 Melem/s` versus temporary old width-rescan control `910.44 us` /
+  `988.54 Kelem/s`, a `1.1540x` candidate/control win. Redis 7.2.4 split check
+  remains an honest loss: intset-only `DEBUG RELOAD` `0.559x` fr/Redis, DUMP
+  encode half `0.917x`, RESTORE decode half `0.429x` for 2,000 sets x 40
+  integer members (`collection_reload_headtohead.py --set-kind int`). Guard
+  compares intset selection against the old parse+to_string round-trip oracle
+  across canonical, noncanonical, overflow, whitespace, and invalid-UTF8
+  members. Retry condition: do not revisit generic decimal or intset width-scan
+  cleanup; route the remaining loss to retained intset/load representation or
+  RESTORE decode/rebuild.
 - frankenredis-set-listpack-direct-emit-tpans / cod-a: `fr-persist`
   compact set listpack encode now streams set members directly into the shared
   listpack finalizer instead of allocating a `Vec<&[u8]>` staging array before

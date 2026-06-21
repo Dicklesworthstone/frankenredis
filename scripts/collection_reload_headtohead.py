@@ -15,6 +15,7 @@ median ratio (the ratio is stable even when absolutes drift), plus CV.
 
 Usage: collection_reload_headtohead.py <redis_port> <fr_port> [--trials N]
        [--hashes H] [--sets S] [--zsets Z] [--members M]
+       [--set-kind str|int]
 Exit 0 always (informational).
 """
 import socket
@@ -34,6 +35,7 @@ HASHES = int(opt("--hashes", "2000"))
 SETS = int(opt("--sets", "2000"))
 ZSETS = int(opt("--zsets", "2000"))
 MEMBERS = int(opt("--members", "40"))
+SET_KIND = opt("--set-kind", "str")
 
 
 class Conn:
@@ -102,7 +104,7 @@ def preload(c):
         if len(batch) >= 200:
             c.pipe(batch); batch = []
     for i in range(SETS):
-        args = ["SADD", f"s:{i}"] + [f"m{j}" for j in range(MEMBERS)]
+        args = ["SADD", f"s:{i}"] + [set_member(i, j) for j in range(MEMBERS)]
         batch.append(args)
         if len(batch) >= 200:
             c.pipe(batch); batch = []
@@ -115,6 +117,18 @@ def preload(c):
             c.pipe(batch); batch = []
     if batch:
         c.pipe(batch)
+
+
+def set_member(i, j):
+    if SET_KIND == "int":
+        if i % 3 == 0:
+            return j - (MEMBERS // 2)
+        if i % 3 == 1:
+            return (j * 257) - 12_345
+        return (j * 1_048_573) - 2_147_483_000
+    if SET_KIND != "str":
+        raise ValueError(f"--set-kind must be str or int, got {SET_KIND!r}")
+    return f"m{j}"
 
 
 def time_reload(c):
@@ -145,7 +159,7 @@ def time_restore(c, payloads):
 
 def main():
     fr, rs = Conn(FR), Conn(RS)
-    print(f"fr:{FR} redis:{RS}  hashes={HASHES} sets={SETS} zsets={ZSETS} members={MEMBERS}")
+    print(f"fr:{FR} redis:{RS}  hashes={HASHES} sets={SETS} zsets={ZSETS} members={MEMBERS} set_kind={SET_KIND}")
     print("preloading identical collection-heavy DB into both...")
     preload(fr); preload(rs)
     fk = fr.cmd("DBSIZE"); rk = rs.cmd("DBSIZE")

@@ -1687,11 +1687,19 @@ fn encode_compact_set_intset(
     // which upstream's intset path also refuses). Use the shared allocation-free
     // canonical parser instead of formatting a String per candidate member.
     let mut values = Vec::with_capacity(members.len());
+    let mut width = 2u32;
     for raw in members {
         let value = parse_listpack_integer(raw)?;
+        if width < 8 && i16::try_from(value).is_err() {
+            if i32::try_from(value).is_ok() {
+                width = 4;
+            } else {
+                width = 8;
+            }
+        }
         values.push(value);
     }
-    let blob = encode_intset_blob(values)?;
+    let blob = encode_intset_blob(values, width)?;
     let mut out = Vec::with_capacity(blob.len() + 4);
     rdb_encode_length(&mut out, blob.len());
     out.extend_from_slice(&blob);
@@ -2221,19 +2229,13 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// Encode a sorted-ascending intset blob (8-byte header + per-element
 /// little-endian fixed-width values). Returns `None` when any value
 /// exceeds the i64 range or `len > u32::MAX`.
-fn encode_intset_blob(mut values: Vec<i64>) -> Option<Vec<u8>> {
+fn encode_intset_blob(mut values: Vec<i64>, width: u32) -> Option<Vec<u8>> {
     // Take the parsed values by value and sort in place — the sole caller
     // (encode_compact_set_intset) builds this Vec fresh and discards it, so owning it lets us
     // skip the extra `to_vec()` allocation+copy per intset DUMP/RDB-save. Sorting the owned Vec
     // vs a copy yields the identical canonical order => byte-identical output.
     // (frankenredis perf: intset encode sorts in place, code-first batch-test pending)
-    let width: u32 = if values.iter().all(|v| i16::try_from(*v).is_ok()) {
-        2
-    } else if values.iter().all(|v| i32::try_from(*v).is_ok()) {
-        4
-    } else {
-        8
-    };
+    debug_assert!(matches!(width, 2 | 4 | 8));
     let len = u32::try_from(values.len()).ok()?;
     values.sort_unstable();
     let sorted = values;
