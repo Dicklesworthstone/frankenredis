@@ -4,6 +4,58 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` batch list push helper rejected
+
+BOLD-VERIFY tested the remaining four-value list-write loss with a batch
+`ListValue::{push_front_many,push_back_many}` helper. The idea from the
+alien-graveyard/artifact pass was command-packet fusion: once the packet already
+contains all list elements, append/prepend the whole batch through the listpack
+or chunked-list representation instead of replaying one mutation at a time.
+
+The temporary hunk added packed-list bulk encode/prepend and one
+`Arc::make_mut` window for deque-backed chunks, then changed `Store::lpush` and
+`Store::rpush` to call the batch helpers. It preserved order across packed
+promotion in a focused unit test while applied, but the same-worker control did
+not confirm a performance win. The source hunk and test were reverted before
+commit; only this evidence remains.
+
+Focused Redis 7.2.4 candidate gate:
+`AGENT_NAME=BlackThrush RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- "4v"
+--noplot`.
+
+| Candidate Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `LPUSH_4v` | `60.669 us` | `65.541 us` | `1.080x` | `0.926x` | loss |
+| `RPUSH_4v` | `47.152 us` | `70.271 us` | `1.490x` | `0.671x` | loss |
+| `SADD_4v` guard | `48.635 us` | `60.524 us` | `1.244x` | `0.804x` | loss; untouched/noisy |
+
+Same-worker reverted control on the same worker and target dir measured
+`LPUSH_4v` Redis `65.587 us` vs FR `64.977 us`, `RPUSH_4v` Redis `46.050 us`
+vs FR `70.110 us`, and `SADD_4v` Redis `48.485 us` vs FR `55.427 us`.
+Criterion reported no stable candidate/control improvement on the two touched
+list rows; the direct FR means were essentially tied (`LPUSH` candidate/control
+`1.009x` slower, `RPUSH` `1.002x` slower). The untouched `SADD` guard moving
+`1.092x` against the candidate reinforces that this tiny helper is below the
+noise floor for the release risk.
+
+Scorecard for this pass: candidate Redis-relative gate **0 wins / 3 losses / 0
+neutral**; touched-list candidate/control gate **0 wins / 0 losses / 2 neutral**.
+Decision: **REJECT / source reverted**. Do not retry simple list batch helper
+wrappers, one-shot packed-list prepend buffers, or `Arc::make_mut` hoisting for
+four-value `LPUSH`/`RPUSH` without a fresh profile naming those frames. Route
+the residual to a real mutable quicklist/listpack-node representation or a
+batch-typed keyed-write execution arena.
+
+Gates: RCH `cargo build --release -p fr-server -p fr-bench` on
+`vmi1227854`; focused RCH `fr-store` test
+`list_multi_push_preserves_order_across_packed_promotion` passed while applied;
+candidate/control RCH `keyed_write_vs_redis` 4v benches above. RCH
+`cargo test -p fr-conformance -- --nocapture` on `vmi1149989` passed after the
+source revert: 194 lib tests, all conformance bins, 99 smoke tests, and doctests
+green. Known non-strict live-oracle drift rows were logged but did not fail.
+
 ## 2026-06-21 cod-a `frankenredis-set-listpack-direct-emit-tpans` measured keep, Redis path still loss
 
 BOLD-VERIFY closed the compact set listpack direct-emitter lane. The production

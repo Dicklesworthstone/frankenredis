@@ -10,6 +10,28 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-b addendum: batch list push helper rejected
+
+Release-readiness impact: no production hunk shipped. A temporary batch
+`ListValue::push_{front,back}_many` helper preserved list order while applied,
+but the same-worker control did not show a stable improvement for the 4-value
+list-write cells.
+
+| gate | Redis 7.2.4 mean | FrankenRedis candidate | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/LPUSH_4v` | `60.669 us` | `65.541 us` | `0.926x` throughput | reject; still loss |
+| `keyed_write_vs_redis/RPUSH_4v` | `47.152 us` | `70.271 us` | `0.671x` throughput | reject; still loss |
+| `keyed_write_vs_redis/SADD_4v` guard | `48.635 us` | `60.524 us` | `0.804x` throughput | untouched/noisy loss |
+
+Same-worker reverted control measured list means of `64.977 us` for `LPUSH_4v`
+and `70.110 us` for `RPUSH_4v`; the candidate was `1.009x` and `1.002x`
+slower by direct mean, with Criterion detecting no stable list-row improvement.
+Readiness score: **0 wins / 3 losses / 0 neutral** for the candidate
+Redis-relative gate. Next credible route is mutable quicklist/listpack-node
+representation or batch-typed keyed-write execution, not a helper-level batch
+append/prepend wrapper. RCH `fr-conformance` is green after the source revert
+(194 lib tests, all conformance bins, 99 smoke tests, doctests).
+
 ## 2026-06-21 cod-a addendum: set listpack direct emit measured keep
 
 Release-readiness impact: keep the scoped `fr-persist` compact set-listpack
