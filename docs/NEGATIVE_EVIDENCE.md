@@ -2389,3 +2389,15 @@ not dispatch — math is already byte-identical to redis). Byte-exact: distances
 missing key/member nil, WRONGTYPE, arity, bad-unit, syntax all == redis. Gates: conformance
 smoke 99/99; keyspace_hits/misses + cmdstat_geodist (calls/failed) + errorstat_WRONGTYPE all
 byte-exact vs Redis 7.2.4. Same pattern can later fast-path GEOPOS/GEOSEARCH.
+
+### GEOPOS borrowed read fast path — SHIPPED (cc)
+GEOPOS 0.77x -> **1.02x** (parity, pipe=100 best-of-5 vs Redis 7.2.4) by adding a borrowed
+read fast path mirroring the GEODIST one (bc36053a8): geo helpers already pub, fr-runtime
+calls record_source_key_lookups(one key) + no-stat zmscore + geo_decode_score + geo_coord_frame
+(RESP3 Double vs RESP2 bulk via session.resp_protocol_version). ALSO fixed a latent keyspace
+over-count in generic geopos (per-member store.zscore bumped keyspace_hits N times -> now ONE
+record_source_key_lookups, matching redis's single lookupKeyRead): fr was 3 hits vs redis 1 for
+a 3-member GEOPOS; now 1=1. Byte-exact verified: RESP2+RESP3 coords, missing member/key nil,
+WRONGTYPE, 0-member, all identical to redis. Gates: fr-command 1157 + fr-store 656 unit / 0
+fail, conformance smoke 99/99, cmdstat_keyspace_parity_gate PASS (46 rows byte-exact). No
+regression (GET 1.10/MGET 1.17/PFCOUNT 1.15/GEODIST 0.84). Remaining geo loss: GEOSEARCH 0.78x.

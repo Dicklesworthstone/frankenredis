@@ -4982,7 +4982,7 @@ fn format_coord_human(value: f64) -> String {
 /// identical in both cases (17-significant-digit human form); only the wire
 /// type tag differs. (frankenredis geopos RESP3 double fidelity)
 #[inline]
-fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
+pub fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
     let s = format_coord_human(value);
     if resp3 {
         RespFrame::Double(s)
@@ -6164,10 +6164,18 @@ fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("GEOPOS"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
-    for member in &argv[2..] {
-        let frame = match store.zscore(&argv[1], member, now_ms)? {
-            Some(score) => match geo_decode_score(score) {
+    // (frankenredis keyspace-acct) Upstream geo.c::geoposCommand does ONE
+    // lookupKeyReadOrReply for the key, then reads each member from that object.
+    // Per-member store.zscore each bumped keyspace_hits -> N vs redis's 1. Record
+    // the key lookup once, then read all members via the no-stat zmscore (mirrors
+    // the geodist fix). Byte-identical reply; only the keyspace stat is corrected.
+    let members: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
+    let scores = store.zmscore(&argv[1], &members, now_ms)?;
+    let mut frames = Vec::with_capacity(scores.len());
+    for score in scores {
+        let frame = match score {
+            Some(s) => match geo_decode_score(s) {
                 Some((longitude, latitude)) => RespFrame::Array(Some(vec![
                     geo_coord_frame(longitude, resp3),
                     geo_coord_frame(latitude, resp3),

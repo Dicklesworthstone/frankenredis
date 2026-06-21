@@ -13780,6 +13780,172 @@ impl Runtime {
         }
     }
 
+    fn can_execute_plain_geopos_borrowed(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> bool {
+        if members.is_empty()
+            || self.policy.gate.max_array_len < members.len().saturating_add(2)
+            || self.policy.gate.max_bulk_len < b"GEOPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || members.iter().any(|m| m.len() > self.policy.gate.max_bulk_len)
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Borrowed runtime fast path for `GEOPOS key member [member ...]` — mirrors
+    /// the GEODIST fast path. Calls the SAME helpers the generic `geopos` uses
+    /// (one `record_source_key_lookups` for the key, then no-stat `zmscore` for all
+    /// members, then `geo_decode_score` / `geo_coord_frame`), so keyspace/LFU/LRU
+    /// accounting and the reply bytes — including the RESP3 Double vs RESP2 bulk
+    /// coordinate encoding via the connection's negotiated protocol — are identical
+    /// to generic `geopos`. WRONGTYPE surfaces via the same `zmscore` error; a
+    /// missing key/member yields the same nil array. Read-only: no
+    /// dirty/propagation. Returns None (fall back) on any disabling state. (cc)
+    pub fn execute_plain_geopos_borrowed(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("geopos");
+        self.session.last_argv_len_sum =
+            b"GEOPOS".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let resp3 = self.session.resp_protocol_version == 3;
+        let start = self.chained_command_start();
+        // Mirror generic geopos: one keyspace lookup for the key, then no-stat
+        // zmscore for all members.
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let reply = match self.server.store.zmscore(key, members, now_ms) {
+            Ok(scores) => {
+                let frames = scores
+                    .into_iter()
+                    .map(|score| match score {
+                        Some(s) => match fr_command::geo_decode_score(s) {
+                            Some((lon, lat)) => RespFrame::Array(Some(vec![
+                                fr_command::geo_coord_frame(lon, resp3),
+                                fr_command::geo_coord_frame(lat, resp3),
+                            ])),
+                            None => RespFrame::Array(None),
+                        },
+                        None => RespFrame::Array(None),
+                    })
+                    .collect();
+                RespFrame::Array(Some(frames))
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_geopos_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_geopos_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let build_argv = || {
+            let mut v = vec![b"GEOPOS".to_vec(), key.to_vec()];
+            v.extend(members.iter().map(|m| m.to_vec()));
+            v
+        };
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("geopos", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'GEOPOS' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Array(None),
+            });
+        }
+    }
+
     /// Parse a BITFIELD integer encoding `i<bits>`/`u<bits>` — copied byte-for-byte
     /// from the generic `bitfield_parse_encoding` so the fast path accepts EXACTLY
     /// the same encodings (any divergence returns None -> generic fallback).

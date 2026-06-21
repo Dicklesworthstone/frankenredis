@@ -3578,6 +3578,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
@@ -7142,6 +7162,73 @@ fn parse_borrowed_plain_geodist_packet<'a>(
         m2,
         to_meter,
         unit,
+    })
+}
+
+struct BorrowedPlainGeoposPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    members: Vec<&'a [u8]>,
+}
+
+/// `GEOPOS key member [member ...]` fast-path packet (variable-arity multibulk,
+/// 6-byte command token, >=1 member). Returns None for any other shape so the
+/// generic `geopos` handler stays authoritative (arity error, etc.). The runtime
+/// fast path then serves a pure read. (frankenredis cc GEOPOS fast path)
+fn parse_borrowed_plain_geopos_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGeoposPacket<'a>> {
+    if config.max_bulk_len < b"GEOPOS".len() || *input.first()? != b'*' {
+        return None;
+    }
+    // Parse the multibulk element count: GEOPOS + key + N members (>= 3 total).
+    let mut idx = 1;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0 || count < 3 || config.max_array_len < count {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    // Command token: $6\r\nGEOPOS\r\n
+    if input.get(idx..idx + 4)? != b"$6\r\n" {
+        return None;
+    }
+    idx += 4;
+    if !input.get(idx..idx + 6)?.eq_ignore_ascii_case(b"GEOPOS") {
+        return None;
+    }
+    idx += 6;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
+    let member_count = count - 2;
+    let mut members = Vec::with_capacity(member_count);
+    for _ in 0..member_count {
+        let (member, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        members.push(member);
+        cursor = next;
+    }
+    Some(BorrowedPlainGeoposPacket {
+        consumed: cursor,
+        key,
+        members,
     })
 }
 
