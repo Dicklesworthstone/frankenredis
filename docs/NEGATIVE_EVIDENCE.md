@@ -2504,3 +2504,20 @@ the quicklist-encoded n=130/900 cases. This is the s36di residual (cod-a / Chunk
 the fix is to make DUMP node-packing (or the chunk structure) match redis's node sizing so the
 emitted node count is identical. Until then xyyfb (hard gate) stays blocked. Reusable repro:
 replay rng(seed) from quicklist_dump_boundary_differ.py to the failing trial + diff DUMP byte 1.
+
+### s36di root cause CORRECTED (cc fork): listpack ENCODER ~1-byte over-size, NOT node-grouping
+Instrumented encode_dump_quicklist2 + quicklist_packed_nodes for seed=1 trial=586 (n=70):
+path 1 (quicklist_packed_nodes) fires with **chunk1=8104 bytes/69 entries, chunk2=96 bytes/1
+entry**. fr's full 70-element single listpack = 8104−7(frame) + 89(entry) + 7(frame) ≈ **8193 >
+8192** (LIST_SIZE_SAFETY_LIMIT), so fr's ChunkedList build split into 2 chunks → DUMP emits 2
+nodes. redis fits the SAME 70 elements in **≤8192** → stays 1 listpack node (enc=listpack). The
+merge check (quicklist_packed_node_accepts_local: 8104+86+8=8198 > 8192) correctly refuses to
+merge — the chunks genuinely don't fit one fr-encoded node. So this is NOT the DUMP node-grouping
+(paths 1/2/3 all behave correctly given the chunk sizes); the real divergence is that **fr's
+listpack entry encoding is ~1 byte larger than redis's** for some element in this set, tipping
+the total over the 8192 boundary and forcing a spurious 2nd node. Likely a listpack integer-width
+or backlen edge case in fr's encoder (listpack_entry_encoded_len / encode_listpack_entry).
+NEXT (for the fixer, likely cod-a or a listpack-encoder pass): DUMP both engines' listpacks for
+this case, decode entry-by-entry, find the element fr encodes 1B larger, align fr's encoder to
+redis byte-for-byte. NOT a clean DUMP-encode-only fix (encoder change → affects all collection
+DUMP, regression risk) — xyyfb stays blocked. No code change kept (instrumentation stashed).
