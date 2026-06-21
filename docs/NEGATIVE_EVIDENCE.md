@@ -2401,3 +2401,14 @@ a 3-member GEOPOS; now 1=1. Byte-exact verified: RESP2+RESP3 coords, missing mem
 WRONGTYPE, 0-member, all identical to redis. Gates: fr-command 1157 + fr-store 656 unit / 0
 fail, conformance smoke 99/99, cmdstat_keyspace_parity_gate PASS (46 rows byte-exact). No
 regression (GET 1.10/MGET 1.17/PFCOUNT 1.15/GEODIST 0.84). Remaining geo loss: GEOSEARCH 0.78x.
+
+### dispatch fast-path campaign-stretch SUMMARY — integrated HEAD verified green (cc)
+Three borrowed read fast paths shipped + each verified byte-exact (conformance 99/99, cmdstat
+keyspace-parity green, no regression): PFCOUNT 0.53x→~1.0x (ac1a968a6), GEODIST 0.61x→0.75x
+(bc36053a8, residual=constant-factor geo compute), GEOPOS 0.77x→1.02x (1b2b79787, + bonus
+keyspace over-count fix). Integrated gauntlet on 1b2b79787 confirms all hold parity-or-faster;
+prior fast paths (GET/TTL/TYPE/HGET/cardinality + peer BITFIELD-GET) unchanged. The clean
+simple-lookup dispatch vein is now ~exhausted. Remaining residuals are NOT clean dispatch
+levers: GEOSEARCH ~0.78x (complex multi-option SEARCH, compute-bound), SINTER-small (multibulk
+set algebra), EXISTS-multikey (already fast-pathed, subtle). frankenredis = parity-or-faster
+across the hot path + all clean cold commands vs Redis 7.2.4, MEASURED.
