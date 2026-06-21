@@ -1376,3 +1376,11 @@ Built scripts/encoding_rdb_differ.py (permanent encoding × config × RDB-path g
   fr DEBUG RELOAD should re-derive encoding to match redis; if so, route the re-derivation
   through the same load-time conversion redis uses). Gate marks these KNOWN so it catches
   true regressions. Encoding-RDB differential space now has a committed permanent gate.
+
+### EXPIRE option matrix — verified byte-exact (cc, no-cargo)
+Probed EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT × {NX,XX,GT,LT + combos} on keys with/without
+existing TTL, edge cases (negative/zero/past/large), 200 trials × 3 checks = 600 vs Redis
+7.2.4: the command return values + EXISTS are **byte-exact (0 real diffs)**. The only diffs
+were PTTL ±1ms (8 cases) = cross-server timing jitter (PTTL read a fraction of a ms apart),
+NOT a bug — future PTTL-comparing probes should allow a few-ms tolerance or compare seconds.
+EXPIRE-options parity confirmed; do not re-probe.
