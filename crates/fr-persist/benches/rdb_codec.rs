@@ -146,6 +146,34 @@ fn build_mixed_zset_entries() -> Vec<RdbEntry> {
     entries
 }
 
+fn build_hash_listpack_entries() -> Vec<RdbEntry> {
+    let mut entries = Vec::with_capacity(600);
+    for key in 0..600 {
+        let fields = (0..96)
+            .map(|field| {
+                let field_bytes = if field % 4 == 0 {
+                    field.to_string().into_bytes()
+                } else {
+                    format!("f{field:03}:k{}", key % 19).into_bytes()
+                };
+                let value_bytes = if field % 3 == 0 {
+                    (field as i64 - 48).to_string().into_bytes()
+                } else {
+                    format!("value:{key:04}:{field:03}").into_bytes()
+                };
+                (field_bytes, value_bytes)
+            })
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("h:{key:06}").into_bytes(),
+            value: RdbValue::Hash(fields),
+            expire_ms: None,
+        });
+    }
+    entries
+}
+
 fn bench_codec(c: &mut Criterion) {
     let entries = build_entries();
     let encoded = encode_rdb(&entries, &[]);
@@ -176,6 +204,14 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| encode_rdb(std::hint::black_box(&mixed_zset_entries), &[]))
     });
     mixed_zset.finish();
+
+    let hash_listpack_entries = build_hash_listpack_entries();
+    let mut hash_listpack = c.benchmark_group("rdb_codec_hash_listpack");
+    hash_listpack.throughput(Throughput::Elements(hash_listpack_entries.len() as u64));
+    hash_listpack.bench_function("encode_hash_listpack_rdb", |b| {
+        b.iter(|| encode_rdb(std::hint::black_box(&hash_listpack_entries), &[]))
+    });
+    hash_listpack.finish();
 }
 
 criterion_group!(benches, bench_codec);

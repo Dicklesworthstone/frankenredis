@@ -1,5 +1,36 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused hash listpack direct-emitter closeout (`frankenredis-hash-listpack-direct-emit-dv9n5`, 2026-06-21)
+
+- Build: `RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --release -p fr-server`, remote `vmi1149989`.
+- Focused A/B harness: `rdb_codec_hash_listpack/encode_hash_listpack_rdb`, 600
+  hash keys x 96 fields, same-worker `vmi1227854`.
+- Retained lever: stream field/value entries directly into the hash listpack
+  payload instead of allocating a flat `Vec<&[u8]>` staging array.
+- Rejected experiment: header-in-place final-buffer emission. It was
+  `1.0554x` slower than retained direct emit and was reverted.
+
+| focused gate | current direct emit | temporary control | ratio | verdict |
+|---|---:|---:|---:|---|
+| hash-listpack RDB encode | `2.6388 ms` / `227.38 Kelem/s` | buffered flat control `3.0709 ms` / `195.38 Kelem/s` | `1.1637x` | keep |
+| hash-listpack RDB encode | `2.6388 ms` / `227.38 Kelem/s` | final-buffer variant `2.7849 ms` / `215.44 Kelem/s` | `0.9475x` | reject |
+
+Redis 7.2.4 hash-only split check (`collection_reload_headtohead.py`, 2,000
+hashes x 40 fields, 7 trials):
+
+| Redis-relative gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `19.4 ms` | `6.7 ms` | `0.344x` | loss |
+| pipelined `DUMP` encode half | `14.7 ms` | `10.6 ms` | `0.720x` | loss |
+| pipelined `RESTORE` decode half | `14.2 ms` | `6.7 ms` | `0.473x` | loss |
+
+Scorecard impact: focused direct-emitter A/B **1 win / 0 losses / 0 neutral**;
+rejected final-buffer experiment **0 wins / 1 loss / 0 neutral**;
+Redis-relative split gate **0 wins / 3 losses / 0 neutral**. Combined honest
+score: **1 win / 4 losses / 0 neutral**. Keep the direct emitter, but route
+remaining hash persistence losses to retained/listpack representation and
+RESTORE decode/rebuild rather than another vector-elision micro-pass.
+
 ## Focused cod-b packed bulk exact-capacity rejection (`frankenredis-uhthd`, 2026-06-21)
 
 - Build: fail-closed remote `rch` release builds for `fr-server` and `fr-bench`

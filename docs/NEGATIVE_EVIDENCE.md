@@ -4,6 +4,50 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-hash-listpack-direct-emit-dv9n5` measured keep, Redis path still loss
+
+BOLD-VERIFY targeted the `fr-persist` compact hash listpack encoder because the
+old path built a flat `Vec<&[u8]>` staging array for every field/value pair
+before listpack construction. The retained lever streams field/value entries
+directly into the listpack payload. A more aggressive attempt to write entries
+into a final header-prefixed listpack buffer was tested and reverted because it
+regressed the same-worker gate.
+
+Focused gate added in this pass:
+`rdb_codec_hash_listpack/encode_hash_listpack_rdb`, 600 hash keys, 96
+fields/key, mixed integer-looking and string field/value bytes. Same-worker A/B
+used `vmi1227854` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`:
+
+| gate | implementation | median time | throughput | decision |
+|---|---|---:|---:|---|
+| focused hash-listpack RDB encode | current direct emit | `2.6388 ms` | `227.38 Kelem/s` | keep |
+| same | temporary buffered flat `Vec<&[u8]>` control | `3.0709 ms` | `195.38 Kelem/s` | control slower |
+| same | temporary final-buffer/header-in-place variant | `2.7849 ms` | `215.44 Kelem/s` | reject/reverted |
+
+Candidate result: retained direct emit is `1.1637x` faster than the buffered
+control (`3.0709 / 2.6388`). The final-buffer variant was `1.0554x` slower than
+the retained direct emitter and was removed before commit.
+
+Fresh Redis 7.2.4 split check, hash-only
+`scripts/collection_reload_headtohead.py 18185 18186 --trials 7 --hashes 2000
+--sets 0 --zsets 0 --members 40`, using vendored Redis and the warm
+`/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis` binary:
+
+| gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `19.4 ms` | `6.7 ms` | `0.344x` | loss |
+| pipelined `DUMP` encode half | `14.7 ms` | `10.6 ms` | `0.720x` | loss |
+| pipelined `RESTORE` decode half | `14.2 ms` | `6.7 ms` | `0.473x` | loss |
+
+Scorecard for this pass: focused direct-emitter A/B **1 win / 0 losses / 0
+neutral**; rejected final-buffer experiment **0 wins / 1 loss / 0 neutral**;
+Redis-relative split gate **0 wins / 3 losses / 0 neutral**. Combined honest
+score: **1 win / 4 losses / 0 neutral**. Keep the already-shipped `fr-persist`
+direct emitter, but do not claim hash persistence dominance. Remaining release
+work is retained/hash-listpack representation plus RESTORE decode/rebuild, not
+another generic listpack vector-elision pass.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` packed bulk exact-capacity rejected and reverted
 
 BOLD-VERIFY targeted the remaining hash/zset memory losses with a compact

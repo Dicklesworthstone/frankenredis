@@ -217,13 +217,19 @@ turns). Keep claims honest — mark which.
 - frankenredis-hash-listpack-direct-emit-dv9n5 / cod-a: `fr-persist`
   compact hash listpack encode now streams field/value entries directly into
   the listpack payload instead of allocating a `Vec<&[u8]>` staging array before
-  calling `encode_listpack_strings_blob` — CODED (reasoned; batch benchmark
-  pending). The shared listpack finalizer keeps header/terminator/count behavior
-  identical for normal listpacks and the existing zset direct encoder. Guard
-  compares direct hash listpack bytes against the old flat-entry reference and
-  decodes integer/string/null-byte field-value pairs. Retry condition if
-  rejected: only revisit with a fresh compact-hash DUMP/RDB profile naming
-  listpack construction, not as generic vector-elision cleanup.
+  calling `encode_listpack_strings_blob` — MEASURED KEEP. Focused hash-listpack
+  `fr-persist` gate (`rdb_codec_hash_listpack/encode_hash_listpack_rdb`, 600
+  hashes x 96 fields, `vmi1227854`) measured current direct emit `2.6388 ms` /
+  `227.38 Kelem/s` versus temporary buffered control `3.0709 ms` /
+  `195.38 Kelem/s`, a `1.1637x` candidate/control win. A more aggressive
+  final-buffer/header-in-place variant regressed to `2.7849 ms` and was removed.
+  Redis 7.2.4 split check remains honest loss: hash-only `DEBUG RELOAD` `0.344x`
+  fr/Redis, DUMP encode half `0.720x`, RESTORE decode half `0.473x` for 2,000
+  hashes x 40 fields. Guard compares direct hash listpack bytes against the old
+  flat-entry reference and decodes integer/string/null-byte field-value pairs.
+  Retry condition: do not revisit generic hash listpack vector cleanup; route
+  remaining loss to retained/hash-listpack representation or RESTORE
+  decode/rebuild.
 - frankenredis-set-intset-canonical-noalloc-acetq / cod-a: `fr-persist`
   compact set intset selection now reuses the shared allocation-free canonical
   decimal parser instead of validating each parsed member by allocating
