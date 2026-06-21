@@ -4716,8 +4716,7 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = execute_plain_keyed_values_write_fast_path(
-                        runtime,
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
                         cmd,
                         packet.key,
                         &[packet.member],
@@ -5687,9 +5686,8 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key, values)) =
                             borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = execute_plain_keyed_values_write_fast_path(
-                                runtime, cmd, key, values, ts,
-                            )
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -5843,9 +5841,8 @@ fn parse_borrowed_multibulk_action(
                     b'R' => {
                         if let Some((cmd, key, values)) =
                             borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = execute_plain_keyed_values_write_fast_path(
-                                runtime, cmd, key, values, ts,
-                            )
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -5902,9 +5899,8 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key, values)) =
                             borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = execute_plain_keyed_values_write_fast_path(
-                                runtime, cmd, key, values, ts,
-                            )
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -10970,20 +10966,6 @@ fn borrowed_plain_keyed_values_args<'a>(
         return None;
     };
     Some((cmd, *key, values))
-}
-
-#[inline]
-fn execute_plain_keyed_values_write_fast_path(
-    runtime: &mut Runtime,
-    cmd: PlainKeyedValuesCmd,
-    key: &[u8],
-    values: &[&[u8]],
-    ts: u64,
-) -> Option<RespFrame> {
-    if matches!(cmd, PlainKeyedValuesCmd::Sadd) && values.len() == 1 {
-        return runtime.execute_plain_sadd_one_borrowed(key, values[0], ts);
-    }
-    runtime.execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
 }
 
 /// `HSET key field value [field value ...]` borrowed-arg matcher: requires a

@@ -10,24 +10,28 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
-## 2026-06-21 cod-a addendum: SADD single-member runtime path pending-bench
+## 2026-06-21 cod-a addendum: SADD single-member runtime path rejected
 
-Release-readiness impact: pending. Under the disk-low stop, no new cargo
-bench/build was started after this code-only hunk. Exact single-member
-`SADD key member` now bypasses the shared variadic keyed-values runtime path and
-uses a fixed-shape runtime function while preserving the same store mutation,
-reply framing, stats, slowlog/latency, errorstats, and threat-event surfaces.
+Release-readiness impact: no production hunk shipped. The disk-low carry-forward
+candidate bypassed the shared variadic keyed-values runtime path for exact
+`SADD key member`, but the measured Redis 7.2.4 head-to-head stayed below the
+parity floor.
 
-Routing evidence: the latest SADD arity sweep measured fr/Redis `0.73x` for
-one member, then `1.16x` for eight members and `1.23x` for sixteen members
-against Redis 7.2.4. That makes arity-1 fixed runtime dispatch cost the target;
-set insertion itself is not the release-readiness bottleneck in that sweep.
+Per-crate harness: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo bench -p fr-bench --profile release --bench
+keyed_write_vs_redis -- SADD_1v`, worker `vmi1227854`. The Criterion bench now
+includes arity 1 so this specific release-readiness gap is reproducible without
+running the whole keyed-write matrix.
 
-Static validation: direct `rustfmt` on touched Rust files passed; targeted `ubs`
-returned nonzero on existing broad inventories while its shadow-workspace fmt,
-clippy, cargo-check, and test-build sections reported clean. Next turn: run the
-SADD P16/c50 Redis 7.2.4 gate plus focused conformance before upgrading this
-from pending to measured keep/revert.
+| gate | Redis 7.2.4 | FrankenRedis candidate | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/SADD_1v`, median throughput | `1.7901 Melem/s` | `1.3708 Melem/s` | `0.77x` | reject; still a measured SADD loss |
+
+The prior routing sweep had `SADD_1v` at `0.73x`, so the candidate's apparent
+lift is within the noisy micro-lever range and does not justify a new runtime
+specialization. Production code is reverted; release-readiness target remains a
+deeper set/list write-path or parser/batch primitive, not another
+single-member SADD routing shim.
 
 ## 2026-06-21 cod-b addendum: SDIFF lookup lever measured keep
 

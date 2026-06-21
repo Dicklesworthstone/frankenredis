@@ -35,6 +35,15 @@ server-side routing shim; keep only the benchmark harness arity-1 coverage and
 this negative evidence. Do not retry single-member SADD runtime shape plumbing
 without a same-window control and a clearer path above the Redis parity floor.
 
+Post-revert validation: `cargo fmt --check --package fr-runtime --package
+fr-server --package fr-bench`, RCH `cargo check -p fr-runtime -p fr-server
+-p fr-bench --all-targets`, RCH `cargo clippy -p fr-runtime -p fr-server
+-p fr-bench --all-targets -- -D warnings`, and RCH `cargo test -p
+fr-conformance -- --nocapture` all passed. Targeted `ubs` on the changed file
+set returned nonzero on existing broad inventories in the monolithic runtime and
+server files plus bench-harness panic/TcpStream heuristics; its embedded fmt,
+clippy, cargo-check, and test-build sections were clean.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup measured keep
 
 Code-only lever shipped in `7b94d4efc` for `sdiff_value`: secondary SDIFF
