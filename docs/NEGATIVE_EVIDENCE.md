@@ -2471,3 +2471,21 @@ insert (mirrors upstream restoreCommand -> objectSetLRUOrLFU) — IDLETIME sets 
 now-idle (LRU read path), FREQ sets lfu_freq + lfu_last_touch_min=now (zero decay). VERIFIED
 byte-exact vs Redis 7.2.4: IDLETIME 0/100/5000 -> 0/100/5000, FREQ 0/50/255 -> 0/50/255,
 no-metadata default unchanged (7/7 diffs=0). fr-store 656 unit tests + conformance 99/99 green.
+
+### xyyfb BLOCKED — quicklist/listpack DUMP boundary still diverges (s36di residual, cc found)
+Attempted to promote scripts/quicklist_dump_boundary_differ.py to a hard parity-suite gate
+(frankenredis-xyyfb). REVERTED: the differ FAILS by default (~1-3 divergences / 600 random
+trials). The s36di "known gap" is NOT fully closed. Characterized (reproducible seeds, list-
+max-listpack-size=128):
+- **Listpack ENCODING divergence** (single node, NOT a boundary issue): seed=1 trial=586 n=70
+  enc=listpack/listpack fr=6992 vs redis=7024; seed=2 trial=176 n=70 fr=6974/6983. fr's listpack
+  SERIALIZATION differs from redis for some mixed element-size distributions (uniform-size sweep
+  of 777 cases was CLEAN — only variable sizes trigger it). Likely a listpack entry-encoding
+  choice (int-encode threshold / backlen) edge case.
+- **Quicklist node-boundary divergence**: seed=2 n=130 fr=18430/18514, n=900 fr=123880/124311;
+  seed=7 n=130 18211/18287. Node-split estimate diverges for some mixed-size sequences.
+Both are DUMP byte-length (serializedlength matched — so RESTORE round-trips correct logically;
+this is cross-engine DUMP BYTE-exactness, not data corruption). xyyfb cannot be a hard gate
+until both are byte-exact. The differ is a GOOD probe (catches it); leaving it excluded from the
+suite (as before) until s36di residual is fixed. FLAGGED to cod-a (s36di/xyyfb owner). Repro:
+`scripts/quicklist_dump_boundary_differ.py --oracle <r> --fr <f> --seed 1 --trials 600`.
