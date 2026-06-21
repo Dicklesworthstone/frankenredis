@@ -10,6 +10,28 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: set listpack direct emit measured keep
+
+Release-readiness impact: keep the scoped `fr-persist` compact set-listpack
+encoder win, but do not upgrade the end-to-end set persistence cell. The
+focused same-worker gate proves direct member emission beats the old flat
+`Vec<&[u8]>` control; the Redis 7.2.4 split check still shows set-listpack
+`DUMP` encode and especially `RESTORE` decode as release risks.
+
+| gate | result | readiness impact |
+|---|---:|---|
+| `rdb_codec_set_listpack/encode_set_listpack_rdb`, direct emit | `1.3526 ms`, `443.60 Kelem/s` | kept focused encoder win |
+| same, temporary buffered control | `1.4603 ms`, `410.88 Kelem/s` | direct emit `1.0796x` faster |
+| set-listpack `DEBUG RELOAD`, 2,000 x 40 strings | `0.376x` fr/Redis | Redis faster; release risk remains |
+| set-listpack pipelined `DUMP` encode half | `0.844x` fr/Redis | Redis faster; encode risk remains |
+| set-listpack pipelined `RESTORE` decode half | `0.437x` fr/Redis | Redis faster; decode/rebuild remains larger risk |
+
+Scorecard: focused A/B **1 win / 0 losses / 0 neutral**; Redis-relative split
+gate **0 wins / 3 losses / 0 neutral**. Combined honest score:
+**1 win / 3 losses / 0 neutral**. Behavior is guarded by
+`set_listpack_dump_differ.py` byte-exact vs Redis 7.2.4 and full
+`fr-conformance`.
+
 ## 2026-06-21 cod-a addendum: BITFIELD GET borrowed fast path measured keep
 
 Release-readiness impact: the focused `BITFIELD key GET u8 0` cell moves from

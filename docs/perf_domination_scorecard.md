@@ -1,5 +1,43 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-a set listpack direct-emitter closeout (`frankenredis-set-listpack-direct-emit-tpans`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec --
+  cargo build --release -p fr-server -p fr-bench`, remote `hz2`.
+- Binary: `/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`
+  sha256 `9770295f401a523e821ad9738e567d31933f476f761aa8e8d6ea588c5ad2cbe6`.
+- Focused A/B harness:
+  `rdb_codec_set_listpack/encode_set_listpack_rdb`, 600 set keys x 96
+  listpack-eligible members, same-worker `hz2`.
+- Retained lever: stream set members directly into the compact set listpack
+  payload instead of allocating a flat `Vec<&[u8]>` staging array. The old
+  buffered control was restored only temporarily for measurement, then removed.
+
+| focused gate | current direct emit | temporary control | ratio | verdict |
+|---|---:|---:|---:|---|
+| set-listpack RDB encode | `1.3526 ms` / `443.60 Kelem/s` | buffered flat control `1.4603 ms` / `410.88 Kelem/s` | `1.0796x` | keep |
+
+Redis 7.2.4 set-listpack split check (`collection_reload_headtohead.py`, 2,000
+sets x 40 string members, `--set-kind str`, 7 trials):
+
+| Redis-relative gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `14.5 ms` | `5.3 ms` | `0.376x` | loss |
+| pipelined `DUMP` encode half | `11.5 ms` | `9.7 ms` | `0.844x` | loss |
+| pipelined `RESTORE` decode half | `13.1 ms` | `5.7 ms` | `0.437x` | loss |
+
+Scorecard impact: focused direct-emitter A/B **1 win / 0 losses / 0 neutral**;
+Redis-relative split gate **0 wins / 3 losses / 0 neutral**. Combined honest
+score: **1 win / 3 losses / 0 neutral**. Keep the `fr-persist` encoder win and
+the byte-exact set-listpack guard, but route remaining persistence losses to
+retained set-listpack representation and RESTORE decode/rebuild.
+
+Gates: RCH focused `fr-persist` bench; RCH release build for `fr-server` and
+`fr-bench`; `scripts/set_listpack_dump_differ.py` byte-exact vs Redis 7.2.4;
+RCH `fr-persist` fmt/check/clippy/focused unit test; full RCH `fr-conformance`
+package green.
+
 ## Focused cod-b exact 4-value keyed-write validation (`frankenredis-hqr5t`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1

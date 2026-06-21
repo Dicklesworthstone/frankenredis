@@ -4,6 +4,70 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-set-listpack-direct-emit-tpans` measured keep, Redis path still loss
+
+BOLD-VERIFY closed the compact set listpack direct-emitter lane. The production
+encoder was already on the desired direct path; this pass adds the missing
+focused Criterion gate and verifies the old buffered `Vec<&[u8]>` control is
+slower. The temporary buffered control was removed before commit, and
+`crates/fr-persist/src/lib.rs` has no final hunk.
+
+The alien-graveyard/artifact rationale is fused deterministic codec emission:
+when the listpack grammar is fixed, emit each member directly into the target
+payload instead of first building a roster of borrowed slices. This targets
+allocation and cache traffic only; it does not change set ordering, Redis
+integer/string listpack encoding, LZF/raw-string policy, or observable replies.
+
+Focused gate added in this pass:
+`rdb_codec_set_listpack/encode_set_listpack_rdb`, 600 set keys, 96 members/key,
+mixing canonical integers, signed integers, strings, binary/null-byte members,
+and short strings. Same-worker A/B used `hz2` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`:
+
+| gate | implementation | median time | throughput | decision |
+|---|---|---:|---:|---|
+| focused set-listpack RDB encode | current direct emit | `1.3526 ms` | `443.60 Kelem/s` | keep |
+| same | temporary buffered flat `Vec<&[u8]>` control | `1.4603 ms` | `410.88 Kelem/s` | control slower |
+
+Candidate result: retained direct emit is `1.0796x` faster than the buffered
+control (`1.4603 / 1.3526`). Criterion flagged the temporary old path as a
+`+6.7157%` median time regression and `-6.2931%` throughput regression against
+the current direct-emitter history.
+
+Fresh Redis 7.2.4 split check, string set-listpack only
+`scripts/collection_reload_headtohead.py 18225 18226 --trials 7 --hashes 0
+--sets 2000 --zsets 0 --members 40 --set-kind str`, using vendored Redis and
+the warm `/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`
+binary (`sha256=9770295f401a523e821ad9738e567d31933f476f761aa8e8d6ea588c5ad2cbe6`):
+
+| gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `14.5 ms` | `5.3 ms` | `0.376x` | loss |
+| pipelined `DUMP` encode half | `11.5 ms` | `9.7 ms` | `0.844x` | loss |
+| pipelined `RESTORE` decode half | `13.1 ms` | `5.7 ms` | `0.437x` | loss |
+
+Behavior guard: `scripts/set_listpack_dump_differ.py 18227 18228` passed
+byte-exact vs Redis 7.2.4 for string, mixed, binary, large, and long-value
+set-listpack shapes.
+
+Scorecard for this pass: focused direct-emitter A/B **1 win / 0 losses / 0
+neutral**; Redis-relative split gate **0 wins / 3 losses / 0 neutral**.
+Combined honest score: **1 win / 3 losses / 0 neutral**. Keep the focused
+encoder win, but do not claim set-listpack persistence dominance. Remaining
+release work is retained set-listpack representation plus RESTORE decode/rebuild,
+not another generic listpack vector-elision pass.
+
+Gates: RCH `cargo bench -p fr-persist --profile release --bench rdb_codec --
+rdb_codec_set_listpack/encode_set_listpack_rdb --noplot` direct/control on
+`hz2`; RCH `cargo build --release -p fr-server -p fr-bench` on `hz2`; focused
+Redis 7.2.4 split check above; set-listpack byte-equality differ above; RCH
+`cargo fmt -p fr-persist --check`; RCH `cargo check -p fr-persist --all-targets`;
+RCH `cargo clippy -p fr-persist --all-targets -- -D warnings`; RCH
+`cargo test -p fr-persist compact_set_listpack_direct_emit_matches_flat_reference
+-- --nocapture`; RCH `cargo test -p fr-conformance -- --nocapture` (194 lib
+tests, all conformance bins, 99 smoke tests, doctests passed). Conformance
+live-oracle non-strict drift rows were logged but did not fail the suite.
+
 ## 2026-06-21 cod-b `frankenredis-hqr5t` exact four-value keyed-write parser measured mixed
 
 BOLD-VERIFY targeted the exact four-value keyed-write parser lane. The server
