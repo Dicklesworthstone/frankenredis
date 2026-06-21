@@ -1196,3 +1196,15 @@ edited by cod-b for uhthd/PackedZSet) and is cod-a's assigned `99fwc` bead. Blin
 committing a partial rewrite would risk the shared build and list-data correctness, so
 none committed. Owner/next step: cod-a, with build+test, on disk recovery. The simple
 VecDeque variant is already in the rejected-levers ledger (measured 0.53x SLOWER).
+
+## 2026-06-21 CobaltCove (cc) — PENDING-BENCH queue (disk-critical, builds frozen)
+
+New peer perf code landed on origin while builds are frozen (DISK-CRITICAL ~40G); these
+need differential byte-exactness + P16 A/B vs Redis 7.2.4 the instant disk recovers:
+- `fdba690e2` perf(runtime): pending SADD arity-one fast path (BlackThrush — targets the
+  SADD 0.79x I root-caused via arity sweep). Verify: SADD reply/state byte-exact + P16
+  sadd ratio (expect arity-1 → toward parity; confirm no regression at higher arity).
+- `7b94d4efc` perf(store): reduce sdiff secondary lookup (uhthd). Verify: my SDIFF
+  large-hashtable differential (0-diff) still holds + SDIFF P16/3-set A/B.
+- `263e3b05a` 99fwc packed-chunk blueprint (cc, design only — implement+bench on recovery).
+cc verification owner for the first two on recovery; no cargo run now (disk-critical).
