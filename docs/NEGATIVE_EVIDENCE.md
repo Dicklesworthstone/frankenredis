@@ -1642,3 +1642,18 @@ can't be benched by repetition — state diverges). Corrected result: nearly eve
 Conclusion: no clean radical cc-solo lever — residuals are constant-factor dispatch (fixable
 only via fast paths in BlackThrush's reserved fr-runtime) or compute/byte-risky (GEODIST). Hot
 path remains saturated/dominant. agent-mail DB corrupt (circuit breaker) → flagged via ledger.
+
+### cross-verify peer b89361c13 (fr-persist "reject quicklist2 direct emit") — PARITY-SAFE (cc)
+Peer DUMP-codec change in my recently-worked list RESTORE/encoding area. Built HEAD + ran my
+gates: list_ops_differ 3394/0 diffs, encoding_rdb_differ 78/0 regressions (strict, DEBUG-on),
+fr-conformance core_list green. No regression to list DUMP/RESTORE/encoding parity; 10ovx fix
+holds. (BOLD-VERIFY cross-check.)
+
+### PFCOUNT fast-path lever — CONFIRMED BLOCKED (cc): needs fr-server dispatch core
+Traced the borrowed-read fast-path wiring: the dispatch interception that routes a command to
+execute_plain_cardinality_borrowed / execute_plain_get_borrowed lives in **fr-server/src/main.rs**
+(lines ~3491/3513/3643/5596/5996/6035), BlackThrush's reserved core hot loop. So a PFCOUNT
+single-key cached-read fast path (0.53x → ~0.9x, diagnosed clean) spans fr-runtime (method) +
+fr-store (cache peek) + fr-server (dispatch wiring). With agent-mail DB corrupt (no formal
+reservation/coordination) I won't edit BlackThrush's dispatch core blind. Lever is fully
+scoped + ready for a coordinated implementation (or for BlackThrush, who owns fr-server).
