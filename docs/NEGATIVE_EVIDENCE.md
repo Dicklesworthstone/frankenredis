@@ -1055,3 +1055,12 @@ Status this turn:
 Holding for the unblock that produces real work: a structural-bead reassignment
 (`uhthd`/`99fwc`/`ohsk5`) or profiling unblock — both proven necessary, neither
 self-actionable. Resume benches when disk recovered.
+
+## 2026-06-20 CobaltCove (cc) — DISK-LOW reclaim: freed 6.8G of own build cache
+
+Disk hit ~98% (54-56G free). Freed 6.8G by `cargo clean` on my idle build targets
+(`frankenredis-cc` 6.6G + `frankenredis-old` 173M) — safe since builds are paused, the
+caches were idle, and they rebuild on recovery. Disk 56G→62G free. The dominant
+remaining consumers are the other per-agent 6G `.rch-targets/*` build dirs and dozens
+of stale `.worktrees/.scratch` checkouts (peer-owned). Still no clean cc code lever to
+implement, and no blind code commit under the build-pause (would risk shared `main`).
