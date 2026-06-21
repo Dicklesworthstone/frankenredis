@@ -4,6 +4,41 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` set-algebra STORE overwrite keep
+
+BOLD-VERIFY targeted the remaining focused set-algebra loss after the prior
+cod-b/CobaltCove SINTERSTORE and SDIFFSTORE keeps. The retained lever changes
+non-empty `SINTERSTORE` / `SUNIONSTORE` / `SDIFFSTORE` destinations from
+delete+reinsert to value-only overwrite through `internal_entries_insert`;
+empty results still delete the destination. This preserves Redis-visible
+replacement semantics while avoiding repeated SCAN/RANDOMKEY side-index cache
+dirties on `*STORE dst ...` packets.
+
+Focused Redis 7.2.4 gate:
+`AGENT_NAME=BlackThrush RCH_WORKER=ovh-a
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo bench --profile release -p fr-bench --bench set_algebra_vs_redis --
+--noplot`.
+
+| Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `SINTERSTORE` | `728.48 us` | `284.37 us` | `0.390x` | `2.562x` | win |
+| `SDIFFSTORE` | `629.46 us` | `298.02 us` | `0.473x` | `2.112x` | win |
+| `SUNIONSTORE` | `6.6817 ms` | `5.8679 ms` | `0.878x` | `1.139x` | win |
+
+Scorecard for this pass: focused set-algebra gate **3 wins / 0 losses / 0
+neutral** vs Redis 7.2.4. This directly closes the previously logged
+SUNIONSTORE loss (`0.764x` throughput) in the same small per-crate bench family;
+do not revert.
+
+Gates: `cargo fmt -p fr-store -- --check`; RCH `cargo test -p fr-store
+set_algebra_store_nonempty_overwrite_is_not_structural -- --nocapture`; RCH
+`cargo build --release -p fr-server -p fr-bench`; RCH `cargo check -p fr-store
+--all-targets`; RCH `cargo clippy -p fr-store --all-targets -- -D warnings`;
+RCH `cargo test -p fr-conformance -- --nocapture` (194 lib tests, all
+conformance bins, 99 smoke tests, doctests passed). Conformance live-oracle
+non-strict drift rows were logged but did not fail the suite.
+
 ## 2026-06-21 cod-a `frankenredis-set-intset-canonical-noalloc-acetq` measured keep, Redis decode still dominates
 
 BOLD-VERIFY revisited the compact set intset RDB encoder after the prior

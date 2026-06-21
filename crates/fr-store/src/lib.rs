@@ -6109,6 +6109,32 @@ impl Store {
         entry
     }
 
+    /// Store a set-algebra result in `destination`.
+    ///
+    /// Non-empty results overwrite the destination in place through
+    /// `internal_entries_insert`, preserving key membership and avoiding the
+    /// remove+reinsert churn that dirties lazy SCAN/RANDOMKEY side-index caches on
+    /// every repeated `*STORE dst ...` packet. Empty results still delete the key,
+    /// matching Redis' destination-clearing semantics.
+    fn store_set_algebra_value(
+        &mut self,
+        destination: &[u8],
+        value: Option<SetValue>,
+        now_ms: u64,
+    ) -> usize {
+        let count = value.as_ref().map_or(0, SetValue::len);
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            let entry = self.set_value_entry(value, now_ms);
+            self.internal_entries_insert(destination.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
+        } else if self.internal_entries_remove(destination).is_some() {
+            self.stream_groups.remove(destination);
+            self.stream_last_ids.remove(destination);
+            self.dirty = self.dirty.saturating_add(1);
+        }
+        count
+    }
+
     /// (frankenredis-v4ba8) Build a sorted-set destination `Entry` with its
     /// encoding RE-DERIVED from the result content (listpack vs skiplist) under
     /// the current thresholds. Every *STORE / cross-key zset destination
@@ -13224,18 +13250,7 @@ impl Store {
         // set_value_entry re-derives the encoding from membership, so OBJECT
         // ENCODING is byte-identical to the prior Vec->GenericSet->from_index_set.
         let value = self.sinter_value(keys, now_ms)?;
-        let count = value.as_ref().map_or(0, |v| v.len());
-        let deleted = self.internal_entries_remove(destination).is_some();
-        self.stream_groups.remove(destination);
-        self.stream_last_ids.remove(destination);
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            let entry = self.set_value_entry(*value, now_ms);
-            self.internal_entries_insert(destination.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
-        } else if deleted {
-            self.dirty = self.dirty.saturating_add(1);
-        }
-        Ok(count)
+        Ok(self.store_set_algebra_value(destination, value.map(|v| *v), now_ms))
     }
 
     pub fn sunionstore(
@@ -13249,18 +13264,7 @@ impl Store {
         // once. Encoding is re-derived from the final membership (set_value_entry)
         // so OBJECT ENCODING is byte-identical to the prior path.
         let value = self.sunion_value(keys, now_ms)?;
-        let count = value.as_ref().map_or(0, SetValue::len);
-        let deleted = self.internal_entries_remove(destination).is_some();
-        self.stream_groups.remove(destination);
-        self.stream_last_ids.remove(destination);
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            let entry = self.set_value_entry(value, now_ms);
-            self.internal_entries_insert(destination.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
-        } else if deleted {
-            self.dirty = self.dirty.saturating_add(1);
-        }
-        Ok(count)
+        Ok(self.store_set_algebra_value(destination, value, now_ms))
     }
 
     /// (frankenredis-sdiffwt) Type-check a ZDIFF/ZUNION/ZINTER source key
@@ -13290,18 +13294,7 @@ impl Store {
         // Vec<Vec<u8>> round-trip + re-collect. set_value_entry re-derives the
         // encoding from membership => OBJECT ENCODING byte-identical.
         let value = self.sdiff_value(keys, now_ms)?;
-        let count = value.as_ref().map_or(0, |v| v.len());
-        let deleted = self.internal_entries_remove(destination).is_some();
-        self.stream_groups.remove(destination);
-        self.stream_last_ids.remove(destination);
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            let entry = self.set_value_entry(*value, now_ms);
-            self.internal_entries_insert(destination.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
-        } else if deleted {
-            self.dirty = self.dirty.saturating_add(1);
-        }
-        Ok(count)
+        Ok(self.store_set_algebra_value(destination, value.map(|v| *v), now_ms))
     }
 
     // ── Sorted Set (ZSet) operations ─────────────────────────────
@@ -39234,6 +39227,36 @@ mod tests {
         assert_eq!(
             store.sdiff(&[b"a", b"b"], 0).unwrap(),
             Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn set_algebra_store_nonempty_overwrite_is_not_structural() {
+        let mut store = Store::new();
+        store
+            .sadd(b"lhs", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .unwrap();
+        store
+            .sadd(b"rhs", &[b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        store.sadd(b"dst", &[b"old".to_vec()], 0).unwrap();
+
+        let generation_before = store.keyspace_generation;
+        let count = store.sunionstore(b"dst", &[b"lhs", b"rhs"], 1).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            store.keyspace_generation, generation_before,
+            "non-empty STORE overwrite should preserve key membership"
+        );
+        assert_eq!(store.scard(b"dst", 2).unwrap(), 3);
+
+        let generation_before_delete = store.keyspace_generation;
+        let count = store.sdiffstore(b"dst", &[b"lhs", b"lhs"], 3).unwrap();
+        assert_eq!(count, 0);
+        assert!(!store.exists(b"dst", 4));
+        assert_ne!(
+            store.keyspace_generation, generation_before_delete,
+            "empty STORE result must still delete the destination"
         );
     }
 

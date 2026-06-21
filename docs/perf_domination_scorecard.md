@@ -1,5 +1,36 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b set-algebra STORE overwrite keep (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+  cargo build --release -p fr-server -p fr-bench`, remote `ovh-a`.
+- Focused gate: `set_algebra_vs_redis` Criterion bench, 16-command packets,
+  small intset source plus large generic source where applicable, Redis 7.2.4
+  oracle from `legacy_redis_code/redis/src/redis-server`.
+- Retained lever: non-empty `SINTERSTORE` / `SUNIONSTORE` / `SDIFFSTORE`
+  destinations overwrite the value in place through `internal_entries_insert`
+  instead of remove+insert. Empty results still remove the destination.
+- Correctness guard: `set_algebra_store_nonempty_overwrite_is_not_structural`
+  proves non-empty STORE overwrite does not advance keyspace generation, while
+  empty-result STORE still deletes structurally.
+
+| Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `SINTERSTORE` | `728.48 us` | `284.37 us` | `0.390x` | `2.562x` | win |
+| `SDIFFSTORE` | `629.46 us` | `298.02 us` | `0.473x` | `2.112x` | win |
+| `SUNIONSTORE` | `6.6817 ms` | `5.8679 ms` | `0.878x` | `1.139x` | win |
+
+Set-algebra score: **3 wins / 0 losses / 0 neutral** vs Redis 7.2.4. This
+supersedes the previous cod-b set-algebra score of **2 wins / 1 loss / 0
+neutral** by turning SUNIONSTORE from `0.764x` throughput into `1.139x`.
+
+Gates: `cargo fmt -p fr-store -- --check`; RCH focused fr-store test; RCH
+`cargo check -p fr-store --all-targets`; RCH `cargo clippy -p fr-store
+--all-targets -- -D warnings`; RCH `cargo test -p fr-conformance --
+--nocapture` (194 lib tests, all conformance bins, 99 smoke tests, doctests
+passed).
+
 ## Focused set intset width-carry closeout (`frankenredis-set-intset-canonical-noalloc-acetq`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
