@@ -77,3 +77,25 @@ seal_if_owned / make_mut). Ruled out cheaper partial fixes:
 So the residual cost is precisely the per-element `Vec<u8>` heap alloc in the ACTIVE mutable
 chunk — which only the packed-append `PackedMut` rewrite above removes. Do not spend effort
 on a bounded variant; go straight to the packed-append chunk (with build+test on recovery).
+
+## Related lever (unlocked by the packed Listpack chunk): zero-decode collection RESTORE/RDB-load (0.36–0.46x → parity)
+Measured separately (project ledger): collection RESTORE(decode) is 0.36–0.46x — the
+dominant collection-RDB gap. Root cause: RESTORE/RDB-load of a quicklist decodes each
+node's **already-listpack-encoded** RDB bytes into `Vec<Vec<u8>>` (Owned chunk) — i.e.
+decode → per-element Vec alloc → later re-encode for DUMP. Redis keeps the listpack node
+bytes as-is.
+
+Lever: when loading a quicklist node whose RDB payload is a listpack that already matches
+fr's listpack encoding, build `ListChunk::Listpack { bytes: Arc::new(rdb_node_bytes), entries: decode_value_spans(&rdb_node_bytes) }` **directly** — skipping the decode→Vec→re-encode
+round trip entirely. The `Listpack` variant and `fr_persist::listpack::decode_value_spans`
+already exist (used by `seal_if_owned`), so this is a **smaller, more bounded** change than
+99fwc itself: it only touches the RDB/RESTORE quicklist-node load path (fr-persist→fr-store
+construction), not the mutable append surface.
+
+Byte-exactness: only valid when the RDB listpack bytes are byte-identical to what fr's
+encoder would produce (same entry encoding). Guard: validate via `decode_value_spans`
+success + a fast canonical-form check; fall back to the current decode path otherwise (so a
+foreign-but-legal listpack still loads correctly). Verify: DUMP→RESTORE→DUMP round-trip
+byte-identical, `DEBUG RELOAD` digest unchanged, the list DUMP byte-equality gate, and
+RESTORE A/B vs Redis. This and 99fwc share the `Listpack` chunk representation; doing 99fwc
+first makes this nearly free. Both PENDING-BENCH (disk-frozen).
