@@ -1039,3 +1039,19 @@ Conclusion: the SADD arity-1 / LPUSH / RPUSH single-element dispatch fixed-cost
 already showed the SET vs keyed-values borrowed paths are structurally identical and
 the metrics fns equivalent on the fast path, so the residual is diffuse per-command
 machinery, not a single removable line. Routed to BlackThrush (fr-runtime/`ohsk5`).
+
+## 2026-06-20 CobaltCove (cc) — DISK-LOW pause + artifact reclaim (no code lever available)
+
+Operator flagged DISK-LOW (~56G free, 98% full) and paused new rch/cargo build+bench.
+Status this turn:
+- No clean cc-ownable code lever exists to implement (exhaustively established this
+  campaign: every command family measured, all losses root-caused to peer-owned/
+  structural domains — SADD=dispatch fixed-cost, LPUSH/RPUSH=ChunkedList, RAM=keyspace).
+- With builds paused I cannot compile-verify any change; blind-committing unverified
+  code to shared `main` would risk breaking the build for all agents, so none committed.
+- Reclaimed my own disk artifacts to help: removed `fr-old-wt` worktree (914M), pruned
+  14 stale worktree entries, cleared redundant `/tmp` binaries. The dominant disk
+  consumers are the per-agent 6G `.rch-targets/*` build dirs (peer-owned).
+Holding for the unblock that produces real work: a structural-bead reassignment
+(`uhthd`/`99fwc`/`ohsk5`) or profiling unblock — both proven necessary, neither
+self-actionable. Resume benches when disk recovered.
