@@ -1384,3 +1384,18 @@ existing TTL, edge cases (negative/zero/past/large), 200 trials × 3 checks = 60
 were PTTL ±1ms (8 cases) = cross-server timing jitter (PTTL read a fraction of a ms apart),
 NOT a bug — future PTTL-comparing probes should allow a few-ms tolerance or compare seconds.
 EXPIRE-options parity confirmed; do not re-probe.
+
+### warm per-crate verification (cc, directive loosened to allow warm benches)
+Using my still-warm cc-localbench target (warm benches now permitted; no cold rebuild):
+- **fr-store unit tests GREEN at HEAD: 654 passed / 0 failed / 3 ignored** — verifies cod-b's
+  sdiff-lookup (7b94d4efc) + PackedZSet score changes are unit-clean (partial peer-commit
+  verification; full P16/server differential still owed on full recovery, needs release binary).
+- Refined 10ovx fix scope: `ListValue::from_restored_quicklist2_nodes` (packed_set.rs:3381) is
+  the SHARED RESTORE + RDB-file-load + replica-sync list-decode path (single caller lib.rs:21214);
+  redis may treat RESTORE-of-dump vs RDB-file-load differently, so the fix must be verified
+  across all three with the full server harness (release binary) — warm fr-store unit tests
+  alone are insufficient. Fix deferred to full disk recovery accordingly.
+- DEBUG RELOAD nuance: fr DEBUG RELOAD intentionally round-trips IN-MEMORY (test
+  debug_reload_no_persistence_round_trips_in_memory_per_upstream), preserving encoding; the
+  earlier reload encoding-divergence is likely a save-vs-nosave mode nuance, not a clear core
+  bug — DOWNGRADE its severity vs the RESTORE 10ovx (which is a real cross-engine RESTORE diff).
