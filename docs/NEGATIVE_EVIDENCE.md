@@ -2245,3 +2245,40 @@ was **0 wins / 3 losses / 0 neutral**. The source tree is back to HEAD for
 retry borrowed push wrappers without a same-worker control win; the remaining
 list/set write gap needs a batch append, mutable quicklist/chunk layout, or
 server dispatch primitive.
+
+## 2026-06-21 cod-b `frankenredis-uhthd` current memory rebaseline / no-source route
+
+Alien-graveyard route checked: whole keyspace/table representation remains the
+only plausible radical lever for the active keyspace-RAM bead. The current
+checkout already has the local compact pieces in place: small boxed key entries,
+compact hash/set/zset/list payload forms, volatile-only expiry side state, and
+lazy ordered/random side views. A local source hunk that tweaks one payload or
+one cache capacity would repeat previously rejected micro-work.
+
+Verification used the existing warm cod-b release binary from the per-crate RCH
+build at `/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`
+and vendored Redis 7.2.4. The quick memory comparator ran at scale 20k with
+fresh high ports and refreshed `.bench-history/memory_baseline.latest.json`.
+
+| data type | RSS fr/Redis | used_memory fr/Redis | verdict |
+|---|---:|---:|---|
+| keyspace | `1.401x` | `0.492x` | RSS loss |
+| string_1k | `1.103x` | `0.767x` | RSS loss |
+| list | `0.994x` | `0.062x` | RSS win |
+| hash | `1.010x` | `0.199x` | RSS loss |
+| set | `0.994x` | `0.116x` | RSS win |
+| zset | `1.097x` | `0.147x` | RSS loss |
+| stream | `1.031x` | `1.085x` | RSS and used-memory loss |
+
+Decision: **NO-SOURCE ROUTE**. RSS score is **2 wins / 5 losses / 0 neutral**;
+used-memory score is **6 wins / 1 loss / 0 neutral**. The memory ratchet passed,
+but the residual RSS gap is structural table/allocator overhead, not a small
+layout miss. The next credible lever must be all-or-nothing keyspace dictionary
+wiring or retained compact-payload storage with explicit SCAN/RANDOMKEY
+semantics proof and same-current A/B. Do not retry Entry-tail packing, exact
+packed-buffer reserves, zset score-byte tagging, no-expiry EXISTS gating,
+RANDOMKEY cache trimming, or shallow list-push/batch wrappers from this result.
+
+Correctness gate: RCH `cargo test -p fr-conformance -- --nocapture` stayed green
+after the current-control pass (194 library tests, all conformance bins, 99
+smoke tests, doctests).

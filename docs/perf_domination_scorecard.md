@@ -1366,3 +1366,23 @@ Scorecard impact: **0 wins / 3 losses / 0 neutral** on the rechecked rows.
 This confirms the shallow borrowed-push wrapper is not a domination lever; keep
 routing list/set writes toward deeper chunk layout, batch append, or dispatch
 work.
+
+## Focused cod-b current memory rebaseline (`frankenredis-uhthd`, 2026-06-21)
+
+- Build/check: warm cod-b RCH release binary at
+  `/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`.
+- Comparator: `scripts/memory_baseline_capture.py --quick`, scale 20k, vendored
+  Redis 7.2.4, fresh high ports.
+- Decision: no source hunk retained; route to whole keyspace/table
+  representation or retained compact payload storage with semantics proof.
+
+| scorecard | wins | losses | neutral | notes |
+|---|---:|---:|---:|---|
+| RSS ratio vs Redis 7.2.4 | 2 | 5 | 0 | wins: list, set; losses: keyspace, string_1k, hash, zset, stream |
+| used_memory ratio vs Redis 7.2.4 | 6 | 1 | 0 | only stream remains above Redis used-memory |
+| source keep/regression | 0 | 0 | 1 | evidence-only structural route |
+
+Measured RSS ratios:
+`keyspace=1.401x`, `string_1k=1.103x`, `list=0.994x`,
+`hash=1.010x`, `set=0.994x`, `zset=1.097x`, `stream=1.031x`.
+RCH `fr-conformance` stayed green after the pass.
