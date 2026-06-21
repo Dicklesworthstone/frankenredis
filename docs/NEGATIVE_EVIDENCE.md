@@ -4,31 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-06-21 cod-a `frankenredis-ohsk5` SADD single-member runtime path pending-bench
+## 2026-06-21 cod-a `frankenredis-ohsk5` SADD single-member runtime path rejected
 
-DISK-LOW pivot: no new `cargo bench` or `cargo build` was started after the
-disk-low instruction. Code-only lever shipped for the exact `SADD key member`
-shape: the server now routes canonical and generic borrowed single-member SADD
-packets to `Runtime::execute_plain_sadd_one_borrowed`, avoiding the variadic
-`SADD`/`LPUSH`/`RPUSH` runtime plumbing used for multi-value writes. The store
-mutation, active-expire gate, reply bytes, slowlog/latency/threat metrics,
-commandstats, errorstats, CLIENT argv accounting, and client-reply suppression
-remain isomorphic to the existing borrowed keyed-values path.
+DISK-LOW carry-forward hunk tested and reverted. The candidate routed canonical
+and generic borrowed single-member `SADD key member` packets to a fixed-shape
+`Runtime::execute_plain_sadd_one_borrowed`, bypassing the shared variadic
+`SADD`/`LPUSH`/`RPUSH` runtime plumbing. That was the right target from the
+arity sweep (`SADD` was `0.73x` fr/Redis at arity 1 but `1.16x` at arity 8 and
+`1.23x` at arity 16), but the isolated measurement did not pay enough.
 
-Profile/routing evidence: the latest arity sweep showed SADD is below Redis
-7.2.4 only at arity 1 (`0.73x` fr/Redis), then flips faster than Redis at 8
-members (`1.16x`) and 16 members (`1.23x`). That points at fixed per-command
-runtime cost, not set storage. This hunk intentionally does not touch
-`fr-store` SADD storage or the previously rejected compact-map single-probe
-family.
+Valid bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo bench -p fr-bench --profile release --bench
+keyed_write_vs_redis -- SADD_1v` on worker `vmi1227854`, after a per-crate
+`fr-server` release build on the same target dir. The bench harness now includes
+arity 1 in `keyed_write_vs_redis` so the filtered Criterion run exercises the
+Redis-benchmark default single-member SADD shape directly.
 
-Validation status: direct `rustfmt` on the touched Rust files passed, and `ubs
-crates/fr-runtime/src/lib.rs crates/fr-server/src/main.rs` returned nonzero only
-on the existing monolithic-file inventories while reporting clean fmt, clippy,
-cargo-check, and test-build sections in its shadow workspace. This commit
-records no candidate Redis-relative throughput ratio. Next turn must run the
-SADD P16/c50 Redis 7.2.4 throughput gate plus focused runtime/store correctness
-and conformance before deciding keep/revert.
+| gate | Redis 7.2.4 | FrankenRedis candidate | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/SADD_1v`, median throughput | `1.7901 Melem/s` | `1.3708 Melem/s` | `0.77x` | reject; still below 0.9 parity floor and only a noisy ~5% lift vs the prior `0.73x` routing baseline |
+
+Discarded harness misuse: `rch exec -- bash -lc 'cargo build --release -p
+fr-server && cargo bench ...'` did not run remotely; `rch` rejected the shell
+wrapper as a non-compilation command and the local fallback hit stale target-dir
+rustc metadata (`E0514`) before any benchmark executed. This is not performance
+evidence.
+
+Decision: revert the production `execute_plain_sadd_one_borrowed` helper and
+server-side routing shim; keep only the benchmark harness arity-1 coverage and
+this negative evidence. Do not retry single-member SADD runtime shape plumbing
+without a same-window control and a clearer path above the Redis parity floor.
 
 ## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup pending-bench
 
@@ -1248,3 +1253,23 @@ PENDING (disk-frozen, no cargo): locate the list RESTORE encoding-derivation
 verify with this harness (0 diffs) + fr-conformance core_list. The harness is committed but
 NOT yet registered in parity_suite (it currently surfaces this open bug); register after fix.
 Verify on recovery whether the divergence also occurs at the default cap=128 (large lists).
+
+### list RESTORE encoding bug — fix localization (cc, for one-shot landing on recovery)
+Narrowed the RESTORE quicklist→listpack downgrade (found above) to the encoding decision
+for bulk-built/restored lists under a NON-default `list-max-listpack-size`:
+- `Store::object_encoding` (lib.rs:7992-8020): for non-`-2` fill it trusts
+  `encoding_decided_by_write()`→`is_forced_quicklist()` first, else falls to
+  `list_fits_legacy_listpack_size()` (which DOES use the configured fill correctly via
+  `quicklist_packed_node_fits`). So the divergence means a restored list either (a) has
+  `decided_by_write=true` with `forced_quicklist` computed under the wrong budget, or (b)
+  `quicklist_packed_node_fits` mishandles a positive (entry-count) fill.
+- Prime suspect: `ListValue::rebuild_growth_state` (packed_set.rs:3211-3217) sets
+  `forced_quicklist = LIST_LP_OVERHEAD + raw_total > LIST_DEFAULT_BUDGET` — the **8KB
+  DEFAULT**, ignoring the configured `list-max-listpack-size`. If RESTORE
+  (`from_restored_quicklist2_nodes`) also marks `decided_by_write`, object_encoding trusts
+  this default-budget flag and reports listpack for a small-but-over-the-configured-cap list.
+- Fix candidates (verify w/ build+test + scripts/list_ops_differ.py on recovery): make the
+  bulk/RESTORE path NOT set `decided_by_write` (so object_encoding falls through to the
+  fill-correct `list_fits_legacy_listpack_size`), OR thread the configured fill into
+  `rebuild_growth_state`. Mirrors the SET RESTORE re-encode fix (bbyfz). Severity: narrow
+  (non-default list-max-listpack-size); confirm whether default cap=128 also diverges.
