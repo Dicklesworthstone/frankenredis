@@ -1657,3 +1657,16 @@ single-key cached-read fast path (0.53x → ~0.9x, diagnosed clean) spans fr-run
 fr-store (cache peek) + fr-server (dispatch wiring). With agent-mail DB corrupt (no formal
 reservation/coordination) I won't edit BlackThrush's dispatch core blind. Lever is fully
 scoped + ready for a coordinated implementation (or for BlackThrush, who owns fr-server).
+
+### WIN: single-key PFCOUNT cached-read borrowed fast path (0.54x -> ~1.0x) (cc)
+PFCOUNT was deep-pipeline 0.53-0.54x vs Redis 7.2.4 — pure DISPATCH overhead (fr's HLL
+cache+compute already byte-identical; it lacked a borrowed fast path while ZCARD has one).
+Added a cached-read fast path: store.pfcount_cache_hittable (immutable peek: live key + valid
+Redis HLL cardinality cache) + store.pfcount_cached_read (lfu+touch+keyspace-lookup, same
+side effects as the generic cache-HIT branch, NO recompute/dirty/propagate); wired as
+PlainCardinalityCmd::Pfcount (reuses the cardinality metrics/session machinery) gated on the
+cache hit, with parse_borrowed_plain_pfcount_packet in fr-server. Cache miss / invalid / wrong-
+type / expired / missing / multi-key all fall back to generic pfcount (recompute + may-replicate
+propagation preserved). MEASURED pipe=100 best-of-5: PFCOUNT 0.54x -> 1.01x (1.87x speedup),
+byte-correct (=506), ZCARD/GET unchanged. Gates: fr-store 654 unit, fr-conformance smoke 99/99,
+cmdstat_keyspace_parity_gate PASS (keyspace_hits/misses + cmdstat byte-exact, incl repeated-hit).

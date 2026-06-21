@@ -17348,6 +17348,66 @@ impl Store {
 
     /// PFCOUNT: return the approximate cardinality for one or more HLL keys.
     /// Multiple keys are merged into a temporary union before estimating.
+    /// (frankenredis cc PFCOUNT fast path) Immutable, side-effect-free predicate:
+    /// is single-key PFCOUNT a pure cache HIT that the borrowed fast path may serve
+    /// without recompute/propagation? True iff the key is live (not logically
+    /// expired — peeked, NOT deleted), holds a `Value::String` carrying a VALID
+    /// Redis HLL cardinality cache (same checks `pfcount`'s cache-HIT branch makes).
+    /// A miss/invalid-cache/wrong-type/expired/missing key returns false so the
+    /// caller falls back to the generic `pfcount` (which handles recompute, dirty,
+    /// digest-stale, and may-replicate propagation).
+    #[must_use]
+    pub fn pfcount_cache_hittable(&self, key: &[u8], now_ms: u64) -> bool {
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            return false;
+        }
+        let Some(entry) = self.entries.get(key) else {
+            return false;
+        };
+        let Value::String(data) = &entry.value else {
+            return false;
+        };
+        hll_has_redis_cache_header(data)
+            && hll_redis_header_is_valid(data)
+            && hll_cache_read(data).is_some()
+    }
+
+    /// (frankenredis cc PFCOUNT fast path) Read the cached HLL cardinality for a
+    /// key the caller has confirmed via [`Self::pfcount_cache_hittable`]. Performs
+    /// EXACTLY the side effects of `pfcount`'s single-key cache-HIT branch — LFU
+    /// frequency bump (when tracking) then LRU/access `touch` — and NO others (a
+    /// cache hit neither recomputes, dirties, marks the digest stale, nor
+    /// propagates), so it is byte- and stat-identical to the generic cache hit.
+    pub fn pfcount_cached_read(&mut self, key: &[u8], now_ms: u64) -> u64 {
+        // Generic PFCOUNT records one keyspace lookup per source key via
+        // `record_source_key_lookups` (exists_no_touch) — store.pfcount itself is
+        // keyspace-no-stat. Mirror that here so the fast path bumps keyspace_hits
+        // identically (the key is a confirmed hit). (frankenredis cc)
+        let _ = self.exists_no_touch(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let entry = self
+            .entries
+            .get_mut(key)
+            .expect("pfcount_cached_read requires pfcount_cache_hittable == true");
+        if lfu_tracking_enabled {
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        let card = match &entry.value {
+            Value::String(data) => hll_cache_read(data)
+                .expect("pfcount_cached_read requires a valid cached HLL header"),
+            _ => unreachable!("pfcount_cache_hittable guarantees Value::String"),
+        };
+        entry.touch(now_ms);
+        card
+    }
+
     pub fn pfcount(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;

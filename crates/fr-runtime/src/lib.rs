@@ -497,6 +497,12 @@ pub enum PlainCardinalityCmd {
     Zcard,
     Hlen,
     Xlen,
+    /// Single-key `PFCOUNT key` served ONLY when the HLL cardinality cache is a
+    /// valid hit (gated in `can_execute_plain_cardinality_borrowed`); a cache
+    /// miss / wrong-type / missing key falls back to the generic handler which
+    /// recomputes + propagates. Returns the cached cardinality as an Integer.
+    /// (frankenredis cc PFCOUNT fast path)
+    Pfcount,
 }
 
 impl PlainCardinalityCmd {
@@ -505,6 +511,7 @@ impl PlainCardinalityCmd {
             PlainCardinalityCmd::Zcard => "ZCARD",
             PlainCardinalityCmd::Hlen => "HLEN",
             PlainCardinalityCmd::Xlen => "XLEN",
+            PlainCardinalityCmd::Pfcount => "PFCOUNT",
         }
     }
 
@@ -513,6 +520,7 @@ impl PlainCardinalityCmd {
             PlainCardinalityCmd::Zcard => "zcard",
             PlainCardinalityCmd::Hlen => "hlen",
             PlainCardinalityCmd::Xlen => "xlen",
+            PlainCardinalityCmd::Pfcount => "pfcount",
         }
     }
 }
@@ -13483,7 +13491,18 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return false;
+        }
+        // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate);
+        // any miss/invalid-cache/wrong-type/expired/missing key falls back to the
+        // generic pfcount handler.
+        if matches!(cmd, PlainCardinalityCmd::Pfcount)
+            && !self.server.store.pfcount_cache_hittable(key, now_ms)
+        {
+            return false;
+        }
+        true
     }
 
     /// Conservative borrowed runtime fast path for `ZCARD key` / `HLEN key`:
@@ -13521,6 +13540,11 @@ impl Runtime {
             PlainCardinalityCmd::Zcard => self.server.store.zcard(key, now_ms),
             PlainCardinalityCmd::Hlen => self.server.store.hlen(key, now_ms),
             PlainCardinalityCmd::Xlen => self.server.store.xlen(key, now_ms),
+            // can_execute_plain_cardinality_borrowed gated this on a valid cache
+            // HIT, so pfcount_cached_read cannot fail (pure read, no recompute).
+            PlainCardinalityCmd::Pfcount => {
+                Ok(self.server.store.pfcount_cached_read(key, now_ms) as usize)
+            }
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
