@@ -4,6 +4,91 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-ohsk5` keyed-write packet-id deferral rejected
+
+BOLD-VERIFY refresh targeted the remaining arity-one keyed-write losses without
+touching the dirty `fr-store` worktree files owned by other lanes. The measured
+current surface used the existing warm target dir
+`/data/projects/.rch-targets/frankenredis-cod-a`, explicit
+`nightly-2026-06-09` to match target metadata, and vendored Redis 7.2.4 via the
+filtered per-crate Criterion bench:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis
+cargo +nightly-2026-06-09 bench -p fr-bench --profile release --bench
+keyed_write_vs_redis -- 1v --noplot`
+
+Current baseline:
+
+| gate | Redis 7.2.4 median throughput | FrankenRedis median throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/LPUSH_1v` | `953.57 Kelem/s` | `753.24 Kelem/s` | `0.79x` | loss |
+| `keyed_write_vs_redis/RPUSH_1v` | `1.0069 Melem/s` | `734.37 Kelem/s` | `0.73x` | loss |
+| `keyed_write_vs_redis/SADD_1v` | `1.1279 Melem/s` | `797.36 Kelem/s` | `0.71x` | loss |
+
+Attempted lever: defer `next_packet_id()` in
+`Runtime::execute_plain_keyed_values_write_borrowed` until the cold
+time-budget threat-event branch. The alien-graveyard/artifact rationale was
+request-scope metadata laziness: remove a per-command atomic from the hot path
+while preserving exact threat-event packet IDs when the branch actually fires.
+
+Candidate result:
+
+| gate | candidate fr/Redis | Criterion verdict for FrankenRedis | decision |
+|---|---:|---|---|
+| `LPUSH_1v` | `0.80x` | no change detected, p=`0.96` | reject |
+| `RPUSH_1v` | `0.75x` | no change detected, p=`0.96` | reject |
+| `SADD_1v` | `0.74x` | no change detected, p=`0.37` | reject |
+
+The Redis side moved between runs, so the ratio lift is not attributable to the
+candidate. The source hunk was reverted; `crates/fr-runtime/src/lib.rs` has no
+remaining production diff from this experiment. This is negative evidence
+against standalone packet-id laziness as a keyed-write lever.
+
+Harness notes: an `rch exec -- cargo bench ... -- 1v` attempt on `vmi1149989`
+failed before measurement because the remote rewritten target dir lacked the
+`frankenredis` server binary. A local run with the default nightly failed with
+target-dir rustc metadata mismatch (`E0514`). Both are setup failures, not perf
+evidence.
+
+Scorecard: arity-one keyed writes remain **0 wins / 3 losses / 0 neutral** vs
+Redis 7.2.4. Retry condition: do not retry packet-id/metrics micro-laziness
+unless a profile names `next_packet_id` or keyed-write metrics as a >=0.1%
+self-time frame. The next high-EV route is a genuinely different primitive:
+batch-typed keyed-write execution/request arena or list/set representation work,
+not another standalone metadata branch trim.
+
+## 2026-06-21 cod-b `frankenredis-uhthd` EXISTS no-expiry fast path rejected
+
+Rejected source hunk: `Store::exists_no_touch` briefly fast-pathed persistent
+keyspaces (`count_expiring_keys() == 0`) with a direct `entries.contains_key`
+probe and manual hit/miss counter updates, falling back to
+`record_keyspace_lookup` only when TTL-bearing keys existed. The TTL fallback
+was covered by a focused `fr-store` unit extension, but the performance result
+did not justify keeping the branch.
+
+Measured gate: filtered per-crate Criterion bench
+`cargo bench --profile release -p fr-bench --bench exists_vs_redis --
+--noplot`, with `RCH_WORKER=hz2`, `RCH_REQUIRE_REMOTE=1`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`, and
+vendored Redis 7.2.4 via
+`REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server`.
+`cargo bench --release` was tried first because that was the requested spelling,
+but this toolchain rejects it; `--profile release` is the equivalent accepted
+Cargo invocation.
+
+| gate | candidate ratio vs Redis 7.2.4 | current-control ratio vs Redis 7.2.4 | fr candidate/control | verdict |
+|---|---:|---:|---:|---|
+| `exists8_all_hit`, Criterion mean time | `1.143x` time, `0.875x` throughput | `1.054x` time, `0.948x` throughput | `1.098x` slower | reject |
+| `exists8_half_hit`, Criterion mean time | `1.202x` time, `0.832x` throughput | `1.284x` time, `0.779x` throughput | `1.091x` slower | reject |
+| `exists8_duplicates`, Criterion mean time | `1.150x` time, `0.869x` throughput | `1.161x` time, `0.862x` throughput | `1.093x` slower | reject |
+
+Decision: source reverted before commit. Redis moved enough between the two
+small Criterion runs that the Redis-relative half-hit ratio alone is not a keep
+signal; the direct FrankenRedis candidate/control comparison regressed all
+three shapes by roughly 9-10%. Do not retry this no-expiry `EXISTS` branch
+without a new profile showing `drop_if_expired`/expiry-side probing dominates.
+
 ## 2026-06-21 cod-a `frankenredis-ohsk5` SADD single-member runtime path rejected
 
 DISK-LOW carry-forward hunk tested and reverted. The candidate routed canonical
@@ -1413,3 +1498,17 @@ core_list + core_list_live_redis green. The encoding_rdb gate's list RESTORE che
 must-pass (catches regressions). RESIDUAL (murky, downgraded severity): DEBUG RELOAD encoding
 — fr round-trips in-memory (preserves) vs redis save+load re-derives; likely a save-vs-nosave
 mode nuance, left as KNOWN in the gate, NOT addressed by this fix.
+
+### CORRECTION: DEBUG RELOAD encoding "divergence" was a test artifact (fr DEBUG disabled)
+With fr started `--enable-debug-command yes` (fr defaults to "no", matching upstream), the
+encoding_rdb_differ gate is **78 checks, 0 regressions, 0 known** — RESTORE (10ovx fix) AND
+DEBUG RELOAD are both byte-exact vs Redis 7.2.4. My earlier "DEBUG RELOAD over-keeps" finding
+was an artifact: fr DEBUG was disabled in those probe runs, so fr's DEBUG RELOAD errored
+(no-op, kept encoding) vs redis's real reload. No DEBUG-RELOAD encoding bug exists. Gate's
+reload check promoted to must-pass; usage note updated (both servers need --enable-debug-command).
+
+### NEW perf lever target: collection RESTORE/RDB-load DECODE = 0.37x (redis 2.7x faster)
+collection_reload_headtohead (2000 hash+set+zset, 40 members, fr DEBUG enabled): DEBUG RELOAD
+0.337x, DUMP-encode 0.747x, **RESTORE-decode 0.373x** (fr 54.4ms vs redis 20.3ms). The decode
+half is the dominant collection-RDB gap (the "keep-listpack / zero-decode" lever). Next:
+per-type RESTORE profiling to find the slowest type, then bulk-build it (qxfmr/duab9 pattern).

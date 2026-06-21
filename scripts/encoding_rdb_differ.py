@@ -5,13 +5,13 @@ probes into one permanent gate. Covers hash/zset/set/list under non-default
 entry-count and per-value caps, checking encoding after: live build+shrink,
 RESTORE-of-dump, DEBUG RELOAD, and COPY.
 
-KNOWN-OPEN: list RDB-round-trip encoding stickiness (frankenredis-10ovx) — fr
-diverges from redis on RESTORE (downgrades) and DEBUG RELOAD (over-keeps) for a
-crossed-then-shrunk quicklist. Those specific list cases are reported as KNOWN and
-do NOT fail the gate; ANY OTHER diff is a regression and fails (exit 1).
+All-must-pass strict gate (exit 1 on ANY diff). frankenredis-10ovx (list RESTORE
+quicklist-stickiness downgrade) is FIXED (d516c8aa1); the earlier "DEBUG RELOAD"
+divergence was a test artifact (fr DEBUG disabled). Run BOTH servers with
+--enable-debug-command yes so the RELOAD checks are valid.
 
 Usage: encoding_rdb_differ.py <redis_port> <fr_port>   (both running; redis needs
---enable-debug-command yes for the RELOAD checks).
+--enable-debug-command yes (BOTH servers) for the RELOAD checks).
 """
 import socket, sys
 
@@ -80,10 +80,8 @@ def main():
                 if da is not None:
                     both("DEL", "r"); red.cmd("RESTORE", "r", "0", da); fr.cmd("RESTORE", "r", "0", da)
                     check(f"{name}_entrycap{cap}_n{n}_restore", "r")  # hash/zset/set RESTORE re-derives OK
-                # KNOWN: fr DEBUG RELOAD preserves sticky in-memory encoding rather than
-                # re-deriving like redis's RDB-load does, so a shrunk hash/set/list stays
-                # promoted where redis converts down. Distinct from 10ovx (RESTORE-of-dump).
-                both("DEBUG", "RELOAD"); check(f"{name}_entrycap{cap}_n{n}_reload", "k", is_known_10ovx=True)
+                # DEBUG RELOAD must match (clean with fr --enable-debug-command yes).
+                both("DEBUG", "RELOAD"); check(f"{name}_entrycap{cap}_n{n}_reload", "k")
         # per-value cap: one oversized element -> hashtable/skiplist
         both("CONFIG", "SET", ecap, "128"); both("CONFIG", "SET", vcap, "16")
         both("FLUSHALL")
@@ -107,9 +105,10 @@ def main():
             if da is not None:
                 both("DEL", "r"); red.cmd("RESTORE", "r", "0", da); fr.cmd("RESTORE", "r", "0", da)
                 check(f"list_cap{cap}_n{n}_restore", "r")  # 10ovx FIXED — must-pass, catches regressions
-            # DEBUG RELOAD stays KNOWN: fr round-trips in-memory (preserves encoding) vs
-            # redis save+load re-derivation — murky save-vs-nosave nuance, not a clear core bug.
-            both("DEBUG", "RELOAD"); check(f"list_cap{cap}_n{n}_reload", "k", is_known_10ovx=True)
+            # DEBUG RELOAD must match too (verified clean once fr is started with
+            # --enable-debug-command yes; the earlier "reload divergence" was a test
+            # artifact from fr DEBUG being disabled -> erroring no-op).
+            both("DEBUG", "RELOAD"); check(f"list_cap{cap}_n{n}_reload", "k")
     print(f"\nTOTAL={total} REGRESSIONS={regressions} KNOWN-10ovx={known}")
     sys.exit(1 if regressions else 0)
 
