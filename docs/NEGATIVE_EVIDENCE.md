@@ -1307,3 +1307,13 @@ root cause is **RESTORE not preserving redis's one-way listpack→quicklist STIC
   preservation. Care: must NOT over-convert genuinely-small single-listpack-node lists that
   redis WOULD convert to listpack on load (the lsetql/a0p5p hysteresis boundary). This is
   exactly why it needs empirical build+test, not a blind edit.
+
+### list RESTORE encoding bug — scope CONFIRMED list-specific (cc)
+Probed hash/zset/set encoding-after-shrink AND encoding-after-RESTORE under non-default
+{hash,zset,set}-max-listpack-entries = 4/128, n = 6/10/200 (build past cap → shrink to 3 →
+DUMP → cross-RESTORE → OBJECT ENCODING): **36 checks, 0 diffs.** So hash/zset/set correctly
+preserve one-way listpack→hashtable/skiplist stickiness on RESTORE (SET via bbyfz). The
+RESTORE-stickiness loss is **LIST-ONLY** — fix is isolated to the quicklist RESTORE path
+(`from_restored_quicklist2_nodes` + the bulk-build encoding re-derivation), no analogous
+hash/zset/set work needed. Verification harness: scripts/list_ops_differ.py (lists) +
+this enc_restore probe (other types, clean).
