@@ -2521,3 +2521,26 @@ NEXT (for the fixer, likely cod-a or a listpack-encoder pass): DUMP both engines
 this case, decode entry-by-entry, find the element fr encodes 1B larger, align fr's encoder to
 redis byte-for-byte. NOT a clean DUMP-encode-only fix (encoder change → affects all collection
 DUMP, regression risk) — xyyfb stays blocked. No code change kept (instrumentation stashed).
+
+### s36di DEFINITIVELY root-caused (cc): ChunkedList BUILD node-size accounting over-counts (NOT encoder/DUMP)
+Decisive test: at list-max-listpack-size=-5 (force single node) fr's DUMP of the seed=1 trial=586
+70-element list is **byte-IDENTICAL to redis (6992 B, 1 node, 0 diffs)**. So fr's listpack ENTRY
+ENCODER and encode_dump_quicklist2 are byte-exact — the actual full listpack is 6992 B < 8192. At
+fill=128 fr nonetheless splits into 2 chunks at BUILD time: its in-memory ChunkedList node-size
+accounting OVER-COUNTS (the prior fork's "chunk1=8104 B/69 entries" was fr's ESTIMATE; the actual
+69-entry listpack is ~6900). Cause: the append-path node-size tracking sums RAW element lengths
+(or a raw+overhead estimate) instead of the listpack-ENCODED length — int-encoded elements (e.g.
+an 18-digit string → 9 encoded bytes) over-count by ~raw-minus-encoded, ~1200 B over 70 entries,
+tipping the estimate past SIZE_SAFETY_LIMIT (8192) so it splits where redis (exact node->sz) keeps
+1 node. FIX LOCATION: ChunkedList append/seal node-size accounting (cod-a / LPUSH-RPUSH domain) —
+make the per-node running byte count use listpack_entry_encoded_len (exact), not raw, matching
+redis's exact node->sz. The encoder + DUMP-encode need NO change. xyyfb unblocks once the build
+accounting is exact. (Verified: encode_dump_quicklist2 + listpack_entry_encoded_len are correct.)
+
+TWO LATENT bugs found while investigating (separate from s36di; flag for the fr-store list owner):
+1. QUICKLIST_SIZE_ESTIMATE_OVERHEAD = 8 (lib.rs:22123) but redis SIZE_ESTIMATE_OVERHEAD = 11.
+   Lenient direction (fr packs more); harmless for the s36di case but a real upstream-mismatch.
+2. listpack_entry_encoded_len backlen_len boundaries are off-by-one (fr-persist lib.rs ~2397):
+   `len < 16_383` / `< 2_097_151` / `< 268_435_455` should be `< 16_384` / `< 2_097_152` /
+   `< 268_435_456` (redis lpEncodeBacklen). Only affects entries with encoded data_len exactly at
+   those boundaries (≥16 KB) — rare, latent. Both NOT the s36di cause (failing entries are small).
