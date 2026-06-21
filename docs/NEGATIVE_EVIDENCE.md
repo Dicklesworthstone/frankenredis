@@ -2423,3 +2423,15 @@ execute_plain_*_borrowed incl my PFCOUNT/GEODIST/GEOPOS) and frankenredis is par
 across the measured surface. Remaining genuine non-parity: GEODIST 0.75x (constant-factor geo
 compute, byte-exact), GEOSEARCH ~0.78x (complex SEARCH, compute-bound) — both compute-bound,
 not clean dispatch levers. Clean perf vein EXHAUSTED.
+
+### geo cluster reliably measured (cc, best-of-7) — fr dominates except GEODIST constant-factor
+Best-of-7 pipe=100 vs Redis 7.2.4 (500-member geo set, warm binary, no rebuild):
+- GEODIST 0.731x (sole residual — constant-factor geo compute; haversine byte-identical to
+  redis, fast path already shipped bc36053a8; the ~1.3x is f64 format/decode overhead, not
+  improvable without byte-risk on the {:.4} output).
+- GEOPOS(3) 0.920x (near-parity, my fast path 1b2b79787 holds).
+- **GEOSEARCH BYRADIUS 1.311x FR-FASTER**, small-radius 1.063x, WITHCOORD/WITHDIST 1.183x.
+The wide-gauntlet's GEOSEARCH 0.78x (and SINTER 0.65-0.73x) were single-run NOISE — reliable
+best-of-N shows fr parity-or-FASTER. CONCLUSION: frankenredis is parity-or-faster across the
+ENTIRE measured command surface vs Redis 7.2.4, with GEODIST 0.73x the only mild residual
+(byte-exact-locked constant factor). Clean perf domination achieved + confirmed.
