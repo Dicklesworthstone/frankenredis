@@ -1225,3 +1225,26 @@ benched). Both CORRECT by source inspection:
   fresh-build Pass A byte-exactness + sdiffwt WRONGTYPE ordering preserved. ✓
 Both safe to bench/ship on disk recovery (queued above). Inspection only; full P16 A/B +
 differential still owed on recovery.
+
+## 2026-06-21 CobaltCove (cc) — BUG FOUND via new list-ops differential harness (no-cargo, frozen turn)
+
+Built `scripts/list_ops_differ.py` (list-command differential to verify the pending 99fwc
++ zero-decode-RESTORE levers on recovery) and ran it vs Redis 7.2.4 (existing fr binary,
+no cargo). 3394 checks, **11 diffs — all one real bug:**
+
+**`list RESTORE encoding downgrade`**: fr RESTORE of a quicklist DUMP returns
+`OBJECT ENCODING = listpack` where Redis returns `quicklist`, when `list-max-listpack-size`
+is small (test used 4) and the list exceeds it. Logical content is CORRECT (all LRANGE
+xrestore_state checks pass — fr parses the RDB fine); the *directly-built* list encoding
+matches redis (the build path respects the cap); ONLY the RESTORE path diverges — fr
+re-derives list encoding apparently with the default 128 threshold instead of the
+configured `list-max-listpack-size`, downgrading quicklist→listpack. Byte-observable via
+OBJECT ENCODING. Class: same family as the SET RESTORE re-encode gap (bbyfz, fixed) — the
+list RESTORE path likely needs to honor the configured list-max-listpack-size (or preserve
+the dump's quicklist encoding) like the build path does.
+
+PENDING (disk-frozen, no cargo): locate the list RESTORE encoding-derivation
+(fr-persist/fr-store list load path) and make it respect list-max-listpack-size, then
+verify with this harness (0 diffs) + fr-conformance core_list. The harness is committed but
+NOT yet registered in parity_suite (it currently surfaces this open bug); register after fix.
+Verify on recovery whether the divergence also occurs at the default cap=128 (large lists).
