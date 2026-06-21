@@ -2489,3 +2489,18 @@ this is cross-engine DUMP BYTE-exactness, not data corruption). xyyfb cannot be 
 until both are byte-exact. The differ is a GOOD probe (catches it); leaving it excluded from the
 suite (as before) until s36di residual is fixed. FLAGGED to cod-a (s36di/xyyfb owner). Repro:
 `scripts/quicklist_dump_boundary_differ.py --oracle <r> --fr <f> --seed 1 --trials 600`.
+
+### s36di residual ROOT-CAUSED (cc): DUMP node-COUNT divergence (fr ChunkedList chunks != redis nodes)
+Byte-level diff of the listpack-case divergence (seed=1 trial=586, n=70, enc=listpack BOTH):
+  fr  DUMP[0:3] = 12 **02** 02 ...   (RDB_TYPE_LIST_QUICKLIST_2, node_count=2)
+  rd  DUMP[0:3] = 12 **01** 02 ...   (node_count=1)
+First differing byte is byte 1 = the quicklist NODE COUNT. fr emits **2** quicklist nodes for a
+list redis emits as **1** — even though OBJECT ENCODING reports `listpack` for both. Root cause:
+fr's ChunkedList holds 2 internal chunks where redis keeps a single listpack node, so DUMP
+serializes a different node structure (=> different bytes + length). This is NOT a listpack
+entry-encoder bug (the per-element encoding matches); it's the ChunkedList chunk-count /
+node-packing on DUMP diverging from redis's `_quicklistNodeAllowInsert` packing. Same class for
+the quicklist-encoded n=130/900 cases. This is the s36di residual (cod-a / ChunkedList domain) —
+the fix is to make DUMP node-packing (or the chunk structure) match redis's node sizing so the
+emitted node count is identical. Until then xyyfb (hard gate) stays blocked. Reusable repro:
+replay rng(seed) from quicklist_dump_boundary_differ.py to the failing trial + diff DUMP byte 1.
