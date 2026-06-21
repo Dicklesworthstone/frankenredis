@@ -202,13 +202,17 @@ turns). Keep claims honest — mark which.
 - frankenredis-mixed-zset-listpack-direct-emit-vly2n / cod-a: `fr-persist`
   compact zset listpack encode now streams member/score entries directly for
   mixed integer/fractional score sets instead of building `score_bytes` and
-  `flat` temporary vectors — CODED (reasoned; batch benchmark pending).
-  Integer-valued scores use the stack `decimal_i64_scratch` path; fractional
-  score formatting remains unchanged. Guard pins mixed-score ordering,
-  same-score member tie ordering, and decoded listpack entry bytes. Retry
-  condition if rejected: only revisit with a fresh mixed-score compact-zset
-  DUMP/RDB profile naming listpack construction or score formatting, not as
-  generic vector cleanup.
+  `flat` temporary vectors — MEASURED KEEP. Focused unsorted mixed-zset
+  `fr-persist` gate (`rdb_codec_mixed_zset/encode_mixed_zset_rdb`, 600 zsets x
+  96 members, `vmi1227854`) measured current direct emit `7.2671 ms` /
+  `82.564 Kelem/s` versus temporary buffered control `8.3999 ms` /
+  `71.429 Kelem/s`, a `1.1559x` candidate/control win. Redis 7.2.4 split
+  check remains honest loss/neutral: zset-only `DEBUG RELOAD` `1.046x`
+  fr/Redis, DUMP encode half `0.749x`, RESTORE decode half `0.450x` for
+  2,000 zsets x 40 members. Guard pins mixed-score ordering, same-score member
+  tie ordering, and decoded listpack entry bytes. Retry condition: do not
+  revisit generic zset listpack vector cleanup; route remaining loss to
+  `fr-store::dump_key` compact-zset materialization or RESTORE decode/rebuild.
 - frankenredis-hash-listpack-direct-emit-dv9n5 / cod-a: `fr-persist`
   compact hash listpack encode now streams field/value entries directly into
   the listpack payload instead of allocating a `Vec<&[u8]>` staging array before

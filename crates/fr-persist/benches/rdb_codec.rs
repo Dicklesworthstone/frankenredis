@@ -122,6 +122,30 @@ fn build_quicklist_entries() -> Vec<RdbEntry> {
     entries
 }
 
+fn build_mixed_zset_entries() -> Vec<RdbEntry> {
+    let mut entries = Vec::with_capacity(600);
+    for key in 0..600 {
+        let members = (0..96)
+            .rev()
+            .map(|member| {
+                let score = if member % 3 == 0 {
+                    (member as i64 - 48) as f64
+                } else {
+                    (member as f64 * 1.5) + ((key % 7) as f64 * 0.125)
+                };
+                (format!("m{member:03}:k{}", key % 17).into_bytes(), score)
+            })
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("z:{key:06}").into_bytes(),
+            value: RdbValue::SortedSet(members),
+            expire_ms: None,
+        });
+    }
+    entries
+}
+
 fn bench_codec(c: &mut Criterion) {
     let entries = build_entries();
     let encoded = encode_rdb(&entries, &[]);
@@ -144,6 +168,14 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| encode_rdb(std::hint::black_box(&quicklist_entries), &[]))
     });
     quicklist.finish();
+
+    let mixed_zset_entries = build_mixed_zset_entries();
+    let mut mixed_zset = c.benchmark_group("rdb_codec_mixed_zset");
+    mixed_zset.throughput(Throughput::Elements(mixed_zset_entries.len() as u64));
+    mixed_zset.bench_function("encode_mixed_zset_rdb", |b| {
+        b.iter(|| encode_rdb(std::hint::black_box(&mixed_zset_entries), &[]))
+    });
+    mixed_zset.finish();
 }
 
 criterion_group!(benches, bench_codec);

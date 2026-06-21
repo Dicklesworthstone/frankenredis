@@ -10,6 +10,28 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: mixed zset listpack direct emit measured keep
+
+Release-readiness impact: keep the scoped `fr-persist` mixed-score zset listpack
+encoder win, but do not upgrade the end-to-end zset persistence cell. The
+focused same-worker gate proves the direct emitter beats the old
+`score_bytes` + flat-vector control; the Redis 7.2.4 split check still shows
+zset `DUMP` encode and `RESTORE` decode as release risks.
+
+| gate | result | readiness impact |
+|---|---:|---|
+| `rdb_codec_mixed_zset/encode_mixed_zset_rdb`, direct emit | `7.2671 ms`, `82.564 Kelem/s` | kept focused encoder win |
+| same, temporary buffered control | `8.3999 ms`, `71.429 Kelem/s` | direct emit `1.1559x` faster |
+| zset-only `DEBUG RELOAD`, 2,000 x 40 | `1.046x` fr/Redis | neutral/noisy parity |
+| zset-only pipelined `DUMP` encode half | `0.749x` fr/Redis | Redis faster; release risk remains |
+| zset-only pipelined `RESTORE` decode half | `0.450x` fr/Redis | Redis faster; decode/rebuild remains larger risk |
+
+Scorecard: focused A/B **1 win / 0 losses / 0 neutral**; Redis-relative split
+gate **0 wins / 2 losses / 1 neutral**. Combined honest score:
+**1 win / 2 losses / 1 neutral**. Next zset persistence target is
+`fr-store::dump_key` compact-zset materialization or RESTORE decode/rebuild,
+not another `fr-persist` listpack roster cleanup.
+
 ## 2026-06-21 cod-a addendum: quicklist2 RDB direct emit rejected
 
 Release-readiness impact: no new Redis-relative win claim. The measured

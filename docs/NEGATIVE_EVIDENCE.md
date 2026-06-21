@@ -4,6 +4,59 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-mixed-zset-listpack-direct-emit-vly2n` measured keep, Redis path still split-loss
+
+BOLD-VERIFY targeted the `fr-persist` compact zset listpack encoder because the
+mixed integer/fractional score path had an avoidable allocation roster:
+`score_bytes: Vec<Vec<u8>>` plus a flattened `Vec<&[u8]>` before final listpack
+construction. The alien-graveyard/artifact rationale was fused deterministic
+codec emission: when the output grammar is known, stream member/score entries
+directly into the target listpack buffer and use stack decimal scratch for
+integer-valued scores.
+
+Focused gate added in this pass:
+`rdb_codec_mixed_zset/encode_mixed_zset_rdb`, 600 zset keys, 96 members/key,
+deliberately unsorted input, mixed integer/fractional scores. The unsorted input
+forces both candidate and old control through the same canonical sort, isolating
+direct entry emission from the later presorted-input fast path.
+
+Same-worker A/B (`vmi1227854`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`,
+`rch exec -- cargo bench -p fr-persist --bench rdb_codec --
+rdb_codec_mixed_zset/encode_mixed_zset_rdb --noplot`):
+
+| gate | implementation | median time | throughput | decision |
+|---|---|---:|---:|---|
+| focused mixed-zset RDB encode | current direct emit | `7.2671 ms` | `82.564 Kelem/s` | keep |
+| same | temporary buffered `score_bytes` + flat control | `8.3999 ms` | `71.429 Kelem/s` | control slower |
+
+Candidate result: direct emit is `1.1559x` faster than the buffered control
+(`8.3999 / 7.2671`). Criterion reported the temporary old path as a `+15.588%`
+time regression and `-13.486%` throughput regression against the current
+direct-emitter history. The temporary control hunk was removed; production
+source remains on the direct-emitter path.
+
+Fresh Redis 7.2.4 split check, zset-only
+`scripts/collection_reload_headtohead.py 18083 18084 --trials 7 --hashes 0
+--sets 0 --zsets 2000 --members 40`, using vendored Redis and the warm
+`/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis` binary:
+
+| gate | fr median | Redis median | fr/Redis throughput ratio | verdict |
+|---|---:|---:|---:|---|
+| `DEBUG RELOAD` save+load | `21.1 ms` | `21.1 ms` | `1.046x` | neutral/noisy parity |
+| pipelined `DUMP` encode half | `14.9 ms` | `11.2 ms` | `0.749x` | loss |
+| pipelined `RESTORE` decode half | `18.0 ms` | `8.1 ms` | `0.450x` | loss |
+
+Artifact log path:
+`artifacts/optimization/frankenredis-bold-verify-coda/20260621T0835Z-mixed-zset-direct-emit-verify/zset-reload-headtohead-2000.log`.
+
+Scorecard for this pass: focused direct-emitter A/B **1 win / 0 losses / 0
+neutral**; Redis-relative split gate **0 wins / 2 losses / 1 neutral**. Combined
+honest score: **1 win / 2 losses / 1 neutral**. Keep the already-shipped
+`fr-persist` direct emitter, but do not claim zset persistence dominance:
+remaining release work is `fr-store::dump_key` compact-zset DUMP materialization
+and RESTORE decode/rebuild, not another generic listpack vector cleanup.
+
 ## 2026-06-21 cod-a `frankenredis-quicklist2-direct-emit-g7ag5` quicklist2 direct emit rejected and reverted
 
 BOLD-VERIFY targeted the `fr-persist` QUICKLIST_2 RDB encode path because prior
