@@ -4,6 +4,60 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` quick memory rebaseline and set-algebra mixed score
+
+BOLD-VERIFY rechecked the `uhthd` store lane after the rejected exact-capacity,
+EXISTS, compact-score, and RANDOMKEY-capacity micro-levers. The fresh source
+decision is **no hunk shipped**: the remaining memory gap is structural table and
+representation overhead, not another safe one-field reserve/cache tweak.
+
+Release build:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo build --release -p fr-server -p fr-bench`, remote
+`vmi1149989`; `frankenredis` sha256
+`55da5f2e9d91b803531663e19bea17fcd71ddea9e676f21baa3913470fc25479`.
+
+Quick fresh-process memory rebaseline used vendored Redis 7.2.4 and
+`scripts/memory_baseline_capture.py --quick`, scale 20k, ports from
+`FR_BENCH_PORT_BASE=48551`. The harness captured
+`.bench-history/memory_baseline.latest.json` and failed its ratchet because
+`string_1k` moved from stored RSS ratio `0.955x` to `1.158x`.
+
+| data type | fr/Redis RSS | fr/Redis used_memory | verdict |
+|---|---:|---:|---|
+| keyspace | `1.445x` | `0.492x` | loss |
+| string_1k | `1.158x` | `0.767x` | loss; ratchet failure |
+| list | `0.972x` | `0.062x` | RSS win |
+| hash | `1.074x` | `0.199x` | small loss |
+| set | `0.994x` | `0.116x` | RSS win |
+| zset | `1.130x` | `0.147x` | loss |
+| stream | `1.052x` | `1.085x` | loss |
+
+Focused per-crate Redis 7.2.4 Criterion gate:
+`AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo bench --profile release -p fr-bench --bench
+set_algebra_vs_redis -- --noplot`. The first `cargo bench --release` attempt
+failed because this Cargo rejects `--release` for benches; the first
+release-profile rerun failed on `ovh-a` because the remote worker lacked the
+`fr-server` binary in its worker-scoped target path. Those are harness setup
+failures, not performance evidence.
+
+| gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `SINTERSTORE` | `766.51 us` | `361.09 us` | `0.471x` | `2.123x` | win |
+| `SDIFFSTORE` | `877.24 us` | `424.35 us` | `0.484x` | `2.067x` | win |
+| `SUNIONSTORE` | `9.2308 ms` | `12.078 ms` | `1.308x` | `0.764x` | loss |
+
+Scorecard: quick RSS **2 wins / 5 losses / 0 neutral**; set-algebra throughput
+**2 wins / 1 loss / 0 neutral**; source score **0 kept hunks / 0 reverted
+hunks / 1 structural no-source route**. Do not retry Entry tail packing,
+exact packed-buffer reserves, zset score-byte tagging, no-expiry EXISTS branch
+gating, or RANDOMKEY cache-capacity tweaks. The next radical lever is a full
+keyspace/table representation change that removes side-index families together,
+or a retained compact representation for hash/zset/list surfaces with
+same-current A/B proof.
+
 ## 2026-06-21 cod-a `frankenredis-hash-listpack-direct-emit-dv9n5` measured keep, Redis path still loss
 
 BOLD-VERIFY targeted the `fr-persist` compact hash listpack encoder because the

@@ -1,5 +1,52 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b BOLD-VERIFY rebaseline (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+  cargo build --release -p fr-server -p fr-bench`, remote `vmi1149989`.
+- Binary: `/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`
+  sha256 `55da5f2e9d91b803531663e19bea17fcd71ddea9e676f21baa3913470fc25479`.
+- Source decision: **no source hunk shipped**. The failed/rejected micro-lever
+  family is now exact packed-buffer reserves, Entry-tail packing, tagged zset
+  score bytes, no-expiry EXISTS branch gating, and RANDOMKEY cache-capacity
+  tricks. Remaining `uhthd` work needs a whole representation/table lever.
+
+Quick memory baseline vs Redis 7.2.4 (`scripts/memory_baseline_capture.py
+--quick`, scale 20k, ports from `FR_BENCH_PORT_BASE=48551`) captured
+`.bench-history/memory_baseline.latest.json` and failed its ratchet because
+`string_1k` moved from stored RSS ratio `0.955x` to `1.158x`.
+
+| data type | fr/Redis RSS | fr/Redis used_memory | verdict |
+|---|---:|---:|---|
+| keyspace | `1.445x` | `0.492x` | loss |
+| string_1k | `1.158x` | `0.767x` | loss |
+| list | `0.972x` | `0.062x` | RSS win |
+| hash | `1.074x` | `0.199x` | loss |
+| set | `0.994x` | `0.116x` | RSS win |
+| zset | `1.130x` | `0.147x` | loss |
+| stream | `1.052x` | `1.085x` | loss |
+
+Memory score: **2 wins / 5 losses / 0 neutral** on RSS. This is smaller scale
+than the 200k broad scorecard and should be treated as quick routing evidence,
+not a dominance claim.
+
+Focused set-algebra Redis 7.2.4 gate:
+`AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo bench --profile release -p fr-bench --bench set_algebra_vs_redis --
+--noplot`.
+
+| Criterion gate | Redis mean | FrankenRedis mean | fr/Redis time | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---:|---|
+| `SINTERSTORE` | `766.51 us` | `361.09 us` | `0.471x` | `2.123x` | win |
+| `SDIFFSTORE` | `877.24 us` | `424.35 us` | `0.484x` | `2.067x` | win |
+| `SUNIONSTORE` | `9.2308 ms` | `12.078 ms` | `1.308x` | `0.764x` | loss |
+
+Set-algebra score: **2 wins / 1 loss / 0 neutral**. SINTER/SDIFF already
+dominate Redis on this focused gate; SUNIONSTORE is still the measurable set
+algebra gap.
+
 ## Focused hash listpack direct-emitter closeout (`frankenredis-hash-listpack-direct-emit-dv9n5`, 2026-06-21)
 
 - Build: `RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --release -p fr-server`, remote `vmi1149989`.
