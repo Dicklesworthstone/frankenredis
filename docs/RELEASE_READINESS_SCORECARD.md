@@ -10,6 +10,50 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-b addendum: compact PackedZSet score tags rejected
+
+Release-readiness impact: no source hunk shipped for packed-zset score tags.
+The temporary candidate encoded exact integer `PackedZSet` scores as
+`i8`/`i16`/`i32` tagged payloads, but fresh Redis 7.2.4 measurements did not
+prove a real release-readiness gain.
+
+| gate | control fr/Redis | candidate fr/Redis | readiness impact |
+|---|---:|---:|---|
+| broad memory zset cell | 1.715 | 1.595 | favorable but not sufficient |
+| broad memory list cell | 1.123 | 1.312 | candidate failed ratchet on unrelated cell |
+| focused packed-zset RSS, 6,250 x 32 integer-score members | 1.57 | 1.58 | direct target no-win |
+
+Decision: reject and revert the packed-score hunk. The remaining zset RSS loss
+is still structural; next work should attack per-key/per-member zset layout, not
+score-byte tagging.
+
+## 2026-06-20 cod-a addendum: SADD compact-map single-probe rejected
+
+Release-readiness impact: no source hunk shipped. Fresh Redis 7.2.4
+head-to-head current baseline under
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a` showed the
+largest current throughput loss was SADD, while ZADD was already faster than
+Redis in this window:
+
+| command | current fr/Redis | readiness impact |
+|---|---:|---|
+| sadd | 0.67 | largest measured loss |
+| lpush / rpush | 0.83 / 0.87 | residual list-write losses |
+| zadd | 1.54 | not the target in this window |
+| set / get / hset / incr | 1.22 / 1.23 / 1.21 / 0.98 | scalar/read guards near parity or better |
+
+Rejected candidate: make `CompactFieldMap::insert_borrowed` reuse the vacant
+slot discovered while proving a set member absent, eliminating the second
+hash/probe pass for new SADD members. The candidate passed `fr-store` check and
+focused compact set/map tests via `rch`, but the measured target gate failed:
+SADD candidate throughput was `663,716` and `666,666` req/s versus reverted
+control `681,818` req/s (`0.97x`/`0.98x` candidate/control). Candidate
+Redis-relative SADD remained below the parity floor (`0.84x` then `0.79x`).
+
+Readiness target after this pass: SADD, LPUSH, and RPUSH remain open write-path
+losses; this single-probe compact-map edit is now negative evidence and should
+not be repeated without a new profile.
+
 ## 2026-06-20 cod-b addendum: current memory score remains 2 wins / 5 losses
 
 Release-readiness impact: evidence update only. A clean detached worktree at

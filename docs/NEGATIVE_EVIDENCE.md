@@ -4,6 +4,61 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` compact PackedZSet score tags rejected
+
+Harness: clean HEAD control worktree `43f17ad91`, candidate with only the
+temporary compact `PackedZSet` score-tag hunk plus the `fr-store` clippy cleanup,
+per-crate `rch exec -- cargo build --release -p fr-server -p fr-bench`, and
+fresh-process memory probes against vendored Redis 7.2.4. Artifact:
+`artifacts/optimization/frankenredis-uhthd-packed-zset-score-codb/20260621T003043Z/`.
+
+| gate | ratios vs Redis 7.2.4 | verdict |
+|---|---|---|
+| broad control memory | keyspace/string_1k/list/hash/set/zset/stream = 1.516 / 0.955 / 1.123 / 1.336 / 1.308 / 1.715 / 0.929 | current zset loss confirmed |
+| broad candidate memory | keyspace/string_1k/list/hash/set/zset/stream = 1.728 / 0.972 / 1.312 / 1.367 / 1.443 / 1.595 / 0.970 | zset moves better, unrelated cells drift worse; not enough alone |
+| focused packed-zset RSS control | 6,250 zsets x 32 integer-score members: Redis 4.59 MB, fr 7.19 MB = 1.57x | direct target baseline |
+| focused packed-zset RSS candidate | 6,250 zsets x 32 integer-score members: Redis 4.58 MB, fr 7.25 MB = 1.58x | no target win; reject |
+
+Decision: rejected and source reverted. The broad scorecard had one favorable
+zset cell, but the direct packed-zset RSS probe did not confirm it and the
+candidate broad run failed the memory ratchet on list. Do not retry score-byte
+tagging as a memory lever; the remaining zset gap is dominated by deeper
+per-key/per-member representation overhead.
+
+## 2026-06-20 cod-a `frankenredis-ohsk5` SADD compact-map single-probe rejection
+
+Harness: per-crate release builds for `fr-server`/`fr-bench` through
+`rch exec -- cargo build --release -p fr-server -p fr-bench`, with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a` for the
+candidate and `/data/projects/.rch-targets/frankenredis-cod-a-control` for the
+control. Redis-relative rows used vendored Redis 7.2.4 `redis-benchmark`, P16,
+c50, n150k, keyspace 100k, best-of-7 unless noted. Candidate temporarily made
+`CompactFieldMap::insert_borrowed` reuse the vacant slot found during the miss
+probe, avoiding the second hash/probe pass for new SADD members. Source was
+reverted after measurement; no production hunk shipped.
+
+| gate | fr/Redis ratios | verdict |
+|---|---|---|
+| current baseline, best-of-5 | lpush/rpush/sadd/zadd/set/get/hset/incr = 0.83 / 0.87 / 0.67 / 1.54 / 1.22 / 1.23 / 1.21 / 0.98 | SADD largest current loss; ZADD already a win in this window |
+| candidate vs Redis | sadd/lpush/rpush/zadd/set/get/hset/incr = 0.84 / 0.86 / 0.88 / 1.31 / 1.29 / 1.23 / 1.19 / 0.97 | Redis-relative SADD looked better, but Redis side was slower |
+| reverted control vs Redis | sadd/lpush/rpush/zadd/set/get/hset/incr = 0.76 / 0.86 / 0.79 / 1.39 / 1.35 / 1.28 / 1.22 / 1.04 | same-window control for decision |
+| candidate rerun vs Redis | sadd/lpush/rpush/zadd/set/get/hset/incr = 0.79 / 0.89 / 0.79 / 1.16 / 1.37 / 1.15 / 1.34 / 1.05 | confirms SADD still below parity floor |
+
+Decision: reject and keep source reverted. Absolute target throughput did not
+beat the same-window control: SADD candidate `663,716`/`666,666` req/s vs
+control `681,818` req/s (`0.97x`/`0.98x` candidate/control). Guard commands were
+mixed and noisy: first candidate/control qps movement was lpush/rpush/zadd/set/get/hset/incr
+= `1.04 / 1.04 / 0.88 / 0.99 / 0.99 / 1.08 / 0.99`. Do not retry this
+single-probe compact-map insertion as a standalone SADD lever; the residual
+needs deeper set mutation/storage work or a profile-backed parser/batch path.
+
+Validation while the candidate was applied: `cargo check -p fr-store
+--all-targets`, `cargo test -p fr-store ideww -- --nocapture`, and `cargo test
+-p fr-store generic_hash_set_inline_members_preserve_indexset_semantics --
+--nocapture` passed via `rch`. The malformed multi-filter Cargo test command
+failed before running tests (`unexpected argument 'compact_str_set'`) and is
+discarded as harness misuse, not code evidence.
+
 ## 2026-06-20 cod-b `frankenredis-uhthd` current-control memory scorecard
 
 Harness: clean detached worktree at `d568ff5f0`, minimized Redis oracle payload
