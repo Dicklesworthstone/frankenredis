@@ -1765,3 +1765,29 @@ type / expired / missing / multi-key all fall back to generic pfcount (recompute
 propagation preserved). MEASURED pipe=100 best-of-5: PFCOUNT 0.54x -> 1.01x (1.87x speedup),
 byte-correct (=506), ZCARD/GET unchanged. Gates: fr-store 654 unit, fr-conformance smoke 99/99,
 cmdstat_keyspace_parity_gate PASS (keyspace_hits/misses + cmdstat byte-exact, incl repeated-hit).
+
+## 2026-06-21 cod-b `frankenredis-uhthd` RANDOMKEY cache-capacity shrink hypothesis rejected
+
+Graveyard-derived lever considered: after the lazy `RANDOMKEY` side index is
+materialized, a structural write clears its cloned keys but keeps the `Vec`
+capacity. Shrinking that capacity looked like a small side-index RAM win without
+touching the sorted-SCAN design tradeoff.
+
+Focused control probe used the warm cod-b release binary
+`/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`, vendored
+Redis 7.2.4, fresh high ports, and 120,000 tiny keys. It measured RSS before
+`RANDOMKEY`, after one `RANDOMKEY`, and after one subsequent `SET` mutation:
+
+| phase | Redis RSS | FrankenRedis RSS | fr/Redis |
+|---|---:|---:|---:|
+| before `RANDOMKEY` | `13,291,520` | `32,079,872` | `2.414x` |
+| after `RANDOMKEY` | `13,815,808` | `29,102,080` | `2.106x` |
+| after dirtying write | `13,815,808` | `29,126,656` | `2.108x` |
+
+Result: the release RSS metric moved opposite the hypothesis, and
+FrankenRedis `used_memory` was unchanged at `7,680,000` throughout. Do not ship a
+`shrink_to_fit`/drop-capacity patch for the random-key cache based on this data;
+it is not a measured Redis-relative win and could regress repeated
+`RANDOMKEY`-after-write rebuild churn. Retry only with allocator-level counters
+that name retained vector capacity as dominant, or with a full keyspace
+representation change that also resolves the SCAN/RANDOMKEY semantics boundary.

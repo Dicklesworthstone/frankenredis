@@ -1383,3 +1383,31 @@ but the sidecar tax on the hot write path kills it; a real version would need
 WATCH to stop relying on a per-key counter (Redis dirties watching clients
 directly — fr-runtime redesign, not a fr-store sidecar). Score: **0 win / 1 loss
 (reverted) / 0 declined**.
+
+## 2026-06-21 cod-b `frankenredis-uhthd` RANDOMKEY cache-capacity shrink hypothesis - NO-SHIP
+
+Source target: `RandomKeySlotIndex::mark_dirty` currently drops cloned key bytes
+with `keys.clear()` after a structural mutation but retains the vector capacity.
+The alien-graveyard/keyspace-route hypothesis was that forcing capacity release
+would remove a hidden full-keyspace side-index tail after a workload calls
+`RANDOMKEY` once and then mutates the DB.
+
+Before editing source, a focused release control probe measured the actual
+Redis-relative metric with the warm cod-b binary
+`/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`, vendored
+Redis 7.2.4, fresh high ports, and 120,000 tiny keys:
+
+| phase | Redis `used_memory_rss` | FrankenRedis `used_memory_rss` | fr/Redis |
+|---|---:|---:|---:|
+| loaded keyspace, before `RANDOMKEY` | `13,291,520` | `32,079,872` | `2.414x` |
+| after one `RANDOMKEY` | `13,815,808` | `29,102,080` | `2.106x` |
+| after one dirtying `SET` | `13,815,808` | `29,126,656` | `2.108x` |
+
+Decision: no source hunk. The observed release RSS did not expose retained vector
+capacity as a stable loss; `used_memory` also stayed unchanged at `7,680,000` on
+the FrankenRedis side, so this would be an allocator-shape guess, not a
+profile-backed win. The likely downside is repeated `RANDOMKEY` after writes
+paying a fresh vector allocation. Retry condition: only revisit with allocator
+profiles/counters naming random-key vector capacity, or fold the sampling index
+into a deeper keyspace representation change with an explicit SCAN semantics
+decision. Score: **0 keep / 0 source regressions / 1 rejected hypothesis**.

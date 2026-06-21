@@ -996,3 +996,23 @@ fr-store -p fr-runtime -p fr-server --all-targets -- -D warnings` passed; RCH
 Lever score: **1 win / 1 rejected loss / 0 neutral**. Release status improves
 for ZADD but remains below Redis; next high-EV routes are deeper sorted-set
 storage/index work plus independent `LPUSH`/`RPUSH` and `SADD` write paths.
+
+## Focused cod-b RANDOMKEY cache-capacity probe (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: no new build; used warm cod-b release binary
+  `/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis`.
+- Oracle: vendored Redis 7.2.4.
+- Workload: fresh-process 120,000 tiny keys, sample RSS before `RANDOMKEY`, after
+  one `RANDOMKEY`, and after a subsequent dirtying `SET`.
+- Candidate action: none. The suspected retained-capacity loss was not visible
+  in the release RSS gate, so no `shrink_to_fit` source hunk was attempted.
+
+| phase | Redis RSS | FrankenRedis RSS | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| before `RANDOMKEY` | `13,291,520` | `32,079,872` | `2.414x` | control gap |
+| after `RANDOMKEY` | `13,815,808` | `29,102,080` | `2.106x` | no shrink target |
+| after dirtying write | `13,815,808` | `29,126,656` | `2.108x` | no shrink target |
+
+Scorecard impact: **0 wins / 0 source losses / 1 rejected hypothesis**. The next
+`uhthd` route remains structural keyspace representation or a deliberate
+SCAN/RANDOMKEY semantics tradeoff, not random-key cache capacity trimming.
