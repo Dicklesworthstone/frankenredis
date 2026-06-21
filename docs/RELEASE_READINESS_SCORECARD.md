@@ -10,6 +10,25 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: SADD single-member runtime path pending-bench
+
+Release-readiness impact: pending. Under the disk-low stop, no new cargo
+bench/build was started after this code-only hunk. Exact single-member
+`SADD key member` now bypasses the shared variadic keyed-values runtime path and
+uses a fixed-shape runtime function while preserving the same store mutation,
+reply framing, stats, slowlog/latency, errorstats, and threat-event surfaces.
+
+Routing evidence: the latest SADD arity sweep measured fr/Redis `0.73x` for
+one member, then `1.16x` for eight members and `1.23x` for sixteen members
+against Redis 7.2.4. That makes arity-1 fixed runtime dispatch cost the target;
+set insertion itself is not the release-readiness bottleneck in that sweep.
+
+Static validation: direct `rustfmt` on touched Rust files passed; targeted `ubs`
+returned nonzero on existing broad inventories while its shadow-workspace fmt,
+clippy, cargo-check, and test-build sections reported clean. Next turn: run the
+SADD P16/c50 Redis 7.2.4 gate plus focused conformance before upgrading this
+from pending to measured keep/revert.
+
 ## 2026-06-21 cod-b addendum: SDIFF lookup lever pending-bench
 
 Release-readiness impact: pending. Under the disk-low stop, no new cargo

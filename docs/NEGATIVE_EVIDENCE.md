@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-ohsk5` SADD single-member runtime path pending-bench
+
+DISK-LOW pivot: no new `cargo bench` or `cargo build` was started after the
+disk-low instruction. Code-only lever shipped for the exact `SADD key member`
+shape: the server now routes canonical and generic borrowed single-member SADD
+packets to `Runtime::execute_plain_sadd_one_borrowed`, avoiding the variadic
+`SADD`/`LPUSH`/`RPUSH` runtime plumbing used for multi-value writes. The store
+mutation, active-expire gate, reply bytes, slowlog/latency/threat metrics,
+commandstats, errorstats, CLIENT argv accounting, and client-reply suppression
+remain isomorphic to the existing borrowed keyed-values path.
+
+Profile/routing evidence: the latest arity sweep showed SADD is below Redis
+7.2.4 only at arity 1 (`0.73x` fr/Redis), then flips faster than Redis at 8
+members (`1.16x`) and 16 members (`1.23x`). That points at fixed per-command
+runtime cost, not set storage. This hunk intentionally does not touch
+`fr-store` SADD storage or the previously rejected compact-map single-probe
+family.
+
+Validation status: direct `rustfmt` on the touched Rust files passed, and `ubs
+crates/fr-runtime/src/lib.rs crates/fr-server/src/main.rs` returned nonzero only
+on the existing monolithic-file inventories while reporting clean fmt, clippy,
+cargo-check, and test-build sections in its shadow workspace. This commit
+records no candidate Redis-relative throughput ratio. Next turn must run the
+SADD P16/c50 Redis 7.2.4 throughput gate plus focused runtime/store correctness
+and conformance before deciding keep/revert.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup pending-bench
 
 DISK-LOW pivot: no new `cargo bench` or `cargo build` was started after the
