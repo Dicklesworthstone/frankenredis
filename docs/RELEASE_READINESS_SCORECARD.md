@@ -1399,3 +1399,21 @@ The parser coverage task is closed by adding arity `4` to
 `keyed_write_vs_redis` and confirming the existing parser tests. The release
 frontier for list writes is still the underlying quicklist/chunk mutation or
 batch append path, not more exact parser arities.
+
+## Cod-a BITFIELD_RO borrowed dispatch kept (MEASURED 2026-06-21)
+
+Release-readiness impact: one bitmap read-only row moved from a measured loss to
+a repeated same-worker win, while the existing `BITFIELD` hot path stayed ahead
+of Redis. The row is noisy, so keep this as a targeted readiness improvement,
+not a blanket bitmap-family domination claim.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| current control vs Redis 7.2.4 | `BITFIELD_RO_GET_u8_0` | `0.697x` | target release perf risk |
+| candidate repeat vs Redis 7.2.4 | `BITFIELD_RO_GET_u8_0` | `1.206x` | targeted win, retained |
+| candidate guard vs Redis 7.2.4 | `BITFIELD_GET_u8_0` | `1.106x` | existing hot path remains ahead |
+| candidate first row vs Redis 7.2.4 | `BITFIELD_RO_GET_u8_0` | `0.689x` | noise caveat; do not overclaim |
+
+Gates: focused runtime parity test, focused server parser test, scoped fmt,
+scoped RCH check/clippy with `-D warnings`, scoped RCH release build, filtered
+Redis 7.2.4 Criterion rows on `hz2`, and RCH `fr-conformance` all green.

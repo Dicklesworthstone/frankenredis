@@ -1367,6 +1367,28 @@ This confirms the shallow borrowed-push wrapper is not a domination lever; keep
 routing list/set writes toward deeper chunk layout, batch append, or dispatch
 work.
 
+## Focused cod-a BITFIELD_RO borrowed dispatch keep (`frankenredis-ohsk5`, 2026-06-21)
+
+- Build/check: per-crate RCH release build for `fr-server` and `fr-bench` on
+  `hz2`, using `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+- Bench: `cargo bench --profile release -p fr-bench --bench bitfield_vs_redis
+  -- BITFIELD_RO_GET_u8_0 --noplot`, plus a `BITFIELD_GET_u8_0` guard.
+- Oracle: vendored Redis 7.2.4.
+- Kept lever: server parser recognizes canonical `BITFIELD_RO key GET <enc>
+  <offset>` and runtime records command identity while reusing the borrowed
+  BITFIELD GET read path.
+
+| command / gate | Redis 7.2.4 median throughput | FrankenRedis throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `BITFIELD_RO_GET_u8_0` control | `617.21 Kelem/s` | `430.42 Kelem/s` | `0.697x` | target loss |
+| `BITFIELD_RO_GET_u8_0` candidate repeat | `664.52 Kelem/s` | `801.65 Kelem/s` | `1.206x` | kept win |
+| `BITFIELD_GET_u8_0` guard | `720.63 Kelem/s` | `796.74 Kelem/s` | `1.106x` | guard win |
+
+Scorecard impact: **2 wins / 1 noisy loss / 0 neutral** when including the
+first candidate row (`0.689x`). This ships a targeted bitmap read fast path, but
+the row is noisy enough that the next domination pass should use a larger sample
+budget or a direct latency harness before claiming the whole bitmap surface.
+
 ## Focused cod-b current memory rebaseline (`frankenredis-uhthd`, 2026-06-21)
 
 - Build/check: warm cod-b RCH release binary at

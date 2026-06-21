@@ -2246,6 +2246,44 @@ retry borrowed push wrappers without a same-worker control win; the remaining
 list/set write gap needs a batch append, mutable quicklist/chunk layout, or
 server dispatch primitive.
 
+## 2026-06-21 cod-a `frankenredis-ohsk5` BITFIELD_RO GET borrowed dispatch kept
+
+Alien-graveyard route kept: extend the existing borrowed single-op
+`BITFIELD key GET u8 0` parser/runtime fast path to the read-only
+`BITFIELD_RO key GET u8 0` shape. The lever avoids generic RESP frame
+allocation and command dispatch for the common bitmap read without touching
+write forms, overflow handling, multi-op replies, or store data structures.
+
+Verification used the warm cod-a target directory
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, vendored
+Redis 7.2.4 at `/dp/frankenredis/legacy_redis_code/redis/src/redis-server`,
+and `RCH_WORKER=hz2` for the release build and filtered Criterion rows.
+
+| gate | Redis 7.2.4 median throughput | FrankenRedis median throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `BITFIELD_RO_GET_u8_0` control before server/runtime hunk | `617.21 Kelem/s` | `430.42 Kelem/s` | `0.697x` | target loss |
+| `BITFIELD_RO_GET_u8_0` candidate first row | `1.0246 Melem/s` | `705.51 Kelem/s` | `0.689x` | noisy loss |
+| `BITFIELD_RO_GET_u8_0` candidate repeat | `664.52 Kelem/s` | `801.65 Kelem/s` | `1.206x` | kept win |
+| `BITFIELD_GET_u8_0` guard after enum generalization | `720.63 Kelem/s` | `796.74 Kelem/s` | `1.106x` | guard win |
+
+Decision: **KEEP** with volatility noted. Score across the measured rows:
+**2 wins / 1 noisy loss / 0 neutral** vs Redis 7.2.4. The repeat row shows the
+new `BITFIELD_RO` path can beat Redis, while the first candidate row shows this
+microbench is scheduler-sensitive; do not claim the whole bitmap family is
+dominated from one row. Next route should target remaining bitmap/list/set cells
+with a more stable harness or larger sample budget, not another shallow
+BITFIELD parser alias.
+
+Correctness gates passed: focused runtime parity test
+`plain_bitfield_ro_get_borrowed_matches_generic_and_keeps_command_identity`,
+focused server parser test
+`borrowed_plain_bitfield_get_packet_parser_accepts_bitfield_ro`,
+`cargo fmt -p fr-runtime -p fr-server -p fr-bench -- --check`,
+RCH `cargo check -p fr-runtime -p fr-server -p fr-bench --all-targets`,
+RCH `cargo clippy -p fr-runtime -p fr-server -p fr-bench --all-targets -- -D warnings`,
+RCH release build for `fr-server`/`fr-bench`, and RCH
+`cargo test -p fr-conformance -- --nocapture` (`194 + 99` tests, green).
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` current memory rebaseline / no-source route
 
 Alien-graveyard route checked: whole keyspace/table representation remains the
