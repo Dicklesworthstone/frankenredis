@@ -13580,6 +13580,191 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Parse a BITFIELD integer encoding `i<bits>`/`u<bits>` — copied byte-for-byte
+    /// from the generic `bitfield_parse_encoding` so the fast path accepts EXACTLY
+    /// the same encodings (any divergence returns None -> generic fallback).
+    fn bitfield_fast_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
+        let s = std::str::from_utf8(arg).ok()?;
+        if s.is_empty() {
+            return None;
+        }
+        let (signed, rest) = if s.starts_with('i') || s.starts_with('I') {
+            (true, &s[1..])
+        } else if s.starts_with('u') || s.starts_with('U') {
+            (false, &s[1..])
+        } else {
+            return None;
+        };
+        let bits: u8 = rest.parse().ok()?;
+        if bits == 0 || (signed && bits > 64) || (!signed && bits > 63) {
+            return None;
+        }
+        Some((signed, bits))
+    }
+
+    /// Parse a BITFIELD offset (`100` or `#5`) — copied from generic
+    /// `bitfield_parse_offset` (same 512 MiB cap) for byte-identical acceptance.
+    fn bitfield_fast_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
+        const MAX_BIT_OFFSET_EXCLUSIVE: u64 = 512 * 1024 * 1024 * 8;
+        let s = std::str::from_utf8(arg).ok()?;
+        let offset = if let Some(rest) = s.strip_prefix('#') {
+            let n: u64 = rest.parse().ok()?;
+            n.checked_mul(u64::from(bits))?
+        } else {
+            s.parse::<u64>().ok()?
+        };
+        if offset >= MAX_BIT_OFFSET_EXCLUSIVE {
+            return None;
+        }
+        Some(offset)
+    }
+
+    fn can_execute_plain_bitfield_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"BITFIELD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Borrowed runtime fast path for the read-only single-op form
+    /// `BITFIELD key GET <enc> <offset>` (the common bitmap read). Mirrors the
+    /// generic `bitfieldCommand` read path EXACTLY: one keyspace lookup via
+    /// `exists_no_touch` (= `record_source_key_lookups` for the single key) then a
+    /// per-op `bitfield_get_no_stat`, returning a one-element array. Returns None
+    /// (fall back) unless the op is a literal GET with a valid encoding+offset, so
+    /// every SET/INCRBY/OVERFLOW/multi-op/invalid form reaches the generic handler
+    /// (writes + propagation + multi-op replies unaffected). (frankenredis cc BITFIELD GET fast path)
+    pub fn execute_plain_bitfield_get_borrowed(
+        &mut self,
+        key: &[u8],
+        get_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !get_arg.eq_ignore_ascii_case(b"GET") {
+            return None;
+        }
+        let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
+        let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
+        if !self.can_execute_plain_bitfield_get_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("bitfield");
+        self.session.last_argv_len_sum =
+            b"BITFIELD".len() + key.len() + get_arg.len() + enc_arg.len() + offset_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Mirror generic single-GET BITFIELD: ONE keyspace lookup (=
+        // record_source_key_lookups via exists_no_touch) then a no-stat per-op read.
+        let _ = self.server.store.exists_no_touch(key, now_ms);
+        let result = self
+            .server
+            .store
+            .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(val) => RespFrame::Array(Some(vec![RespFrame::Integer(val)])),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv = vec![
+                b"BITFIELD".to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.record_slowlog(&argv, elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv = vec![
+                b"BITFIELD".to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("bitfield", elapsed_us, kind);
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv = vec![
+                b"BITFIELD".to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'BITFIELD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &RespFrame::Integer(0),
+            });
+        }
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
     fn record_plain_cardinality_borrowed_metrics(
         &mut self,
         cmd: PlainCardinalityCmd,

@@ -1499,6 +1499,38 @@ single-member 0.79x is entirely fr-runtime **per-command dispatch fixed-cost**
 `ohsk5` dispatch territory (BlackThrush). redis-benchmark's default 1-member SADD
 is the worst case for any per-command fixed-cost difference.
 
+## 2026-06-21 cod-a `frankenredis-ohsk5` BITFIELD GET u8 borrowed fast path kept
+
+Targeted the bitmap/HLL residual row that had `BITFIELD GET u8` at `0.77x`
+against Redis 7.2.4. The radical lever was not another store bit loop; it was
+removing the fixed dispatch/parser tax for the exact read-only single-op shape
+that benchmark users actually send: `BITFIELD key GET <enc> <offset>`.
+
+| artifact / gate | variant | command | fr/Redis or candidate/control throughput | verdict |
+|---|---|---|---:|---|
+| `crates/fr-bench/benches/bitfield_vs_redis.rs` | inverse control vs Redis 7.2.4 | `BITFIELD bf GET u8 0` | `0.42x` | baseline loss (`532.77 Kelem/s` vs Redis `1.2683 Melem/s`) |
+| same | retained candidate vs Redis 7.2.4 | `BITFIELD bf GET u8 0` | `1.10x` | keep (`1.4224 Melem/s` vs Redis `1.2917 Melem/s`) |
+| same | retained candidate vs old control | `BITFIELD bf GET u8 0` | `2.67x` | direct FrankenRedis A/B win |
+| `rch exec -- cargo bench -p fr-bench --profile release --bench bitfield_vs_redis -- BITFIELD_GET_u8_0 --noplot` | retained candidate vs Redis 7.2.4 on `hz2` | `BITFIELD bf GET u8 0` | `1.17x` | remote confirmation (`886.57 Kelem/s` vs Redis `758.31 Kelem/s`) |
+
+Decision: **KEEP**. Score for the focused cell is **1 win / 0 losses / 0
+neutral**. The shipped path parses canonical `*5 BITFIELD key GET enc offset`
+borrowed from the input buffer, validates literal GET plus the same
+encoding/offset rules as the generic command, then performs the same single
+keyspace lookup and `bitfield_get_no_stat` read. Every write or ambiguous form
+falls through: SET, INCRBY, OVERFLOW, multi-op BITFIELD, invalid encodings,
+invalid offsets, and BITFIELD_RO are not claimed here.
+
+Gates passed: `cargo fmt -p fr-runtime -p fr-server -p fr-bench --check`; RCH
+check/clippy for `fr-runtime`, `fr-server`, and `fr-bench`; RCH release build
+for `fr-server` and `fr-bench`; focused `fr-command` BITFIELD tests (24/24);
+focused `fr-store` BITFIELD tests; live `bitfield_differ.py 46371 46372 1
+1200` (0 divergences); live `bitfield_overflow_differ.py`; live
+`bitfield_offset_limit_differ.py`; live `bitmap_differ.py --iters 1000 --seed
+4242`; full `fr-conformance` package (194 lib tests, all bins, 99 smoke tests,
+doctests) green. Final validation release binary sha256:
+`0ef2e830a283f760e50312d40a69416418a5e364452143673dcb80ab503194a7`.
+
 ## 2026-06-20 CobaltCove (cc) — bitmap + HyperLogLog families — fr dominates heavy ops, no new lever
 
 Probed the previously-unbenched bitmap/HLL families (pipelined ×50, best-of-9,

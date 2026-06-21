@@ -3552,6 +3552,30 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
+                        packet.key,
+                        packet.get_arg,
+                        packet.enc_arg,
+                        packet.offset_arg,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -7034,6 +7058,49 @@ fn parse_borrowed_plain_pfcount_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainZcardPacket { consumed, key })
+}
+
+struct BorrowedPlainBitfieldGetPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    get_arg: &'a [u8],
+    enc_arg: &'a [u8],
+    offset_arg: &'a [u8],
+}
+
+/// `BITFIELD key GET <enc> <offset>` read-only single-op fast-path packet —
+/// extracts the five bulk args of the common bitmap read form (5-element
+/// multibulk, 8-byte command token). The runtime fast path validates the GET
+/// op + encoding/offset and serves it; any other BITFIELD form (SET/INCRBY/
+/// OVERFLOW/multi-op/invalid) returns None there and falls to the generic
+/// handler. (frankenredis cc BITFIELD GET fast path)
+fn parse_borrowed_plain_bitfield_get_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitfieldGetPacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"BITFIELD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$8\r\n").and_then(|rest| {
+        rest.get(..8)
+            .filter(|command| command.eq_ignore_ascii_case(b"BITFIELD"))
+            .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next1) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (get_arg, next2) = parse_borrowed_plain_set_bulk(input, next1, config.max_bulk_len)?;
+    let (enc_arg, next3) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
+    let (offset_arg, consumed) = parse_borrowed_plain_set_bulk(input, next3, config.max_bulk_len)?;
+    Some(BorrowedPlainBitfieldGetPacket {
+        consumed,
+        key,
+        get_arg,
+        enc_arg,
+        offset_arg,
+    })
 }
 
 struct BorrowedPlainTtlPacket<'a> {

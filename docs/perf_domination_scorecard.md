@@ -1,5 +1,39 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-a BITFIELD GET borrowed fast-path keep (`frankenredis-ohsk5`, 2026-06-21)
+
+- Build: `AGENT_NAME=cod-a
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec --
+  cargo build --release -p fr-server -p fr-bench`, remote `ovh-a`.
+- Final validation binary:
+  `/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`
+  sha256 `0ef2e830a283f760e50312d40a69416418a5e364452143673dcb80ab503194a7`.
+- Focused gate: new `fr-bench` Criterion bench `bitfield_vs_redis`, 128-command
+  packets of `BITFIELD bf GET u8 0`, Redis 7.2.4 oracle from
+  `/dp/frankenredis/legacy_redis_code/redis/src/redis-server`.
+- Retained lever: exact borrowed parser plus runtime read-only single-op fast
+  path for canonical `BITFIELD key GET <enc> <offset>`.
+
+| gate | Redis median throughput | FrankenRedis median throughput | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| inverse control, old generic dispatch | `1.2683 Melem/s` | `532.77 Kelem/s` | `0.42x` | baseline loss |
+| candidate, same local target | `1.2917 Melem/s` | `1.4224 Melem/s` | `1.10x` | win |
+| candidate, remote `rch cargo bench` confirmation on `hz2` | `758.31 Kelem/s` | `886.57 Kelem/s` | `1.17x` | win |
+
+Direct FrankenRedis candidate/control throughput ratio: **2.67x**. Focused
+Redis-relative score: **1 win / 0 losses / 0 neutral** for `BITFIELD key GET
+u8 0`. This is not a claim for BITFIELD SET, INCRBY, OVERFLOW, BITFIELD_RO, or
+multi-op command forms.
+
+Gates: `cargo fmt -p fr-runtime -p fr-server -p fr-bench --check`; RCH
+`cargo check -p fr-runtime -p fr-server -p fr-bench --all-targets`; RCH
+`cargo clippy -p fr-runtime -p fr-server -p fr-bench --all-targets --
+-D warnings`; focused `fr-command` BITFIELD tests; focused `fr-store`
+BITFIELD tests; live `bitfield_differ.py 46371 46372 1 1200`; live
+`bitfield_overflow_differ.py`; live `bitfield_offset_limit_differ.py`; live
+`bitmap_differ.py --iters 1000 --seed 4242`; full RCH `fr-conformance` package
+green.
+
 ## Focused cod-b set-algebra STORE overwrite keep (`frankenredis-uhthd`, 2026-06-21)
 
 - Build: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a

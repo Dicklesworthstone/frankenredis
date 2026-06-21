@@ -10,6 +10,25 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: BITFIELD GET borrowed fast path measured keep
+
+Release-readiness impact: the focused `BITFIELD key GET u8 0` cell moves from
+a Redis 7.2.4 loss to a win. This is a single read-only subcommand fast path;
+write, overflow, `BITFIELD_RO`, and multi-op forms remain on the generic
+handler and are not upgraded by this row.
+
+| gate | Redis 7.2.4 median throughput | FrankenRedis throughput | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| old generic dispatch inverse-control | `1.2683 Melem/s` | `532.77 Kelem/s` | `0.42x` | prior loss |
+| retained candidate | `1.2917 Melem/s` | `1.4224 Melem/s` | `1.10x` | keep; focused win |
+| retained candidate, remote `rch` confirmation on `hz2` | `758.31 Kelem/s` | `886.57 Kelem/s` | `1.17x` | supportive win |
+
+Direct FrankenRedis candidate/control throughput ratio: **2.67x**. Readiness
+score for this focused BITFIELD GET slice: **1 win / 0 losses / 0 neutral**.
+Conformance and live differs are green: focused `fr-command`/`fr-store`
+BITFIELD tests, `bitfield_differ.py` seed 1 x 1200, overflow/offset/bitmap
+differs, and full `fr-conformance`.
+
 ## 2026-06-21 cod-a addendum: mixed zset listpack direct emit measured keep
 
 Release-readiness impact: keep the scoped `fr-persist` mixed-score zset listpack

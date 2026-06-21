@@ -19,6 +19,11 @@ turns). Keep claims honest — mark which.
   direct-encode header helpers (push_array_header/push_map_header), 30+ borrowed_plain_*
   fast paths in fr-server. decimal_*_len now branchless ilog10 (e4fu8).
 
+## Current cod-a measured keep (2026-06-21)
+| Lever | Result | Why |
+|---|---|---|
+| `frankenredis-ohsk5` BITFIELD GET borrowed single-op fast path | **KEEP; closes the focused BITFIELD GET u8 loss.** Same-target inverse-control Criterion gate for `bitfield_vs_redis/BITFIELD_GET_u8_0` measured old generic dispatch at Redis `1.2683 Melem/s` vs FrankenRedis control `532.77 Kelem/s` (`0.42x` fr/Redis throughput). Candidate measured Redis `1.2917 Melem/s` vs FrankenRedis `1.4224 Melem/s` (`1.10x` fr/Redis throughput), a direct `2.67x` FrankenRedis candidate/control throughput win. Remote `rch exec -- cargo bench -p fr-bench --profile release --bench bitfield_vs_redis -- BITFIELD_GET_u8_0 --noplot` confirmation on `hz2` measured Redis `758.31 Kelem/s` vs FrankenRedis `886.57 Kelem/s` (`1.17x`). Score: **1 win / 0 losses / 0 neutral** for the focused `BITFIELD key GET u8 0` cell. | Added an exact borrowed packet parser for canonical `*5 BITFIELD key GET enc offset` and a runtime fast path that validates literal GET, encoding, and offset before executing the same single-key lookup plus `bitfield_get_no_stat` read used by the generic path. SET/INCRBY/OVERFLOW/multi-op/invalid/BITFIELD_RO forms fall back to existing dispatch. Gates: fmt, RCH check/clippy for touched crates, RCH release build for `fr-server`/`fr-bench`, focused `fr-command` and `fr-store` BITFIELD tests, live `bitfield_differ.py` seed 1 x 1200, overflow/offset/bitmap differs, and full `fr-conformance` green. Do not generalize this row to BITFIELD writes or multi-op forms. |
+
 ## Current cod-b measured keep (2026-06-21)
 | Lever | Result | Why |
 |---|---|---|
