@@ -10,6 +10,30 @@ origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 30000
 > The full 36-cell matrix + heavy multi-server loops 144-kill under cumulative sandbox load;
 > these are focused light batches (the reliable subset).
 
+## 2026-06-21 cod-a addendum: arity-one keyed-write scorecard and packet-id candidate rejected
+
+Release-readiness impact: no production hunk shipped. Current arity-one
+keyed-write Criterion coverage still shows the Redis 7.2.4 losses concentrated
+in single-value list/set writes:
+
+| gate | Redis 7.2.4 median throughput | FrankenRedis median throughput | fr/Redis | readiness impact |
+|---|---:|---:|---:|---|
+| `keyed_write_vs_redis/LPUSH_1v` | `953.57 Kelem/s` | `753.24 Kelem/s` | `0.79x` | loss |
+| `keyed_write_vs_redis/RPUSH_1v` | `1.0069 Melem/s` | `734.37 Kelem/s` | `0.73x` | loss |
+| `keyed_write_vs_redis/SADD_1v` | `1.1279 Melem/s` | `797.36 Kelem/s` | `0.71x` | loss |
+
+Attempted lever: lazily allocate keyed-write packet IDs only for the cold
+time-budget threat-event branch. Candidate ratios were `LPUSH_1v 0.80x`,
+`RPUSH_1v 0.75x`, and `SADD_1v 0.74x`, but Criterion reported no detectable
+FrankenRedis improvement for all three target rows (`p=0.96`, `p=0.96`,
+`p=0.37` respectively). Redis-side throughput also moved between runs, so the
+ratio lift is not attributable.
+
+Readiness score: **0 wins / 3 losses / 0 neutral** for this arity-one
+keyed-write slice. The rejected hunk was reverted. Next credible route is
+batch-typed keyed-write execution/request arena or deeper list/set
+representation work, not packet-id/metrics micro-laziness.
+
 ## 2026-06-21 cod-a addendum: SADD single-member runtime path rejected
 
 Release-readiness impact: no production hunk shipped. The disk-low carry-forward
