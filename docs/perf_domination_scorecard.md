@@ -1,5 +1,34 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+## Focused cod-b packed bulk exact-capacity rejection (`frankenredis-uhthd`, 2026-06-21)
+
+- Build: fail-closed remote `rch` release builds for `fr-server` and `fr-bench`
+  with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+- Harness: fresh-process hash/zset memory probe against vendored Redis 7.2.4,
+  scale 200k, using the warm `frankenredis` release binary.
+- Candidate: exact varint-aware packed-builder reserve sizes for
+  `HashFieldMap::from_unique_pairs{,_borrowed}` and
+  `PackedZSet::from_unique_pairs`.
+- Decision: **rejected and source reverted**. Redis-relative ratios moved in the
+  right direction only because the Redis oracle RSS was higher in the candidate
+  window; FrankenRedis absolute RSS worsened on both target cells.
+
+| memory gate | control fr/Redis RSS | candidate fr/Redis RSS | FrankenRedis absolute delta | verdict |
+|---|---:|---:|---:|---|
+| packed hash | `1.300x` | `1.202x` | `+557,056 B` | loss |
+| packed zset | `1.555x` | `1.491x` | `+16,384 B` | loss |
+
+Scorecard impact: **0 wins / 2 losses / 0 neutral** on the target absolute-RSS
+signal. Do not retry fixed-capacity/exact-reserve tweaks for packed hash/zset
+unless a same-window A/B shows real FrankenRedis RSS reduction or an allocator
+class proof predicts process-RSS movement. Route the remaining hash/zset memory
+gap to deeper representation/table overhead.
+
+Infra-only note: `.rchignore` now excludes `legacy_redis_code/`, `artifacts/`,
+and `.bench-history/`; after the first fail-closed RCH sync timeout, remote sync
+fell to about 7.3 MB and the per-crate release build completed. That is build
+hygiene, not a Redis performance keep.
+
 ## Focused cod-b current-control memory scorecard (`frankenredis-uhthd`, 2026-06-20)
 
 - Build: fail-closed remote `rch` build on `vmi1152480`:

@@ -1,0 +1,4 @@
+# Local oracle/build evidence payloads are large and not needed for remote Cargo builds.
+legacy_redis_code/
+artifacts/
+.bench-history/

@@ -4,6 +4,48 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-b `frankenredis-uhthd` packed bulk exact-capacity rejected and reverted
+
+BOLD-VERIFY targeted the remaining hash/zset memory losses with a compact
+builder capacity lever: reserve exact varint-aware bytes in
+`HashFieldMap::from_unique_pairs{,_borrowed}` and `PackedZSet::from_unique_pairs`
+instead of the prior fixed `+10` per entry allowance. The rationale was succinct
+bulk construction: remove per-key over-reservation in packed listpack-like
+buffers without changing stored bytes, ordering, command semantics, or Redis
+observable replies.
+
+The candidate test passed via RCH:
+`RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo test -p fr-store
+packed_bulk_builders_use_exact_varint_capacity_uhthd -- --nocapture`, remote
+`ovh-a`.
+
+Head-to-head memory probe used fresh local processes for vendored Redis 7.2.4
+and the warm `frankenredis` release binary, scale 200k, after a per-crate remote
+release build:
+`RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo build --release -p fr-server -p fr-bench`.
+
+| gate | control Redis RSS | control fr RSS | control fr/Redis | candidate Redis RSS | candidate fr RSS | candidate fr/Redis | decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| packed hash memory | `7,634,944` | `9,928,704` | `1.300x` | `8,720,384` | `10,485,760` | `1.202x` | reject |
+| packed zset memory | `7,688,192` | `11,956,224` | `1.555x` | `8,032,256` | `11,972,608` | `1.491x` | reject |
+
+The Redis-relative ratios looked better only because the Redis oracle process
+RSS drifted upward in the candidate window. FrankenRedis absolute RSS worsened:
+hash `+557,056 B`; zset `+16,384 B`. Scorecard: **0 wins / 2 losses / 0
+neutral** on the target absolute-RSS decision signal. Source was reverted; do
+not retry fixed-capacity/exact-reserve tweaks for packed hash/zset unless a
+same-window A/B shows absolute FrankenRedis RSS reduction or an allocator class
+proof explains why process RSS should move. Route to deeper representation/table
+overhead instead.
+
+RCH infra note: the first fail-closed remote release build timed out during sync
+because large local oracle/evidence directories were still in the transfer
+payload. `.rchignore` now excludes `legacy_redis_code/`, `artifacts/`, and
+`.bench-history/`; remote sync fell to about 7.3 MB and the per-crate release
+build completed. This is not a Redis behavior/perf keep claim.
+
 ## 2026-06-21 cod-a `frankenredis-mixed-zset-listpack-direct-emit-vly2n` measured keep, Redis path still split-loss
 
 BOLD-VERIFY targeted the `fr-persist` compact zset listpack encoder because the
