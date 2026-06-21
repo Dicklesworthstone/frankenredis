@@ -2028,3 +2028,39 @@ neutral**. Next route should not repeat constructor micro-bypass work; the
 remaining gap needs a deeper RESTORE/RDB decode primitive, likely CRC/listpack
 validation cost, server dispatch overhead around RESTORE, or a broader
 borrowed-payload decode path with same-worker A/B proof.
+
+## 2026-06-21 cod-a `frankenredis-ohsk5` borrowed ListValue push helper rejected
+
+Alien-graveyard route tested: remove the extra `Vec<u8>` materialization in
+`Store::lpush` / `Store::rpush` when the list is still in the single-listpack
+representation. The candidate added borrowed `ListValue::push_front_bytes` and
+`push_back_bytes` helpers so `PackedList` could copy directly from the command
+argument slice; promoted `ChunkedList` still had to allocate one owned element
+per push.
+
+Verification used the warm cod-a target directory:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, vendored
+Redis 7.2.4 at `/dp/frankenredis/legacy_redis_code/redis/src/redis-server`, and
+`rch exec -- cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- --noplot` after a colocated remote release build of
+`fr-server` and `fr-bench`.
+
+| command | Redis 7.2.4 median throughput | FrankenRedis candidate median throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_1v` | `990.20 Kelem/s` | `746.85 Kelem/s` | `0.754x` | loss |
+| `LPUSH_5v` | `692.79 Kelem/s` | `595.50 Kelem/s` | `0.860x` | loss |
+| `LPUSH_8v` | `550.35 Kelem/s` | `563.01 Kelem/s` | `1.023x` | win |
+| `LPUSH_12v` | `450.41 Kelem/s` | `494.20 Kelem/s` | `1.097x` | win |
+| `LPUSH_16v` | `378.08 Kelem/s` | `442.44 Kelem/s` | `1.170x` | win |
+| `RPUSH_1v` | `1.0828 Melem/s` | `751.12 Kelem/s` | `0.694x` | loss |
+| `RPUSH_5v` | `825.81 Kelem/s` | `618.11 Kelem/s` | `0.749x` | loss |
+| `RPUSH_8v` | `689.77 Kelem/s` | `571.96 Kelem/s` | `0.829x` | loss |
+| `RPUSH_12v` | `588.52 Kelem/s` | `496.16 Kelem/s` | `0.843x` | loss |
+| `RPUSH_16v` | `520.56 Kelem/s` | `432.57 Kelem/s` | `0.831x` | loss |
+
+Decision: **NO-SHIP / REVERTED**. Score across the targeted list-push cells:
+**3 wins / 7 losses / 0 neutral** vs Redis 7.2.4. The result confirms that
+borrowed caller-side element plumbing is too shallow; the residual gap is in
+the promoted `ChunkedList` structure and per-element owned-node path. Next route
+must be a deeper mutable packed quicklist node or batch/list-chunk primitive,
+not another `Vec` elision wrapper around the existing push API.

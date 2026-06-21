@@ -1451,3 +1451,33 @@ was still far below Redis and lacked a same-worker candidate/control proof
 because `rch` moved the release bench from `hz2` to `ovh-a`. Source hunk was
 manually reverted before commit. Route next to a deeper RESTORE decode, CRC, or
 server dispatch primitive; do not retry this constructor micro-lever.
+
+## 2026-06-21 cod-a ohsk5 borrowed list-push helper - REVERTED
+
+Scope: `frankenredis-ohsk5`, warm target dir
+`/data/projects/.rch-targets/frankenredis-cod-a`, vendored Redis 7.2.4, Criterion
+`keyed_write_vs_redis`.
+
+Attempted source lever: add borrowed `ListValue::push_front_bytes` /
+`push_back_bytes` and call them from `Store::lpush` / `Store::rpush` to avoid
+building an intermediate `Vec<u8>` before appending to a packed list. This kept
+the existing `ChunkedList` representation untouched, so promoted lists still
+allocated one owned element per pushed value.
+
+| command | fr/Redis candidate | decision |
+|---|---:|---|
+| `LPUSH_1v` | `0.754x` | loss |
+| `LPUSH_5v` | `0.860x` | loss |
+| `LPUSH_8v` | `1.023x` | win |
+| `LPUSH_12v` | `1.097x` | win |
+| `LPUSH_16v` | `1.170x` | win |
+| `RPUSH_1v` | `0.694x` | loss |
+| `RPUSH_5v` | `0.749x` | loss |
+| `RPUSH_8v` | `0.829x` | loss |
+| `RPUSH_12v` | `0.843x` | loss |
+| `RPUSH_16v` | `0.831x` | loss |
+
+Decision: source hunk reverted before commit. The list-push score is **3 wins /
+7 losses / 0 neutral** vs Redis 7.2.4, and all RPUSH arities remain losses. Do
+not repeat shallow borrowed helper work for LPUSH/RPUSH; the next credible lever
+needs to change the mutable quicklist/chunk layout or batch append primitive.

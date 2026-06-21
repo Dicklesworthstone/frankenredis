@@ -1297,3 +1297,29 @@ modules, but the avoidable new `expect` was removed before the final run.
 Next readiness targets: deeper sorted-set storage/index cost, `RPUSH`/`LPUSH`
 list write cost, and `SADD` storage/probe cost. Do not retry the rejected
 runtime-only ZADD shortcut without a new profile.
+
+## Cod-a borrowed list-push helper rejected (MEASURED 2026-06-21)
+
+Release-readiness impact: no source hunk shipped. A bounded allocation-elision
+candidate for `LPUSH`/`RPUSH` did not clear the Redis 7.2.4 gate, so list writes
+remain a release perf risk.
+
+| Gate | Command | Ratio | Release-readiness impact |
+|---|---|---:|---|
+| candidate vs Redis 7.2.4 | `LPUSH_1v` | 0.754x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `LPUSH_5v` | 0.860x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `LPUSH_8v` | 1.023x | win, not enough for family |
+| candidate vs Redis 7.2.4 | `LPUSH_12v` | 1.097x | win, not enough for family |
+| candidate vs Redis 7.2.4 | `LPUSH_16v` | 1.170x | win, not enough for family |
+| candidate vs Redis 7.2.4 | `RPUSH_1v` | 0.694x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `RPUSH_5v` | 0.749x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `RPUSH_8v` | 0.829x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `RPUSH_12v` | 0.843x | release perf risk remains |
+| candidate vs Redis 7.2.4 | `RPUSH_16v` | 0.831x | release perf risk remains |
+
+Candidate hunk: borrowed `ListValue::push_front_bytes` /
+`push_back_bytes` called from `Store::lpush` / `Store::rpush` to avoid a
+caller-side `Vec<u8>` when the list is packed. It was reverted because all
+`RPUSH` arities and small-arity `LPUSH` still lost to Redis. The next release
+readiness target is a deeper mutable quicklist/chunk representation or batch
+append primitive.

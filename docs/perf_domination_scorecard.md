@@ -1216,3 +1216,33 @@ cell. Focused `fr-store` check and quicklist2 RESTORE tests passed while the
 candidate was present, but the source hunk did not earn a keep proof and was
 reverted. Next target should be a deeper RESTORE decode/validation or dispatch
 primitive with same-worker A/B, not another single-node constructor bypass.
+
+## Focused cod-a borrowed list-push helper rejection (`frankenredis-ohsk5`, 2026-06-21)
+
+- Build: colocated `rch exec` release build for `fr-server` and `fr-bench` using
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+- Bench: `cargo bench --profile release -p fr-bench --bench
+  keyed_write_vs_redis -- --noplot`.
+- Oracle: vendored Redis 7.2.4.
+- Attempted lever: borrowed `ListValue::push_front_bytes` /
+  `push_back_bytes` to skip the caller-side `Vec<u8>` allocation for packed
+  lists. The hunk was reverted because the Redis-relative gate stayed red on
+  the target list-write shape.
+
+| command | Redis 7.2.4 median throughput | FrankenRedis candidate throughput | fr/Redis | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_1v` | `990.20 Kelem/s` | `746.85 Kelem/s` | `0.754x` | loss |
+| `LPUSH_5v` | `692.79 Kelem/s` | `595.50 Kelem/s` | `0.860x` | loss |
+| `LPUSH_8v` | `550.35 Kelem/s` | `563.01 Kelem/s` | `1.023x` | win |
+| `LPUSH_12v` | `450.41 Kelem/s` | `494.20 Kelem/s` | `1.097x` | win |
+| `LPUSH_16v` | `378.08 Kelem/s` | `442.44 Kelem/s` | `1.170x` | win |
+| `RPUSH_1v` | `1.0828 Melem/s` | `751.12 Kelem/s` | `0.694x` | loss |
+| `RPUSH_5v` | `825.81 Kelem/s` | `618.11 Kelem/s` | `0.749x` | loss |
+| `RPUSH_8v` | `689.77 Kelem/s` | `571.96 Kelem/s` | `0.829x` | loss |
+| `RPUSH_12v` | `588.52 Kelem/s` | `496.16 Kelem/s` | `0.843x` | loss |
+| `RPUSH_16v` | `520.56 Kelem/s` | `432.57 Kelem/s` | `0.831x` | loss |
+
+Scorecard impact: **0 kept wins / 1 rejected lever**. Redis-relative list-push
+cell score for this candidate was **3 wins / 7 losses / 0 neutral**, with every
+RPUSH arity still below Redis. Next target remains mutable quicklist/chunk
+storage or batch append, not shallow borrowed argument plumbing.
