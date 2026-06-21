@@ -63,3 +63,17 @@ Add a 3rd variant (or repurpose Owned) — proposed `ListChunk::PackedMut { buf:
 DISK-CRITICAL build-freeze: a multi-surface state-machine rewrite cannot be written "well"
 with zero compiler/test feedback — latent byte-exactness bugs would not surface until
 builds resume. This blueprint lets it be implemented correctly and fast on recovery.
+
+## Verified at source (cc, 2026-06-21): no bounded shortcut exists
+Read the full append state machine (accepts_append / push_back_owned / push_front_owned /
+seal_if_owned / make_mut). Ruled out cheaper partial fixes:
+- `lp_bytes` is **already maintained incrementally** (`*lp_bytes += added` per push; the
+  O(chunk) `owned_listpack_bytes` recompute fires only once after a `make_mut` invalidation
+  sets it to 0). No O(n²) accounting bug to fix.
+- `front_biased` **already makes pure LPUSH and pure RPUSH O(1)-amortized** (at most one
+  `reverse()` when the bias flips; the redis-benchmark pure-lpush/pure-rpush cases never
+  thrash). Only alternating LPUSH+RPUSH on one chunk pays O(n) inserts — rare, not the gap.
+- Interior chunks are **already sealed to packed `Listpack`** (no per-element Vec there).
+So the residual cost is precisely the per-element `Vec<u8>` heap alloc in the ACTIVE mutable
+chunk — which only the packed-append `PackedMut` rewrite above removes. Do not spend effort
+on a bounded variant; go straight to the packed-append chunk (with build+test on recovery).
