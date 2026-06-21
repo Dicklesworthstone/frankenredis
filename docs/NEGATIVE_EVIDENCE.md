@@ -1360,3 +1360,19 @@ EXCEPT the single list RDB-round-trip stickiness bug (10ovx). The encoding-diffe
 is now mined out — do not re-probe; the one open item is 10ovx (needs build+test to fix,
 match redis per-path RDB conversion). Harnesses committed: list_ops_differ.py + the
 enc_restore / copy_reload / valcap probes (in /tmp, can be promoted to scripts/ if wanted).
+
+### NEW finding via consolidated gate: fr DEBUG RELOAD doesn't re-derive encoding (hash/set/list)
+Built scripts/encoding_rdb_differ.py (permanent encoding × config × RDB-path gate; 78 checks,
+0 regressions, 8 known divergences) and it surfaced 6 cases my targeted probes missed:
+- **hash + set DEBUG RELOAD**: redis=listpack, fr=hashtable for a shrunk collection (built
+  past cap → shrunk below). Same direction as the list RELOAD case.
+- Coherent root cause: **fr DEBUG RELOAD preserves the sticky in-memory encoding** rather than
+  re-deriving like redis's RDB-load does (which converts a now-fits collection back to
+  listpack). Confirmed by contrast: hash/set **RESTORE-of-dump re-derives correctly** (clean),
+  only DEBUG RELOAD diverges — so fr's DEBUG RELOAD likely isn't a true encoding round-trip.
+  zset RELOAD is clean. (Distinct from 10ovx, which is list RESTORE-of-dump downgrade.)
+- Severity: DEBUG RELOAD is a debug/test command (lower severity than a data path); matters
+  for test-parity + simulating server-restart encoding. PENDING (verify on recovery whether
+  fr DEBUG RELOAD should re-derive encoding to match redis; if so, route the re-derivation
+  through the same load-time conversion redis uses). Gate marks these KNOWN so it catches
+  true regressions. Encoding-RDB differential space now has a committed permanent gate.
