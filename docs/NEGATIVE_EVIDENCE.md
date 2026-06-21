@@ -4,6 +4,76 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-21 cod-a `frankenredis-quicklist2-direct-emit-g7ag5` quicklist2 direct emit rejected and reverted
+
+BOLD-VERIFY targeted the `fr-persist` QUICKLIST_2 RDB encode path because prior
+RDB work left a plausible allocation lever: stream each PACKED listpack node
+directly into a node buffer instead of collecting borrowed slices and calling
+the shared listpack builder. The alien-graveyard/artifact rationale was
+region-style fused emission: remove one intermediate roster and finish each
+quicklist node in one pass while preserving the Redis 7.2.4 PLAIN threshold
+(`1 << 30`) fixed by `frankenredis-1z4ba`.
+
+Focused gate added in this pass:
+`rdb_codec_quicklist/encode_quicklist_rdb`, 300 list keys, 180 members/key,
+96-byte deterministic members. This is a server-free `fr-persist` encode gate,
+not a Redis-relative release score by itself.
+
+Same-worker control:
+
+| gate | implementation | worker | mean time | throughput | decision |
+|---|---|---|---:|---:|---|
+| `cargo bench -p fr-persist --profile release --bench rdb_codec -- rdb_codec_quicklist --noplot` | buffered slice roster | `ovh-a` | `23.890 ms` | `12.558 Kelem/s` | control |
+| same | direct emitter restored | `ovh-a` | `25.465 ms` | `11.781 Kelem/s` | reject |
+
+Candidate result: direct emission was `1.0659x` slower than the buffered path
+and Criterion flagged the restored direct-emitter run as `+6.5926%` time
+regression (`p=0.00`) / `-6.1849%` throughput. A previous direct-emitter run on
+`hz2` (`24.475 ms`, `12.257 Kelem/s`) is routing evidence only because it was a
+different worker.
+
+Scorecard for this lever: **0 wins / 1 loss / 0 neutral**. Redis-relative ratio:
+**no new keep claim** from this encode-only gate; release-readiness ratios remain
+the existing Redis 7.2.4 head-to-head rows until a list-specific DEBUG
+RELOAD/DUMP harness isolates this path. Production was reverted to the buffered
+slice-roster encoder; the focused benchmark stays as the retry guard. Do not
+retry direct quicklist2 listpack streaming unless a fresh profile shows the
+shared listpack builder or borrowed roster dominates and a same-worker gate
+beats the buffered control.
+
+## 2026-06-21 cod-b arity-one keyed-write cached default write gate rejected
+
+BOLD-VERIFY targeted the current arity-one keyed-write losses from the existing
+`keyed_write_vs_redis` scorecard (`LPUSH_1v`, `RPUSH_1v`, `SADD_1v`) without
+touching peer-owned store representation work. The attempted lever cached the
+default selected-DB write gate for the exact arity-one borrowed packet path and
+threaded it into `Runtime::execute_plain_keyed_values_write_borrowed`, leaving
+all source reverted after measurement.
+
+Candidate gate: filtered per-crate Criterion bench
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- 1v
+--noplot`, via `rch exec`, `RCH_WORKER=vmi1152480`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`, and vendored
+Redis 7.2.4 at
+`/dp/frankenredis/legacy_redis_code/redis/src/redis-server`. The first bench
+attempt failed before measurement because `FR_SERVER_BIN` pointed at the local
+warm target path while RCH rewrote `CARGO_TARGET_DIR` on the worker. The
+measured runs built `fr-server` on the same worker and let the harness resolve
+`FR_SERVER_BIN` from the worker-local target dir.
+
+| gate | candidate fr/Redis time | control fr/Redis time | fr candidate/control time | verdict |
+|---|---:|---:|---:|---|
+| `LPUSH_1v` | `1.618x` (`0.618x` throughput) | `1.235x` (`0.810x` throughput) | `1.285x` slower | reject |
+| `RPUSH_1v` | `1.385x` (`0.722x` throughput) | `1.069x` (`0.935x` throughput) | `1.361x` slower | reject |
+| `SADD_1v` | `1.436x` (`0.696x` throughput) | `1.292x` (`0.774x` throughput) | `1.152x` slower | reject |
+
+Scorecard: **0 wins / 3 losses / 0 neutral** vs Redis 7.2.4, and **0 wins /
+3 losses / 0 neutral** vs current control. Retry condition: do not retry cached
+default write-gate or one-branch policy-gate micro-laziness unless a fresh
+profile names `plain_borrowed_default_key_write_allows` or the selected-DB write
+gate as a material hot frame. The next route remains structural batch-typed
+keyed-write execution/request arena or list/set representation work.
+
 ## 2026-06-21 cod-a `frankenredis-ohsk5` keyed-write packet-id deferral rejected
 
 BOLD-VERIFY refresh targeted the remaining arity-one keyed-write losses without
@@ -1553,3 +1623,22 @@ algorithmic. Corrects the earlier brief "algorithmic O(n)" hypothesis (that was 
 score misuse artifact). No clean cc-store/cc-runtime lever; rank_of constant-factor is cod-b's
 treap domain. FLAGGED to cod-b: the distinct-score ZLEXCOUNT O(n) cliff (edge case) + whether
 the treap rank_of constant factor (~2x) can be tightened.
+
+### wide pipelined gauntlet (cc, disk recovered) — corrected harness; real residual losses
+METHODOLOGY LESSON: a draining loop that counts `\r\n` to tally pipelined replies OVER-counts
+bulk ($len\r\n+data\r\n = 2) and multibulk (N) replies → early exit → desync → garbage ratios
+(produced impossible readings like HSCAN 7.66x / SMEMBERS 24x and phantom TTL/TYPE/GETBIT
+losses). Re-ran with a PROPER per-reply RESP reader + READ-ONLY commands only (mutating cmds
+can't be benched by repetition — state diverges). Corrected result: nearly everything parity+
+(GET 1.26, HGETALL 1.01, TTL 1.00, TYPE 1.01, SCAN 0.87, HSCAN 1.07, ZRANGE 1.01, LRANGE 1.04
+— prior cold-cmd fast paths all hold). REAL residual losses (deep-pipelined vs Redis 7.2.4):
+| cmd | ratio | note |
+|---|---:|---|
+| PFCOUNT (single, cached) | 0.53x | HLL cache WORKS + byte-identical format (HYLL/sparse, cache_after valid) — gap is cache-HIT constant-factor: PFCOUNT lacks a borrowed fast path (generic dispatch) while GET has one (1.26x). Fix = PFCOUNT fast path, but fr-runtime is BlackThrush/ohsk5-reserved + agent-mail down → not pursued (no collision). |
+| GEODIST | 0.58x | haversine compute (geohash decode + trig); byte-risk on float fmt (declined prior). |
+| SINTER (300∩4 small) | 0.68x | smallest-set tiny intersection; dispatch/constant (3+set SINTER already +25%). |
+| BITFIELD GET u8 | 0.77x | single subcommand parse overhead. |
+| EXISTS (3 keys) | 0.81x | multi-key generic dispatch. |
+Conclusion: no clean radical cc-solo lever — residuals are constant-factor dispatch (fixable
+only via fast paths in BlackThrush's reserved fr-runtime) or compute/byte-risky (GEODIST). Hot
+path remains saturated/dominant. agent-mail DB corrupt (circuit breaker) → flagged via ledger.
