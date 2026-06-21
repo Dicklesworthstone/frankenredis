@@ -35,20 +35,33 @@ server-side routing shim; keep only the benchmark harness arity-1 coverage and
 this negative evidence. Do not retry single-member SADD runtime shape plumbing
 without a same-window control and a clearer path above the Redis parity floor.
 
-## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup pending-bench
+## 2026-06-21 cod-b `frankenredis-uhthd` SDIFF secondary-source lookup measured keep
 
-DISK-LOW pivot: no new `cargo bench` or `cargo build` was started after the
-disk-low instruction. Code-only lever shipped for `sdiff_value`: secondary SDIFF
+Code-only lever shipped in `7b94d4efc` for `sdiff_value`: secondary SDIFF
 sources no longer pay an unconditional `contains_key` probe before `get_mut`
 when LFU tracking is disabled. The LFU-enabled path keeps the existence
 pre-check so it preserves the prior per-existing-key RNG draw sequence.
 
-Validation status: pending benchmark and post-hunk cargo validation next turn.
-This commit records no Redis-relative throughput ratio for the SDIFF lever.
-Pre-pivot gates on the same file/crate were green (`fr-store` check, focused
-SDIFF tests, `fr-store` clippy, and `fr-conformance`), but the final code-only
-lookup hunk is intentionally carried with a pending-bench note because of the
-disk-low stop.
+Measured gate: filtered per-crate Criterion bench
+`cargo bench -p fr-bench --bench set_algebra_vs_redis -- SDIFFSTORE`, with
+`RCH_WORKER=ovh-a`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`,
+and current `fr-server` release binary
+`sha256=44622477fd90e2c54dde633f454a8624af17b3e83a6d867c5145f70721625cb7`.
+
+| gate | Redis 7.2.4 | FrankenRedis | ratio vs Redis | verdict |
+|---|---:|---:|---:|---|
+| `set_algebra_vs_redis/SDIFFSTORE`, Criterion mean time | `622,693 ns` | `303,346 ns` | `0.487x` time, `2.05x` throughput | keep; current fr is faster than Redis on this row |
+
+Discarded harness attempts: two earlier `fr-bench` runs failed before measuring
+because `cargo bench -p fr-bench` does not build `fr-server`, and `rch` rewrites
+remote `CARGO_TARGET_DIR` unless `FR_SERVER_BIN` is passed inside the remote
+`env`. They produced no performance evidence.
+
+Validation: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo test -p fr-conformance -- --nocapture` passed: 194 lib tests, all
+`fr-conformance` bin tests, 99 smoke tests, and doctests green. Non-strict live
+oracle drift was printed but not asserted, matching the existing harness mode.
 
 ## 2026-06-21 cod-b `frankenredis-uhthd` compact PackedZSet score tags rejected
 
@@ -1273,3 +1286,24 @@ for bulk-built/restored lists under a NON-default `list-max-listpack-size`:
   fill-correct `list_fits_legacy_listpack_size`), OR thread the configured fill into
   `rebuild_growth_state`. Mirrors the SET RESTORE re-encode fix (bbyfz). Severity: narrow
   (non-default list-max-listpack-size); confirm whether default cap=128 also diverges.
+
+### list RESTORE encoding bug — ROOT CAUSE PINNED (cc; corrects earlier candidate)
+Read the full path. `quicklist_packed_node_fits` (lib.rs:22135) is CORRECT (positive fill:
+`entries.len() > fill → false`), so `list_fits_legacy_listpack_size` is fine. The actual
+root cause is **RESTORE not preserving redis's one-way listpack→quicklist STICKINESS**:
+- Redis: build a list past `list-max-listpack-size` → quicklist; popping back below the
+  threshold keeps it quicklist (sticky, never converts back). RESTORE preserves quicklist.
+- fr: `ListValue::from_restored_quicklist2_nodes` (packed_set.rs) sets `decided_by_write=false`
+  + `fill=-2`, then `rebuild_growth_state`. With a non-`-2` configured `list-max-listpack-size`,
+  `object_encoding` (lib.rs:7998) sees `decided_by_write()==false` → falls to
+  `list_fits_legacy_listpack_size`, which RE-DERIVES from CURRENT contents — so a
+  crossed-then-shrunk list (e.g. 130→pop→127 @ cap=128) re-derives to listpack and
+  DOWNGRADES, diverging from redis's preserved quicklist. (Empirically: harness shows
+  redis=quicklist, fr=listpack; logical contents identical.)
+- Fix (needs build+test on recovery, verify with scripts/list_ops_differ.py): RESTORE of a
+  quicklist that the RDB indicates was quicklist-encoded should mark the restored list as
+  forced/sticky-quicklist (set `decided_by_write`+`forced_quicklist` under the configured
+  fill) rather than re-deriving from current contents — mirroring redis's load-time
+  preservation. Care: must NOT over-convert genuinely-small single-listpack-node lists that
+  redis WOULD convert to listpack on load (the lsetql/a0p5p hysteresis boundary). This is
+  exactly why it needs empirical build+test, not a blind edit.
