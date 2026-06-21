@@ -1064,3 +1064,16 @@ caches were idle, and they rebuild on recovery. Disk 56G→62G free. The dominan
 remaining consumers are the other per-agent 6G `.rch-targets/*` build dirs and dozens
 of stale `.worktrees/.scratch` checkouts (peer-owned). Still no clean cc code lever to
 implement, and no blind code commit under the build-pause (would risk shared `main`).
+
+## 2026-06-21 CobaltCove (cc) — DISK root-cause: crisis is OTHER projects, not frankenredis
+
+Disk still dropping (50G, 98%). Surveyed `.rch-targets/*`: the dominant consumers are
+NON-frankenredis project build targets — frankenjax-cod-a 51G + frankenjax-cod-b 48G +
+frankenjax-cod-a-local 35G (~134G), frankentorch-cod-a/cc ~78G, frankenfs-cc 44G,
+frankenpandas-cc 27G, frankenlibc-cod-b 27G, frankenscipy-cod-a 23G. frankenredis's
+own footprint is small by comparison (frankenredis-cod-b 31G is the largest, peer-owned;
+my frankenredis-cc is already cleaned/empty). All `/data/tmp` frankenredis worktrees are
+peers' (coralox/cod-b). I have reclaimed everything safely mine (6.8G last turn). The
+remaining headroom must come from those other-project caches (cross-project decision,
+not frankenredis-cc-actionable). No frankenredis code lever exists and none committed
+unverified under the build-pause.
