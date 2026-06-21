@@ -1346,3 +1346,17 @@ match BOTH per-path behaviors. This is subtle and bidirectional → definitively
 build+test (cannot be safely guessed blind). Harnesses: scripts/list_ops_differ.py (RESTORE
 direction) + the COPY/RELOAD probe here. Bead frankenredis-10ovx scope now covers RESTORE,
 DEBUG RELOAD, and the redis-default cap=128.
+
+### encoding/config/RDB differential sweep — CONCLUDED (cc); only 10ovx found
+Completed a focused differential sweep of the encoding × config × RDB-path space (the
+under-covered area where 10ovx surfaced), all vs Redis 7.2.4 (no-cargo, existing binary):
+- entry/size-cap stickiness (build past cap → shrink → live/RESTORE/RELOAD/COPY): list✗
+  (=10ovx, RESTORE+RELOAD, bidirectional, default cap=128); hash/zset/set ✓ (0 diffs).
+- per-VALUE caps (hash/zset/set-max-listpack-value 64/16, one oversized element →
+  hashtable/skiplist, live+RESTORE+RELOAD): **36 checks, 0 diffs — clean.**
+- COPY list encoding: clean.
+Conclusion: fr's OBJECT ENCODING is byte-exact with redis across the config/RDB matrix
+EXCEPT the single list RDB-round-trip stickiness bug (10ovx). The encoding-differential vein
+is now mined out — do not re-probe; the one open item is 10ovx (needs build+test to fix,
+match redis per-path RDB conversion). Harnesses committed: list_ops_differ.py + the
+enc_restore / copy_reload / valcap probes (in /tmp, can be promoted to scripts/ if wanted).
