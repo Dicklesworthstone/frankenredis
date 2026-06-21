@@ -2412,3 +2412,14 @@ simple-lookup dispatch vein is now ~exhausted. Remaining residuals are NOT clean
 levers: GEOSEARCH ~0.78x (complex multi-option SEARCH, compute-bound), SINTER-small (multibulk
 set algebra), EXISTS-multikey (already fast-pathed, subtle). frankenredis = parity-or-faster
 across the hot path + all clean cold commands vs Redis 7.2.4, MEASURED.
+
+### SINTER reliably measured NEAR-PARITY (cc) — gauntlet single-run losses were NOISE
+Best-of-7 pipe=100 vs Redis 7.2.4 (warm binary, no rebuild): SINTER big∩small(4-result) 0.956x,
+big∩mid(150-result) 0.889x, small∩big 0.821x (worst — mild arg-order sensitivity), SINTERCARD
+control 1.015x. The earlier wide-gauntlet single-run SINTER 0.65-0.73x readings were NOISE
+(confirmed via best-of-N, per the standing "confirm losses with best-of-N" rule). SINTER is NOT
+a real lever — near-parity. This reconfirms: dispatch fast-path coverage is extensive (60+
+execute_plain_*_borrowed incl my PFCOUNT/GEODIST/GEOPOS) and frankenredis is parity-or-faster
+across the measured surface. Remaining genuine non-parity: GEODIST 0.75x (constant-factor geo
+compute, byte-exact), GEOSEARCH ~0.78x (complex SEARCH, compute-bound) — both compute-bound,
+not clean dispatch levers. Clean perf vein EXHAUSTED.
