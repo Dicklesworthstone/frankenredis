@@ -529,6 +529,28 @@ fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlainBitfieldGetCmd {
+    Bitfield,
+    BitfieldRo,
+}
+
+impl PlainBitfieldGetCmd {
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainBitfieldGetCmd::Bitfield => "BITFIELD",
+            PlainBitfieldGetCmd::BitfieldRo => "BITFIELD_RO",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainBitfieldGetCmd::Bitfield => "bitfield",
+            PlainBitfieldGetCmd::BitfieldRo => "bitfield_ro",
+        }
+    }
+}
+
 /// `SRANDMEMBER key` / `HRANDFIELD key` / `ZRANDMEMBER key` — the no-count
 /// random-read forms that return a single random member as a bulk string (or
 /// nil for a missing/empty container). They lacked a borrow fast path and fell
@@ -13619,9 +13641,14 @@ impl Runtime {
         Some(offset)
     }
 
-    fn can_execute_plain_bitfield_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_bitfield_get_borrowed(
+        &mut self,
+        cmd: PlainBitfieldGetCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
         if self.policy.gate.max_array_len < 5
-            || self.policy.gate.max_bulk_len < b"BITFIELD".len()
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
@@ -13630,15 +13657,16 @@ impl Runtime {
     }
 
     /// Borrowed runtime fast path for the read-only single-op form
-    /// `BITFIELD key GET <enc> <offset>` (the common bitmap read). Mirrors the
-    /// generic `bitfieldCommand` read path EXACTLY: one keyspace lookup via
-    /// `exists_no_touch` (= `record_source_key_lookups` for the single key) then a
-    /// per-op `bitfield_get_no_stat`, returning a one-element array. Returns None
+    /// `BITFIELD[_RO] key GET <enc> <offset>` (the common bitmap read). Mirrors
+    /// the generic read path EXACTLY: one keyspace lookup via `exists_no_touch`
+    /// (= `record_source_key_lookups` for the single key) then a per-op
+    /// `bitfield_get_no_stat`, returning a one-element array. Returns None
     /// (fall back) unless the op is a literal GET with a valid encoding+offset, so
     /// every SET/INCRBY/OVERFLOW/multi-op/invalid form reaches the generic handler
-    /// (writes + propagation + multi-op replies unaffected). (frankenredis cc BITFIELD GET fast path)
+    /// (writes + propagation + multi-op replies unaffected).
     pub fn execute_plain_bitfield_get_borrowed(
         &mut self,
+        cmd: PlainBitfieldGetCmd,
         key: &[u8],
         get_arg: &[u8],
         enc_arg: &[u8],
@@ -13650,9 +13678,11 @@ impl Runtime {
         }
         let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
         let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
-        if !self.can_execute_plain_bitfield_get_borrowed(key, now_ms) {
+        if !self.can_execute_plain_bitfield_get_borrowed(cmd, key, now_ms) {
             return None;
         }
+        let command_upper = cmd.name_upper();
+        let command_lower = cmd.name_lower();
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -13660,9 +13690,9 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("bitfield");
+        self.session.last_command_name.push_str(command_lower);
         self.session.last_argv_len_sum =
-            b"BITFIELD".len() + key.len() + get_arg.len() + enc_arg.len() + offset_arg.len();
+            command_upper.len() + key.len() + get_arg.len() + enc_arg.len() + offset_arg.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -13687,7 +13717,7 @@ impl Runtime {
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
             let argv = vec![
-                b"BITFIELD".to_vec(),
+                command_upper.as_bytes().to_vec(),
                 key.to_vec(),
                 get_arg.to_vec(),
                 enc_arg.to_vec(),
@@ -13699,7 +13729,7 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv = vec![
-                b"BITFIELD".to_vec(),
+                command_upper.as_bytes().to_vec(),
                 key.to_vec(),
                 get_arg.to_vec(),
                 enc_arg.to_vec(),
@@ -13715,11 +13745,11 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("bitfield", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind(command_lower, elapsed_us, kind);
         }
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv = vec![
-                b"BITFIELD".to_vec(),
+                command_upper.as_bytes().to_vec(),
                 key.to_vec(),
                 get_arg.to_vec(),
                 enc_arg.to_vec(),
@@ -13734,8 +13764,8 @@ impl Runtime {
                 action: "slow_command_detected",
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
-                    "command 'BITFIELD' took {}us, exceeding budget {}ms",
-                    elapsed_us, self.server.command_time_budget_ms
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    command_upper, elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(&argv),
                 output: &RespFrame::Integer(0),
@@ -26889,8 +26919,8 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, PlainObjectStatCmd,
-        PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        OutputBufferClassLimit, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
+        PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -30405,6 +30435,45 @@ mod tests {
         assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 2).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 4).is_none());
+    }
+
+    #[test]
+    fn plain_bitfield_ro_get_borrowed_matches_generic_and_keeps_command_identity() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        let value = [0xA5_u8; 32];
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"bf", &value]), 1);
+        }
+
+        let fast_reply = fast.execute_plain_bitfield_get_borrowed(
+            PlainBitfieldGetCmd::BitfieldRo,
+            b"bf",
+            b"GET",
+            b"u8",
+            b"0",
+            2,
+        );
+        assert!(
+            fast_reply.is_some(),
+            "BITFIELD_RO GET should take the borrowed fast path"
+        );
+        let Some(fast_reply) = fast_reply else {
+            return;
+        };
+        let generic_reply =
+            generic.execute_frame(command(&[b"BITFIELD_RO", b"bf", b"GET", b"u8", b"0"]), 2);
+
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast.session.last_command_name, "bitfield_ro");
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
     }
 
     #[test]

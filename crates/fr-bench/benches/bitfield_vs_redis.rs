@@ -184,19 +184,24 @@ fn bitfield_vs_redis(c: &mut Criterion) {
     let mut group = c.benchmark_group("bitfield_vs_redis");
     group.throughput(Throughput::Elements(COMMANDS_PER_ITER_U64));
 
-    let packet = bitfield_get_packet(COMMANDS_PER_ITER);
-    for engine in engines {
-        let id = BenchmarkId::new("BITFIELD_GET_u8_0", engine.name);
-        group.bench_with_input(id, &engine, |b, engine| {
-            let mut client = Client::connect(engine.port);
-            b.iter_custom(|iters| {
-                let start = Instant::now();
-                for _ in 0..iters {
-                    client.run_bitfield_packet(&packet, COMMANDS_PER_ITER);
-                }
-                start.elapsed()
+    for case in [
+        ("BITFIELD_GET_u8_0", b"BITFIELD".as_slice()),
+        ("BITFIELD_RO_GET_u8_0", b"BITFIELD_RO".as_slice()),
+    ] {
+        let packet = bitfield_get_packet(case.1, COMMANDS_PER_ITER);
+        for engine in engines {
+            let id = BenchmarkId::new(case.0, engine.name);
+            group.bench_with_input(id, &engine, |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        client.run_bitfield_packet(&packet, COMMANDS_PER_ITER);
+                    }
+                    start.elapsed()
+                });
             });
-        });
+        }
     }
 
     group.finish();
@@ -208,9 +213,9 @@ fn setup_dataset(client: &mut Client) {
     client.run_status_packet(&command(&[b"SET".as_slice(), b"bf".as_slice(), &value]), 1);
 }
 
-fn bitfield_get_packet(count: usize) -> Vec<u8> {
+fn bitfield_get_packet(command_name: &[u8], count: usize) -> Vec<u8> {
     let command = command(&[
-        b"BITFIELD".as_slice(),
+        command_name,
         b"bf".as_slice(),
         b"GET".as_slice(),
         b"u8".as_slice(),

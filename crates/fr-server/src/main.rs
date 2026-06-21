@@ -39,8 +39,9 @@ use fr_eventloop::{
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{
-    ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd,
-    PlainKeyedValuesCmd, PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
+    ClientSession, ClientUnblockMode, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
+    PlainKeyedPopCmd, PlainKeyedValuesCmd, PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd,
+    Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -3555,6 +3556,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
+                        packet.cmd,
                         packet.key,
                         packet.get_arg,
                         packet.enc_arg,
@@ -7062,18 +7064,18 @@ fn parse_borrowed_plain_pfcount_packet<'a>(
 
 struct BorrowedPlainBitfieldGetPacket<'a> {
     consumed: usize,
+    cmd: PlainBitfieldGetCmd,
     key: &'a [u8],
     get_arg: &'a [u8],
     enc_arg: &'a [u8],
     offset_arg: &'a [u8],
 }
 
-/// `BITFIELD key GET <enc> <offset>` read-only single-op fast-path packet —
-/// extracts the five bulk args of the common bitmap read form (5-element
-/// multibulk, 8-byte command token). The runtime fast path validates the GET
-/// op + encoding/offset and serves it; any other BITFIELD form (SET/INCRBY/
-/// OVERFLOW/multi-op/invalid) returns None there and falls to the generic
-/// handler. (frankenredis cc BITFIELD GET fast path)
+/// `BITFIELD[_RO] key GET <enc> <offset>` read-only single-op fast-path packet
+/// — extracts the five bulk args of the common bitmap read form. The runtime
+/// fast path validates the GET op + encoding/offset and serves it; any other
+/// BITFIELD form (SET/INCRBY/OVERFLOW/multi-op/invalid) returns None there and
+/// falls to the generic handler.
 fn parse_borrowed_plain_bitfield_get_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -7081,11 +7083,28 @@ fn parse_borrowed_plain_bitfield_get_packet<'a>(
     if config.max_array_len < 5 || config.max_bulk_len < b"BITFIELD".len() {
         return None;
     }
-    let mut cursor = input.strip_prefix(b"*5\r\n$8\r\n").and_then(|rest| {
-        rest.get(..8)
-            .filter(|command| command.eq_ignore_ascii_case(b"BITFIELD"))
-            .map(|_| input.len() - rest.len() + 8)
-    })?;
+    let (cmd, mut cursor) = input
+        .strip_prefix(b"*5\r\n$8\r\n")
+        .and_then(|rest| {
+            rest.get(..8)
+                .filter(|command| command.eq_ignore_ascii_case(b"BITFIELD"))
+                .map(|_| (PlainBitfieldGetCmd::Bitfield, input.len() - rest.len() + 8))
+        })
+        .or_else(|| {
+            if config.max_bulk_len < b"BITFIELD_RO".len() {
+                return None;
+            }
+            input.strip_prefix(b"*5\r\n$11\r\n").and_then(|rest| {
+                rest.get(..11)
+                    .filter(|command| command.eq_ignore_ascii_case(b"BITFIELD_RO"))
+                    .map(|_| {
+                        (
+                            PlainBitfieldGetCmd::BitfieldRo,
+                            input.len() - rest.len() + 11,
+                        )
+                    })
+            })
+        })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
     }
@@ -7096,6 +7115,7 @@ fn parse_borrowed_plain_bitfield_get_packet<'a>(
     let (offset_arg, consumed) = parse_borrowed_plain_set_bulk(input, next3, config.max_bulk_len)?;
     Some(BorrowedPlainBitfieldGetPacket {
         consumed,
+        cmd,
         key,
         get_arg,
         enc_arg,
@@ -14153,7 +14173,7 @@ mod tests {
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
-    use fr_runtime::Runtime;
+    use fr_runtime::{PlainBitfieldGetCmd, Runtime};
     use mio::Token;
     use std::io::{ErrorKind, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
@@ -17754,6 +17774,38 @@ mod tests {
             crate::parse_borrowed_plain_ping_packet(b"*2\r\n$4\r\nPING\r\n$2\r\nx\r\n", &cfg)
                 .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_bitfield_get_packet_parser_accepts_bitfield_ro() {
+        let input = b"*5\r\n$11\r\nBITFIELD_RO\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitfield_get_packet(input, &ParserConfig::default());
+        assert!(
+            parsed.is_some(),
+            "canonical BITFIELD_RO GET packet should parse"
+        );
+        let Some(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.cmd, PlainBitfieldGetCmd::BitfieldRo);
+        assert_eq!(parsed.key, b"bf");
+        assert_eq!(parsed.get_arg, b"GET");
+        assert_eq!(parsed.enc_arg, b"u8");
+        assert_eq!(parsed.offset_arg, b"0");
+        assert_eq!(parsed.consumed, input.len());
+
+        assert!(
+            crate::parse_borrowed_plain_bitfield_get_packet(
+                input,
+                &ParserConfig {
+                    max_bulk_len: b"BITFIELD".len(),
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "BITFIELD_RO bulk-limit errors stay on the generic parser"
         );
     }
 
