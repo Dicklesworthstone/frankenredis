@@ -3730,6 +3730,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_setnx_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -10028,6 +10048,34 @@ fn parse_borrowed_plain_expire_packet<'a>(
         rest.get(..6)
             .filter(|command| command.eq_ignore_ascii_case(b"EXPIRE"))
             .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-6s9dx) Byte-prefix fast path for `SETNX key value` (3-element,
+// same key+arg shape as EXPIRE); `member` carries the value bytes. Reuses
+// execute_plain_setnx_borrowed (a WRITE — inserts only if the key is absent).
+fn parse_borrowed_plain_setnx_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"SETNX".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"SETNX"))
+            .map(|_| input.len() - rest.len() + 5)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;

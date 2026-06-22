@@ -3327,3 +3327,23 @@ LFU test `core_object_live_redis_matches_runtime` (expected value non-determinis
 runtime fn is only called from fr-server dispatch) and passed in the n8ct0 conformance run minutes
 earlier. Remaining 6s9dx siblings (SETNX/SETEX/RENAME/GETEX/HINCRBY/INCRBYFLOAT/COPY) = same pattern,
 each its own packet shape; bench each fast-vs-generic.
+
+### 2026-06-22 (part 17) 6s9dx SETNX borrowed fast-path SHIPPED — 2.10x vs generic (cc/BlackThrush)
+Second 6s9dx cold-cluster command. `SETNX key value` is a single-key WRITE returning Integer with the
+same 3-element `*3 CMD key arg` wire shape as EXPIRE, so it reuses `BorrowedPlainKeyMemberPacket`
+(member = value): new `parse_borrowed_plain_setnx_packet` (fr-server) + `execute_plain_setnx_borrowed`
+→ `store.setnx` (fr-runtime, inserts only if key absent, returns whether set). Gated off by
+`plain_borrowed_default_key_write_allows` (so the "set" keyspace event / propagation / AOF / maxmemory
+denial are provably inactive — and SETNX creating a key under maxmemory correctly defers to generic).
+
+A/B (generic-fr `fr_persist` [no SETNX fast path] vs fast-fr, redis-benchmark -c50 -P16, SETNX
+key:__rand_int__ value): **generic ~180k rps → fast-path ~379k rps = 2.10x** (2 runs 2.108/2.101).
+Bigger than PERSIST (1.9x) — SETNX is firmly dispatch-bound.
+
+Verified: SETNX byte-exact vs redis (new→1/get=value, exists→0/value unchanged);
+cmdstat_keyspace_parity_gate PASS (cmdstat_setnx + keyspace hits/misses byte-exact, 46 rows);
+fr-runtime 683 passed/0 failed. fr-conformance: only failure is the SAME pre-existing flaky OBJECT
+FREQ LFU test (`core_object_live_redis_matches_runtime`, expected value non-deterministic across runs:
+81 / 155 / 161 — it compares fr's deterministic counter vs redis's probabilistic LFU; 97wc2), which is
+unreachable by this change and is a flawed-test/LFU-model issue, not a SETNX regression. Generic path
+untouched (additive parser + handler). Remaining 6s9dx: SETEX/RENAME/GETEX/HINCRBY/INCRBYFLOAT/COPY.
