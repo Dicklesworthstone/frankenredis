@@ -2673,3 +2673,17 @@ default then override. Result: restore_edge differ 8→2 diffs; fr-store 656 uni
 99/99 green. RESIDUAL (2 diffs, edge case): RESTORE IDLETIME 999999999 (>49 days) — redis's
 24-bit-second LRU clock wraps to 10144255 s; fr's u32-millisecond last_access can't represent
 that (caps ~4294967 s) — a representation-depth limit, not worth changing for a >49-day idle.
+
+### differential sweep (cc) — 3 mine-domain surfaces verified byte-exact (post f16dz-followup)
+Continued differential probing vs Redis 7.2.4 (warm binary). After fixing the f16dz follow-up
+(59147a79c), these surfaces are byte-exact (0 diffs):
+- SET-algebra-store RESULT encoding: SINTERSTORE/SUNIONSTORE/SDIFFSTORE result OBJECT ENCODING
+  (intset/listpack/hashtable) + members + card across all-int/mixed/listpack/hashtable input
+  shapes — 72 checks 0 diffs (confirms the direct-build set-algebra encoding is correct).
+- COPY: LRU freshness (copy reports IDLETIME 0 even from a RESTORE-IDLETIME-100 source, =redis),
+  encoding/type/DUMP/TTL preservation across all types, REPLACE, DB option — 27 checks 0 diffs.
+- STRING edges: APPEND int→raw encoding, SETRANGE zero-pad + on-int, GETRANGE OOB/negative,
+  INCR overflow + INCRBYFLOAT format/exp, int/embstr/raw encoding boundary (44/45), GETDEL,
+  GETEX PERSIST/EX, SETEX/SETNX/SET NX/XX/GET/KEEPTTL — 43 checks 0 diffs.
+Differential probing remains the high-yield mine-lane pattern (found+fixed f16dz-followup this
+sweep); these 3 surfaces are now bounded clean.
