@@ -2777,3 +2777,18 @@ a clean mine-domain lever. PROFILING VALIDATION COMPLETE across the 3 key perf a
 (syscall-bound + peer framing). Every residual is now explained at the instruction level —
 byte-exact-required / inherent / syscall-bound / peer-domain — none a missed mine lever. The perf
 domination is comprehensively CPU-profile-validated at its limits (profiling tool newly available).
+
+### EXISTS 0.8x profiling-characterized (cc): per-command machinery, no clean lever
+perf record of an EXISTS 3-key blast (32k samples): process_buffered_frames (dispatch loop) ~49%,
+execute_plain_exists_borrowed_into 10.7% (clock 3.2% chained), drop_if_expired per-key 7.8%,
+plain_borrowed_default_key_read_allows (fast-path gate) 4.5%, parse_borrowed_plain_exists/set_bulk
+~7%, memcmp 2.8%. EXISTS 0.8x = fr's per-command machinery being a LARGER FRACTION for a cheap
+multi-key command (vs GET 1.26x where the value-copy reply dominates + amortizes machinery). No
+single fixable hot spot — every part is necessary: per-key drop_if_expired+keyspace stat (=redis
+lookupKeyReadWithFlags), parse, chained clock (1/cmd, beats redis 2). The gate (4.5%) is ~20
+necessary safety checks (auth/ACL/db!=0/txn/subscription/pause/maxmemory/aof/replica/blocked/
+notify/tracking/monitor/script) gating the borrowed fast path; caching it risks STALENESS bugs
+(the fast path bypasses generic handling — a stale gate would e.g. skip a keyspace event or run
+mid-transaction) for a modest cheap-command gain → declined. ALL 4 perf residuals now CPU-
+profiled (hot-path/GEODIST/large-value/EXISTS) — each is byte-exact-required / inherent / syscall-
+bound / machinery-necessary, NONE a missed mine lever. Perf domination fully CPU-validated.
