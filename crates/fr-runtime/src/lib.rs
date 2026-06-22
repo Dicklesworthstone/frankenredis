@@ -404,6 +404,13 @@ pub enum PlainKeyedValuesCmd {
     Sadd,
     Lpush,
     Rpush,
+    // (frankenredis-n8ct0) Variadic DELETE siblings — `CMD key member [member ...]`
+    // -> Integer(count removed). Same wire shape + reply as SADD, so they share
+    // this borrowed fast path; routed to store.hdel/store.srem which own all
+    // accounting + empty-key autodelete (the fast path is gated off whenever
+    // notifications/replication/AOF/tracking are active, so no extra side effects).
+    Hdel,
+    Srem,
 }
 
 impl PlainKeyedValuesCmd {
@@ -414,6 +421,8 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Sadd => "SADD",
             PlainKeyedValuesCmd::Lpush => "LPUSH",
             PlainKeyedValuesCmd::Rpush => "RPUSH",
+            PlainKeyedValuesCmd::Hdel => "HDEL",
+            PlainKeyedValuesCmd::Srem => "SREM",
         }
     }
 
@@ -424,6 +433,8 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Sadd => "sadd",
             PlainKeyedValuesCmd::Lpush => "lpush",
             PlainKeyedValuesCmd::Rpush => "rpush",
+            PlainKeyedValuesCmd::Hdel => "hdel",
+            PlainKeyedValuesCmd::Srem => "srem",
         }
     }
 }
@@ -8209,16 +8220,17 @@ impl Runtime {
         }
     }
 
-    /// Conservative borrowed runtime fast path for the fixed-single-key variadic
-    /// WRITE commands SADD / LPUSH / RPUSH (`CMD key value [value ...]`). Mirrors
-    /// the generic handlers exactly — the store method's Integer reply, WRONGTYPE
-    /// on a key holding the wrong type — while skipping argv materialization, the
-    /// generic command dispatch (classify + command_table_index +
-    /// dispatch_with_client_context), and the post-`Ok` keyspace/tracking/AOF
-    /// bookkeeping block, all of which `plain_borrowed_default_key_write_allows`
-    /// guarantees is no-op in plain mode (db0 master, no aof/replica/notify/
-    /// tracking/monitor/blocked-client/transaction/script). These commands are
-    /// classified as writes, so each counts one write regardless of outcome.
+    /// Conservative borrowed runtime fast path for fixed-single-key variadic
+    /// WRITE commands SADD / LPUSH / RPUSH / HDEL / SREM
+    /// (`CMD key value [value ...]`). Mirrors the generic handlers exactly —
+    /// the store method's Integer reply, WRONGTYPE on a key holding the wrong
+    /// type — while skipping argv materialization, the generic command dispatch
+    /// (classify + command_table_index + dispatch_with_client_context), and the
+    /// post-`Ok` keyspace/tracking/AOF bookkeeping block, all of which
+    /// `plain_borrowed_default_key_write_allows` guarantees is no-op in plain
+    /// mode (db0 master, no aof/replica/notify/tracking/monitor/blocked-client/
+    /// transaction/script). These commands are classified as writes, so each
+    /// counts one write regardless of outcome.
     /// Returns None (fall back to generic) on any disabling state.
     /// (frankenredis-ev067 — the SADD/LPUSH/RPUSH analog of
     /// [`Self::execute_plain_append_borrowed`].) KEEP IN SYNC with the q0qym
@@ -8277,6 +8289,19 @@ impl Runtime {
                 .server
                 .store
                 .rpush(key, values, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            // (frankenredis-n8ct0) store.hdel/srem own type-check, keyspace
+            // hit/miss accounting, dirty tracking, and empty-key autodelete —
+            // identical to the generic path which calls the same methods.
+            PlainKeyedValuesCmd::Hdel => self
+                .server
+                .store
+                .hdel(key, values, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Srem => self
+                .server
+                .store
+                .srem(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
         };
         let elapsed_us = self.finish_chained_command(start);
@@ -13668,11 +13693,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("geodist");
-        self.session.last_argv_len_sum = b"GEODIST".len()
-            + key.len()
-            + m1.len()
-            + m2.len()
-            + unit.map_or(0, <[u8]>::len);
+        self.session.last_argv_len_sum =
+            b"GEODIST".len() + key.len() + m1.len() + m2.len() + unit.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -14141,7 +14163,9 @@ impl Runtime {
             || self.policy.gate.max_array_len < members.len().saturating_add(2)
             || self.policy.gate.max_bulk_len < b"GEOPOS".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || members.iter().any(|m| m.len() > self.policy.gate.max_bulk_len)
+            || members
+                .iter()
+                .any(|m| m.len() > self.policy.gate.max_bulk_len)
         {
             return false;
         }

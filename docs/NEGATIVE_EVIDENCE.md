@@ -3264,3 +3264,38 @@ ships (correct, faster, alloc-free, and becomes a larger share once the fast-pat
 fast-path as the next lever. Methodology note: redis-benchmark `HDEL h field:__rand_int__ -r N`
 deletes random distinct fields over a pre-populated N-field hashtable hash (≈63% hit at n=r) — fair,
 identical workload to both servers.
+
+### 2026-06-22 (part 15) n8ct0 SHIPPED — HDEL/SREM borrowed fast-path closes the removal gap (cc/BlackThrush)
+Implemented the pt14 redirect: HDEL/SREM lacked a borrowed fast-path (HSET had
+`execute_plain_hset_borrowed`), so they paid the generic owned-argv dispatch tax (~7.5x/3.3x).
+HDEL/SREM share SADD's exact wire shape (`CMD key member [member ...]` → Integer count), so the
+fix extends the existing `PlainKeyedValuesCmd` keyed-values fast path:
+- fr-runtime: `PlainKeyedValuesCmd` += {Hdel, Srem} (name_upper/lower), routed in
+  `execute_plain_keyed_values_write_borrowed` to `store.hdel`/`store.srem` (the SAME methods the
+  generic path calls — they own type-check, keyspace hit/miss accounting, dirty tracking, per-field
+  TTL clear, and empty-key autodelete).
+- fr-server: HDEL/SREM added to the `$4` verb block of all 18 `parse_borrowed_plain_keyed_valuesN`
+  packet parsers.
+Safe because the fast path is gated off (`plain_borrowed_default_key_write_allows`) whenever
+notify-keyspace-events / replicas / AOF / client-tracking / maxmemory / non-default-db / MULTI /
+monitors are active — i.e. exactly the cases needing notifications or propagation. In the plain hot
+path there are no side effects beyond the store mutation + stats.
+
+**HEAD-TO-HEAD (redis-benchmark -c50 -P16, 300k-elem hashtable hash/set, `CMD k member:__rand_int__`,
+fr+redis pinned to dedicated cores, vs Redis 7.2.4):**
+| cmd | BEFORE (pt11/pt14) | AFTER (n8ct0) |
+|---|---:|---:|
+| HDEL | 7.5x slower (fr 93k vs redis 666k) | **1.34x** (fr 394k vs redis 529k) |
+| SREM | 3.3x slower | **1.30x** |
+The residual ~1.3x now matches the SADD/HSET insert residual (pt8: SADD 1.27x) = shared structural
+store-side cost (uybhq/6lgnu), NOT dispatch. The dispatch tax is eliminated. (Standalone fr HDEL hit
+806k rps single-server.)
+
+**Correctness (all on the live n8ct0 binary, which exercises the fast path):** DEBUG DIGEST-VALUE
+byte-exact vs Redis 7.2.4 for hash/set/src after identical HDEL/SREM/SMOVE (ALL-MATCH);
+cmdstat_keyspace_parity_gate PASS (cmdstat calls + keyspace_hits/misses byte-exact, 46 rows);
+fr-runtime suite 683 passed / 0 failed; fr-conformance 347 passed / 0 failed (core 194). No crash
+under -c50 -P16. The generic path is untouched (additive enum/parser arms only). Bead n8ct0 → done.
+Build note confirmed: fr-runtime/fr-server changes build the full binary fine on a WARM worker
+(ovh-a) — fr-command isn't recompiled (upstream); cold workers still fail fr-command's build.rs
+(commands-dir blocker), so builds are worker-roulette but land warm on retry.

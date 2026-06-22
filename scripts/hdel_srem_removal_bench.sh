@@ -9,8 +9,8 @@ FR_BIN=${FR_BIN:-/data/projects/.rch-targets/frankenredis-cc/release/frankenredi
 REDIS_BIN=${REDIS_BIN:-/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server}
 BENCH=${BENCH:-/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark}
 CLI=${CLI:-/data/projects/frankenredis/legacy_redis_code/redis/src/redis-cli}
-FR_PORT=7901
-RD_PORT=7902
+FR_PORT=17901
+RD_PORT=17902
 N=${N:-2000000}        # hash/set field count (>128 => hashtable encoding)
 OPS=${OPS:-2000000}    # redis-benchmark request count
 RUNS=${RUNS:-3}

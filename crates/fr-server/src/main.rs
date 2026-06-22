@@ -3580,12 +3580,9 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zcount_borrowed(
-                        packet.key,
-                        packet.min,
-                        packet.max,
-                        ts,
-                    ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -3603,12 +3600,9 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zlexcount_borrowed(
-                        packet.key,
-                        packet.min,
-                        packet.max,
-                        ts,
-                    ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts)
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -7200,7 +7194,10 @@ fn parse_borrowed_plain_zcount_packet<'a>(
         return None;
     }
     let mut cursor = "*4\r\n$6\r\n".len();
-    if input.get(cursor..cursor + 6)?.eq_ignore_ascii_case(b"ZCOUNT") {
+    if input
+        .get(cursor..cursor + 6)?
+        .eq_ignore_ascii_case(b"ZCOUNT")
+    {
         cursor += 6;
     } else {
         return None;
@@ -7241,7 +7238,10 @@ fn parse_borrowed_plain_zlexcount_packet<'a>(
         return None;
     }
     let mut cursor = "*4\r\n$9\r\n".len();
-    if input.get(cursor..cursor + 9)?.eq_ignore_ascii_case(b"ZLEXCOUNT") {
+    if input
+        .get(cursor..cursor + 9)?
+        .eq_ignore_ascii_case(b"ZLEXCOUNT")
+    {
         cursor += 9;
     } else {
         return None;
@@ -7290,7 +7290,10 @@ fn parse_borrowed_plain_geodist_packet<'a>(
         return None;
     };
     let mut cursor = "*4\r\n$7\r\n".len();
-    if input.get(cursor..cursor + 7)?.eq_ignore_ascii_case(b"GEODIST") {
+    if input
+        .get(cursor..cursor + 7)?
+        .eq_ignore_ascii_case(b"GEODIST")
+    {
         cursor += 7;
     } else {
         return None;
@@ -8442,6 +8445,10 @@ fn parse_borrowed_plain_keyed_values18_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -8548,6 +8555,10 @@ fn parse_borrowed_plain_keyed_values17_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -8651,6 +8662,10 @@ fn parse_borrowed_plain_keyed_values16_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -8751,6 +8766,10 @@ fn parse_borrowed_plain_keyed_values15_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -8848,6 +8867,10 @@ fn parse_borrowed_plain_keyed_values14_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -8942,6 +8965,10 @@ fn parse_borrowed_plain_keyed_values13_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9033,6 +9060,10 @@ fn parse_borrowed_plain_keyed_values12_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9121,6 +9152,10 @@ fn parse_borrowed_plain_keyed_values11_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9206,6 +9241,10 @@ fn parse_borrowed_plain_keyed_values10_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9288,6 +9327,10 @@ fn parse_borrowed_plain_keyed_values9_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9367,6 +9410,10 @@ fn parse_borrowed_plain_keyed_values8_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9443,6 +9490,10 @@ fn parse_borrowed_plain_keyed_values7_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9516,6 +9567,10 @@ fn parse_borrowed_plain_keyed_values6_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9586,6 +9641,10 @@ fn parse_borrowed_plain_keyed_values5_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9653,6 +9712,10 @@ fn parse_borrowed_plain_keyed_values4_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9709,6 +9772,10 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9739,9 +9806,10 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
     ))
 }
 
-// (frankenredis-reioo) 2-value LPUSH/RPUSH/SADD (`*4 $len CMD key v1 v2`); reuses
-// execute_plain_keyed_values_write_borrowed with a 2-element value slice
-// (KeyRange's {start,end} = {v1,v2}). 3+ value forms fall through to generic.
+// (frankenredis-reioo) 2-value LPUSH/RPUSH/SADD/HDEL/SREM
+// (`*4 $len CMD key v1 v2`); reuses execute_plain_keyed_values_write_borrowed
+// with a 2-element value slice (KeyRange's {start,end} = {v1,v2}). 3+ value
+// forms fall through to generic.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values2_packet<'a>(
     input: &'a [u8],
@@ -9763,6 +9831,10 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -9791,10 +9863,11 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
     ))
 }
 
-// (frankenredis-ken99) single-value LPUSH/RPUSH/SADD (`*3 $len CMD key value`),
-// reusing the verified-live execute_plain_keyed_values_write_borrowed with a
-// 1-element value slice. Multi-value forms (arity > 3) fall through to the generic
-// path. LPUSHX/RPUSHX are NOT matched (distinct commands).
+// (frankenredis-ken99) single-value LPUSH/RPUSH/SADD/HDEL/SREM
+// (`*3 $len CMD key value`), reusing the verified-live
+// execute_plain_keyed_values_write_borrowed with a 1-element value slice.
+// Multi-value forms (arity > 3) fall through to the generic path.
+// LPUSHX/RPUSHX are NOT matched (distinct commands).
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values1_packet<'a>(
     input: &'a [u8],
@@ -9816,6 +9889,10 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
         let name = rest.get(..4)?;
         if name.eq_ignore_ascii_case(b"SADD") {
             (PlainKeyedValuesCmd::Sadd, 4)
+        } else if name.eq_ignore_ascii_case(b"HDEL") {
+            (PlainKeyedValuesCmd::Hdel, 4)
+        } else if name.eq_ignore_ascii_case(b"SREM") {
+            (PlainKeyedValuesCmd::Srem, 4)
         } else {
             return None;
         }
@@ -15240,6 +15317,35 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values_delete_parsers_accept_hdel_and_srem() {
+        let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values1_packet(
+            b"*3\r\n$4\r\nhDeL\r\n$1\r\nh\r\n$1\r\nf\r\n",
+            &ParserConfig::default(),
+        )
+        .expect("canonical single-field HDEL packet should parse");
+        assert_eq!(cmd, crate::PlainKeyedValuesCmd::Hdel);
+        assert_eq!(parsed.key, b"h");
+        assert_eq!(parsed.member, b"f");
+
+        let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values4_packet(
+            b"*6\r\n$4\r\nsReM\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+            &ParserConfig::default(),
+        )
+        .expect("canonical four-member SREM packet should parse");
+        assert_eq!(cmd, crate::PlainKeyedValuesCmd::Srem);
+        assert_eq!(parsed.key, b"s");
+        assert_eq!(
+            [parsed.v1, parsed.v2, parsed.v3, parsed.v4],
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice()
+            ]
         );
     }
 
