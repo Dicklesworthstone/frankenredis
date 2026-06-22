@@ -21481,14 +21481,23 @@ impl Store {
         }
         // (frankenredis-f16dz) Apply RESTORE IDLETIME/FREQ to the restored
         // entry before insertion, mirroring upstream restoreCommand's
-        // objectSetLRUOrLFU. The parser guarantees the two are mutually
-        // exclusive. Previously parsed+validated but never applied, so OBJECT
-        // IDLETIME/FREQ returned defaults instead of the restored value.
-        if let Some(idle_secs) = metadata.idletime_secs {
-            entry.set_restore_idletime(idle_secs, now_ms);
-        }
-        if let Some(freq) = metadata.lfu_freq {
-            entry.set_restore_lfu_freq(freq, now_ms);
+        // objectSetLRUOrLFU EXACTLY: it is POLICY-CONDITIONAL — under an LFU
+        // maxmemory-policy only FREQ is applied (IDLETIME ignored), and under a
+        // non-LFU policy only IDLETIME is applied (FREQ ignored). Applying both
+        // unconditionally (the prior form) corrupted OBJECT IDLETIME after a
+        // RESTORE ... FREQ under a non-LFU policy (the LFU clock field was set so
+        // IDLETIME read garbage instead of redis's 0). The parser already
+        // guarantees IDLETIME/FREQ are mutually exclusive.
+        // Initialize to upstream's RESTORE default first, then override with the
+        // explicit option, so a fresh RESTORE (no option) reports redis's default
+        // (non-LFU: IDLETIME 0 with the LFU-clock field cleared; LFU: FREQ
+        // LFU_INIT_VAL=5) instead of stale/garbage entry state — then IDLETIME
+        // (non-LFU) / FREQ (LFU) override exactly per objectSetLRUOrLFU.
+        const LFU_INIT_VAL: u8 = 5;
+        if self.lfu_tracking_enabled() {
+            entry.set_restore_lfu_freq(metadata.lfu_freq.unwrap_or(LFU_INIT_VAL), now_ms);
+        } else {
+            entry.set_restore_idletime(metadata.idletime_secs.unwrap_or(0), now_ms);
         }
         self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         if let Some(last_id) = restored_stream_last_id {

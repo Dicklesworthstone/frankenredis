@@ -2659,3 +2659,17 @@ simple-lookup cold reads are fast-pathed. Remaining residuals are NOT clean disp
 GEOSEARCH ~0.78x (complex multi-option SEARCH, compute-bound), SINTER-small ~0.7-0.8x (multibulk
 set algebra), EXISTS-multikey ~0.8x (already fast-pathed, subtle constant-factor). frankenredis
  is parity-or-faster across the hot path + all clean cold commands vs Redis 7.2.4, MEASURED.
+
+### f16dz follow-up FIXED (cc): RESTORE IDLETIME/FREQ now policy-conditional + correct default state
+Differential probe of RESTORE metadata across maxmemory-policies (noeviction/allkeys-lru/
+allkeys-lfu) found the f16dz fix was incomplete: it applied IDLETIME/FREQ UNCONDITIONALLY, but
+upstream objectSetLRUOrLFU is POLICY-CONDITIONAL (LFU policy → FREQ only; non-LFU → IDLETIME
+only). Symptom: RESTORE ... FREQ <n> under a non-LFU policy made OBJECT IDLETIME return garbage
+(~213000 s) vs redis 0, because the LFU clock field got set and IDLETIME read it. ALSO the
+restored entry's DEFAULT LRU/LFU state was stale (OBJECT IDLETIME garbage even for the ignored-
+FREQ case). FIX (restore_key_with_metadata): under LFU set FREQ (default LFU_INIT_VAL=5), under
+non-LFU set IDLETIME (default 0, clears the LFU clock field) — initialize to redis's RESTORE
+default then override. Result: restore_edge differ 8→2 diffs; fr-store 656 unit tests + smoke
+99/99 green. RESIDUAL (2 diffs, edge case): RESTORE IDLETIME 999999999 (>49 days) — redis's
+24-bit-second LRU clock wraps to 10144255 s; fr's u32-millisecond last_access can't represent
+that (caps ~4294967 s) — a representation-depth limit, not worth changing for a >49-day idle.
