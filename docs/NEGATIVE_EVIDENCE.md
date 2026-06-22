@@ -3518,3 +3518,21 @@ A/B (generic-fr `fr_hsetnx` vs fast-fr, -c50 -P16, RENAMENX c d both-exist → 0
 exists→0+src kept; missing→ERR no such key; src==dst→0); cmdstat_renamenx calls=3 failed_calls=1, keyspace
 0/0, errorstat_ERR=1, gate PASS; fr-runtime 683/0; conformance clean (only flaky OBJECT FREQ 97wc2).
 Remaining dispatch-bound write: SMOVE (last one).
+
+### 2026-06-22 (part 27) SMOVE borrowed fast-path SHIPPED — ~1.84x — borrowed-write-fast-path VEIN COMPLETE (cc/BlackThrush)
+`SMOVE source destination member` (4-element WRITE → Integer); reuses BorrowedPlainKeyRangePacket
+(key=src, start=dst, end=member): parse_borrowed_plain_smove_packet + execute_plain_smove_borrowed →
+store.smove (0 if member absent from src, 1 if moved [removing from src — deleting src if it empties —
+and adding to dst], WRONGTYPE on non-set src/dst). Error in-path. A/B (generic-fr `fr_renamenx` vs fast-fr,
+-c50 -P16, SMOVE src dst absent→0): **generic ~420k → fast ~772k = ~1.84x** (1.901/1.772). Byte-exact vs
+redis incl edges (move→1 + member relocated; not-in-src→0; last-member move deletes src; wrong-type→
+WRONGTYPE); cmdstat_smove calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1, gate PASS;
+fr-runtime 683/0; fr-conformance 347/0 FULLY GREEN.
+
+=== BORROWED WRITE FAST-PATH VEIN COMPLETE (12 cold-dispatch write commands) ===
+6s9dx cluster (8): PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x, HINCRBY 1.84x, COPY 1.80x,
+INCRBYFLOAT 1.66x, GETEX 1.85x. Follow-ons (4): GETSET 1.87x, HSETNX 2.1x, RENAMENX 1.79x, SMOVE 1.84x.
+Every common write command that lacked a borrowed fast path now has one (~1.7-2.3x vs generic dispatch),
+all byte-exact (correctness + cmdstat + keyspace + errorstats) vs Redis 7.2.4. The cold-dispatch write
+vein is EXHAUSTED. Next un-dominated workloads = structural fr-store (hot-write inserts 6lgnu ZADD/SADD/
+LPUSH ~1.2-1.3x; XADD tcknm 1.5x; RESTORE-decode b1o02 0.37x) or a fresh broad head-to-head sweep.
