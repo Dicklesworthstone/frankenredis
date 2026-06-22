@@ -3167,3 +3167,23 @@ node-alloc cost. Same multi-structure overhead `uybhq` (CLOSED, RSS-only) found.
 unified ordered-zset primitive (skiplist / order-statistic-augmented) closing BOTH insert throughput
 AND RSS, preserving ZRANDMEMBER O(1) pick + lex/score order + DUMP/DIGEST byte-exactness. SADD/LPUSH
 siblings (set repr; 99fwc ChunkedList). fr-store/CoralOx domain, structural, build-blocked (pt6).
+
+### 2026-06-22 (part 11) BIGGEST gap found: large-structure REMOVAL (bead ym6ih)
+Completed the write-path picture by measuring REMOVALS (inserts were pt8). redis-benchmark
+-c50 -P16, ~1.9M-element structures pre-populated identically, remove random distinct members,
+repeat-verified vs Redis 7.2.4:
+| command | ratio | command | ratio |
+|---|---:|---|---:|
+| **HDEL** | **~2.83x** (2 runs 2.82/2.85) | ZREM | 1.46x |
+| **SREM** | **~2.4x** (2 runs 2.32/2.48) | ZPOPMIN | 1.42x |
+| SPOP | 1.20x | | |
+
+These are the LARGEST hot-command gaps of the whole campaign — bigger than the cold-dispatch
+cluster (~2x) and the inserts (~1.3x). DELETE-PATH SPECIFIC: SADD insert is 1.27x / HSET insert
+parity, but SREM/HDEL delete is 2.4–2.83x → the removal implementation is the issue, not the
+structure or dispatch. HYPOTHESIS (hash = CompactFieldMap arena+open-addressing, ideww): tombstone
+accumulation without compaction/shrink-rehash → probe chains lengthen across a delete-heavy run,
+while redis dict shrink-rehashes. SPECIFIC algorithmic fix (compaction/shrink or backshift-delete),
+NOT a full rewrite → likely highest-ROI hot-command lever now. Bead **ym6ih**. ZREM/ZPOPMIN 1.4x =
+multi-structure zset delete (6lgnu sibling). Build-blocked (pt6). NOTE: this updates the campaign
+"biggest un-dominated workload" → large-structure REMOVAL (HDEL/SREM), ahead of cold-dispatch ~2x.
