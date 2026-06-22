@@ -2838,3 +2838,22 @@ Net: profiling (unblocked this session, paranoid 4→1) found the missing-fast-p
 commands and corrected an earlier mis-declination — 2 real dispatch wins (ZCOUNT now fr-faster).
 The fast-path layer is mine; cod-b's treap is untouched (only called). Remaining ZLEXCOUNT-eq
 0.70x + distinct-score O(n) are cod-b's treap domain.
+
+### post-ZCOUNT broad re-baseline + SMISMEMBER profiled (cc); GETRANGE artifact corrected
+METHODOLOGY (re-confirm): a `recv().count(b"\r\n")` reply drain is correct ONLY for integer
+replies; for multibulk (SMISMEMBER 5 CRLF/reply) + bulk (GETRANGE 2 CRLF/reply) it DESYNCS and
+inflates the apparent loss. Proper per-reply RESP-reader best-of-7 vs Redis 7.2.4:
+- GETRANGE 0.966x (small) / 0.945x (200B) = PARITY — the broad-sweep/CRLF-count "0.653x" was a
+  desync ARTIFACT (matches the earlier wide_gauntlet2 0.94x). Not a loss.
+- ZCOUNT 1.13x (fr-faster) — confirms the shipped fast path.
+- SMISMEMBER 0.660x = REAL residual (the CRLF-count "0.351x" was inflated). PROFILED (13.6k
+  samples, proper blast): GenericSet::Packed → PackedStrSet::contains → CompactFieldMap::
+  contains_key (open-addressing HASH) = 49.5% + memcmp_avx2 32%; the borrowed fast path itself is
+  only 4.7% (working). ROOT CAUSE: for a small (listpack-range, ≤128) set fr's internal repr is a
+  HASH (CompactFieldMap, ideww) while redis uses a real listpack (linear scan). For tiny sets the
+  hash compute+probe+memcmp overhead EXCEEDS redis's cache-friendly linear lpFind → fr ~1.5x
+  slower on small-set membership (SMISMEMBER/SISMEMBER). NOT dispatch (fast-pathed) and NOT
+  algorithmic (both effectively scan ~all). Lever = give small sets a linear packed-buffer
+  contains instead of the hash (structural repr change in packed_set.rs / CompactFieldMap, mine-
+  adjacent ideww; byte-exactness of insertion-order iteration must hold) — delicate, deferred/
+  flagged not attempted blind. The shipped ZCOUNT/ZLEXCOUNT fast paths hold; no new dispatch lever.
