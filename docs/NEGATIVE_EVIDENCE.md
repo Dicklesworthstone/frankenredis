@@ -3106,3 +3106,36 @@ workaround). Net campaign state: measurable surface = parity-or-faster EXCEPT (a
 cold-dispatch cluster [6s9dx, fix=fast paths, BUILD-BLOCKED], (b) structural RESTORE-decode 0.37x
 [b1o02, fr-store keep-listpack, contended+disk]. No shippable lever exists until the build infra is
 fixed (ops-level, escalated). Servers/measurement are zero-disk; no rebuild run.
+
+### 2026-06-22 (part 8) METHODOLOGY CORRECTION + ohsk5 headline RE-MEASURED via redis-benchmark P16
+Big correction. Parts 1–7 used a single-connection pipelined Python probe, which leaves fr's
+single-threaded server IDLE between round-trips → per-command CPU never dominates → it UNDERSTATES
+the CPU-bound gap that ohsk5 measures under concurrent load. Re-ran the proper tool
+(`redis-benchmark -c 50 -P 16 -n 800k-1M`, load-gen on cores 4-11) vs Redis 7.2.4:
+
+| command | fr/redis (rps) | verdict |
+|---|---:|---|
+| SET | 1.07x | **fr faster** |
+| GET | 1.04x | **fr faster** |
+| INCR | 1.00x | parity |
+| HSET | 1.05x | **fr faster** |
+| LPUSH | ~0.82x (≈1.22x slower) | residual (3-run median) |
+| SADD | ~0.79x (≈1.27x slower) | residual |
+| ZADD | ~0.75x (≈1.33x slower) | residual |
+
+TWO findings:
+1. **ohsk5's headline gap is CLOSED.** ohsk5 (created 2026-06-05) measured GET 1.96x / SET 2.01x /
+   INCR 1.95x / HSET 1.56x SLOWER. Under the same P16 methodology today, GET/SET/INCR/HSET are
+   **parity-or-faster** — the dispatch/fast-path/store work shipped since erased the 2x. The P1
+   headline should be updated (commented on ohsk5).
+2. **New real residuals = hot WRITE commands ZADD 1.33x / SADD 1.27x / LPUSH 1.22x.** All have
+   borrowed fast paths (so NOT dispatch) → the cost is **store-side data-structure insert**: zset
+   (skiplist-equiv treap/IndexMap+BTreeMap, bead uybhq), set (PackedStrMap/intset), list
+   (ChunkedList vs quicklist, bead 99fwc). Structural, fr-store, contended. ZADD 1.33x is the new
+   single biggest hot-command residual (replacing the stale GET/SET 2x as the headline).
+
+CAVEAT on my pt1–7 single-conn results: hot READS (GET/multi-elem/SCAN/SORT) and large-values are
+genuinely parity (reads are less per-command-CPU-bound, and GET P16 confirms parity). But the
+single-conn cold-command ratios (6s9dx: PERSIST/RENAME/etc ~2x) are likely UNDERSTATED under P16 —
+the dispatch tax grows under saturation — so those gaps are real and possibly larger, not smaller.
+Use redis-benchmark -c50 -P16 (CPU-bound) as the canonical perf gate going forward, not single-conn.
