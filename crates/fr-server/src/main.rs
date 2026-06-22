@@ -3856,6 +3856,24 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_getex_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_getex_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -7746,6 +7764,29 @@ fn parse_borrowed_plain_persist_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainPersistPacket { consumed, key })
+}
+
+// (frankenredis-6s9dx) Byte-prefix fast path for the no-option `GETEX key`
+// (2-element); reuses BorrowedPlainTypePacket ({consumed, key}). GETEX WITH expiry
+// options is a 3+-element packet the recognizer never matches (falls through).
+fn parse_borrowed_plain_getex_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainTypePacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"GETEX".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"GETEX"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainTypePacket { consumed, key })
 }
 
 struct BorrowedPlainExpiretimePacket<'a> {

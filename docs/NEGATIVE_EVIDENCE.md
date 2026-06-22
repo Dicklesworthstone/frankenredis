@@ -3458,3 +3458,26 @@ calls=4 failed_calls=3, keyspace 0/0, errorstat_ERR=2 + errorstat_WRONGTYPE=1 �
 classify correctly); gate PASS; fr-runtime 683/0; fr-conformance 248 + only the recurring flaky OBJECT
 FREQ LFU test (97wc2, unreachable). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x,
 HINCRBY 1.84x, COPY 1.80x, INCRBYFLOAT 1.66x — 7 of 8 shipped. Remaining: GETEX (read-with-options).
+
+### 2026-06-22 (part 23) 6s9dx GETEX borrowed fast-path SHIPPED — ~1.85x — 6s9dx CLUSTER COMPLETE (cc/BlackThrush)
+Eighth and FINAL 6s9dx cold-cluster command. The no-option `GETEX key` is a 2-element read-returning-value
+(no TTL change); reuses BorrowedPlainTypePacket ({consumed, key}). Mirrors generic getex EXACTLY:
+store.key_type (records the keyspace hit/miss like lookupKeyRead) — missing → nil, non-string → WRONGTYPE
+— then store.getex(key, None, now_ms) reads the value (one LFU bump, no double keyspace count). GETEX WITH
+expiry options is a 3+-element packet the recognizer never matches (falls through). Uses the WRITE gate
+because GETEX is CMD_WRITE (its role==Master requirement defers the read-only-replica READONLY case to generic).
+
+A/B (generic-fr `fr_incrf` [no GETEX fast path] vs fast-fr, redis-benchmark -c50 -P16, GETEX k):
+**generic ~500k rps → fast-path ~920k rps = ~1.85x** (3 runs 1.808/1.826/1.919).
+
+Verified: GETEX byte-exact vs redis incl edges (value; **TTL UNCHANGED by no-opt**; missing → nil;
+wrong-type → WRONGTYPE; PERSIST option [3-elem] defers to generic and clears TTL); cmdstat + KEYSPACE +
+errorstats byte-exact (cmdstat_getex calls=3 failed_calls=1, keyspace_hits=2 misses=1 — the WRONGTYPE
+case still records a hit on the existing key, errorstat_WRONGTYPE=1); gate PASS; fr-runtime 683/0;
+fr-conformance 248 + only the recurring flaky OBJECT FREQ LFU test (97wc2, unreachable).
+
+=== 6s9dx COLD-DISPATCH CLUSTER COMPLETE (8/8) ===
+PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x, HINCRBY 1.84x, COPY 1.80x, INCRBYFLOAT 1.66x,
+GETEX 1.85x — every cold-cluster command now has a borrowed fast path eliminating the ~2x generic
+owned-argv dispatch tax, all byte-exact (correctness + cmdstat + keyspace + errorstats) vs Redis 7.2.4.
+Bead 6s9dx CLOSED.

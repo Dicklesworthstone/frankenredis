@@ -943,6 +943,10 @@ fn plain_incrbyfloat_owned_argv(key: &[u8], increment_arg: &[u8]) -> Vec<Vec<u8>
     ]
 }
 
+fn plain_getex_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"GETEX".to_vec(), key.to_vec()]
+}
+
 /// Saturating i128 -> i64 clamp (mirrors fr-command's clamp_i128_to_i64).
 fn clamp_i128_to_i64_runtime(value: i128) -> i64 {
     if value < i128::from(i64::MIN) {
@@ -13969,6 +13973,141 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'INCRBYFLOAT' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_getex_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"GETEX".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        // GETEX is CMD_WRITE: the WRITE gate's role==Master requirement makes a
+        // read-only replica defer to the generic path (which emits READONLY).
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-6s9dx) Conservative borrowed fast path for the no-option
+    /// `GETEX key` (returns the value, no TTL change). Mirrors the generic getex
+    /// EXACTLY: `store.key_type` (records the keyspace hit/miss) — missing → nil,
+    /// non-string → WRONGTYPE — then `store.getex(key, None, now_ms)` reads the
+    /// value (one LFU bump, no double keyspace count) → BulkString. GETEX WITH
+    /// expiry options is a 3+-element packet the recognizer never matches (falls
+    /// through). Gated by the WRITE predicate, so propagation, AOF, and tracking
+    /// are inactive (the no-option form never modifies, so there is nothing to
+    /// propagate anyway).
+    pub fn execute_plain_getex_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_getex_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getex");
+        self.session.last_argv_len_sum = b"GETEX".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // key_type records the keyspace hit/miss (lookupKeyRead), exactly as the
+        // generic getex does its lookupKeyReadOrReply/checkType before the read.
+        let reply = match self.server.store.key_type(key, now_ms) {
+            None => RespFrame::BulkString(None),
+            Some("string") => match self.server.store.getex(key, None, now_ms) {
+                Ok(Some(v)) => RespFrame::BulkString(Some(v)),
+                Ok(None) => RespFrame::BulkString(None),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_getex_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_getex_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("getex", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'GETEX' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
