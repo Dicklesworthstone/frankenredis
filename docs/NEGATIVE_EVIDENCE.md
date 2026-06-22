@@ -3507,3 +3507,14 @@ A/B (generic-fr `fr_getset` vs fast-fr, -c50 -P16, HSETNX h f v): **generic ~423
 (3 runs 1.987/2.127/2.208). Byte-exact vs redis (new→1+stored; exists→0+unchanged; wrong-type→WRONGTYPE);
 cmdstat_hsetnx calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0;
 fr-conformance 347/0 FULLY GREEN. Remaining dispatch-bound writes: RENAMENX, SMOVE.
+
+### 2026-06-22 (part 26) RENAMENX borrowed fast-path SHIPPED — ~1.79x vs generic (cold-dispatch follow-on, cc/BlackThrush)
+`RENAMENX key newkey` (3-element WRITE → Integer); reuses BorrowedPlainKeyMemberPacket (member=newkey):
+parse_borrowed_plain_renamenx_packet + execute_plain_renamenx_borrowed → store.renamenx (0 if dest exists,
+1 if renamed, Err(KeyNotFound) if source absent → -ERR no such key via CommandError::Store(err).to_resp()).
+Does NOT special-case source==destination (matches generic; store.renamenx returns 0, which matches redis).
+A/B (generic-fr `fr_hsetnx` vs fast-fr, -c50 -P16, RENAMENX c d both-exist → 0): **generic ~488k → fast
+~870k = ~1.79x** (3 runs 1.688/1.930/1.738). Byte-exact vs redis incl edges (rename→1+src gone; dest
+exists→0+src kept; missing→ERR no such key; src==dst→0); cmdstat_renamenx calls=3 failed_calls=1, keyspace
+0/0, errorstat_ERR=1, gate PASS; fr-runtime 683/0; conformance clean (only flaky OBJECT FREQ 97wc2).
+Remaining dispatch-bound write: SMOVE (last one).
