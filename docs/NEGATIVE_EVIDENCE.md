@@ -3372,3 +3372,25 @@ overwrite dest works); cmdstat_keyspace_parity_gate PASS + explicit RENAME probe
 (`core_object_live_redis_matches_runtime`, expected value non-deterministic across runs, 97wc2),
 unreachable by this change (4th confirmation). 6s9dx so far: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x.
 Remaining: SETEX/GETEX/HINCRBY/INCRBYFLOAT/COPY.
+
+### 2026-06-22 (part 19) 6s9dx SETEX borrowed fast-path SHIPPED — ~1.95x vs generic (cc/BlackThrush)
+Fourth 6s9dx cold-cluster command (the highest single-conn gap, 2.37x). `SETEX key seconds value` is a
+4-element WRITE returning +OK; reuses BorrowedPlainKeyRangePacket (start=seconds, end=value):
+parse_borrowed_plain_setex_packet (fr-server) + execute_plain_setex_borrowed → store.set with the
+derived px TTL (fr-runtime). Validates seconds in-path (parse_i64_arg, require >0, seconds*1000+now
+no-overflow) and DEFERS (None) on ANY edge case so the generic path emits the exact errors. Gated off
+when notify/repl/AOF/tracking/maxmemory active.
+
+A/B (generic-fr `fr_rename` [no SETEX fast path] vs fast-fr, redis-benchmark -c50 -P16, pre-populated
+keys so SETEX overwrites): **generic ~265k rps → fast-path ~516k rps = ~1.95x** (4 runs
+1.81/1.95/2.02/2.00). NOISE NOTE: first attempts were wild (1.2-5.55x, throughput 20-120k) because the
+box load average was 104 (other agents' rustc builds); re-ran at load ~11 for the stable ~1.95x. ALWAYS
+check `uptime` load before trusting throughput A/B — a saturated 64-core box gives garbage variance.
+
+Verified: SETEX byte-exact vs redis incl ALL edge cases (ok→+OK/ttl=100; seconds 0 & negative →
+"ERR invalid expire time in 'setex' command"; non-int → "ERR value is not an integer or out of range");
+cmdstat_keyspace_parity_gate PASS + SETEX probe byte-exact (cmdstat_setex calls=3 failed_calls=1,
+errorstat_ERR=1 — the deferred edge case routes to generic and counts correctly); fr-runtime 683/0;
+fr-conformance **347/0 FULLY GREEN** (the recurring OBJECT FREQ LFU test passed this run — confirming
+it was flaky/probabilistic, 97wc2, not a real regression). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME
+2.2-2.3x, SETEX ~1.95x. Remaining: GETEX/HINCRBY/INCRBYFLOAT/COPY.

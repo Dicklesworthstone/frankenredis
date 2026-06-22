@@ -3730,6 +3730,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_setex_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_setex_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_rename_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -10151,6 +10174,36 @@ fn parse_borrowed_plain_setrange_packet<'a>(
         rest.get(..8)
             .filter(|command| command.eq_ignore_ascii_case(b"SETRANGE"))
             .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
+// (frankenredis-6s9dx) Byte-prefix fast path for `SETEX key seconds value`
+// (4-element); reuses BorrowedPlainKeyRangePacket (start = seconds, end = value).
+// execute_plain_setex_borrowed validates seconds and defers on edge cases.
+fn parse_borrowed_plain_setex_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SETEX".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"SETEX"))
+            .map(|_| input.len() - rest.len() + 5)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;

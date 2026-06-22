@@ -913,6 +913,15 @@ fn plain_rename_owned_argv(key: &[u8], newkey: &[u8]) -> Vec<Vec<u8>> {
     vec![b"RENAME".to_vec(), key.to_vec(), newkey.to_vec()]
 }
 
+fn plain_setex_owned_argv(key: &[u8], seconds_arg: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"SETEX".to_vec(),
+        key.to_vec(),
+        seconds_arg.to_vec(),
+        value.to_vec(),
+    ]
+}
+
 /// Saturating i128 -> i64 clamp (mirrors fr-command's clamp_i128_to_i64).
 fn clamp_i128_to_i64_runtime(value: i128) -> i64 {
     if value < i128::from(i64::MIN) {
@@ -13352,6 +13361,139 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'RENAME' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_setex_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"SETEX".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `SETEX key
+    /// seconds value`. Mirrors the generic `setex` exactly on the clean path:
+    /// parse `seconds` as a decimal i64, require it strictly positive and that
+    /// `seconds*1000` plus `now_ms` does not overflow, then `store.set` with the
+    /// derived px TTL and reply `+OK`. ANY edge case (non-integer, <= 0, or
+    /// overflow) returns None to defer to the generic path, which emits the exact
+    /// `value is not an integer` / `invalid expire time in 'setex' command` error.
+    /// Gated by the WRITE predicate, so the "set" keyspace event, propagation
+    /// (rewritten as SET ... PXAT), AOF, and tracking are provably inactive.
+    pub fn execute_plain_setex_borrowed(
+        &mut self,
+        key: &[u8],
+        seconds_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_setex_borrowed(key, value, now_ms) {
+            return None;
+        }
+        // Same validation as generic setex()/getExpireMillisecondsOrReply; defer on
+        // any failure so the canonical error text is emitted by the generic path.
+        let raw = parse_i64_arg(seconds_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let seconds = raw as u64;
+        if seconds > i64::MAX as u64 / 1000 {
+            return None;
+        }
+        let px = seconds.saturating_mul(1000);
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        // basetime overflow (deadline = now + px must fit i64).
+        i64::try_from(px).ok()?.checked_add(now_i)?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("setex");
+        self.session.last_argv_len_sum =
+            b"SETEX".len() + key.len() + seconds_arg.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        self.server
+            .store
+            .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = RespFrame::SimpleString("OK".to_string());
+
+        self.record_plain_setex_borrowed_metrics(key, seconds_arg, value, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_setex_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        seconds_arg: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "setex",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SETEX' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
