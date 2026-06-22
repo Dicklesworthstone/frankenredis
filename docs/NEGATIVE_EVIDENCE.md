@@ -3347,3 +3347,28 @@ FREQ LFU test (`core_object_live_redis_matches_runtime`, expected value non-dete
 81 / 155 / 161 — it compares fr's deterministic counter vs redis's probabilistic LFU; 97wc2), which is
 unreachable by this change and is a flawed-test/LFU-model issue, not a SETNX regression. Generic path
 untouched (additive parser + handler). Remaining 6s9dx: SETEX/RENAME/GETEX/HINCRBY/INCRBYFLOAT/COPY.
+
+### 2026-06-22 (part 18) 6s9dx RENAME borrowed fast-path SHIPPED — 2.2-2.3x vs generic (cc/BlackThrush)
+Third 6s9dx cold-cluster command. `RENAME key newkey` is a single-source WRITE returning `+OK`/error,
+same 3-element `*3 CMD key arg` shape as EXPIRE/SETNX (reuses BorrowedPlainKeyMemberPacket, member =
+dest key): new `parse_borrowed_plain_rename_packet` (fr-server) + `execute_plain_rename_borrowed` →
+`store.rename` (fr-runtime). On `Err(KeyNotFound)` it emits the canonical `-ERR no such key` IN-PATH
+(via `CommandError::Store(err).to_resp()`, the same mapping the generic path uses) with the identical
+failed-call + errorstats accounting; the metrics record Success/Failed by reply kind. Gated off when
+notify/repl/AOF/tracking/maxmemory/etc active, so rename_from/rename_to events + propagation are
+inactive. WATCH is pull-based (fingerprint+dirty snapshot at EXEC) so the store mutation is detected.
+
+A/B (generic-fr `fr_setnx` [no RENAME fast path] vs fast-fr, redis-benchmark -c50 -P16, `RENAME k k`
+self-rename — see note): **generic ~264k rps → fast-path ~600k rps = 2.23-2.32x** (2 runs).
+WORKLOAD NOTE: redis-benchmark ABORTS on the first server error reply, so the natural
+`RENAME key:__rand_int__ tmp` workload (sources get consumed → "no such key" → benchmark aborts)
+can't be used; self-rename (always-OK, hits store.rename's key==newkey early-return) isolates the
+dispatch lever cleanly. Real moves would score somewhat lower (more store work) but still a strong win.
+
+Verified: RENAME byte-exact vs redis (move→+OK + dest=value + src gone; missing→`ERR no such key`;
+overwrite dest works); cmdstat_keyspace_parity_gate PASS + explicit RENAME probe byte-exact
+(cmdstat_rename calls=3 failed_calls=1, errorstat_ERR count=1 — the error path matches); fr-runtime
+683 passed/0 failed. fr-conformance: only failure is the recurring flaky OBJECT FREQ LFU test
+(`core_object_live_redis_matches_runtime`, expected value non-deterministic across runs, 97wc2),
+unreachable by this change (4th confirmation). 6s9dx so far: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x.
+Remaining: SETEX/GETEX/HINCRBY/INCRBYFLOAT/COPY.
