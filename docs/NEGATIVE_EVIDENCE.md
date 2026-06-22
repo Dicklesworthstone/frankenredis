@@ -3536,3 +3536,20 @@ Every common write command that lacked a borrowed fast path now has one (~1.7-2.
 all byte-exact (correctness + cmdstat + keyspace + errorstats) vs Redis 7.2.4. The cold-dispatch write
 vein is EXHAUSTED. Next un-dominated workloads = structural fr-store (hot-write inserts 6lgnu ZADD/SADD/
 LPUSH ~1.2-1.3x; XADD tcknm 1.5x; RESTORE-decode b1o02 0.37x) or a fresh broad head-to-head sweep.
+
+### 2026-06-22 (part 28) tcknm XADD side-map alloc fix — BYTE-EXACT but ~1.00x (mimalloc absorbs) — REVERTED (cc/BlackThrush)
+Revisited bead tcknm now that bench is unblocked. The fix: in fr-store::xadd's EXISTING-stream (hot
+append) path, replace `stream_last_ids.entry(key.to_vec()).or_insert(..)` and the analogous
+`stream_entries_added` entry with borrowed `get_mut(key)` (insert only on the unreachable miss) — removing
+2 owned-key allocations per XADD on an existing stream. Implemented + verified BYTE-EXACT (DEBUG
+DIGEST-VALUE of explicit-ID streams matched redis 7.2.4 exactly: dig_s=348eda79.., dig_s2=cc340b9d..,
+xlen=200; fr-runtime/conformance unaffected). A/B (HEAD fr `fr_smove` vs fixed fr, redis-benchmark
+-c50 -P16, XADD s * f v auto-id append, 2M ops): **generic ~335k vs fast ~334k = 0.986/0.995/1.013 =
+~1.00x** (tight 3-run spread at load ~15-28 → a clean null, not noise). CONFIRMS the prior mimalloc
+suspicion: mimalloc recycles the 2 small key.to_vec() allocs, so eliminating them yields NO throughput
+gain. **The XADD ~1.5x-vs-redis gap is NOT the side-map allocations** — it's elsewhere (stream entry
+encoding PackedStreamLog / ID generation / StreamEntries insert). REVERTED per REVERT-~0-gain. tcknm's
+specific premise is disproven; the XADD gap needs fresh root-causing (a different store-side cost).
+Reusable lesson: [[feedback_mimalloc_defeats_buffer_reuse_levers]] — small-alloc-avoidance levers are
+mimalloc-neutral; bench A/B before trusting them. (The clean borrowed-write dispatch vein is exhausted;
+remaining gaps are structural fr-store: 6lgnu hot-write inserts, b1o02 RESTORE-decode.)
