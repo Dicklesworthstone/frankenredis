@@ -2821,3 +2821,20 @@ redis), NOT dispatch. The fast path correctly removes the ~30% dispatch waste (r
 kept), but the real ZLEXCOUNT bottleneck is the treap/lex-count compute = cod-b's zset domain
 (the lever to close ZLEXCOUNT is making store.zlexcount's lex rank-diff match redis's skiplist
 speed). Flagged to cod-b.
+
+### ZCOUNT + ZLEXCOUNT fast paths verified on integrated HEAD (cc) — profiling-found dispatch vein
+Independently verified the integrated HEAD (8512fee76, both fast paths from this session's
+profiling work): conformance smoke 99/99, byte-exact 35/0 (ZCOUNT + ZLEXCOUNT across inclusive/
+exclusive/-inf/+inf/nan/inverted/missing/wrongtype/arity on listpack+skiplist, equal+distinct
+score). Best-of-5 pipe=200 vs Redis 7.2.4 on a 10k zset:
+- ZCOUNT 1.29x (fr-FASTER; was ~0.5x) — the missing-fast-path generic-dispatch ~30% was the
+  whole gap, eliminated.
+- ZLEXCOUNT equal-score 1.43x... wait measured 0.70x (improved from ~0.5x via dispatch savings;
+  residual is cod-b's treap lex rank_of, NOT the fast path — ZLEXCOUNT's compute is heavier than
+  ZCOUNT's so dispatch was a smaller fraction). Distinct-score ZLEXCOUNT remains O(n) (cod-b
+  treap-guard, known).
+- ZCARD 1.09x (no regression).
+Net: profiling (unblocked this session, paranoid 4→1) found the missing-fast-path zset range
+commands and corrected an earlier mis-declination — 2 real dispatch wins (ZCOUNT now fr-faster).
+The fast-path layer is mine; cod-b's treap is untouched (only called). Remaining ZLEXCOUNT-eq
+0.70x + distinct-score O(n) are cod-b's treap domain.
