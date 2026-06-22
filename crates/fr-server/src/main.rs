@@ -3799,6 +3799,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hincrbyfloat_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_hincrbyfloat_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hincrby_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_hincrby_borrowed(
@@ -10558,6 +10581,36 @@ fn parse_borrowed_plain_hincrby_packet<'a>(
         rest.get(..7)
             .filter(|command| command.eq_ignore_ascii_case(b"HINCRBY"))
             .map(|_| input.len() - rest.len() + 7)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
+// (frankenredis-hincrbyfloatfast) Byte-prefix fast path for `HINCRBYFLOAT key
+// field increment` (4-element); reuses BorrowedPlainKeyRangePacket (start = field,
+// end = increment). execute_plain_hincrbyfloat_borrowed parses the float + defers.
+fn parse_borrowed_plain_hincrbyfloat_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"HINCRBYFLOAT".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$12\r\n").and_then(|rest| {
+        rest.get(..12)
+            .filter(|command| command.eq_ignore_ascii_case(b"HINCRBYFLOAT"))
+            .map(|_| input.len() - rest.len() + 12)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;

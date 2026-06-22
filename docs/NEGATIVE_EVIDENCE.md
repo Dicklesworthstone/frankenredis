@@ -3600,3 +3600,21 @@ REMAINING from sweep2 (assess next): PFADD 2.75x (HLL register update — likely
 SCAN 1.62x (fr sorted-order cursor vs redis reverse-binary — deliberate design, per keyspace_ram_gap),
 GEODIST 1.34x / GEOPOS 1.14x (geo decode), SSCAN 1.24x. LESSON: sweep ALL command families (bit/HLL/geo/
 scan/stream) before declaring the dispatch vein exhausted — SETBIT was a clean 1.94x hiding in an unswept family.
+
+### 2026-06-22 (part 31) HINCRBYFLOAT borrowed fast-path SHIPPED — ~1.73x (cc/BlackThrush)
+Another untested write lacking a fast path. `HINCRBYFLOAT key field increment` (4-element WRITE → bulk);
+reuses BorrowedPlainKeyRangePacket (start=field, end=increment): combines HINCRBY's *4 shape +
+INCRBYFLOAT's float parse (parse_f64_arg + f80 long-double fallback, defer on non-float; defer on NaN/Inf
+increment for the generic's pre-lookup "value is NaN or Infinity") + store.hincrbyfloat_text with the
+HINCRBYFLOAT-SPECIFIC error map (IncrFloatNaN → "value is NaN or Infinity", ValueNotFloat → "hash value is
+not a float", else Store). A/B (generic-fr vs fast-fr, -c50 -P16, HINCRBYFLOAT h f 1.5): **generic ~315k →
+fast ~547k = ~1.73x** (3 runs 1.736/1.717/1.746). BYTE-EXACT vs redis incl f80 float format
+(HINCRBYFLOAT h f 3001.6 → 3001.60000000000000009) + ALL custom error messages (hash value is not a float
+/ value is NaN or Infinity / WRONGTYPE / not a valid float); cmdstat_hincrbyfloat calls=4 failed_calls=3,
+keyspace 0/0, errorstat_ERR=2 + errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0; fr-conformance 347/0 GREEN.
+
+PFADD 2.75x is STRUCTURAL (store.pfadd does hll_parse decode of the full register set + re-encode PER add,
+vs redis in-place hllSparseSet/hllDenseSet mutation) — a fast path won't help; the fix is decoded-register
+storage / in-place HLL mutation (fr-store, multi-session). SCAN/SSCAN structural (sorted cursor). GEODIST/
+GEOPOS have fast paths (structural geo decode). Untested-write dispatch levers shipped: SETBIT 1.94x,
+HINCRBYFLOAT 1.73x. Still untested + likely dispatch-bound: LSET/LREM/LINSERT (list mods, lack fast paths).
