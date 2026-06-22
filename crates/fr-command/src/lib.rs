@@ -4694,7 +4694,9 @@ pub fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     Ok(val)
 }
 
-fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
+// (frankenredis-6s9dx) `pub` so the fr-runtime INCRBYFLOAT borrowed fast path can
+// parse the increment with byte-identical semantics to the generic handler.
+pub fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     let bytes = text.as_bytes();

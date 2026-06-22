@@ -3433,3 +3433,28 @@ errorstat_ERR=1 — the source-lookup accounting + deferred same-key all match);
 683/0; fr-conformance 248 + only the recurring flaky OBJECT FREQ LFU test (97wc2, unreachable).
 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x, HINCRBY 1.84x, COPY 1.80x. Remaining:
 GETEX (read-with-options), INCRBYFLOAT (float-format byte-exactness care).
+
+### 2026-06-22 (part 22) 6s9dx INCRBYFLOAT borrowed fast-path SHIPPED — ~1.66x vs generic (cc/BlackThrush)
+Seventh 6s9dx cold-cluster command. `INCRBYFLOAT key increment` is a 3-element WRITE returning a bulk
+string; reuses BorrowedPlainKeyMemberPacket (member=increment). 3-crate change: exposed `parse_f64_arg`
+as `pub` in fr-command, imported into fr-runtime so the fast path parses the delta byte-IDENTICALLY to
+the generic handler. execute_plain_incrbyfloat_borrowed mirrors generic ordering EXACTLY: (1) NON-counting
+peek_value_type — defer on wrong-type for the canonical WRONGTYPE w/o bumping keyspace; (2) parse_f64_arg
+with the f80 long-double fallback (Err but long_double_text_is_valid → delta=0.0; else defer for "value
+is not a valid float"); (3) store.incrbyfloat_text (the f80 text path drives the result) → BulkString or
+CommandError::Store(err).to_resp() (NaN/Inf, non-float current). Gated off when notify/repl/AOF/tracking/
+maxmemory active.
+
+A/B (generic-fr `fr_copy` [no INCRBYFLOAT fast path] vs fast-fr, redis-benchmark -c50 -P16, INCRBYFLOAT
+k 1.5): **generic ~298k rps → fast-path ~494k rps = ~1.66x** (3 runs 1.638/1.658/1.678). Lower than the
+other cold cmds because INCRBYFLOAT's store work (f80 parse+format) is heavier, shrinking the dispatch
+fraction — still a solid win.
+
+Verified: BYTE-EXACT vs redis incl the delicate float formatting — `INCRBYFLOAT k 3001.6` →
+`3001.60000000000000009` (the x87 f80 precision artifact) MATCHES redis exactly — plus all edges
+(non-float current → "value is not a valid float"; bad increment → same; wrong-type → WRONGTYPE; inf →
+"increment would produce NaN or Infinity"); cmdstat + KEYSPACE + errorstats byte-exact (cmdstat_incrbyfloat
+calls=4 failed_calls=3, keyspace 0/0, errorstat_ERR=2 + errorstat_WRONGTYPE=1 — in-path + deferred errors
+classify correctly); gate PASS; fr-runtime 683/0; fr-conformance 248 + only the recurring flaky OBJECT
+FREQ LFU test (97wc2, unreachable). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x,
+HINCRBY 1.84x, COPY 1.80x, INCRBYFLOAT 1.66x — 7 of 8 shipped. Remaining: GETEX (read-with-options).

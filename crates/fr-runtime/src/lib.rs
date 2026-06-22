@@ -12,7 +12,7 @@ use fr_command::{
     apply_client_caching_mode, apply_client_reply_state, apply_client_tracking_update,
     build_unknown_args_preview, client_tracking_getredir_value, client_trackinginfo_frame,
     command_acl_categories, commands_in_acl_category, dispatch_argv, execute_migrate,
-    frame_to_argv, parse_client_tracking_state, parse_migrate_request,
+    frame_to_argv, parse_client_tracking_state, parse_f64_arg, parse_migrate_request,
 };
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
@@ -933,6 +933,14 @@ fn plain_hincrby_owned_argv(key: &[u8], field: &[u8], increment_arg: &[u8]) -> V
 
 fn plain_copy_owned_argv(key: &[u8], dest: &[u8]) -> Vec<Vec<u8>> {
     vec![b"COPY".to_vec(), key.to_vec(), dest.to_vec()]
+}
+
+fn plain_incrbyfloat_owned_argv(key: &[u8], increment_arg: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"INCRBYFLOAT".to_vec(),
+        key.to_vec(),
+        increment_arg.to_vec(),
+    ]
 }
 
 /// Saturating i128 -> i64 clamp (mirrors fr-command's clamp_i128_to_i64).
@@ -13799,6 +13807,168 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'COPY' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_incrbyfloat_borrowed(
+        &mut self,
+        key: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"INCRBYFLOAT".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || increment_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `INCRBYFLOAT
+    /// key increment`. Mirrors the generic incrbyfloat EXACTLY: (1) a NON-counting
+    /// type peek — defer to generic on a wrong-type key so the canonical WRONGTYPE
+    /// is emitted there without bumping keyspace stats; (2) parse the increment via
+    /// the SHARED `parse_f64_arg` with the same f80 long-double fallback (defer on
+    /// an unparseable delta for the exact "value is not a valid float"); (3)
+    /// `store.incrbyfloat_text` (the f80 text path drives the result), returning
+    /// the formatted bulk or the same StoreError mapping (NaN/Inf, non-float
+    /// current value). Gated by the WRITE predicate, so the "incrbyfloat" keyspace
+    /// event, propagation (rewritten SET), AOF, and tracking are inactive.
+    pub fn execute_plain_incrbyfloat_borrowed(
+        &mut self,
+        key: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_incrbyfloat_borrowed(key, increment_arg, now_ms) {
+            return None;
+        }
+        // (1) wrong-type peek first (non-counting), matching generic ordering.
+        if let Some(t) = self.server.store.peek_value_type(key, now_ms)
+            && t != fr_store::ValueType::String
+        {
+            return None;
+        }
+        // (2) parse the delta exactly like generic (f80 long-double fallback).
+        let delta = match parse_f64_arg(increment_arg) {
+            Ok(v) => v,
+            Err(_) if fr_store::long_double_text_is_valid(increment_arg) => 0.0,
+            Err(_) => return None,
+        };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("incrbyfloat");
+        self.session.last_argv_len_sum = b"INCRBYFLOAT".len() + key.len() + increment_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .incrbyfloat_text(key, increment_arg, delta, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(text) => RespFrame::BulkString(Some(text)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_incrbyfloat_borrowed_metrics(
+            key,
+            increment_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_incrbyfloat_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        increment_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("incrbyfloat", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'INCRBYFLOAT' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
