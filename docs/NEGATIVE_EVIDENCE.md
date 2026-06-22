@@ -2750,3 +2750,17 @@ already-optimized (clock-chained beating redis, active-expire O(1)-skipped). No 
 hot-path lever remains; the throughput domination is now validated at the CPU level, not just
 network-bound A/B. Residual micro-costs are necessary (commandstats timing) or core/event-loop
 owned (active-expire stats-struct) or mimalloc-bound.
+
+### GEODIST 0.75x residual PROFILING-CONFIRMED (cc): ~30% CPU is the {:.4} float formatter
+perf record of a sustained GEODIST blast (31k samples): execute_plain_geodist_borrowed 47%, of
+which **~30% is alloc::fmt::format → core::fmt::float::float_to_decimal_common_exact (dragon::
+format_exact 16% + grisu 4%)** — i.e. `geo_distance_reply`'s `format!("{normalized:.4}")`. The
+haversine/decode/zmscore are minor; the formatter dominates the gap. redis uses C
+snprintf("%.4f") (fast). This is the KNOWN-DECLINED lever (prior ledger: "geodist {:.4} declined
+on rounding byte-risk"): a byte-exact FAST pure-Rust %.4f is not available — Rust's dragon IS the
+byte-exact fixed-precision algorithm; ryu/grisu give shortest-round-trip not fixed %.4f;
+`libc::snprintf` would match redis byte-for-byte but needs unsafe C linkage (violates fr's
+pure-safe-Rust principle, bead gu5nf); manual `(d*1e4).round_ties_even()` risks divergence from
+C %.4f at exact-half values. CONCLUSION: GEODIST 0.75x is at its byte-exact CPU limit — the cost
+is correct float formatting in safe Rust, not a missed optimization. Profiling (newly unblocked)
+validated this rather than finding a clean lever; residual stands as documented-WONTFIX.
