@@ -12477,7 +12477,7 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
     Ok(RespFrame::Integer(receivers as i64))
 }
 
-fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
+pub fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     // Upstream Redis 7.2 t_zset.c::zslParseRange uses
     // strtod((char*)ptr+(open?1:0), &eptr) and `eptr[0] != '\0'` as
     // the trailing-junk gate. That has three observable consequences
@@ -12568,7 +12568,7 @@ fn score_bound_f64(bound: ScoreBound) -> f64 {
 ///   emit its empty result WITHOUT calling the store (so exactly the single
 ///   keyspace lookup redis performs is recorded).
 /// - `Err(WrongType)` — inverted range on a wrong-type key.
-fn zscore_inverted_wrongtype_guard(
+pub fn zscore_inverted_wrongtype_guard(
     store: &mut Store,
     key: &[u8],
     lo: ScoreBound,

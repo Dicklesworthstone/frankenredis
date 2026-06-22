@@ -13797,6 +13797,180 @@ impl Runtime {
         }
     }
 
+    fn can_execute_plain_zcount_borrowed(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZCOUNT".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || min_arg.len() > self.policy.gate.max_bulk_len
+            || max_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Borrowed runtime fast path for `ZCOUNT key min max` — mirrors the generic
+    /// `zcount` (parse_score_bound x2 -> zscore_inverted_wrongtype_guard ->
+    /// store.zcount) but skips generic dispatch. Profiling showed ~30% of pipelined
+    /// ZCOUNT CPU was generic dispatch (execute_frame_internal / command_table_index
+    /// / classify_command / arg materialization), not the ZRankTreap rank-diff (~12%).
+    /// Byte-exact: identical parse/guard/store calls and keyspace accounting
+    /// (store.zcount records the single lookup; the inverted-bounds guard mirrors the
+    /// generic path). A score-bound PARSE error returns None so the generic handler
+    /// emits the exact error reply. (frankenredis cc ZCOUNT fast path)
+    pub fn execute_plain_zcount_borrowed(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zcount_borrowed(key, min_arg, max_arg, now_ms) {
+            return None;
+        }
+        // Parse BEFORE any side effect; a bad bound falls back to generic for the
+        // exact "min or max is not a float" reply.
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zcount");
+        self.session.last_argv_len_sum =
+            b"ZCOUNT".len() + key.len() + min_arg.len() + max_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Mirror generic zcount EXACTLY: inverted-bounds/wrongtype guard, then
+        // store.zcount (which records the one keyspace lookup).
+        let reply = match fr_command::zscore_inverted_wrongtype_guard(
+            &mut self.server.store,
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
+            Ok(true) => RespFrame::Integer(0),
+            Ok(false) => match self.server.store.zcount(key, min, max, now_ms) {
+                Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Err(err) => err.to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_zcount_borrowed_metrics(
+            key, min_arg, max_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_zcount_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let build_argv = || {
+            vec![
+                b"ZCOUNT".to_vec(),
+                key.to_vec(),
+                min_arg.to_vec(),
+                max_arg.to_vec(),
+            ]
+        };
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("zcount", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build_argv);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ZCOUNT' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     fn can_execute_plain_geopos_borrowed(
         &mut self,
         key: &[u8],

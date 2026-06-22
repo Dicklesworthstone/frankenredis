@@ -2792,3 +2792,18 @@ notify/tracking/monitor/script) gating the borrowed fast path; caching it risks 
 mid-transaction) for a modest cheap-command gain → declined. ALL 4 perf residuals now CPU-
 profiled (hot-path/GEODIST/large-value/EXISTS) — each is byte-exact-required / inherent / syscall-
 bound / machinery-necessary, NONE a missed mine lever. Perf domination fully CPU-validated.
+
+### ZCOUNT borrowed read fast path SHIPPED (cc) — 0.5x → 1.20x (profiling-driven)
+Profiling (perf, on a 10k-skiplist ZCOUNT blast) showed ~30% of ZCOUNT CPU was GENERIC dispatch
+(execute_frame_internal/command_table_index/classify_command/arg-materialization/dispatch_with_
+client_context), only ~12% the ZRankTreap rank-diff — i.e. the ~0.5x pipelined loss was the
+MISSING fast path, not the treap (cod-b's, untouched). Added a borrowed read fast path mirroring
+GEODIST: pub parse_score_bound + zscore_inverted_wrongtype_guard (fr-command), execute_plain_
+zcount_borrowed + gate + metrics (fr-runtime), parse_borrowed_plain_zcount_packet + dispatch arm
+(fr-server). Calls the SAME parse/guard/store.zcount in the same order → byte-exact incl keyspace
+accounting; a bad score-bound or 5-element arity falls back to generic for the exact error.
+MEASURED: ZCOUNT(2000,8000) on 10k skiplist 0.5x → **1.203x (fr now FASTER)**, ZCARD 1.04 / GET
+1.17 unregressed. VERIFIED: correctness 28/0 byte-exact (inclusive/exclusive/-inf/+inf/inverted/
+nan/bad-bound/missing/wrongtype/arity, listpack+skiplist); cmdstat+keyspace_hits/misses byte-
+exact vs redis; fr-command 1157 + fr-store 656 unit tests + conformance smoke 99/99 all pass.
+(ZLEXCOUNT deferred — its treap-warming + lex-bound parsing exceed a clean mirror.)
