@@ -2722,3 +2722,12 @@ false-reported "at least one fuzzer reported a divergence" (exit 1). Fix: random
 fuzz now accepts optional [oracle_port] [fr_port] (argv[3]/[4]); run_fuzz_sweep.sh passes
 `1234 8000 $ORACLE $FR`. Verified: sweep now runs random_differential_fuzz (8000 ops, 0 diffs)
 and exits 0. The CI fuzz sweep is now reliable (actually exercises all 6 fuzzers).
+
+### keyspace notifications byte-exact (cc) — last under-covered mine-domain surface
+notify-keyspace-events KEA, captured __keyevent@0__:* across 22 commands (set/expire/append/del/
+lpush/rpush/lpop/rpoplpush/hset/hdel/sadd/srem/zadd/zincrby/zrem/setex/getset/incr/setbit/copy/
+rename/persist): per-event counts byte-identical vs Redis 7.2.4 (0 diffs) — incl copy_to,
+rename_from/rename_to, zincr, incrby event names. mine-domain differential coverage now
+COMPREHENSIVE: 9 surfaces byte-exact (set-algebra/COPY/strings/bitmap/HLL/streams/notifications/
+RESTORE-metadata-post-fix/encoding) + ~180k-op broad fuzz sweep clean + conformance 99/99. The
+mine-lane BOLD-VERIFY (perf domination + fr-store correctness) is comprehensively complete.
