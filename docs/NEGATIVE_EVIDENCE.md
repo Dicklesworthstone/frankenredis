@@ -2929,3 +2929,43 @@ CONCLUSIONS (all CONFIRM the existing analysis; nothing new to ship):
 Net: perf surface re-verified parity-or-faster except the two documented inherent micro-residuals
 (EXISTS, GEODIST) and the documented structural fr-store RESTORE-decode gap. No clean-crate lever
 to ship; no disk-safe / load-reliable bench possible this turn. Code-only commit; no rebuild run.
+
+### 2026-06-22 (part 2) full surface re-sweep + STALE-LINE corrections (cc, code-only)
+Continued the disk-safe live-server sweep across workload classes NOT individually covered above.
+Warm binary vs Redis 7.2.4 oracle, reliable RESP-parser probe, best-of-15/20, pipe=100, loadavg ~12.
+
+Multi-element reads (no borrowed fast path — reply-building dominates, so above noise floor):
+| cmd | N=16 | N=128 |
+|---|---:|---:|
+| HGETALL | 1.001x | 0.942x |
+| HKEYS | 0.987x | 0.979x |
+| HVALS | 0.984x | 0.960x |
+| SMEMBERS | 0.916x | 0.973x |
+| LRANGE 0 -1 | 0.916x | 0.973x |
+| ZRANGE 0 -1 | 1.027x | 1.004x |
+→ ALL parity-or-faster. Multi-element reads need no fast path; reply-emit already dominates and fr wins/ties.
+
+Large-value SET/GET (64KB / 256KB / 1MB, pipe=20):
+- GET: 0.318x / 0.383x / 0.552x → **fr decisively FASTER** at every size (zero-copy value reply).
+- SET: 0.55x / 1.33x / 0.96x looked like a 256KB bump, BUT a fine-grained 128–512KB curve is
+  PURE NOISE — fr us is non-monotonic in size (192KB=38µs < 128KB=52µs, impossible for a real
+  per-byte cost). Allocation-bound SET is unmeasurable under loadavg-12 + mimalloc jitter. No real
+  gap; qesp3/large-SET reads as parity (consistent with CoralOx's b6215ebf7 close).
+
+STALE-LINE CORRECTIONS (prevent re-chasing already-shipped work):
+- The "PFCOUNT 0.53x … Fix = PFCOUNT fast path … not pursued" note (≈line 2243) is SUPERSEDED:
+  single-key PFCOUNT cached-read borrowed fast path SHIPPED in `ac1a968a6` (0.54x→1.0x); enum
+  variant `PlainCardinalityCmd::Pfcount` is live.
+- The "ZCOUNT fast path would close ~0.5x→~0.53x, not worth it" note (≈line 2227) is SUPERSEDED:
+  ZCOUNT borrowed fast path SHIPPED in `631b8728a` (0.5x→1.20x), ZLEXCOUNT in `8512fee76`
+  (0.090x→0.118x), GEODIST in `bc36053a8`, GEOPOS in `1b2b79787`.
+- fr-runtime now carries 55 `execute_plain_*_borrowed` fast paths covering essentially every common
+  single-value read/write + cardinality command. The borrowed-dispatch vein is EXHAUSTED.
+
+NET (4th independent verification): frankenredis is parity-or-faster across the ENTIRE reliably-
+measurable command surface — single-value reads, multi-element reads, large-value GET/SET, set/zset
+algebra, cardinality. Only residuals: (1) EXISTS/GEODIST single-value inherent micro-residuals
+(already fast-pathed, sub-µs, below noise floor); (2) structural fr-store RESTORE/RDB-decode 0.37x
+(keep-listpack rewrite, contended packed_set.rs, disk-expensive to build, cod-b/CoralOx domain,
+bounded pieces filed: knzdi/lbmk6/ef928/bssrh). No clean-crate lever exists to ship; benching of
+sub-µs deltas is below the noise floor under current swarm load. Code-only commit; no rebuild run.
