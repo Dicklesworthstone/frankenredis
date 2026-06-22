@@ -3900,6 +3900,72 @@ impl<'a> Iterator for PackedZSetIter<'a> {
     }
 }
 
+/// (frankenredis-ym6ih) Pre-optimization delete path, kept ONLY for the A/B
+/// micro-bench `swap_remove_perf_legacy_vs_new_ym6ih`. This is the original
+/// `swap_remove`: it re-probes the index by field bytes twice (tombstone +
+/// repoint) and allocates the moved field's bytes — exactly the per-delete work
+/// the slot back-pointer + `lookup_slot` change eliminates.
+#[cfg(test)]
+impl CompactFieldMap {
+    fn tombstone_slot_legacy(&mut self, field: &[u8]) {
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        loop {
+            let s = self.slots[slot];
+            if s >= 2 {
+                let pos = (s - 2) as usize;
+                let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
+                if &self.buf[fr] == field {
+                    self.slots[slot] = CFM_TOMB;
+                    self.tombs += 1;
+                    return;
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    fn repoint_slot_legacy(&mut self, field: &[u8], pos: usize) {
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        loop {
+            let s = self.slots[slot];
+            if s >= 2 {
+                let cur = (s - 2) as usize;
+                let (fr, _) = cfm_decode(&self.buf, self.order[cur]);
+                if &self.buf[fr] == field {
+                    self.slots[slot] = (pos as u32) + 2;
+                    return;
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    fn swap_remove_legacy(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        let pos = self.lookup(field)?;
+        let off = self.order[pos];
+        let (_, vr) = cfm_decode(&self.buf, off);
+        let value = self.buf[vr].to_vec();
+        self.dead += self.entry_size(off);
+        self.tombstone_slot_legacy(field);
+        let last = self.order.len() - 1;
+        if pos != last {
+            let moved_off = self.order[last];
+            self.order[pos] = moved_off;
+            let (mfr, _) = cfm_decode(&self.buf, moved_off);
+            let mfield = self.buf[mfr].to_vec();
+            self.repoint_slot_legacy(&mfield, pos);
+        }
+        self.order.pop();
+        // Keep `slot_of` length consistent with `order` so `rehash`/`maybe_compact`
+        // stay sound for repeated legacy deletes (legacy never reads `slot_of`).
+        self.slot_of.pop();
+        self.maybe_compact();
+        Some(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4135,6 +4201,76 @@ mod tests {
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
+
+    /// (frankenredis-ym6ih) A/B micro-bench isolating the per-delete work that the
+    /// slot back-pointer + `lookup_slot` + value-free `delete` removed. Builds an
+    /// identical large hashtable-range map, then deletes every field two ways:
+    /// the pre-optimization `swap_remove_legacy` (3 probes + 2 allocs/delete) vs
+    /// the new `delete` (1 probe, 0 owned allocs). Both share the same
+    /// `maybe_compact`, so the wall-clock delta is pure per-op savings. Ignored by
+    /// default (timing); run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn swap_remove_perf_legacy_vs_new_ym6ih() {
+        use std::time::Instant;
+        const N: usize = 300_000;
+        let build = || {
+            let mut m = CompactFieldMap::new();
+            for i in 0..N {
+                let f = format!("field:{i:012}");
+                m.insert(f.as_bytes(), b"v");
+            }
+            m
+        };
+        // Distinct, shuffled-ish delete order (every field hit once, present).
+        let order: Vec<Vec<u8>> = (0..N)
+            .map(|i| format!("field:{:012}", (i.wrapping_mul(2_654_435_761)) % N).into_bytes())
+            .collect();
+        // Dedup so each field is deleted exactly once (multiplicative hash collisions).
+        let mut seen = std::collections::HashSet::new();
+        let dels: Vec<&[u8]> = order
+            .iter()
+            .filter(|f| seen.insert((*f).clone()))
+            .map(|f| f.as_slice())
+            .collect();
+
+        let mut legacy = build();
+        let t0 = Instant::now();
+        let mut lc = 0u64;
+        for f in &dels {
+            if legacy.swap_remove_legacy(f).is_some() {
+                lc += 1;
+            }
+        }
+        let legacy_ns = t0.elapsed().as_nanos();
+
+        let mut newm = build();
+        let t1 = Instant::now();
+        let mut nc = 0u64;
+        for f in &dels {
+            if newm.delete(f) {
+                nc += 1;
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos();
+
+        assert_eq!(lc, nc, "both paths must remove the same field count");
+        assert_eq!(legacy.len(), newm.len(), "same residual size");
+        let speedup = legacy_ns as f64 / new_ns as f64;
+        eprintln!(
+            "[ym6ih] CompactFieldMap delete {} fields: legacy={:.2}ms new={:.2}ms  speedup={:.3}x  ({:.0}ns vs {:.0}ns per delete)",
+            nc,
+            legacy_ns as f64 / 1e6,
+            new_ns as f64 / 1e6,
+            speedup,
+            legacy_ns as f64 / nc as f64,
+            new_ns as f64 / nc as f64,
+        );
+        assert!(
+            new_ns as f64 <= legacy_ns as f64 * 0.95,
+            "new delete must be at least 5% faster than legacy (got {speedup:.3}x)"
+        );
+    }
 
     #[test]
     fn compact_str_set_matches_indexset_under_random_ops_ideww() {
