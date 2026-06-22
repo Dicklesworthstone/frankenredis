@@ -8,7 +8,9 @@ target-*/
 .bv/
 
 # Local oracle clone (not part of clean-room implementation)
-legacy_redis_code/
+# NOTE: no trailing slash — must also ignore a *symlink* named legacy_redis_code
+# (a worktree `ln -sf` self-link was once accidentally committed; see history).
+legacy_redis_code
 crates/*/.git/
 crates/*/.git.nested_backup/
 
