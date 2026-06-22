@@ -651,6 +651,17 @@ impl HashFieldMap {
         }
     }
 
+    /// (frankenredis-ym6ih) Remove `field`, returning only whether it existed —
+    /// for HDEL, which counts removed fields and discards the value. Avoids the
+    /// owned-value allocation that `swap_remove` makes on the hashtable path.
+    /// Same final state and order semantics as `swap_remove(field).is_some()`.
+    pub fn delete(&mut self, field: &[u8]) -> bool {
+        match self {
+            HashFieldMap::Packed(p) => p.shift_remove(field).is_some(),
+            HashFieldMap::Hash(h) => h.delete(field),
+        }
+    }
+
     #[must_use]
     pub fn iter(&self) -> HashFieldMapIter<'_> {
         match self {
@@ -727,6 +738,12 @@ pub struct CompactFieldMap {
     buf: Vec<u8>,
     /// `buf` offsets of live entries, in insertion order. `order.len()` == count.
     order: Vec<u32>,
+    /// (frankenredis-ym6ih) Back-pointer: `slot_of[pos]` is the `slots` index
+    /// that points at order position `pos` (so `slots[slot_of[pos]] == pos + 2`).
+    /// Lets `swap_remove` repoint a moved entry's slot in O(1) without re-probing
+    /// by its field bytes (killing a probe + an owned-field allocation per
+    /// delete). `slot_of.len()` == `order.len()`; rebuilt by `rehash`.
+    slot_of: Vec<u32>,
     /// Open-addressing slots (linear probe). 0 = EMPTY, 1 = TOMBSTONE, else the
     /// occupant's `pos_in_order + 2`. `slots.len()` is a power of two (or 0).
     slots: Vec<u32>,
@@ -781,6 +798,13 @@ impl CompactFieldMap {
 
     /// Returns the `order` position of `field`, or `None`.
     fn lookup(&self, field: &[u8]) -> Option<usize> {
+        self.lookup_slot(field).map(|(pos, _)| pos)
+    }
+
+    /// Returns `(order_position, slot_index)` for `field`, or `None`. The slot
+    /// index lets removers tombstone/repoint the slot directly instead of
+    /// re-probing by field bytes (frankenredis-ym6ih).
+    fn lookup_slot(&self, field: &[u8]) -> Option<(usize, usize)> {
         if self.slots.is_empty() {
             return None;
         }
@@ -795,7 +819,7 @@ impl CompactFieldMap {
                 let pos = (s - 2) as usize;
                 let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
                 if &self.buf[fr] == field {
-                    return Some(pos);
+                    return Some((pos, slot));
                 }
             }
             slot = (slot + 1) & mask;
@@ -807,6 +831,7 @@ impl CompactFieldMap {
     fn rehash(&mut self, new_cap: usize) {
         let cap = new_cap.next_power_of_two().max(8);
         let mut slots = vec![CFM_EMPTY; cap];
+        let mut slot_of = vec![0u32; self.order.len()];
         let mask = cap - 1;
         for (pos, &off) in self.order.iter().enumerate() {
             let (fr, _) = cfm_decode(&self.buf, off);
@@ -820,8 +845,10 @@ impl CompactFieldMap {
                 slot = (slot + 1) & mask;
             }
             slots[slot] = (pos as u32) + 2;
+            slot_of[pos] = slot as u32;
         }
         self.slots = slots;
+        self.slot_of = slot_of;
         self.tombs = 0;
     }
 
@@ -872,6 +899,7 @@ impl CompactFieldMap {
                     self.tombs -= 1;
                 }
                 self.slots[target] = (pos as u32) + 2;
+                self.slot_of.push(target as u32);
                 break;
             }
             if s == CFM_TOMB && first_tomb.is_none() {
@@ -922,6 +950,7 @@ impl CompactFieldMap {
                     self.tombs -= 1;
                 }
                 self.slots[target] = (pos as u32) + 2;
+                self.slot_of.push(target as u32);
                 break;
             }
             if s == CFM_TOMB && first_tomb.is_none() {
@@ -958,41 +987,25 @@ impl CompactFieldMap {
         CompactFieldMapIter { map: self, pos: 0 }
     }
 
-    /// Set the slot holding `field` to TOMBSTONE. (Field must be present.)
-    fn tombstone_slot(&mut self, field: &[u8]) {
-        let mask = self.slots.len() - 1;
-        let mut slot = (self.hash(field) as usize) & mask;
-        loop {
-            let s = self.slots[slot];
-            if s >= 2 {
-                let pos = (s - 2) as usize;
-                let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
-                if &self.buf[fr] == field {
-                    self.slots[slot] = CFM_TOMB;
-                    self.tombs += 1;
-                    return;
-                }
-            }
-            slot = (slot + 1) & mask;
+    /// (frankenredis-ym6ih) Swap-remove the live entry at order position `pos`,
+    /// whose index slot is `slot`. O(1) and probe-free: tombstone `slot`, move
+    /// the last entry into the gap, and repoint *its* slot via the `slot_of`
+    /// back-pointer (no re-probe, no owned-field allocation). Callers reclaim the
+    /// dead arena bytes (`self.dead += entry_size`) and read any return value
+    /// before calling. Order is NOT preserved.
+    fn remove_at(&mut self, pos: usize, slot: usize) {
+        self.slots[slot] = CFM_TOMB;
+        self.tombs += 1;
+        let last = self.order.len() - 1;
+        if pos != last {
+            self.order[pos] = self.order[last];
+            let moved_slot = self.slot_of[last] as usize;
+            self.slots[moved_slot] = (pos as u32) + 2;
+            self.slot_of[pos] = moved_slot as u32;
         }
-    }
-
-    /// Repoint the slot holding `field` to order position `pos`.
-    fn repoint_slot(&mut self, field: &[u8], pos: usize) {
-        let mask = self.slots.len() - 1;
-        let mut slot = (self.hash(field) as usize) & mask;
-        loop {
-            let s = self.slots[slot];
-            if s >= 2 {
-                let cur = (s - 2) as usize;
-                let (fr, _) = cfm_decode(&self.buf, self.order[cur]);
-                if &self.buf[fr] == field {
-                    self.slots[slot] = (pos as u32) + 2;
-                    return;
-                }
-            }
-            slot = (slot + 1) & mask;
-        }
+        self.order.pop();
+        self.slot_of.pop();
+        self.maybe_compact();
     }
 
     /// Order-preserving remove (HDEL on small/listpack-range hashes). O(n).
@@ -1010,25 +1023,29 @@ impl CompactFieldMap {
     }
 
     /// Unordered remove (HDEL on hashtable-range hashes, where order is
-    /// unspecified). O(1): swap the last entry into the gap.
+    /// unspecified). O(1): swap the last entry into the gap. Returns the removed
+    /// value; use [`delete`](Self::delete) when the value is discarded.
     pub(crate) fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
-        let pos = self.lookup(field)?;
+        let (pos, slot) = self.lookup_slot(field)?;
         let off = self.order[pos];
         let (_, vr) = cfm_decode(&self.buf, off);
         let value = self.buf[vr].to_vec();
         self.dead += self.entry_size(off);
-        self.tombstone_slot(field);
-        let last = self.order.len() - 1;
-        if pos != last {
-            let moved_off = self.order[last];
-            self.order[pos] = moved_off;
-            let (mfr, _) = cfm_decode(&self.buf, moved_off);
-            let mfield = self.buf[mfr].to_vec();
-            self.repoint_slot(&mfield, pos);
-        }
-        self.order.pop();
-        self.maybe_compact();
+        self.remove_at(pos, slot);
         Some(value)
+    }
+
+    /// (frankenredis-ym6ih) Unordered remove that does NOT allocate the removed
+    /// value — for HDEL/SREM, which only need a removed/not-found flag. Otherwise
+    /// identical to [`swap_remove`](Self::swap_remove). One probe + zero owned
+    /// allocations per delete (vs the prior 3 probes + 2 allocs).
+    pub(crate) fn delete(&mut self, field: &[u8]) -> bool {
+        let Some((pos, slot)) = self.lookup_slot(field) else {
+            return false;
+        };
+        self.dead += self.entry_size(self.order[pos]);
+        self.remove_at(pos, slot);
+        true
     }
 
     /// Swap-remove the entry at insertion-order position `idx`, returning its
@@ -1042,17 +1059,8 @@ impl CompactFieldMap {
         let field = self.buf[fr].to_vec();
         let value = self.buf[vr].to_vec();
         self.dead += self.entry_size(off);
-        self.tombstone_slot(&field);
-        let last = self.order.len() - 1;
-        if idx != last {
-            let moved_off = self.order[last];
-            self.order[idx] = moved_off;
-            let (mfr, _) = cfm_decode(&self.buf, moved_off);
-            let mfield = self.buf[mfr].to_vec();
-            self.repoint_slot(&mfield, idx);
-        }
-        self.order.pop();
-        self.maybe_compact();
+        let slot = self.slot_of[idx] as usize;
+        self.remove_at(idx, slot);
         Some((field, value))
     }
 
@@ -1140,7 +1148,9 @@ impl CompactStrSet {
     }
 
     pub(crate) fn swap_remove(&mut self, member: &[u8]) -> bool {
-        self.inner.swap_remove(member).is_some()
+        // (frankenredis-ym6ih) Members carry an empty value, so route through the
+        // value-free `delete` (one probe, no allocation per remove).
+        self.inner.delete(member)
     }
 
     /// Swap-remove the member at insertion-order position `idx` (matches

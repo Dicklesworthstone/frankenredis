@@ -3225,3 +3225,42 @@ that regenerates from a clean-room source. ESCALATED to swarm (CoralOx/CobaltCov
 Once unblocked, levers 1–2 (cc-domain, non-structural) are the fastest high-impact ships; verify each
 with redis-benchmark -c50 -P16 + DEBUG DIGEST + the relevant differ/HSCAN gate; REVERT if <~1.1x.
 NOTE: single-conn raw-socket probes UNDERSTATE CPU-bound gaps — always gate with -c50 -P16.
+
+### 2026-06-22 (part 14) ym6ih SHIPPED (delete primitive) + HEADLINE REDIRECT (cc/BlackThrush)
+BUILD UNBLOCKED for fr-store: the pt6/pt13 "universal blocker" only bites the full `frankenredis`
+binary (fr-command build.rs needs the gitignored `legacy_redis_code/redis/src/commands`, absent on
+cold rch workers). **fr-store's own crate + tests build fine on any worker** (no fr-command in its
+dep graph) — so per-crate A/B micro-benches sidestep the blocker entirely. (Local reuse of the warm
+target is impossible: E0514 — the warm rlibs are rustc-metadata-incompatible with local rustc even
+though both report `1.98.0-nightly (f20a92ec0 2026-06-07)` — different build, different metadata hash.)
+
+SHIPPED the ym6ih `CompactFieldMap::swap_remove` non-structural fix (slot back-pointer `slot_of` +
+`lookup_slot` returning the slot index + value-free `delete()`): per delete went from 3 hash-probes
++ 2 owned allocs → **1 probe + 0 owned allocs**. One touch-point covers HDEL (HashFieldMap::delete)
+AND SREM (CompactStrSet→delete). Order/iteration semantics unchanged.
+- **A/B micro-bench** (`fr-store` test `swap_remove_perf_legacy_vs_new_ym6ih`, release, 300k-field
+  hashtable map, delete-all, both paths share `maybe_compact` so the delta is pure per-op savings):
+  **legacy → new = 1.38x / 1.90x / 2.26x** across 3 samples (~234–286 ns/del → ~105–169 ns/del).
+- **Byte-exact:** 5 `compact*` differential tests (CompactStrSet/CompactFieldMap drop-in vs
+  IndexSet/IndexMap over randomized insert/contains/get_index/shift_remove/swap_remove/
+  swap_remove_index/retain) PASS + 655 other fr-store tests PASS (lone failure =
+  `scan_match_prefix_prune_..._faster` timing-ratio assert, a known flake on slow/contended rch
+  workers, touches ZERO code I changed). **Live DEBUG DIGEST-VALUE parity** (patched fr vs Redis
+  7.2.4, identical HDEL/SREM/SMOVE on hashtable-range hash+set): h/s/src digests ALL MATCH
+  byte-for-byte; HLEN/SCARD exact (scripts/ym6ih_digest_parity.sh; high ports — 7902 was squatted
+  by a foreign redis, verify executable per the probe-port rule).
+
+**HEADLINE REDIRECT (important — corrects pt11/pt12):** the per-op delete is only ~150 ns, but
+end-to-end HDEL under -c50 -P16 is still ~10.7 µs/op (fr 93k rps vs redis 666k = **~7.5x**;
+SREM ~3.3x). So `swap_remove` is **<2% of the end-to-end command cost** — it CANNOT be the headline
+2.83x gap, and `maybe_compact` is also not it (only ~1 arena-rebuild + ~1 rehash over a 2M-delete
+run, <0.1%). ROOT CAUSE of the end-to-end HDEL/SREM gap = the **MISSING borrowed fast-path**:
+fr-runtime has `execute_plain_hset_borrowed` / `execute_plain_hget_borrowed` (→ HSET/HGET parity)
+but **no `execute_plain_hdel_borrowed` / `execute_plain_srem_borrowed`** — HDEL/SREM fall through to
+the generic owned-argv mutation path (with_mutated_entry etc.), i.e. the same ~2x dispatch tax as the
+6s9dx cold cluster, compounded under the per-element loop. **The real ym6ih lever is a borrowed
+HDEL/SREM fast-path (6s9dx-class, fr-runtime), not the store primitive.** The primitive fix still
+ships (correct, faster, alloc-free, and becomes a larger share once the fast-path lands). Filing the
+fast-path as the next lever. Methodology note: redis-benchmark `HDEL h field:__rand_int__ -r N`
+deletes random distinct fields over a pre-populated N-field hashtable hash (≈63% hit at n=r) — fair,
+identical workload to both servers.

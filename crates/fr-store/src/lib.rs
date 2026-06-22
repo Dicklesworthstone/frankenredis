@@ -9947,7 +9947,8 @@ impl Store {
             for field in fields {
                 // (frankenredis-sremfast) Order-agnostic O(1) remove for
                 // hashtable-encoded hashes (was O(n) per field shift).
-                if m.swap_remove(field).is_some() {
+                // (frankenredis-ym6ih) `delete` skips the discarded-value alloc.
+                if m.delete(field) {
                     removed += 1;
                 }
             }
