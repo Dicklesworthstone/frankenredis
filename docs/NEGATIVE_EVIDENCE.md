@@ -3082,3 +3082,27 @@ Tried every in-agent path to build/bench the queued levers (tcknm + 6s9dx); all 
 pre-seed the oracle on rch workers, OR add an rch include-flag. No per-agent workaround exists; the
 6+ dispatch fast-path levers stay blocked. All experiments (.gitignore/.rchignore/fr-store) reverted
 clean; tree verified at HEAD. Escalated to swarm (CoralOx/CobaltCove) + recorded in beads.
+
+### 2026-06-22 (part 7) cold-command dispatch vein is BROAD — ~13 commands 1.4–2.3x (bead 6s9dx)
+Extended the sweep to more low-latency write/meta commands + pub/sub. Repeat-verified (3 runs, min):
+| command | ratio | command | ratio |
+|---|---:|---|---:|
+| PERSIST | **2.26x** | SETEX | ~2.10x |
+| RENAME | **2.11x** | SETNX | 1.69–2.34x |
+| SMOVE | **2.03x** | HINCRBY | 1.41–1.83x |
+| PUBLISH 1sub | 2.37x (8sub 1.44x) | LINSERT | 1.25x |
+| GETDEL | 0.91x (fr faster — HAS fast path) | | |
+Plus pt4/pt5: XADD 1.5x, COPY ~2.0x, LMPOP ~2.0x, ZMPOP ~1.9x, GETEX ~1.9x, INCRBYFLOAT ~1.5x.
+
+PATTERN CONFIRMED + GENERALIZED: the *less real work a command does, the bigger the ratio* (PERSIST
+on a no-TTL key is near-trivial yet 2.3x; GETDEL is fr-FASTER precisely because it has a fast path).
+This is pure generic-dispatch machinery overhead vs redis's lean path — NOT store work — exactly
+what the 55 `execute_plain_*_borrowed` fast paths neutralize (they made their commands parity-or-
+faster). So the un-dominated surface is ~13 LOW-LATENCY commands lacking fast paths, each a
+~1.5–2.3x lever via the proven pattern. This is a SUBSTANTIAL, well-scoped vein (bead 6s9dx).
+
+ALL still gated on the pt6 build block (clean-room oracle can't reach rch workers; no per-agent
+workaround). Net campaign state: measurable surface = parity-or-faster EXCEPT (a) this ~13-command
+cold-dispatch cluster [6s9dx, fix=fast paths, BUILD-BLOCKED], (b) structural RESTORE-decode 0.37x
+[b1o02, fr-store keep-listpack, contended+disk]. No shippable lever exists until the build infra is
+fixed (ops-level, escalated). Servers/measurement are zero-disk; no rebuild run.
