@@ -3066,3 +3066,19 @@ raises the priority of the build-unblock substantially. Filed/queued as a cluste
 escalated to the swarm. NOTE the multi-key MPOP / COPY ratios may include genuine store work
 (deep-copy for COPY, multi-key resolve for *MPOP) on top of dispatch — confirm split after a fast
 path lands (if dispatch-only, expect ~1.0x like the prior cold-cmd fixes).
+
+### 2026-06-22 (part 6) build-unblock EXHAUSTED — embedded-repo blocks vendoring (cc/BlackThrush)
+Tried every in-agent path to build/bench the queued levers (tcknm + 6s9dx); all dead:
+1. **Local cargo into warm `.rch-targets/frankenredis-cc`** → E0514 rustc-skew. Warm deps built by
+   remote rustc `91fe22da8084…`; NONE of the 11 local rustup toolchains match (default `f20a92ec`).
+2. **Local cold build (fresh target)** → forbidden (no cold rebuild) + disk-unsafe at 98%.
+3. **rch + un-ignored-but-untracked oracle** → rch does NOT sync untracked files (only tracked
+   files' working-tree content — which is why my uncommitted fr-store edits DID build).
+4. **`git add -f legacy_redis_code/redis/src/commands`** → stages NOTHING: `legacy_redis_code/redis`
+   is an **EMBEDDED GIT REPO** (`legacy_redis_code/redis/.git` present), so git treats it as a
+   submodule and won't stage its files. This is the real reason it was untracked.
+⇒ "vendor commands/" is NOT a plain add. Coordinated fix must: register a submodule, OR copy the
+392 JSON out of the embedded repo to a tracked non-repo path + repoint `fr-command/build.rs`, OR
+pre-seed the oracle on rch workers, OR add an rch include-flag. No per-agent workaround exists; the
+6+ dispatch fast-path levers stay blocked. All experiments (.gitignore/.rchignore/fr-store) reverted
+clean; tree verified at HEAD. Escalated to swarm (CoralOx/CobaltCove) + recorded in beads.
