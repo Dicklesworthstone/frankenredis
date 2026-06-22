@@ -3579,3 +3579,24 @@ rewrites — random-pick, zset rank, and the hot-write inserts (6lgnu) / RESTORE
 and largely CoralOx's fr-store domain. No clean per-turn dispatch lever remains. LESSON: to check if a command
 already has a fast path, grep the fr-server `parse_borrowed_plain_<cmd>_packet` + dispatch arm, NOT just the
 runtime execute fn name (rand_member family covers SRANDMEMBER/ZRANDMEMBER/HRANDFIELD under one fn).
+
+### 2026-06-22 (part 30) SETBIT borrowed fast-path SHIPPED — ~1.94x — (dispatch vein NOT fully exhausted; bit family was untested) (cc/BlackThrush)
+The pt29 "dispatch exhausted" claim was premature — it only covered hot zset/hash/set/list/string commands.
+A 2nd sweep over the UNTESTED families (bit/HLL/stream-read/scan/geo, -c50 -P16) surfaced NEW gaps:
+SETBIT 2.41x, PFADD 2.75x, SCAN 1.62x, GEODIST 1.34x, GETBIT 1.25x (has fp), SSCAN 1.24x; fr FASTER on
+ZSCAN 0.57x/HSCAN 0.76x/LPOS 0.75x/BITPOS 0.94x/BITFIELD 0.98x. SETBIT lacked a borrowed fast path (GETBIT
+has one → why SETBIT 2.41x vs GETBIT 1.25x: the ~1.2x delta is the dispatch tax).
+
+SHIPPED SETBIT: `SETBIT key offset value` (4-element WRITE → Integer old bit); reuses
+BorrowedPlainKeyRangePacket (start=offset, end=value). Validates offset [0,2^32) + value 0/1 in-path,
+defers on any malformed/out-of-range for the exact generic error; then store.setbit (grows string,
+enforces proto-max-bulk-len, returns old bit) → Integer or CommandError::Store(err).to_resp() (WRONGTYPE).
+A/B (generic-fr `fr_smove` vs fast-fr, SETBIT bm 500 1): **generic ~411k → fast ~797k = ~1.94x** (3 runs
+1.916/1.936/1.961, tight even at load ~59). Byte-exact vs redis incl edges (old-bit / GETBIT readback /
+string GROW to 126B / WRONGTYPE / bad-offset / bad-bit); cmdstat_setbit calls=3 failed_calls=2, keyspace
+0/0, errorstat_ERR=1 + errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0; fr-conformance 347/0 FULLY GREEN.
+
+REMAINING from sweep2 (assess next): PFADD 2.75x (HLL register update — likely structural sparse/dense),
+SCAN 1.62x (fr sorted-order cursor vs redis reverse-binary — deliberate design, per keyspace_ram_gap),
+GEODIST 1.34x / GEOPOS 1.14x (geo decode), SSCAN 1.24x. LESSON: sweep ALL command families (bit/HLL/geo/
+scan/stream) before declaring the dispatch vein exhausted — SETBIT was a clean 1.94x hiding in an unswept family.

@@ -973,6 +973,15 @@ fn plain_smove_owned_argv(src: &[u8], dst: &[u8], member: &[u8]) -> Vec<Vec<u8>>
     ]
 }
 
+fn plain_setbit_owned_argv(key: &[u8], offset_arg: &[u8], value_arg: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"SETBIT".to_vec(),
+        key.to_vec(),
+        offset_arg.to_vec(),
+        value_arg.to_vec(),
+    ]
+}
+
 /// Saturating i128 -> i64 clamp (mirrors fr-command's clamp_i128_to_i64).
 fn clamp_i128_to_i64_runtime(value: i128) -> i64 {
     if value < i128::from(i64::MIN) {
@@ -14701,6 +14710,173 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'SMOVE' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_setbit_borrowed(
+        &mut self,
+        key: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"SETBIT".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || offset_arg.len() > self.policy.gate.max_bulk_len
+            || value_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-setbitfast) Conservative borrowed WRITE fast path for `SETBIT
+    /// key offset value`. Mirrors the generic setbit EXACTLY: parse the offset as a
+    /// decimal i64 in [0, 2^32), parse value as 0/1, then `store.setbit` (grows the
+    /// string as needed, enforces proto-max-bulk-len, returns the OLD bit) →
+    /// `Integer(old)` or the same CommandError::Store(err).to_resp() mapping
+    /// (WRONGTYPE / out-of-range). Defers (None) on any malformed/out-of-range
+    /// offset or non-0/1 value so the generic path emits the exact error. Gated by
+    /// the WRITE predicate, so the "setbit" keyspace event, propagation, AOF, and
+    /// tracking are provably inactive.
+    pub fn execute_plain_setbit_borrowed(
+        &mut self,
+        key: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_setbit_borrowed(key, offset_arg, value_arg, now_ms) {
+            return None;
+        }
+        // Same validation as generic setbit; defer on any failure for exact errors.
+        let offset = parse_i64_arg(offset_arg).ok()?;
+        if !(0..4_294_967_296).contains(&offset) {
+            return None;
+        }
+        let bit = parse_i64_arg(value_arg).ok()?;
+        if bit != 0 && bit != 1 {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("setbit");
+        self.session.last_argv_len_sum = b"SETBIT".len() + key.len() + offset_arg.len() + value_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .setbit(key, offset as usize, bit != 0, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(old) => RespFrame::Integer(i64::from(old)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_setbit_borrowed_metrics(
+            key,
+            offset_arg,
+            value_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed setbit metrics carry key/offset/value slices plus failed flag"
+    )]
+    fn record_plain_setbit_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("setbit", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SETBIT' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
