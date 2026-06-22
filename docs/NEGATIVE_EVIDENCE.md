@@ -3413,3 +3413,23 @@ not an integer or out of range"); cmdstat_keyspace_parity_gate PASS + HINCRBY pr
 bad-increment count correctly); fr-runtime 683/0; fr-conformance 248 + only the recurring flaky OBJECT
 FREQ LFU test (97wc2, unreachable). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x,
 HINCRBY 1.84x. Remaining: GETEX, INCRBYFLOAT, COPY.
+
+### 2026-06-22 (part 21) 6s9dx COPY borrowed fast-path SHIPPED — ~1.80x vs generic (cc/BlackThrush)
+Sixth 6s9dx cold-cluster command. No-option `COPY source destination` is a 3-element WRITE returning
+Integer; reuses BorrowedPlainKeyMemberPacket (member=dest): parse_borrowed_plain_copy_packet (fr-server)
++ execute_plain_copy_borrowed → store.copy(.., replace=false, ..) (fr-runtime). Defers (None) when
+source==dest so the generic emits "ERR source and destination objects are the same"; COPY with
+DB/REPLACE is a 4+-element packet the recognizer never matches (falls through). store.copy bumps the
+SOURCE keyspace lookup internally (same method generic calls → parity). Gated off when
+notify/repl/AOF/tracking/maxmemory active; gate requires db0 so the cluster cross-DB reject is a no-op.
+
+A/B (generic-fr `fr_hincrby` [no COPY fast path] vs fast-fr, redis-benchmark -c50 -P16, COPY s d both
+existing → 0): **generic ~500k rps → fast-path ~894k rps = ~1.80x** (3 runs 1.87/1.80/1.72).
+
+Verified: COPY byte-exact vs redis incl ALL edges (new→1+dest copied; dest exists→0; REPLACE [4-elem]
+defers→1; src missing→0; src==dst→"ERR source and destination objects are the same"); cmdstat +
+KEYSPACE + errorstats byte-exact (cmdstat_copy calls=4 failed_calls=1, keyspace_hits=2 misses=1,
+errorstat_ERR=1 — the source-lookup accounting + deferred same-key all match); gate PASS; fr-runtime
+683/0; fr-conformance 248 + only the recurring flaky OBJECT FREQ LFU test (97wc2, unreachable).
+6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x, HINCRBY 1.84x, COPY 1.80x. Remaining:
+GETEX (read-with-options), INCRBYFLOAT (float-format byte-exactness care).
