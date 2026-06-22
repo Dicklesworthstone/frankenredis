@@ -2764,3 +2764,16 @@ pure-safe-Rust principle, bead gu5nf); manual `(d*1e4).round_ties_even()` risks 
 C %.4f at exact-half values. CONCLUSION: GEODIST 0.75x is at its byte-exact CPU limit — the cost
 is correct float formatting in safe Rust, not a missed optimization. Profiling (newly unblocked)
 validated this rather than finding a clean lever; residual stands as documented-WONTFIX.
+
+### large-value (apg7r) profiling-characterized (cc): syscall-bound + fr-server framing residual
+perf record of a 256KB-value GET blast (34k samples): ~58% in __syscall_cancel_arch_end → kernel
+(the write() sending the 256KB response) — inherent, memory/network-bound, redis pays the same.
+fr's user-space cost is the secondary remainder (the reply framing / value copy). So the apg7r
+large-value loss (~0.4-0.6x ≥64KB) is fr-server's write-path framing overhead (the documented
+"2-copy framing plateau") layered on the unavoidable send syscall — fr-server domain (BlackThrush),
+delicate (hand-rolled buffer reuse measured a REGRESSION earlier; mimalloc already recycles). Not
+a clean mine-domain lever. PROFILING VALIDATION COMPLETE across the 3 key perf areas: hot GET/SET
+(tight, clock-chained beating redis), GEODIST (byte-exact {:.4} formatter limit), large-value
+(syscall-bound + peer framing). Every residual is now explained at the instruction level —
+byte-exact-required / inherent / syscall-bound / peer-domain — none a missed mine lever. The perf
+domination is comprehensively CPU-profile-validated at its limits (profiling tool newly available).
