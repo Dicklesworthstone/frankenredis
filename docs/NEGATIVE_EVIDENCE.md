@@ -3187,3 +3187,17 @@ while redis dict shrink-rehashes. SPECIFIC algorithmic fix (compaction/shrink or
 NOT a full rewrite → likely highest-ROI hot-command lever now. Bead **ym6ih**. ZREM/ZPOPMIN 1.4x =
 multi-structure zset delete (6lgnu sibling). Build-blocked (pt6). NOTE: this updates the campaign
 "biggest un-dominated workload" → large-structure REMOVAL (HDEL/SREM), ahead of cold-dispatch ~2x.
+
+### 2026-06-22 (part 12) ym6ih root-caused PRECISELY (code-read) — non-structural per-op fix
+Verified the HDEL 2.83x / SREM 2.4x cause in code (packed_set.rs). My pt11 tombstone-accumulation
+hypothesis was WRONG: CompactFieldMap DOES clear tombstones (maybe_compact rehash @ tombs*4>=slots.len,
+:1078) + compacts arena (dead*2>buf.len, :1061). The real cost is per-op work in
+`CompactFieldMap::swap_remove` (:1014, HDEL backend; SREM via CompactStrSet wraps it → SAME path):
+per delete = (1) lookup() probe, (2) tombstone_slot() RE-PROBES same field, (3) value.to_vec()
+(HDEL discards it), (4) moved-field buf[mfr].to_vec() alloc, (5) repoint_slot() THIRD probe. = ~3
+hash+probe traversals + 2 allocs/delete vs redis dictDelete (1 probe + free). SPECIFIC non-structural
+levers (ONE fix → both HDEL+SREM): (1) lookup() returns slot index → tombstone directly (kill probe #2);
+(2) store slot back-pointer in `order` → O(1) repoint (kill probe #3 + the mfield alloc); (3) bool-return
+delete → no value alloc. Lands ~1 probe + 0-1 alloc, approaching redis. Order/iteration unchanged
+(unordered-OK path); verify DIGEST + hash/set differ + HSCAN. This is the highest-ROI hot-command
+lever: biggest gap, precise single-touch-point fix, NOT a rewrite. Bead ym6ih updated. Build-blocked (pt6).
