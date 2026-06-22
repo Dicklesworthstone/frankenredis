@@ -2687,3 +2687,15 @@ Continued differential probing vs Redis 7.2.4 (warm binary). After fixing the f1
   GETEX PERSIST/EX, SETEX/SETNX/SET NX/XX/GET/KEEPTTL — 43 checks 0 diffs.
 Differential probing remains the high-yield mine-lane pattern (found+fixed f16dz-followup this
 sweep); these 3 surfaces are now bounded clean.
+
+### differential sweep cont'd (cc) — bitmap + HLL byte-exact; mine-domain space now well-bounded
+- BITMAP: BITCOUNT (BYTE/BIT ranges incl negative/OOB), BITPOS (bit 0/1, ranges, BIT/BYTE,
+  all-ones no-zero edge), SETBIT (grow/large offset/bad bit+offset errors), GETBIT (OOB), BITOP
+  AND/OR/XOR/NOT (mismatched lengths, empty-key, NOT-arity error) — 57 checks 0 diffs.
+- HLL: PFADD incremental sparse→dense (n=1..3000) with raw HLL byte-exactness (GET) + DUMP +
+  STRLEN + PFCOUNT at each step, PFADD return/dup/no-element, PFMERGE (into-new/into-existing/
+  self/multi), wrongtype errors — 52 checks 0 diffs (HLL byte representation byte-identical
+  across the sparse/dense transition).
+Five consecutive mine-domain surfaces now byte-exact (set-algebra/COPY/strings/bitmap/HLL).
+Differential finds have converged: the real bugs (10ovx, f16dz, f16dz-followup) are fixed,
+s36di root-caused for cod-a; the mine-domain correctness surface is comprehensively bounded.
