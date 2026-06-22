@@ -3157,3 +3157,13 @@ bead 6s9dx. The dispatch-tax thesis holds cleanly: commands WITHOUT a borrowed f
 GET/SET (with fast paths) are parity-or-faster. ~8 commands × ~2x = a substantial aggregate
 low-latency-write penalty, all fixable via the proven `execute_plain_*_borrowed` pattern (one
 batched PR). Still BUILD-BLOCKED (pt6 ops-level oracle-sync). Bead 6s9dx updated with P16 numbers.
+
+### 2026-06-22 (part 10) hot-write insert-throughput lever FILED (bead 6lgnu)
+The biggest hot-command residual (ZADD 1.33x / SADD 1.27x / LPUSH 1.22x, pt8 P16) is now a filed
+actionable lever: **6lgnu**. Root cause confirmed in code (fr-store FullSortedSet lib.rs ~647):
+every ZADD updates TWO structures — `dict: IndexMap<member,f64>` + `ordered: BTreeMap<ScoreMember,()>`
+(+ lazy rank treap) — vs redis's single shared skiplist+dict; per-insert dual-structure + BTreeMap
+node-alloc cost. Same multi-structure overhead `uybhq` (CLOSED, RSS-only) found. Bold lever = a
+unified ordered-zset primitive (skiplist / order-statistic-augmented) closing BOTH insert throughput
+AND RSS, preserving ZRANDMEMBER O(1) pick + lex/score order + DUMP/DIGEST byte-exactness. SADD/LPUSH
+siblings (set repr; 99fwc ChunkedList). fr-store/CoralOx domain, structural, build-blocked (pt6).
