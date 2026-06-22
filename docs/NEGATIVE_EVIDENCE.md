@@ -3394,3 +3394,22 @@ errorstat_ERR=1 — the deferred edge case routes to generic and counts correctl
 fr-conformance **347/0 FULLY GREEN** (the recurring OBJECT FREQ LFU test passed this run — confirming
 it was flaky/probabilistic, 97wc2, not a real regression). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME
 2.2-2.3x, SETEX ~1.95x. Remaining: GETEX/HINCRBY/INCRBYFLOAT/COPY.
+
+### 2026-06-22 (part 20) 6s9dx HINCRBY borrowed fast-path SHIPPED — ~1.84x vs generic (cc/BlackThrush)
+Fifth 6s9dx cold-cluster command. `HINCRBY key field increment` is a 4-element WRITE returning Integer;
+reuses BorrowedPlainKeyRangePacket (start=field, end=increment): parse_borrowed_plain_hincrby_packet
+(fr-server) + execute_plain_hincrby_borrowed (fr-runtime). Mirrors generic hincrby EXACTLY: parse the
+increment as i64 (defer to generic on non-int for the canonical error), then store.hincrby → Integer or
+the same CommandError::Store(err).to_resp() mapping (wrong-type / non-int field value / overflow), with
+failed-call + errorstats accounting. Gated off when notify/repl/AOF/tracking/maxmemory active.
+
+A/B (generic-fr `fr_setex` [no HINCRBY fast path] vs fast-fr, redis-benchmark -c50 -P16, HINCRBY h f 1):
+**generic ~340k rps → fast-path ~690k rps = ~1.84x** (3 runs 1.886/1.842/1.798).
+
+Verified: HINCRBY byte-exact vs redis incl ALL edges (5/8/-2 incl negative; non-int field value →
+"ERR hash value is not an integer"; wrong-type key → "WRONGTYPE..."; non-int increment → "ERR value is
+not an integer or out of range"); cmdstat_keyspace_parity_gate PASS + HINCRBY probe byte-exact
+(cmdstat_hincrby calls=3 failed_calls=2, errorstat_ERR=2 — both the in-path store error AND the deferred
+bad-increment count correctly); fr-runtime 683/0; fr-conformance 248 + only the recurring flaky OBJECT
+FREQ LFU test (97wc2, unreachable). 6s9dx: PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x,
+HINCRBY 1.84x. Remaining: GETEX, INCRBYFLOAT, COPY.
