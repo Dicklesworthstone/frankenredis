@@ -3037,3 +3037,32 @@ Real unblock = vendor+track just `legacy_redis_code/redis/src/commands` (392 JSO
 syncs deterministically (reverses the prior deliberate untracking — coordinate, don't do unilaterally
 mid-swarm), OR pre-seed workers, OR an rch include flag. Both .rchignore + XADD edits reverted clean;
 XADD lever stays queued in bead tcknm. No clean-crate lever buildable until this infra is fixed.
+
+### 2026-06-22 (part 5) cold-command fast-path CLUSTER — 6 real gaps, all dispatch-bound (cc/BlackThrush)
+Swept low-frequency write/meta commands lacking borrowed fast paths. Repeat-verified (3 runs,
+pipe=200) to filter noise. fr/redis ratio:
+| command | ratio | note |
+|---|---:|---|
+| COPY (REPLACE) | **1.86–2.06x** | no fast path; deep-copy + generic dispatch |
+| LMPOP 1key LEFT | **1.74–2.14x** | new multi-key pop, no fast path |
+| ZMPOP 1key MIN | **1.66–2.13x** | "" |
+| GETEX EX | **1.82–1.94x** | GET + TTL set, no fast path |
+| INCRBYFLOAT | **1.40–1.70x** | parse/format float, no fast path |
+| XADD (pt4) | 1.5x | bead tcknm |
+| HRANDFIELD c5 / WITHVALUES | 0.57–0.92x | fr FASTER |
+| ZRANDMEMBER c5 / SRANDMEMBER c5 | 0.73–0.88x | fr FASTER |
+| OBJECT IDLETIME | 1.095x | parity |
+
+These are the SAME signature as the historical cold-command audit (sub-2µs commands ~2x slow via
+generic-dispatch MACHINERY, not store work — closed for ~30 commands via `execute_plain_*_borrowed`,
+giving 2–5x). COPY/LMPOP/ZMPOP/GETEX/INCRBYFLOAT/XADD are simply the commands that never got a
+borrowed fast path. Fix pattern is PROVEN (the 55 existing fast paths). Each is a real ~1.5–2x lever
+in fr-runtime(+fr-command+fr-server).
+
+BLOCKED on the SAME infra wall (pt4b): can't build into the warm rch dir (local rustc-skew; rch
+fails on the gitignored, unsynced legacy_redis_code/redis/src/commands). So this is now **6+ ready
+levers gated on ONE infra fix** (vendor the 1.7MB commands/ dir to rch workers, or pre-seed). That
+raises the priority of the build-unblock substantially. Filed/queued as a cluster (bead) +
+escalated to the swarm. NOTE the multi-key MPOP / COPY ratios may include genuine store work
+(deep-copy for COPY, multi-key resolve for *MPOP) on top of dispatch — confirm split after a fast
+path lands (if dispatch-only, expect ~1.0x like the prior cold-cmd fixes).
