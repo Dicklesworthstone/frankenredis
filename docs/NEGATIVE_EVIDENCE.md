@@ -2890,3 +2890,42 @@ fixed by untracking + tightening .gitignore (no trailing slash). Local main chec
 real 244M oracle dir (cp from k8yfq-baseline-src). NOTE for other agents: if your rch build can't
 find legacy_redis_code/redis/src/commands, recreate the local oracle (real dir or a worktree
 symlink -> a checkout that has it); the in-repo tracked symlink is gone.
+
+### 2026-06-22 independent re-verification + measurement noise-floor finding (cc, DISK-CRITICAL/code-only)
+Disk at 98% (45G free) + machine loadavg ~12 (full franken-swarm building). Re-measured the
+warm release binary (built 08:24, HEAD 29f15883f) vs Redis 7.2.4 oracle via two live servers +
+raw-socket Python probe (zero build, disk-neutral). Two probe methodologies, single-conn,
+pipe=200/500, best-of-7/20 us/op:
+
+| cmd | crude probe (CRLF-count reader) | reliable probe (full RESP parser) | ledger of record |
+|---|---:|---:|---|
+| GET | 0.819x (faster) | 1.006x (parity) | parity-or-faster ✓ |
+| GEOPOS | 1.011x | 1.233x | mild residual ✓ |
+| GEODIST | 1.426x | **1.141x** | inherent residual ✓ |
+| EXISTS 1key | 1.557x | 1.557x | inherent residual ✓ |
+| EXISTS 5key | 1.008x | 1.406x | inherent residual ✓ |
+
+CONCLUSIONS (all CONFIRM the existing analysis; nothing new to ship):
+1. **Sub-µs A/B is below the noise floor under swarm load.** The crude reader produced a phantom
+   GEODIST 1.43x that the correct RESP parser collapses to 1.14x; GET swung 0.82x↔1.01x between
+   runs. At ~0.3µs deltas with loadavg 12, no micro-lever can be reliably benched right now — any
+   "win" would be measurement artifact. (Corrects nothing in the ledger; flags the bench condition.)
+2. **GEODIST is not a legal lever.** fr's `geo_distance_m` (fr-command:5015) is algorithmically
+   byte-identical to redis `geohashGetDistance` (same haversine, same libm sin/cos/asin/sqrt); the
+   sole diff is a defensive `.clamp(0.0,1.0)` on `a` (2 comparisons, removing it risks asin(NaN)).
+   GEODIST is byte-exact-locked, so the math cannot change. Residual is the per-cmd fixed overhead,
+   not the math — matches the recorded "mild already-optimized residual".
+3. **EXISTS gap reproduced (~1.4–1.56x), already documented as inherent.** It is optimally
+   fast-pathed (execute_plain_exists_borrowed_into); fr EXISTS≈fr GET≈0.85–0.95µs while redis
+   EXISTS is leaner (0.61µs) because it has no value to copy — fr's fixed fast-path machinery
+   (active-expire cycle, metrics, packet_id, session bookkeeping) is the constant. Trimming it from
+   EXISTS specifically lives in contended fr-runtime and risks stat-parity (cmdstat gate); a prior
+   crate-bench EXISTS candidate was already rejected (ledger ~line 726). Not pursued — inherent.
+4. **Only big un-dominated workload remains structural + contended + disk-expensive:** collection
+   RESTORE/RDB-decode 0.37x (keep-listpack rewrite of PackedStrMap/PackedZSet, packed_set.rs,
+   cod-b/CoralOx domain; bounded pieces already filed: knzdi/lbmk6/ef928/bssrh). Cannot be safely
+   built under disk-critical and is not a clean per-turn ship.
+
+Net: perf surface re-verified parity-or-faster except the two documented inherent micro-residuals
+(EXISTS, GEODIST) and the documented structural fr-store RESTORE-decode gap. No clean-crate lever
+to ship; no disk-safe / load-reliable bench possible this turn. Code-only commit; no rebuild run.
