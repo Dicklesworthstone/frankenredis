@@ -3201,3 +3201,27 @@ levers (ONE fix → both HDEL+SREM): (1) lookup() returns slot index → tombsto
 delete → no value alloc. Lands ~1 probe + 0-1 alloc, approaching redis. Order/iteration unchanged
 (unordered-OK path); verify DIGEST + hash/set differ + HSCAN. This is the highest-ROI hot-command
 lever: biggest gap, precise single-touch-point fix, NOT a rewrite. Bead ym6ih updated. Build-blocked (pt6).
+
+### 2026-06-22 (part 13) === SHIPPABLE LEVER QUEUE === (consolidated, execute top-down on build unblock)
+Capstone synthesis of the 2026-06-22 BOLD-VERIFY campaign. ALL measured under the canonical gate
+(`redis-benchmark -c50 -P16`, vs Redis 7.2.4), root-caused to code, filed as beads. Hot READS and
+GET/SET/INCR/HSET are parity-or-faster (ohsk5 read headline CLOSED). Ranked by ROI (impact × fix-tractability):
+
+| # | lever (bead) | P16 gap | root cause | fix | crate |
+|---|---|---|---|---|---|
+| 1 | **HDEL/SREM removal (ym6ih)** | **2.83x / 2.4x** | `CompactFieldMap::swap_remove` 3 probes + 2 allocs/del | lookup→slot-index, slot back-ptr in `order`, bool-return delete | fr-store packed_set.rs (cc) |
+| 2 | cold-dispatch cluster (6s9dx) | ~2.0–2.4x | no borrowed fast path (generic owned-argv dispatch) | add `execute_plain_*_borrowed` (8+ cmds, 1 PR) | fr-runtime (cc) |
+| 3 | hot-write inserts (6lgnu) | ZADD 1.33 / SADD 1.27 / LPUSH 1.22 | multi-structure insert (dict+BTreeMap, ChunkedList) | unified ordered-zset primitive; list/set repr | fr-store (CoralOx/cc) |
+| 4 | XADD (tcknm) | 1.5x | 2× `key.to_vec()`/call in side-maps | `.get_mut` borrow | fr-store (cc) |
+| 5 | RESTORE-decode (b1o02) | 0.37x | decode into packed repr vs redis keep-listpack | listpack-backed small-hash repr | fr-store (CoralOx) |
+
+UNIVERSAL BLOCKER (pt6, ALL of the above): cannot build/bench — local cargo has rustc-skew vs the
+warm rch-target deps; rch can't sync `legacy_redis_code/redis/src/commands` (fr-command build.rs
+input) because it's gitignored as an embedded git repo, kept out of the tracked clean-room tree
+deliberately. NO safe per-agent fix (verified: .rchignore negation, un-ignore+stage, toolchain
+match all fail; SSH worker pre-seed + committing redis source are unsafe unilateral infra changes).
+Needs an OPS-level fix: pre-seed the oracle on rch workers, an rch include-mechanism, or a build.rs
+that regenerates from a clean-room source. ESCALATED to swarm (CoralOx/CobaltCove, high importance).
+Once unblocked, levers 1–2 (cc-domain, non-structural) are the fastest high-impact ships; verify each
+with redis-benchmark -c50 -P16 + DEBUG DIGEST + the relevant differ/HSCAN gate; REVERT if <~1.1x.
+NOTE: single-conn raw-socket probes UNDERSTATE CPU-bound gaps — always gate with -c50 -P16.
