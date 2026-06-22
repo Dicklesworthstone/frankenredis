@@ -3481,3 +3481,20 @@ PERSIST 1.9x, SETNX 2.10x, RENAME 2.2-2.3x, SETEX 1.95x, HINCRBY 1.84x, COPY 1.8
 GETEX 1.85x — every cold-cluster command now has a borrowed fast path eliminating the ~2x generic
 owned-argv dispatch tax, all byte-exact (correctness + cmdstat + keyspace + errorstats) vs Redis 7.2.4.
 Bead 6s9dx CLOSED.
+
+### 2026-06-22 (part 24) GETSET borrowed fast-path SHIPPED — ~1.87x vs generic (cold-dispatch follow-on, cc/BlackThrush)
+After the 6s9dx cluster (8/8), swept the remaining common write commands lacking a borrowed fast path:
+GETSET / RENAMENX / HSETNX / SMOVE all still pay the ~2x generic owned-argv dispatch tax. Shipped GETSET
+first. `GETSET key value` is a 3-element WRITE returning the old value; reuses BorrowedPlainKeyMemberPacket
+(member=value): parse_borrowed_plain_getset_packet (fr-server) + execute_plain_getset_borrowed →
+store.getset (fr-runtime, records the keyspace lookup on the old value, sets new, returns old). Error
+in-path (WRONGTYPE on non-string old) via CommandError::Store(err).to_resp() w/ failed+errorstats. Gated
+off when notify/repl/AOF/tracking/maxmemory active.
+
+A/B (generic-fr `fr_getex` [no GETSET fast path] vs fast-fr, redis-benchmark -c50 -P16, GETSET k v):
+**generic ~432k rps → fast-path ~807k rps = ~1.87x** (3 runs 1.957/1.844/1.800).
+
+Verified: GETSET byte-exact vs redis incl edges (old→returned + new stored; missing→nil + sets;
+wrong-type→WRONGTYPE); cmdstat + KEYSPACE + errorstats byte-exact (cmdstat_getset calls=3 failed_calls=1,
+keyspace_hits=2 misses=1, errorstat_WRONGTYPE=1); gate PASS; fr-runtime 683/0; fr-conformance 347/0 FULLY
+GREEN (OBJECT FREQ flaky test passed this run). Remaining dispatch-bound writes: RENAMENX/HSETNX/SMOVE.
