@@ -3027,3 +3027,13 @@ the fix + a structural alternative (move last_id/entries_added INTO the Stream v
 maps). Re-apply + A/B (gap is 1.5x = benchable) once oracle reaches an rch worker or a quiet machine
 allows a local build. INFRA NOTE: building into the warm `.rch-targets/frankenredis-cc` dir requires
 rch (matching remote rustc); local cargo cannot reuse it, and rch needs legacy_redis_code synced.
+
+UPDATE (pt4b, BlackThrush): attempted the build-unblock and it is HARDER than ".rchignore narrow".
+`legacy_redis_code/` is GITIGNORED + untracked, so rch never syncs it regardless of `.rchignore` —
+a gitignore-style negation (`legacy_redis_code/*` + `!.../redis/src/commands`) was tried and rch
+STILL reports the commands dir missing on a fresh worker (fr-store + fr-command compile remotely,
+then build.rs errors). The 08:24 warm binary only built because its worker had a STALE cached oracle.
+Real unblock = vendor+track just `legacy_redis_code/redis/src/commands` (392 JSON, ~1.7MB) so it
+syncs deterministically (reverses the prior deliberate untracking — coordinate, don't do unilaterally
+mid-swarm), OR pre-seed workers, OR an rch include flag. Both .rchignore + XADD edits reverted clean;
+XADD lever stays queued in bead tcknm. No clean-crate lever buildable until this infra is fixed.
