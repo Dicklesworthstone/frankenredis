@@ -2857,3 +2857,36 @@ inflates the apparent loss. Proper per-reply RESP-reader best-of-7 vs Redis 7.2.
   contains instead of the hash (structural repr change in packed_set.rs / CompactFieldMap, mine-
   adjacent ideww; byte-exactness of insertion-order iteration must hold) — delicate, deferred/
   flagged not attempted blind. The shipped ZCOUNT/ZLEXCOUNT fast paths hold; no new dispatch lever.
+
+### SMISMEMBER small-set linear-contains lever: IMPLEMENTED + reverted (infra-blocked from bench) (cc)
+Lever (targets the measured SMISMEMBER 0.66x = CompactFieldMap::contains_key hash 49.5%+memcmp
+32%, slower than redis listpack lpFind for tiny sets): gate contains_key to a LINEAR arena scan
+for small maps (skips foldhash compute + slot probe). Exact diff (in crates/fr-store/src/
+packed_set.rs, byte-exact by construction — contains_key is a bool, linear vs hash give identical
+results):
+  const CFM_LINEAR_MAX: usize = 128;   // = PACKED_MAX_ENTRIES (every Packed set; large hashes >128 keep hash)
+  // in CompactFieldMap::contains_key, before self.lookup(field).is_some():
+  if self.order.len() <= CFM_LINEAR_MAX {
+      let flen = field.len();
+      for &off in &self.order {
+          let (clen, p) = read_varint(&self.buf, off as usize);
+          if clen == flen && self.buf[p..p + clen] == *field { return true; }
+      }
+      return false;
+  }
+STATUS: REVERTED unbenched — could NOT measure due to rch build infra: (1) rustc SKEW (E0514:
+cached cc/serde_json/libmimalloc-sys build-script artifacts compiled by a different rustc than the
+assigned rch node) which needs a clean rebuild — forbidden under DISK-CRITICAL/no-cold-rebuild;
+(2) legacy_redis_code resolution was inconsistent during builds while repairing the symlink bug
+(below). GAIN UNCERTAIN by my own analysis (linear avoids foldhash but does N length-checks; only
+wins if foldhash-on-tiny-keys cost > the short scan), so per measure-or-revert it was NOT committed.
+READY-TO-BENCH: re-apply the diff above, build warm from a worktree, A/B vs /tmp/fr-ZC (origin
+baseline) + redis on a 100-member listpack set, keep only if measurably >0.66x and HEXISTS/HGET
+unregressed + encoding/set differ 0-diff.
+
+### INFRA: legacy_redis_code oracle symlink bug fixed on origin (cc) — see commits 6933c3fc7/2abb9347e
+The ZLEXCOUNT fork (8512fee76) committed legacy_redis_code as a tracked circular absolute symlink;
+fixed by untracking + tightening .gitignore (no trailing slash). Local main checkout restored to a
+real 244M oracle dir (cp from k8yfq-baseline-src). NOTE for other agents: if your rch build can't
+find legacy_redis_code/redis/src/commands, recreate the local oracle (real dir or a worktree
+symlink -> a checkout that has it); the in-repo tracked symlink is gone.
