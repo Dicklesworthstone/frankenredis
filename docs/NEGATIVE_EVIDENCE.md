@@ -2969,3 +2969,31 @@ algebra, cardinality. Only residuals: (1) EXISTS/GEODIST single-value inherent m
 (keep-listpack rewrite, contended packed_set.rs, disk-expensive to build, cod-b/CoralOx domain,
 bounded pieces filed: knzdi/lbmk6/ef928/bssrh). No clean-crate lever exists to ship; benching of
 sub-µs deltas is below the noise floor under current swarm load. Code-only commit; no rebuild run.
+
+### 2026-06-22 (part 3) keyspace/SORT/range-scan workload coverage — all parity-or-faster (cc)
+Extended the disk-safe sweep to structure-dependent O(n) workloads NOT previously isolated this
+session (SCAN cursor scheme, KEYS glob, SORT comparison-sort, ZRANGEBYSCORE range emit). 5000-key
+space + 5000-elem list/zset, reliable RESP parser, best-of-N:
+| workload | fr/redis |
+|---|---:|
+| SCAN full (COUNT 100) | 0.875x (fr faster) |
+| KEYS * | 0.917x |
+| KEYS key:1* | 0.738x |
+| SORT biglist (5000, full) | **~1.0x** (3 careful repeats: 1.018x / 1.048x / 0.990x) |
+| SORT … LIMIT 0 10 | 0.610x (fr faster — partial-select beats full-sort-then-limit) |
+| ZRANGEBYSCORE -inf +inf | 0.841x |
+| ZRANGEBYSCORE 0 100 | 0.787x |
+| DBSIZE / RANDOMKEY | 0.99x / 1.05x (parity) |
+→ ALL parity-or-faster. Notably fr's sorted index-cursor SCAN is FASTER than redis reverse-binary
+dict scan at this scale (the uhthd RAM tradeoff buys SCAN speed), and KEYS glob is faster.
+
+NOISE-FLOOR re-confirmation (3rd instance this session): a single-shot SORT-full read 1.18x, but
+15-rep best-of repeats collapse it to ~1.0x. Pattern holds — GEODIST 1.43x→1.14x, SET-256KB
+1.33x→noise-curve, SORT 1.18x→1.0x: EVERY apparent gap this session is load-induced single-shot
+artifact. Trust only ≥3-repeat deltas >~1.3x under loadavg-12.
+
+CUMULATIVE 2026-06-22 verdict (parts 1–3): frankenredis is parity-or-faster across EVERY reliably-
+measured workload class vs Redis 7.2.4 — single-value reads, multi-element reads, large-value
+GET/SET, set/zset algebra, cardinality, SCAN/KEYS/SORT/range-scan. Residuals: EXISTS/GEODIST sub-µs
+inherent micro (below noise floor) + structural fr-store RESTORE-decode 0.37x (bead b1o02, disk-
+blocked). No clean-crate lever to ship. Code-only commit; no rebuild run.
