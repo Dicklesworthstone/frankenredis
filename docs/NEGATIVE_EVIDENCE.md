@@ -3299,3 +3299,31 @@ under -c50 -P16. The generic path is untouched (additive enum/parser arms only).
 Build note confirmed: fr-runtime/fr-server changes build the full binary fine on a WARM worker
 (ovh-a) — fr-command isn't recompiled (upstream); cold workers still fail fr-command's build.rs
 (commands-dir blocker), so builds are worker-roulette but land warm on retry.
+
+### 2026-06-22 (part 16) 6s9dx PERSIST borrowed fast-path SHIPPED + METHODOLOGY LESSON (cc/BlackThrush)
+First cold-dispatch-cluster command (6s9dx) given a borrowed fast-path. `PERSIST key` mirrors EXPIRE's
+single-key WRITE fast path (the `*2 CMD key` shape, like TYPE): new `parse_borrowed_plain_persist_packet`
+(fr-server) + `execute_plain_persist_borrowed` → `store.persist` (fr-runtime), gated off by
+`plain_borrowed_default_key_write_allows` (so the "persist" keyspace event / propagation / AOF are
+provably inactive in the plain path).
+
+**METHODOLOGY LESSON (important — nearly caused a wrong revert):** measuring fast-path-fr vs *Redis*
+gave 1.885x and looked like a near-no-gain "store-bound" residual → I almost reverted. WRONG framing.
+The lever's gain is **fast-fr vs generic-fr** (A/B, both built from the same base ± the PERSIST diff,
+no redis in the loop): **generic 253k rps → fast-path ~480k rps = 1.82–1.98x** (2 runs). The vs-redis
+ratio was misleading because Redis's PERSIST is intrinsically fast (715k, a trivial `removeExpire`),
+so even a doubled fr throughput still trails it (2.83x→~1.5x). **Always A/B fast-vs-generic on two fr
+binaries to score a borrowed-fast-path lever; vs-redis only sets the absolute ceiling.** PERSIST IS
+dispatch-bound (the 6s9dx thesis holds); the ~1.5x vs-redis residual is store.persist's heavier TTL
+bookkeeping (separate store-side lever, not this one).
+
+Verified: PERSIST correctness byte-exact vs redis (ttl→1/ttl_after=-1/no-ttl→0/missing→0);
+cmdstat_keyspace_parity_gate PASS (cmdstat_persist calls=3 + keyspace hits/misses byte-exact, 46 rows);
+fr-runtime 683 passed/0 failed. fr-conformance: the only failure is the pre-existing FLAKY OBJECT FREQ
+LFU test `core_object_live_redis_matches_runtime` (expected value non-deterministic across runs:
+155 then 81 — it compares fr's deterministic counter against redis's probabilistic LFU; one case is
+`object_freq..._after_lfu_switch` = known open bug 97wc2). That test is UNREACHABLE by this change
+(the conformance harness drives the Runtime API directly, not fr-server's packet parser; the new
+runtime fn is only called from fr-server dispatch) and passed in the n8ct0 conformance run minutes
+earlier. Remaining 6s9dx siblings (SETNX/SETEX/RENAME/GETEX/HINCRBY/INCRBYFLOAT/COPY) = same pattern,
+each its own packet shape; bench each fast-vs-generic.
