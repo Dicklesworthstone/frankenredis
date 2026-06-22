@@ -2709,3 +2709,16 @@ CREATE/CREATECONSUMER/DELCONSUMER, XREADGROUP, XPENDING summary+full, XACK, XCLA
 (set-algebra, COPY, strings, bitmap, HLL, streams). The differential-probing vein is exhausted
 for mine-domain correctness — real bugs (10ovx, f16dz, f16dz-followup) fixed, s36di handed to
 cod-a. fr-store correctness is comprehensively verified byte-exact vs Redis 7.2.4.
+
+### broad fuzz sweep CLEAN (~180k+ ops) + run_fuzz_sweep.sh harness fix (cc)
+Ran the full differential fuzz sweep vs Redis 7.2.4 on current HEAD (with f16dz-followup):
+- random_command_differ 7 seeds×8000, fuzz_untrodden 5×4000, option_fuzz 9000, random_state
+  6×3000, random_reply 8×6000, random_differential_fuzz 4 seeds×8000 — ALL 0 divergences
+  (~180k+ randomized ops byte-exact). fr-store correctness comprehensively confirmed.
+HARNESS BUG FOUND+FIXED: run_fuzz_sweep.sh invoked random_differential_fuzz.py with positional
+"$ORACLE $FR", but that fuzzer reads argv as <seed> <N> and used hardcoded standalone ports
+28801/28802 → it ConnectionRefused EVERY sweep run (silently never executed) and the sweep
+false-reported "at least one fuzzer reported a divergence" (exit 1). Fix: random_differential_
+fuzz now accepts optional [oracle_port] [fr_port] (argv[3]/[4]); run_fuzz_sweep.sh passes
+`1234 8000 $ORACLE $FR`. Verified: sweep now runs random_differential_fuzz (8000 ops, 0 diffs)
+and exits 0. The CI fuzz sweep is now reliable (actually exercises all 6 fuzzers).

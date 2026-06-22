@@ -109,8 +109,12 @@ def kind(reply):
 def main():
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1234
     N = int(sys.argv[2]) if len(sys.argv) > 2 else 6000
+    # Optional explicit ports (oracle/redis then fr) so run_fuzz_sweep.sh can drive
+    # this fuzzer against its chosen port pair; default to the standalone constants.
+    red_port = int(sys.argv[3]) if len(sys.argv) > 3 else RED
+    fr_port = int(sys.argv[4]) if len(sys.argv) > 4 else FR
     random.seed(seed)
-    fr, red = conn(FR), conn(RED)
+    fr, red = conn(fr_port), conn(red_port)
     # reset both
     for s in (fr, red):
         s.sendall(enc(["FLUSHALL"])); read_reply(s)

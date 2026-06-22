@@ -23,7 +23,10 @@ run() {  # name + full arg list
 
 # Positional <oracle> <fr>:
 run random_command_differ.py        "$ORACLE" "$FR"
-run random_differential_fuzz.py     "$ORACLE" "$FR"
+# random_differential_fuzz reads argv as <seed> <N> [oracle_port] [fr_port] (its first two
+# args are NOT ports); pass an explicit seed+N so it connects to THIS pair instead of erroring
+# on its standalone default ports 28801/28802 (was a silent skip that false-failed the sweep).
+run random_differential_fuzz.py     1234 8000 "$ORACLE" "$FR"
 run fuzz_untrodden_differ.py        "$ORACLE" "$FR"
 # --oracle/--fr flag style:
 run option_fuzz_differ.py           --oracle "$ORACLE" --fr "$FR"
