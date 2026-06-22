@@ -3553,3 +3553,29 @@ specific premise is disproven; the XADD gap needs fresh root-causing (a differen
 Reusable lesson: [[feedback_mimalloc_defeats_buffer_reuse_levers]] — small-alloc-avoidance levers are
 mimalloc-neutral; bench A/B before trusting them. (The clean borrowed-write dispatch vein is exhausted;
 remaining gaps are structural fr-store: 6lgnu hot-write inserts, b1o02 RESTORE-decode.)
+
+### 2026-06-22 (part 29) Broad head-to-head sweep — DISPATCH VEIN CONFIRMED EXHAUSTED, all residuals STRUCTURAL (cc/BlackThrush)
+After shipping the 12-command borrowed-write fast-path vein + disproving tcknm, ran a broad fr(HEAD)-vs-
+Redis-7.2.4 sweep (-c50 -P16, ~21 commands, pre-populated 200-elem hash/set/zset/list; load ~21-40 so
+ratios are directional ±~0.1x, gross pattern robust):
+
+fr FASTER (redis/fr<1): HGET 0.81, LINDEX 0.84, STRLEN/HGETALL 0.90, SMEMBERS 0.92, ZCOUNT 0.96.
+fr SLOWER (redis/fr>1): ZRANK 1.41, SRANDMEMBER 1.38, ZADD 1.34, ZINCRBY 1.33, HRANDFIELD 1.32,
+ZRANGEBYSCORE 1.24, SADD 1.24, HSET 1.24, LPUSH 1.19. (parity: ZSCORE/ZCARD/ZRANGE/SISMEMBER/LRANGE/GETRANGE.)
+
+KEY FINDING — every fr-slower command ALREADY HAS a borrowed fast path, so these are STRUCTURAL store
+costs, NOT dispatch:
+- HRANDFIELD/SRANDMEMBER/ZRANDMEMBER → all route through execute_plain_rand_member_borrowed (PlainRandMemberCmd
+  family); I started a HRANDFIELD fast path before discovering the existing one (name collision at compile) →
+  reverted. The ~1.3-1.4x is the random-pick cost (CompactStrSet/CompactFieldMap get_index(rand) + LFU/keyspace),
+  structural — SRANDMEMBER WITH its fast path is still 1.38x, proving it's not dispatch.
+- ZRANK 1.41x → has execute_plain_rank_borrowed; the gap is rank computation (lazy treap / ordered BTreeMap
+  vs redis skiplist span), structural zset (uybhq/6lgnu domain).
+- ZADD/ZINCRBY/SADD/LPUSH/HSET 1.19-1.34x → hot-write inserts, structural dual-structure/ChunkedList (6lgnu).
+
+CONCLUSION: the cold/borrowed-dispatch fast-path vein is EXHAUSTED (every common command without a fast path
+now has one; the rest were already done). ALL remaining un-dominated workloads are STRUCTURAL fr-store
+rewrites — random-pick, zset rank, and the hot-write inserts (6lgnu) / RESTORE-decode (b1o02) — multi-session
+and largely CoralOx's fr-store domain. No clean per-turn dispatch lever remains. LESSON: to check if a command
+already has a fast path, grep the fr-server `parse_borrowed_plain_<cmd>_packet` + dispatch arm, NOT just the
+runtime execute fn name (rand_member family covers SRANDMEMBER/ZRANDMEMBER/HRANDFIELD under one fn).
