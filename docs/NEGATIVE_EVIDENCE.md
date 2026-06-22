@@ -2997,3 +2997,33 @@ measured workload class vs Redis 7.2.4 — single-value reads, multi-element rea
 GET/SET, set/zset algebra, cardinality, SCAN/KEYS/SORT/range-scan. Residuals: EXISTS/GEODIST sub-µs
 inherent micro (below noise floor) + structural fr-store RESTORE-decode 0.37x (bead b1o02, disk-
 blocked). No clean-crate lever to ship. Code-only commit; no rebuild run.
+
+### 2026-06-22 (part 4) stream/bitmap sweep — NEW REAL GAP: XADD 1.5x (bead tcknm) (cc/BlackThrush)
+Swept the two structurally-distinct classes not yet covered: stream throughput + bitmap ops.
+Reliable RESP parser, repeat-verified (≥3 runs) to filter load noise:
+| workload | result |
+|---|---|
+| **XADD 3field auto-id (pipe)** | **1.5x SLOWER** — fr ~2.5µs vs redis ~1.6µs; 3 tight repeats 1.519/1.539/1.708x = REAL |
+| XRANGE full (5000) | 1.018x parity |
+| XRANGE COUNT 100 | single-shot 1.288x → repeats 1.182/1.058/0.839x = NOISE |
+| XLEN | 0.862x (fr faster) |
+| BITCOUNT 1MB | **0.477x** (fr ~2x faster — hardware popcount) |
+| BITOP AND 1MB | single-shot 1.280x → repeats 1.40/1.09/1.05x, XOR parity = NOISE (same loop) |
+| BITOP XOR 1MB | 1.017x parity |
+| BITPOS 1MB | 0.975x parity |
+
+XADD is the FIRST genuine reproducible gap this session. ROOT CAUSE (fr-store::xadd ~15622): hot
+existing-stream path does TWO `key.to_vec()` heap allocs per call to look up the `stream_last_ids`
+/ `stream_entries_added` side-maps via `.entry(key.to_vec())` — redis keeps last_id/entries_added
+INSIDE the stream object (zero alloc). The code's own comment (~15658) flags this waste.
+
+FIX implemented (byte-exact `.entry`→`.get_mut(key)` borrow w/ insert fallback) + compiled cleanly
+(fr-store built remotely via rch), but **REVERTED unbenched**: (1) bench BLOCKED — rch worker lacks
+the `.rchignore`-excluded `legacy_redis_code/redis/src/commands` (fr-command build script errors),
+and local cargo has rustc-skew vs the warm rch-target deps (the documented "rch rustc-skew blocked
+bench" wall, cf SMISMEMBER 2bf4ed5bb); (2) mimalloc likely absorbs small-alloc avoidance
+(feedback_mimalloc_defeats_buffer_reuse_levers) → expected gain uncertain. Filed bead **tcknm** with
+the fix + a structural alternative (move last_id/entries_added INTO the Stream value, kill the side
+maps). Re-apply + A/B (gap is 1.5x = benchable) once oracle reaches an rch worker or a quiet machine
+allows a local build. INFRA NOTE: building into the warm `.rch-targets/frankenredis-cc` dir requires
+rch (matching remote rustc); local cargo cannot reuse it, and rch needs legacy_redis_code synced.
