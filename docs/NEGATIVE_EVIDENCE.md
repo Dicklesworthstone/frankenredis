@@ -2699,3 +2699,13 @@ sweep); these 3 surfaces are now bounded clean.
 Five consecutive mine-domain surfaces now byte-exact (set-algebra/COPY/strings/bitmap/HLL).
 Differential finds have converged: the real bugs (10ovx, f16dz, f16dz-followup) are fixed,
 s36di root-caused for cod-a; the mine-domain correctness surface is comprehensively bounded.
+
+### differential sweep cont'd (cc) — STREAMS byte-exact; probing converged (6 surfaces clean)
+STREAMS: XADD (explicit/partial/star-seq IDs, dup-ID + 0-0 errors, NOMKSTREAM), XRANGE
+(exclusive `(`, COUNT, partial-ID expansion), XREVRANGE, XDEL, XTRIM MAXLEN/~approx/MINID,
+XINFO STREAM/GROUPS/CONSUMERS, XSETID (+FORCE, nonexist error), consumer groups (XGROUP
+CREATE/CREATECONSUMER/DELCONSUMER, XREADGROUP, XPENDING summary+full, XACK, XCLAIM, XAUTOCLAIM)
+— 37 checks 0 diffs. CONVERGED: 6 consecutive mine-domain surfaces byte-exact this stretch
+(set-algebra, COPY, strings, bitmap, HLL, streams). The differential-probing vein is exhausted
+for mine-domain correctness — real bugs (10ovx, f16dz, f16dz-followup) fixed, s36di handed to
+cod-a. fr-store correctness is comprehensively verified byte-exact vs Redis 7.2.4.
