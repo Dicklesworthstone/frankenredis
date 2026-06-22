@@ -3498,3 +3498,12 @@ Verified: GETSET byte-exact vs redis incl edges (old→returned + new stored; mi
 wrong-type→WRONGTYPE); cmdstat + KEYSPACE + errorstats byte-exact (cmdstat_getset calls=3 failed_calls=1,
 keyspace_hits=2 misses=1, errorstat_WRONGTYPE=1); gate PASS; fr-runtime 683/0; fr-conformance 347/0 FULLY
 GREEN (OBJECT FREQ flaky test passed this run). Remaining dispatch-bound writes: RENAMENX/HSETNX/SMOVE.
+
+### 2026-06-22 (part 25) HSETNX borrowed fast-path SHIPPED — ~2.1x vs generic (cold-dispatch follow-on, cc/BlackThrush)
+`HSETNX key field value` (4-element WRITE → Integer); reuses BorrowedPlainKeyRangePacket (start=field,
+end=value): parse_borrowed_plain_hsetnx_packet + execute_plain_hsetnx_borrowed → store.hsetnx (sets the
+field only if absent, creating the hash; returns whether set). Error in-path (WRONGTYPE) w/ failed+errorstats.
+A/B (generic-fr `fr_getset` vs fast-fr, -c50 -P16, HSETNX h f v): **generic ~423k → fast ~890k = ~2.1x**
+(3 runs 1.987/2.127/2.208). Byte-exact vs redis (new→1+stored; exists→0+unchanged; wrong-type→WRONGTYPE);
+cmdstat_hsetnx calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0 FULLY GREEN. Remaining dispatch-bound writes: RENAMENX, SMOVE.
