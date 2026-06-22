@@ -2731,3 +2731,22 @@ rename_from/rename_to, zincr, incrby event names. mine-domain differential cover
 COMPREHENSIVE: 9 surfaces byte-exact (set-algebra/COPY/strings/bitmap/HLL/streams/notifications/
 RESTORE-metadata-post-fix/encoding) + ~180k-op broad fuzz sweep clean + conformance 99/99. The
 mine-lane BOLD-VERIFY (perf domination + fr-store correctness) is comprehensively complete.
+
+### CPU profiling UNBLOCKED (perf_event_paranoid 4→1) — hot path validated tight (cc)
+perf now works (paranoid=1, ptrace_scope=1) — the profiling tool blocked all campaign. Profiled
+the hot GET/SET path under a sustained pipelined blast (perf record -g, 31k samples). Top self:
+- process_buffered_frames (dispatch loop) ~18%.
+- execute_plain_set_borrowed → Timespec/clock: the per-command clock read is ALREADY chained
+  (chained_command_start/finish reuse the prior command's end-instant → 1 clock_gettime/command,
+  vs redis's 2 ustime() reads per command for commandstats) — fr BEATS redis here; the residual
+  is the one necessary read.
+- run_active_expire_cycle ~2.4%: already O(1)-skips sampling when count_expiring_keys()==0
+  (bk7pi); residual is the per-command ActiveExpireCycleStats plan-struct construction (core/
+  event-loop owner's micro-lever, flagged previously).
+- _mi_page_malloc_zero ~1.5%: mimalloc value alloc (hand-rolled reuse measured a REGRESSION
+  earlier — mimalloc already recycles).
+Conclusion: with profiling finally available, the hot path is confirmed CPU-tight and
+already-optimized (clock-chained beating redis, active-expire O(1)-skipped). No clean mine-domain
+hot-path lever remains; the throughput domination is now validated at the CPU level, not just
+network-bound A/B. Residual micro-costs are necessary (commandstats timing) or core/event-loop
+owned (active-expire stats-struct) or mimalloc-bound.
