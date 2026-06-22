@@ -2807,3 +2807,17 @@ MEASURED: ZCOUNT(2000,8000) on 10k skiplist 0.5x → **1.203x (fr now FASTER)**,
 nan/bad-bound/missing/wrongtype/arity, listpack+skiplist); cmdstat+keyspace_hits/misses byte-
 exact vs redis; fr-command 1157 + fr-store 656 unit tests + conformance smoke 99/99 all pass.
 (ZLEXCOUNT deferred — its treap-warming + lex-bound parsing exceed a clean mirror.)
+
+### ZLEXCOUNT borrowed fast path (cc) — shipped (1.307x fr-side), but command stays treap-bound
+Mirrored the ZCOUNT fast path (631b8728a) for ZLEXCOUNT: validate lex bounds + record_source_key
+_lookups + no-stat store.zlexcount, skipping generic dispatch. MEASURED (pipe=100, 2000-member
+equal-score skiplist, ZLEXCOUNT - +): generic 76.6ms → fast path 58.6ms = **1.307x fr-side**
+(0.090x → 0.118x vs Redis 7.2.4). Byte-exact 21/0 (incl -/+, [/( inclusive/exclusive, missing
+key, WRONGTYPE, malformed-bound fallback, wrong-arity, distinct-score misuse, listpack+skiplist);
+cmdstat+keyspace parity gate PASS; fr-store 656 unit + conformance 99/99 green; ZCARD unregressed.
+HONEST: unlike ZCOUNT (which became 1.20x fr-FASTER), ZLEXCOUNT stays a LOSS at 0.118x — the
+dominant cost is store.zlexcount's compute (the lex rank-diff / treap-warming, ~8x slower than
+redis), NOT dispatch. The fast path correctly removes the ~30% dispatch waste (real micro-win,
+kept), but the real ZLEXCOUNT bottleneck is the treap/lex-count compute = cod-b's zset domain
+(the lever to close ZLEXCOUNT is making store.zlexcount's lex rank-diff match redis's skiplist
+speed). Flagged to cod-b.

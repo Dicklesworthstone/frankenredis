@@ -13674,7 +13674,8 @@ fn zlexcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 /// bounds must start with '[' (inclusive), '(' (exclusive), or be
 /// exactly '-' (min) or '+' (max). Plain strings are rejected with
 /// "ERR min or max not valid string range item". (br-frankenredis-moer)
-fn validate_lex_bound(arg: &[u8]) -> Result<(), CommandError> {
+/// `pub` so the ZLEXCOUNT borrowed fast path validates bounds identically (cc).
+pub fn validate_lex_bound(arg: &[u8]) -> Result<(), CommandError> {
     let valid = arg == b"-" || arg == b"+" || arg.first().is_some_and(|c| *c == b'[' || *c == b'(');
     if valid {
         Ok(())

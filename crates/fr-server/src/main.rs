@@ -3601,6 +3601,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zlexcount_borrowed(
+                        packet.key,
+                        packet.min,
+                        packet.max,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -7190,6 +7213,47 @@ fn parse_borrowed_plain_zcount_packet<'a>(
     let (min, next2) = parse_borrowed_plain_set_bulk(input, next1, config.max_bulk_len)?;
     let (max, consumed) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
     Some(BorrowedPlainZcountPacket {
+        consumed,
+        key,
+        min,
+        max,
+    })
+}
+
+struct BorrowedPlainZlexcountPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    min: &'a [u8],
+    max: &'a [u8],
+}
+
+/// `ZLEXCOUNT key min max` fast-path packet (4-element multibulk, 9-byte command
+/// token). The runtime fast path validates the lex bounds and falls back to the
+/// generic handler on a malformed bound (for the exact error). (cc ZLEXCOUNT)
+fn parse_borrowed_plain_zlexcount_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZlexcountPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZLEXCOUNT".len() {
+        return None;
+    }
+    if !input.starts_with(b"*4\r\n$9\r\n") {
+        return None;
+    }
+    let mut cursor = "*4\r\n$9\r\n".len();
+    if input.get(cursor..cursor + 9)?.eq_ignore_ascii_case(b"ZLEXCOUNT") {
+        cursor += 9;
+    } else {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next1) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (min, next2) = parse_borrowed_plain_set_bulk(input, next1, config.max_bulk_len)?;
+    let (max, consumed) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
+    Some(BorrowedPlainZlexcountPacket {
         consumed,
         key,
         min,
