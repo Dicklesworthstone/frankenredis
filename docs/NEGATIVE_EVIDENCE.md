@@ -3139,3 +3139,21 @@ genuinely parity (reads are less per-command-CPU-bound, and GET P16 confirms par
 single-conn cold-command ratios (6s9dx: PERSIST/RENAME/etc ~2x) are likely UNDERSTATED under P16 —
 the dispatch tax grows under saturation — so those gaps are real and possibly larger, not smaller.
 Use redis-benchmark -c50 -P16 (CPU-bound) as the canonical perf gate going forward, not single-conn.
+
+### 2026-06-22 (part 9) cold-dispatch cluster RE-MEASURED under P16 (accurate, supersedes pt5/pt7)
+redis-benchmark `-c 50 -P 16 -n 400k` (load-gen cores 4-11), keys pre-populated, vs Redis 7.2.4.
+GET/SET anchors validate (0.94x/0.93x = fr faster), confirming the gate + the closed headline:
+| command | P16 ratio | command | P16 ratio |
+|---|---:|---|---:|
+| SETEX | **2.37x** | PERSIST | 2.03x |
+| SETNX | 2.19x | HINCRBY | 1.97x |
+| RENAME | 2.18x | INCRBYFLOAT | 1.97x |
+| GETEX | 2.17x | COPY | 1.95x |
+| GET (anchor) | 0.94x (fr faster) | SET (anchor) | 0.93x (fr faster) |
+
+CONFIRMS pt8's prediction: under proper CPU-bound load the cold cluster is a FIRM ~2.0–2.4x (larger
+than the single-conn pt5/pt7 estimates of ~1.4–2.3x). These are accurate, canonical numbers for
+bead 6s9dx. The dispatch-tax thesis holds cleanly: commands WITHOUT a borrowed fast path pay ~2x;
+GET/SET (with fast paths) are parity-or-faster. ~8 commands × ~2x = a substantial aggregate
+low-latency-write penalty, all fixable via the proven `execute_plain_*_borrowed` pattern (one
+batched PR). Still BUILD-BLOCKED (pt6 ops-level oracle-sync). Bead 6s9dx updated with P16 numbers.
