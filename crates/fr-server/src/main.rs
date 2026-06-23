@@ -2788,6 +2788,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_set_nx_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
                     let default_write_allowed =
@@ -11547,6 +11567,39 @@ fn parse_borrowed_plain_set_relexpire_packet<'a>(
             end: time,
         },
     ))
+}
+
+// (frankenredis-setnxfast) Byte-prefix fast path for the no-other-option `SET key
+// value NX` (4-element idempotent set). Requires a literal NX token in slot 3;
+// XX/GET/KEEPTTL/EX/PX and every other shape fall through to the generic. Reuses
+// BorrowedPlainSetPacket (key, value); the NX token is verified, not returned.
+fn parse_borrowed_plain_set_nx_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainSetPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (opt, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !opt.eq_ignore_ascii_case(b"NX") {
+        return None;
+    }
+    Some(BorrowedPlainSetPacket {
+        consumed,
+        key,
+        value,
+    })
 }
 
 struct BorrowedPlainHsetPacket<'a> {

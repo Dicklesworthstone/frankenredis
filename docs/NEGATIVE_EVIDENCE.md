@@ -3748,3 +3748,19 @@ fr-conformance 347/0.
 Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT
 ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x. Remaining:
 SET..EXAT/PXAT (abs, needs set_with_abs_expiry + past-deadline handling), LINSERT (scan-dominated), PFADD (HLL structural).
+
+### 2026-06-22 (part 40) SET key value NX fast-path SHIPPED — ~1.86x (idempotent set) (cc/BlackThrush)
+`SET key value NX` (*4, set-if-absent — idempotent sets / simple lock-acquire) went through the generic
+option-scanner. Added parse_borrowed_plain_set_nx_packet (requires a literal NX token in slot 3; reuses
+BorrowedPlainSetPacket) + execute_plain_set_nx_borrowed: store.setnx (set only when absent, no TTL) → +OK when
+set, nil (BulkString None) when the key existed — the generic's NX-without-GET behaviour. Recorded as `set`.
+XX/GET/KEEPTTL/EX/PX and every other shape fall through to the generic; SET never type-checks (NX only checks
+existence) so no WRONGTYPE. A/B (generic-fr `fr_setpx` vs fast-fr, -c50 -P16, SET k vvv NX on a held key →
+nil path): **~1.86x** (1.787/1.927/1.898/1.816, tight at load 6). BYTE-EXACT vs redis incl edges + deferred
+forms: set-when-absent=+OK, set-when-present=nil (value unchanged), lowercase nx=OK, XX-on-missing=nil,
+XX-on-existing=OK (deferred), GET option=old value (deferred). cmdstat_set calls=3 failed_calls=0 (NX→nil is
+success), keyspace 0/0, no errorstats, gate PASS; fr-runtime 683/0; fr-conformance 347/0.
+SET option fast-paths now: plain, EX, PX, NX. Session untested-write dispatch levers: SETBIT 1.94x,
+HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x,
+LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x. Remaining: SET..NX..EX (*6 lock pattern),
+SET..XX, SET..EXAT/PXAT (abs), LINSERT (scan), PFADD (HLL structural).
