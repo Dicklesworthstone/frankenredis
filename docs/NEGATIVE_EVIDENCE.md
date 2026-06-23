@@ -3845,3 +3845,21 @@ PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..
 SET..NX..EX|PX 1.93x, SET..XX 2.17x, SET..XX..EX|PX 2.39x, SET..EXAT/PXAT 2.56x (+ hjk0m keyspace fix).
 Remaining un-dominated: LINSERT (scan), PFADD/zset/RESTORE (structural, CoralOx domain). Dispatch vein on the
 write surface now genuinely exhausted.
+
+### 2026-06-23 (part 46) Broad keyspace/cmdstat parity audit — option-heavy surface CLEAN (no new hjk0m-class bug); write-dispatch vein CONVERGED (cc/BlackThrush)
+Load at 100+ (perf benching unreliable), so ran the load-INDEPENDENT high-value check: a broad keyspace_hits/
+misses + per-cmd cmdstat differential vs redis 7.2.4 over ~40 option-heavy/conditional commands (the hjk0m
+class) — GETEX option forms (PERSIST/EX/EXAT/PXAT), COPY/COPY REPLACE, GETDEL, OBJECT encoding/refcount/
+idletime, LMPOP/ZMPOP, SINTERSTORE/SUNIONSTORE/SDIFFSTORE/ZRANGESTORE, SINTERCARD/SMISMEMBER/ZMSCORE, BITFIELD
+SET/GET/INCRBY, INCRBYFLOAT, SETRANGE/GETRANGE/APPEND. RESULT: **ALL-MATCH** — keyspace fr=(25,4)==redis(25,4),
+0 cmdstat divergences. So hjk0m (SET NX/XX) was an isolated case; the rest of the conditional/option surface is
+keyspace+cmdstat parity-clean. Shipped scripts/keyspace_cmdstat_broad_audit.py (arg-based, exit-coded) to guard
+this surface going forward (complements cmdstat_keyspace_parity_gate.py).
+
+**CONVERGENCE: the borrowed-dispatch fast-path vein on the common WRITE surface is now EXHAUSTED.** 33 levers
+shipped this session covering: SET (plain/EX/PX/NX/XX/NX+EX|PX/XX+EX|PX/EXAT/PXAT — full surface), EXPIRE family
+(EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT/SETEX/PSETEX), SETBIT, HINCRBYFLOAT, LSET, RPOPLPUSH, LMOVE, LPUSHX/RPUSHX,
+HDEL/SREM, the 6s9dx cold cluster, etc. — all ~1.5-2.6x, byte-exact, keyspace-clean. Remaining un-dominated
+workloads are NOT dispatch: LINSERT (scan-dominated, low fast-path ceiling like LSET-mid) and the STRUCTURAL
+fr-store gaps — PFADD 2.75x (HLL decode/re-encode per add), zset cluster 6lgnu (ZADD/ZRANK/ZINCRBY 1.3-1.4x),
+RESTORE-decode 0.37x b1o02, random-pick 1.3-1.4x. These need fr-store rewrites (multi-session, CoralOx domain).
