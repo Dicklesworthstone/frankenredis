@@ -2807,6 +2807,30 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some((is_seconds, packet)) =
+                    parse_borrowed_plain_set_nx_relexpire_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_set_nx_relexpire_borrowed(
+                        is_seconds,
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
@@ -11600,6 +11624,61 @@ fn parse_borrowed_plain_set_nx_packet<'a>(
         key,
         value,
     })
+}
+
+// (frankenredis-setnxexfast) Byte-prefix fast path for `SET key value NX EX|PX time`
+// (6-element distributed-lock pattern), accepting both option orders (NX first or
+// the EX|PX value pair first). Returns is_seconds (EX=true, PX=false). Any other
+// *6 SET shape (XX/GET/KEEPTTL/EXAT/PXAT/conflicts) falls through to the generic.
+// Reuses BorrowedPlainKeyRangePacket (start = value, end = time).
+fn parse_borrowed_plain_set_nx_relexpire_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(bool, BorrowedPlainKeyRangePacket<'a>)> {
+    if config.max_array_len < 6 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*6\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (c, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let unit_is_seconds = |u: &[u8]| {
+        if u.eq_ignore_ascii_case(b"EX") {
+            Some(true)
+        } else if u.eq_ignore_ascii_case(b"PX") {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let (is_seconds, time) = if a.eq_ignore_ascii_case(b"NX") {
+        // NX EX|PX <time>
+        (unit_is_seconds(b)?, c)
+    } else if c.eq_ignore_ascii_case(b"NX") {
+        // EX|PX <time> NX
+        (unit_is_seconds(a)?, b)
+    } else {
+        return None;
+    };
+    Some((
+        is_seconds,
+        BorrowedPlainKeyRangePacket {
+            consumed,
+            key,
+            start: value,
+            end: time,
+        },
+    ))
 }
 
 struct BorrowedPlainHsetPacket<'a> {

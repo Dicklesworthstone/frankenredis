@@ -3764,3 +3764,24 @@ SET option fast-paths now: plain, EX, PX, NX. Session untested-write dispatch le
 HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x,
 LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x. Remaining: SET..NX..EX (*6 lock pattern),
 SET..XX, SET..EXAT/PXAT (abs), LINSERT (scan), PFADD (HLL structural).
+
+### 2026-06-22 (part 41) SET key value NX EX|PX time fast-path SHIPPED — ~1.93x (distributed-lock pattern) + GENERIC KEYSPACE BUG FOUND (cc/BlackThrush)
+The `SET k v NX EX|PX time` lock pattern (*6) lacked a fast path. Added parse_borrowed_plain_set_nx_relexpire_packet
+(accepts BOTH option orders: NX-first and EX|PX-value-first; returns is_seconds) + execute_plain_set_nx_relexpire_borrowed:
+validate expiry value first (SETEX-style, defer on bad), then NX check via the NON-counting peek
+(store.peek_value_type(key).is_some()) → nil if present, else store.set(.., Some(px), ..) → +OK. Recorded as `set`.
+XX/GET/KEEPTTL/EXAT/PXAT/conflicts defer to generic. A/B (generic-fr `fr_setnx2` vs fast-fr, -c50 -P16, SET k vvv
+NX EX 500 held→nil): **~1.93x** (1.930/1.980/1.903/1.909). BYTE-EXACT vs redis incl both orders (NX EX = OK, EX 200
+NX = OK), PX variant, present→nil(unchanged), EXPIRED-REACQUIRE (NX re-acquires after key PX-expires — peek treats
+expired as absent), invalid expiry → "invalid expire time in 'set' command". cmdstat_set calls=4 failed_calls=1,
+keyspace 0/0, errorstat_ERR=1, gate PASS; fr-runtime 683/0; fr-conformance 347/0.
+
+**PRE-EXISTING BUG FOUND (fr-command generic SET): SET with NX/XX over-counts keyspace_hits/misses.** The generic
+set() uses store.exists_no_touch for the NX/XX existence check, which COUNTS keyspace hits/misses; redis SET uses
+lookupKeyWrite (no keyspace stat) → redis SET..NX/XX is keyspace 0/0 but generic-fr is 1/2 (verified: fr_setnx2
+SET k v NX EX → hits=1 misses=2 vs redis 0/0). My fast paths (part 40 store.setnx, part 41 peek_value_type) are
+CORRECT (0/0); the generic remains buggy. FIX for fr-command: the NX/XX precheck must use a non-counting peek
+(peek_value_type) not exists_no_touch. The cmdstat gate misses it because its probe lacks SET..NX/XX.
+SET option fast-paths now: plain, EX, PX, NX, NX+EX|PX. Session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x,
+PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x,
+SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x.
