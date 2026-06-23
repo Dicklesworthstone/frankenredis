@@ -411,6 +411,13 @@ pub enum PlainKeyedValuesCmd {
     // notifications/replication/AOF/tracking are active, so no extra side effects).
     Hdel,
     Srem,
+    // (frankenredis-pushxfast) Conditional variadic push siblings — `CMD key member
+    // [member ...]` -> Integer(new length, 0 when the key is absent so it is NOT
+    // created). Same wire shape + reply as LPUSH/RPUSH; routed to store.lpushx/rpushx
+    // which own the exists-check + all accounting (gated off whenever
+    // notifications/replication/AOF/tracking are active, so no extra side effects).
+    Lpushx,
+    Rpushx,
 }
 
 impl PlainKeyedValuesCmd {
@@ -423,6 +430,8 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Rpush => "RPUSH",
             PlainKeyedValuesCmd::Hdel => "HDEL",
             PlainKeyedValuesCmd::Srem => "SREM",
+            PlainKeyedValuesCmd::Lpushx => "LPUSHX",
+            PlainKeyedValuesCmd::Rpushx => "RPUSHX",
         }
     }
 
@@ -435,6 +444,8 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Rpush => "rpush",
             PlainKeyedValuesCmd::Hdel => "hdel",
             PlainKeyedValuesCmd::Srem => "srem",
+            PlainKeyedValuesCmd::Lpushx => "lpushx",
+            PlainKeyedValuesCmd::Rpushx => "rpushx",
         }
     }
 }
@@ -8496,6 +8507,25 @@ impl Runtime {
                 .store
                 .srem(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            // (frankenredis-pushxfast) store.lpushx/rpushx take owned values + own
+            // the exists-check, keyspace/dirty accounting, and (no) autocreate —
+            // identical to the generic path. The to_vec mirrors the generic's
+            // argv[2..].to_vec(), so this matches generic alloc behaviour and the
+            // win is purely the skipped dispatch.
+            PlainKeyedValuesCmd::Lpushx => {
+                let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
+                self.server
+                    .store
+                    .lpushx(key, &owned, now_ms)
+                    .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+            }
+            PlainKeyedValuesCmd::Rpushx => {
+                let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
+                self.server
+                    .store
+                    .rpushx(key, &owned, now_ms)
+                    .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+            }
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match store_result {

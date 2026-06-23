@@ -10392,6 +10392,17 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
         } else {
             return None;
         }
+    } else if let Some(rest) = input.strip_prefix(b"*3\r\n$6\r\n") {
+        // (frankenredis-pushxfast) Single-element LPUSHX/RPUSHX (the dominant form);
+        // multi-element LPUSHX/RPUSHX fall through to the generic path.
+        let name = rest.get(..6)?;
+        if name.eq_ignore_ascii_case(b"LPUSHX") {
+            (PlainKeyedValuesCmd::Lpushx, 6)
+        } else if name.eq_ignore_ascii_case(b"RPUSHX") {
+            (PlainKeyedValuesCmd::Rpushx, 6)
+        } else {
+            return None;
+        }
     } else {
         return None;
     };

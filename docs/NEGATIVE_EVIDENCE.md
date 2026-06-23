@@ -3699,3 +3699,21 @@ fr-conformance 347/0.
 Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/
 PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x. Remaining untested writes: LPUSHX/RPUSHX
 (keyed_values $6-block churn across 18 arity parsers), LINSERT (*5 BEFORE/AFTER pivot-scan), PFADD (structural HLL).
+
+### 2026-06-22 (part 37) LPUSHX/RPUSHX (1-value) fast-path SHIPPED — ~1.5x (keyed_values family) (cc/BlackThrush)
+LPUSHX/RPUSHX (conditional pushes, `CMD key member [member...]` → Integer length, 0 if key absent so NOT
+created) lacked fast paths. Extended the PlainKeyedValuesCmd family with Lpushx/Rpushx (name_upper/_lower +
+wrapper arms routing to store.lpushx/rpushx — values to_vec'd to match the concrete &[Vec<u8>] sig, same
+alloc as the generic so the win is purely skipped dispatch). Added a $6 verb block to the keyed_values1
+parser (the dominant SINGLE-element form; multi-element LPUSHX/RPUSHX fall through to the generic, still
+correct — confirmed: multi=7). A/B (generic-fr `fr_lmove` vs fast-fr, -c50 -P16, LPUSHX/RPUSHX k v on an
+existing list): **~1.5x** (LPUSHX 1.519/1.491, RPUSHX 1.497/1.458/1.484; one 1.117 load-noise outlier).
+BYTE-EXACT vs redis incl edges (lpushx existing=3/head=x, rpushx=4/tail=y, missing key → 0 + NOT created,
+multi-value → deferred-generic 7, wrong-type → WRONGTYPE); cmdstat lpushx calls=4 failed_calls=1 (fast +
+deferred both counted), rpushx calls=1, keyspace 0/0, errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0.
+PARTIAL COVERAGE NOTE: only keyed_values1 (1 value) has the fast path; 2+-value LPUSHX/RPUSHX defer to generic
+(rare, correct). To extend, add the same $6 block to keyed_values2..18.
+Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/
+PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x. Remaining: LINSERT (*5 scan-dominated),
+PFADD (structural HLL).
