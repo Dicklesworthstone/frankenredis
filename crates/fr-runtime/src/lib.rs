@@ -7354,6 +7354,120 @@ impl Runtime {
     /// matches *4 with a literal NX token, so XX/GET/KEEPTTL/EX/PX and every other
     /// shape fall through to the generic. SET never type-checks (NX only checks
     /// existence), so there is no WRONGTYPE. Recorded as `set`. Gated by WRITE.
+    /// (frankenredis-setxxfast) Conservative borrowed WRITE fast path for the
+    /// no-other-option `SET key value XX` form (set only if the key already exists —
+    /// update-only). Mirrors the generic set() for that exact option set: the NX/XX
+    /// existence check uses the NON-counting peek (redis SET uses lookupKeyWrite, no
+    /// keyspace stat); when the key exists, store.set overwrites the value and (no
+    /// KEEPTTL) clears any TTL → `+OK`, otherwise nil (BulkString None). The parser
+    /// only matches *4 with a literal XX token; NX/GET/KEEPTTL/EX/PX and every other
+    /// shape fall through to the generic. SET never type-checks. Recorded as `set`.
+    pub fn execute_plain_set_xx_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum =
+            b"SET".len() + key.len() + value.len() + b"XX".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // XX: set only when the key exists (non-counting peek, matching redis 0/0).
+        let reply = if self.server.store.peek_value_type(key, now_ms).is_some() {
+            self.server
+                .store
+                .set(key.to_vec(), value.to_vec(), None, now_ms);
+            RespFrame::SimpleString("OK".to_string())
+        } else {
+            RespFrame::BulkString(None)
+        };
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_set_cond_borrowed_metrics(b"XX", key, value, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_set_cond_borrowed_metrics(
+        &mut self,
+        cond_upper: &[u8],
+        key: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || vec![b"SET".to_vec(), key.to_vec(), value.to_vec(), cond_upper.to_vec()];
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_canonical_with_kind(
+                "set",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SET' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     pub fn execute_plain_set_nx_borrowed(
         &mut self,
         key: &[u8],

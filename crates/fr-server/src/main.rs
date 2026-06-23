@@ -2807,6 +2807,26 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_nx_relexpire_packet(unparsed, &parser_config)
                 {
@@ -11617,6 +11637,38 @@ fn parse_borrowed_plain_set_nx_packet<'a>(
     let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (opt, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     if !opt.eq_ignore_ascii_case(b"NX") {
+        return None;
+    }
+    Some(BorrowedPlainSetPacket {
+        consumed,
+        key,
+        value,
+    })
+}
+
+// (frankenredis-setxxfast) Byte-prefix fast path for `SET key value XX` (4-element
+// set-if-exists). Requires a literal XX token in slot 3; NX/GET/KEEPTTL/EX/PX and
+// every other shape fall through to the generic. Reuses BorrowedPlainSetPacket.
+fn parse_borrowed_plain_set_xx_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainSetPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (opt, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !opt.eq_ignore_ascii_case(b"XX") {
         return None;
     }
     Some(BorrowedPlainSetPacket {

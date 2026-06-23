@@ -3797,3 +3797,18 @@ SET NX/XX/NX+EX/EX/PX probes to cmdstat_keyspace_parity_gate.py (the gate previo
 probe); gate PASSES (46 rows, keyspace_hits=37 misses=20). fr-command 1267/0; fr-conformance 347/0. This also
 retroactively confirms my borrow fast paths (SET..NX store.setnx, SET..NX..EX|PX peek_value_type) were already
 correct. Parity fix, not a perf lever (no ratio).
+
+### 2026-06-22 (part 43) SET key value XX fast-path SHIPPED — ~2.17x (set-if-exists) (cc/BlackThrush)
+The SET..NX sibling: `SET key value XX` (*4, update-only — set only when the key exists). Added
+parse_borrowed_plain_set_xx_packet (literal XX in slot 3; reuses BorrowedPlainSetPacket) +
+execute_plain_set_xx_borrowed: NON-counting peek (keyspace 0, matching redis lookupKeyWrite) — if the key
+exists, store.set(.., None, ..) overwrites the value + clears TTL (no KEEPTTL) → +OK, else nil. Recorded as
+`set`. NX/GET/KEEPTTL/EX/PX fall through to the generic. A/B (generic-fr `fr_hjk0m` vs fast-fr, -c50 -P16,
+SET k vvv XX on existing key): **~2.17x** (2.172/2.150/2.194; one 2.66 load outlier). BYTE-EXACT vs redis incl
+edges: XX-on-existing=+OK + value updated + TTL cleared (ttl -1), XX-on-missing=nil + NOT created, lowercase
+xx=OK, NX regression OK. cmdstat_set calls=4 failed_calls=0, keyspace 0/0, no errorstats, gate PASS;
+fr-runtime 683/0; fr-conformance 347/0.
+SET option fast-paths now: plain, EX, PX, NX, XX, NX+EX|PX. Session untested-write dispatch levers: SETBIT 1.94x,
+HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x,
+LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x, SET..XX 2.17x (+ hjk0m
+generic keyspace fix). Remaining: SET..XX..EX|PX (lock-refresh), SET..EXAT/PXAT (abs), LINSERT (scan), PFADD (HLL).
