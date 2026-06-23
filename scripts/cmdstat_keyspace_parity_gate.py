@@ -119,6 +119,13 @@ SEQ = [
     # writes
     ["incr", "s"], ["expire", "s", "10000"], ["append", "s2", "!"],
     ["mset", "k1", "v1", "k2", "v2"], ["set", "k3", "v3"],
+    # SET option forms (hjk0m): NX/XX use lookupKeyWrite upstream -> keyspace 0; the
+    # generic NX/XX precheck must NOT count (was exists_no_touch). Covers the borrow
+    # fast paths (NX, NX+EX/PX) and the generic (XX) for keyspace + cmdstat_set parity.
+    ["set", "lk", "v", "NX"], ["set", "lk", "v2", "NX"],
+    ["set", "lk", "v3", "XX"], ["set", "absent", "v", "XX"],
+    ["set", "lk2", "v", "NX", "EX", "100"], ["set", "lk2", "v2", "NX", "EX", "100"],
+    ["set", "ek", "v", "EX", "100"], ["set", "ek2", "v", "PX", "100000"],
     # re-reads after writes
     ["get", "s"], ["ttl", "s"], ["dbsize"],
 ]

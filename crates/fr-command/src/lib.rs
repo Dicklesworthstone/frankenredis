@@ -3759,7 +3759,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         if get {
             old_value.is_some()
         } else {
-            store.exists_no_touch(&argv[1], now_ms)
+            // (frankenredis-hjk0m) Upstream setGenericCommand performs the NX/XX
+            // existence check via lookupKeyWrite, which does NOT bump
+            // keyspace_hits/misses. exists_no_touch counts them (it only skips the
+            // LRU/LFU touch), so `SET k v NX`/`XX` wrongly reported a keyspace
+            // hit/miss vs redis's 0. Use the non-counting type peek instead.
+            store.peek_value_type(&argv[1], now_ms).is_some()
         }
     } else {
         false

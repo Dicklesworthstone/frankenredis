@@ -3785,3 +3785,15 @@ CORRECT (0/0); the generic remains buggy. FIX for fr-command: the NX/XX precheck
 SET option fast-paths now: plain, EX, PX, NX, NX+EX|PX. Session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x,
 PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x,
 SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x.
+
+### 2026-06-22 (part 42) FIXED hjk0m — generic SET NX/XX keyspace over-count (redis-parity) (cc/BlackThrush)
+Fixed the pre-existing fr-command bug found in pt41: generic set() did the NX/XX existence precheck via
+store.exists_no_touch (which COUNTS keyspace_hits/misses); redis setGenericCommand uses lookupKeyWrite (no
+keyspace stat). One-line fix: the non-GET NX/XX branch now uses store.peek_value_type(key).is_some() (non-counting,
+same existence semantics). The GET branch is UNCHANGED — redis SET..GET reads via lookupKeyRead which DOES count,
+so fr's store.get there is correct (verified reasoning, not touched). VERIFIED: generic SET..XX on exists+missing
+→ 0 keyspace contribution (the lone hit in the probe is the explicit GET); fr == redis [hits:1 misses:0]. Added
+SET NX/XX/NX+EX/EX/PX probes to cmdstat_keyspace_parity_gate.py (the gate previously missed this — no SET-option
+probe); gate PASSES (46 rows, keyspace_hits=37 misses=20). fr-command 1267/0; fr-conformance 347/0. This also
+retroactively confirms my borrow fast paths (SET..NX store.setnx, SET..NX..EX|PX peek_value_type) were already
+correct. Parity fix, not a perf lever (no ratio).
