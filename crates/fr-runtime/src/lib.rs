@@ -7345,11 +7345,12 @@ impl Runtime {
     /// emits the exact "value is not an integer" / "invalid expire time in 'set'
     /// command". SET never type-checks (it overwrites), so there is no WRONGTYPE.
     /// Recorded as `set` (it IS the SET command). Gated by the WRITE predicate.
-    pub fn execute_plain_set_ex_borrowed(
+    pub fn execute_plain_set_relexpire_borrowed(
         &mut self,
+        is_seconds: bool,
         key: &[u8],
         value: &[u8],
-        seconds_arg: &[u8],
+        time_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
@@ -7362,19 +7363,24 @@ impl Runtime {
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
-        // Same validation as generic set()/getExpireMillisecondsOrReply for EX; defer
-        // on any failure so the canonical error text is emitted by the generic path.
-        let raw = parse_i64_arg(seconds_arg).ok()?;
+        // Same validation as generic set()/getExpireMillisecondsOrReply for EX/PX;
+        // defer on any failure so the canonical error text is emitted by the generic.
+        let raw = parse_i64_arg(time_arg).ok()?;
         if raw <= 0 {
             return None;
         }
-        let seconds = raw as u64;
-        if seconds > i64::MAX as u64 / 1000 {
-            return None;
-        }
-        let px = seconds.saturating_mul(1000);
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
         let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
         i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+        let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -7384,7 +7390,7 @@ impl Runtime {
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("set");
         self.session.last_argv_len_sum =
-            b"SET".len() + key.len() + value.len() + b"EX".len() + seconds_arg.len();
+            b"SET".len() + key.len() + value.len() + unit_upper.len() + time_arg.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -7397,7 +7403,9 @@ impl Runtime {
             .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_ex_borrowed_metrics(key, value, seconds_arg, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_relexpire_borrowed_metrics(
+            unit_upper, key, value, time_arg, elapsed_us, now_ms, packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -7406,11 +7414,12 @@ impl Runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_plain_set_ex_borrowed_metrics(
+    fn record_plain_set_relexpire_borrowed_metrics(
         &mut self,
+        unit_upper: &[u8],
         key: &[u8],
         value: &[u8],
-        seconds_arg: &[u8],
+        time_arg: &[u8],
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -7421,8 +7430,8 @@ impl Runtime {
                 b"SET".to_vec(),
                 key.to_vec(),
                 value.to_vec(),
-                b"EX".to_vec(),
-                seconds_arg.to_vec(),
+                unit_upper.to_vec(),
+                time_arg.to_vec(),
             ]
         };
         if self.server.store.slowlog_log_slower_than_us >= 0

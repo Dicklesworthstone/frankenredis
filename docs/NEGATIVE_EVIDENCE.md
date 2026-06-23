@@ -3733,3 +3733,18 @@ keyspace 0/0, errorstat_ERR=2, gate PASS; fr-runtime 683/0; fr-conformance 347/0
 Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT
 ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x. Next: SET..PX (same parser,
 unit=PX), LINSERT (scan-dominated), PFADD (structural HLL).
+
+### 2026-06-22 (part 39) SET key value PX ms fast-path SHIPPED — ~2.25x (generalized SET..EX to EX/PX) (cc/BlackThrush)
+Generalized the SET..EX fast path to also cover the millisecond form: parser now matches EX OR PX in slot 3
+and returns is_seconds (parse_borrowed_plain_set_relexpire_packet); execute_plain_set_relexpire_borrowed
+derives px = sec*1000 (EX, with i64::MAX/1000 check) or ms directly (PX), same basetime overflow check, then
+store.set(.., Some(px), ..) → +OK recorded as `set`. EXAT/PXAT (absolute, store.set_with_abs_expiry) + NX/XX/
+GET/KEEPTTL still defer to generic. A/B (generic-fr `fr_setex2` [EX-fast only] vs fast-fr, -c50 -P16, SET k vvv
+PX 500000): **~2.25x** (2.204/2.199/2.319/2.280, tight at load 5). BYTE-EXACT vs redis incl edges + regressions:
+PX=OK pttl~250000, lowercase px=OK, EX still fast (regression OK pttl~100000), 0/negative → "invalid expire
+time in 'set' command", non-int → "value is not an integer", EXAT → deferred-generic OK (abs TTL). cmdstat_set
+calls=4 failed_calls=2 (PX+EX fast + 2 deferred), keyspace 0/0, errorstat_ERR=2, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0.
+Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT
+~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x. Remaining:
+SET..EXAT/PXAT (abs, needs set_with_abs_expiry + past-deadline handling), LINSERT (scan-dominated), PFADD (HLL structural).

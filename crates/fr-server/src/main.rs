@@ -2763,10 +2763,11 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_ex_packet(unparsed, &parser_config)
+                } else if let Some((is_seconds, packet)) =
+                    parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_ex_borrowed(
+                    if let Some(response) = runtime.execute_plain_set_relexpire_borrowed(
+                        is_seconds,
                         packet.key,
                         packet.start,
                         packet.end,
@@ -11505,14 +11506,15 @@ fn parse_borrowed_plain_set_packet<'a>(
     })
 }
 
-// (frankenredis-setexfast) Byte-prefix fast path for the no-flag `SET key value EX
-// seconds` (5-element, the dominant set-with-TTL). Requires a literal EX token in
-// slot 3; PX/EXAT/PXAT/NX/XX/GET/KEEPTTL and every other shape fall through to the
-// generic. Reuses BorrowedPlainKeyRangePacket (start = value, end = seconds).
-fn parse_borrowed_plain_set_ex_packet<'a>(
+// (frankenredis-setexfast) Byte-prefix fast path for the no-flag `SET key value
+// EX|PX time` (5-element, the dominant set-with-TTL). Requires a literal EX or PX
+// token in slot 3 (returns is_seconds: EX=true, PX=false); EXAT/PXAT/NX/XX/GET/
+// KEEPTTL and every other shape fall through to the generic. Reuses
+// BorrowedPlainKeyRangePacket (start = value, end = time).
+fn parse_borrowed_plain_set_relexpire_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
-) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+) -> Option<(bool, BorrowedPlainKeyRangePacket<'a>)> {
     if config.max_array_len < 5 || config.max_bulk_len < b"SET".len() {
         return None;
     }
@@ -11528,16 +11530,23 @@ fn parse_borrowed_plain_set_ex_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (unit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    if !unit.eq_ignore_ascii_case(b"EX") {
+    let is_seconds = if unit.eq_ignore_ascii_case(b"EX") {
+        true
+    } else if unit.eq_ignore_ascii_case(b"PX") {
+        false
+    } else {
         return None;
-    }
-    let (seconds, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainKeyRangePacket {
-        consumed,
-        key,
-        start: value,
-        end: seconds,
-    })
+    };
+    let (time, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some((
+        is_seconds,
+        BorrowedPlainKeyRangePacket {
+            consumed,
+            key,
+            start: value,
+            end: time,
+        },
+    ))
 }
 
 struct BorrowedPlainHsetPacket<'a> {
