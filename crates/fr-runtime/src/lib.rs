@@ -991,6 +991,15 @@ fn plain_hincrbyfloat_owned_argv(key: &[u8], field: &[u8], increment_arg: &[u8])
     ]
 }
 
+fn plain_lset_owned_argv(key: &[u8], index_arg: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"LSET".to_vec(),
+        key.to_vec(),
+        index_arg.to_vec(),
+        value.to_vec(),
+    ]
+}
+
 /// Saturating i128 -> i64 clamp (mirrors fr-command's clamp_i128_to_i64).
 fn clamp_i128_to_i64_runtime(value: i128) -> i64 {
     if value < i128::from(i64::MIN) {
@@ -15060,6 +15069,170 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'HINCRBYFLOAT' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_lset_borrowed(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"LSET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || index_arg.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-lsetfast) Conservative borrowed WRITE fast path for `LSET key
+    /// index value`. Parse the index (i64 truncated to i32, upstream's 32-bit
+    /// index), defer on a non-integer so the generic's peek-before-parse ordering
+    /// emits the exact "no such key" / WRONGTYPE / "value is not an integer"; then
+    /// `store.lset` once → `+OK` or CommandError::Store(err).to_resp() (KeyNotFound →
+    /// "no such key", WrongType → WRONGTYPE, IndexOutOfRange → "index out of range").
+    /// This does a SINGLE keyed lookup vs the generic's redundant peek-then-lset
+    /// double lookup. Gated by the WRITE predicate, so the "lset" keyspace event,
+    /// propagation, AOF, and tracking are inactive.
+    pub fn execute_plain_lset_borrowed(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lset_borrowed(key, index_arg, value, now_ms) {
+            return None;
+        }
+        // Parse the index first (i64 then truncate to i32 — upstream 32-bit index)
+        // and DEFER on a non-integer: the generic peeks the key type before parsing
+        // the index, so a bad index on a missing/wrong-type key must surface the
+        // key error (no such key / WRONGTYPE) — deferring lets the generic produce
+        // that exact ordering. On a valid index we then call store.lset directly,
+        // which does a SINGLE keyed lookup (returns KeyNotFound / WrongType /
+        // IndexOutOfRange) — avoiding the generic's redundant peek-then-lset double
+        // lookup, the actual source of LSET's slowdown.
+        let index = i64::from(parse_i64_arg(index_arg).ok()? as i32);
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lset");
+        self.session.last_argv_len_sum = b"LSET".len() + key.len() + index_arg.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.lset(key, index, value.to_vec(), now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(()) => RespFrame::SimpleString("OK".to_string()),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lset_borrowed_metrics(
+            key,
+            index_arg,
+            value,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed lset metrics carry key/index/value slices plus failed flag"
+    )]
+    fn record_plain_lset_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_lset_owned_argv(key, index_arg, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_lset_owned_argv(key, index_arg, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("lset", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_lset_owned_argv(key, index_arg, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'LSET' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),

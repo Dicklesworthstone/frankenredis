@@ -3618,3 +3618,22 @@ vs redis in-place hllSparseSet/hllDenseSet mutation) — a fast path won't help;
 storage / in-place HLL mutation (fr-store, multi-session). SCAN/SSCAN structural (sorted cursor). GEODIST/
 GEOPOS have fast paths (structural geo decode). Untested-write dispatch levers shipped: SETBIT 1.94x,
 HINCRBYFLOAT 1.73x. Still untested + likely dispatch-bound: LSET/LREM/LINSERT (list mods, lack fast paths).
+
+### 2026-06-22 (part 32) LSET borrowed fast-path SHIPPED — ~1.19x (single-lookup, NOT dispatch) (cc/BlackThrush)
+List-mod sweep (-c50 -P16, 200-elem list): LSET-head 1.85x / LSET-mid 1.49x vs redis (dispatch-bound,
+no fast path); LREM-nomatch **1.00x PARITY** (no fast path needed — already parity, skip). First LSET fast
+path mirrored the generic ordering (peek_value_type THEN store.lset = TWO lookups) → A/B **0.99x NO GAIN**
+(matched generic work, only saved dispatch which is small relative to LSET's store traversal+clone).
+KEY INSIGHT: the actual slowdown is the generic doing a REDUNDANT double lookup (peek-then-lset). Revised
+the fast path to parse the index first + DEFER on a non-integer (so the generic's peek-before-parse ordering
+still emits the exact "no such key"/WRONGTYPE/"value is not an integer"), then call store.lset ONCE (it
+returns KeyNotFound/WrongType/IndexOutOfRange internally) → A/B **~1.19x** (1.177/1.231/1.159).
+BYTE-EXACT vs redis incl edges (OK / negative index / index out of range / no such key / WRONGTYPE);
+cmdstat_lset calls=5 failed_calls=4, keyspace 0/0, errorstat_ERR=3 + errorstat_WRONGTYPE=1, gate PASS;
+fr-runtime 683/0; fr-conformance 347/0.
+
+LESSON: a missing fast path does NOT guarantee a dispatch-bound gap — LSET's store work (peek+lset+clone)
+dominated, so the win came from ELIMINATING the redundant peek (single keyed lookup), not from skipping
+dispatch. Always A/B fast-vs-generic; if ~0, look for redundant store work the fast path can drop.
+LREM is parity (don't add a fast path). Untested-write dispatch levers now: SETBIT 1.94x, HINCRBYFLOAT 1.73x,
+LSET 1.19x.
