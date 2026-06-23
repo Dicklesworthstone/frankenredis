@@ -3653,3 +3653,20 @@ non-int→"value is not an integer" / i64-overflow→same / past-time→delete+e
 miss returns 0 without bumping keyspace_misses), errorstat_ERR=1, gate PASS; fr-runtime 683/0; fr-conformance
 347/0. Untested-write dispatch levers this session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/
 EXPIREAT/PEXPIREAT ~1.6x. (ZINCRBY already has a fast path; APPEND/SETRANGE/GETDEL too.)
+
+### 2026-06-22 (part 34) PSETEX fast-path SHIPPED — ~1.9x (generalized SETEX) (cc/BlackThrush)
+SETEX had a borrowed fast path; its ms sibling PSETEX did not. Generalized execute_plain_setex_borrowed into
+execute_plain_setex_kind_borrowed(is_seconds, name_upper, name_lower): same `*4 key time value` shape
+(BorrowedPlainKeyRangePacket), the only differences are px = seconds*1000 (with the i64::MAX/1000 upper
+check) for SETEX vs px = ms directly for PSETEX; both require time>0 + now+px fits i64, then store.set(.., Some(px), ..)
+→ +OK. SETEX + PSETEX wrappers delegate; metrics + owned_argv name-parameterized. Defers on non-int/<=0/overflow
+so the generic emits "value is not an integer" / "invalid expire time in '<cmd>' command".
+A/B (generic-fr `fr_pexpire` vs fast-fr, -c50 -P16, PSETEX k 500000 hello): generic ~385k → fast ~720k =
+**~1.9x** (1.971/1.698/1.951). BYTE-EXACT vs redis incl edges (OK + PTTL/GET readback; 0/negative → "invalid
+expire time in 'psetex' command"; non-int → "value is not an integer"); SETEX REGRESSION intact (still +OK,
+pttl correct). cmdstat byte-exact (psetex calls=3 failed=2, setex calls=1 failed=0), keyspace 0/0,
+errorstat_ERR=2, gate PASS; fr-runtime 683/0; fr-conformance 347/0.
+Untested-write dispatch levers this session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/
+PEXPIREAT ~1.6x, PSETEX 1.9x. Generalization pattern (one core + per-variant wrappers) reused 3x now
+(EXPIRE-kinds, SETEX-kinds). Remaining untested writes are niche/structural (LPUSHX/RPUSHX family-churn,
+RPOPLPUSH/LMOVE 2-key, LINSERT 5-elem, PFADD structural-HLL).

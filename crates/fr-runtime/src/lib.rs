@@ -983,11 +983,16 @@ fn plain_rename_owned_argv(key: &[u8], newkey: &[u8]) -> Vec<Vec<u8>> {
     vec![b"RENAME".to_vec(), key.to_vec(), newkey.to_vec()]
 }
 
-fn plain_setex_owned_argv(key: &[u8], seconds_arg: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+fn plain_setex_owned_argv(
+    name_upper: &[u8],
+    key: &[u8],
+    time_arg: &[u8],
+    value: &[u8],
+) -> Vec<Vec<u8>> {
     vec![
-        b"SETEX".to_vec(),
+        name_upper.to_vec(),
         key.to_vec(),
-        seconds_arg.to_vec(),
+        time_arg.to_vec(),
         value.to_vec(),
     ]
 }
@@ -13572,26 +13577,8 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_setex_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
-        if self.policy.gate.max_array_len < 4
-            || self.policy.gate.max_bulk_len < b"SETEX".len()
-            || key.len() > self.policy.gate.max_bulk_len
-            || value.len() > self.policy.gate.max_bulk_len
-        {
-            return false;
-        }
-        self.plain_borrowed_default_key_write_allows(now_ms)
-    }
-
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `SETEX key
-    /// seconds value`. Mirrors the generic `setex` exactly on the clean path:
-    /// parse `seconds` as a decimal i64, require it strictly positive and that
-    /// `seconds*1000` plus `now_ms` does not overflow, then `store.set` with the
-    /// derived px TTL and reply `+OK`. ANY edge case (non-integer, <= 0, or
-    /// overflow) returns None to defer to the generic path, which emits the exact
-    /// `value is not an integer` / `invalid expire time in 'setex' command` error.
-    /// Gated by the WRITE predicate, so the "set" keyspace event, propagation
-    /// (rewritten as SET ... PXAT), AOF, and tracking are provably inactive.
+    /// seconds value`.
     pub fn execute_plain_setex_borrowed(
         &mut self,
         key: &[u8],
@@ -13599,20 +13586,67 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setex_borrowed(key, value, now_ms) {
+        self.execute_plain_setex_kind_borrowed(true, b"SETEX", "setex", key, seconds_arg, value, now_ms)
+    }
+
+    /// (frankenredis-psetexfast) Borrowed WRITE fast path for `PSETEX key
+    /// milliseconds value` — the millisecond sibling of SETEX (px taken directly,
+    /// no *1000 conversion).
+    pub fn execute_plain_psetex_borrowed(
+        &mut self,
+        key: &[u8],
+        ms_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setex_kind_borrowed(false, b"PSETEX", "psetex", key, ms_arg, value, now_ms)
+    }
+
+    /// Shared core for SETEX/PSETEX. Mirrors the generic exactly on the clean path:
+    /// parse the time as a decimal i64, require it strictly positive; for SETEX
+    /// (`is_seconds`) require `seconds*1000` not to overflow then px = seconds*1000,
+    /// for PSETEX px = ms directly; require `now_ms + px` to fit i64; then store.set
+    /// with the px TTL and reply `+OK`. ANY edge case (non-integer, <= 0, or
+    /// overflow) returns None to defer to the generic, which emits the exact "value
+    /// is not an integer" / "invalid expire time in '<cmd>' command" error. Gated by
+    /// the WRITE predicate, so the "set" keyspace event, propagation (rewritten as
+    /// SET ... PXAT), AOF, and tracking are provably inactive.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_plain_setex_kind_borrowed(
+        &mut self,
+        is_seconds: bool,
+        name_upper: &'static [u8],
+        name_lower: &'static str,
+        key: &[u8],
+        time_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < name_upper.len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
             return None;
         }
-        // Same validation as generic setex()/getExpireMillisecondsOrReply; defer on
-        // any failure so the canonical error text is emitted by the generic path.
-        let raw = parse_i64_arg(seconds_arg).ok()?;
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        // Same validation as the generic setex/psetex; defer on any failure so the
+        // canonical error text is emitted by the generic path.
+        let raw = parse_i64_arg(time_arg).ok()?;
         if raw <= 0 {
             return None;
         }
-        let seconds = raw as u64;
-        if seconds > i64::MAX as u64 / 1000 {
-            return None;
-        }
-        let px = seconds.saturating_mul(1000);
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
         let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
         // basetime overflow (deadline = now + px must fit i64).
         i64::try_from(px).ok()?.checked_add(now_i)?;
@@ -13623,9 +13657,9 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("setex");
+        self.session.last_command_name.push_str(name_lower);
         self.session.last_argv_len_sum =
-            b"SETEX".len() + key.len() + seconds_arg.len() + value.len();
+            name_upper.len() + key.len() + time_arg.len() + value.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -13639,7 +13673,9 @@ impl Runtime {
         let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::SimpleString("OK".to_string());
 
-        self.record_plain_setex_borrowed_metrics(key, seconds_arg, value, elapsed_us, now_ms, packet_id);
+        self.record_plain_setex_borrowed_metrics(
+            name_upper, name_lower, key, time_arg, value, elapsed_us, now_ms, packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -13647,10 +13683,13 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_plain_setex_borrowed_metrics(
         &mut self,
+        name_upper: &'static [u8],
+        name_lower: &'static str,
         key: &[u8],
-        seconds_arg: &[u8],
+        time_arg: &[u8],
         value: &[u8],
         elapsed_us: u64,
         now_ms: u64,
@@ -13661,7 +13700,7 @@ impl Runtime {
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
@@ -13669,7 +13708,7 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -13678,7 +13717,7 @@ impl Runtime {
             self.server
                 .store
                 .record_command_histogram_canonical_with_kind(
-                    "setex",
+                    name_lower,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -13686,7 +13725,7 @@ impl Runtime {
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(key, seconds_arg, value));
+                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -13696,7 +13735,8 @@ impl Runtime {
                 action: "slow_command_detected",
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
-                    "command 'SETEX' took {elapsed_us}us, exceeding budget {}ms",
+                    "command '{}' took {elapsed_us}us, exceeding budget {}ms",
+                    String::from_utf8_lossy(name_upper),
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
