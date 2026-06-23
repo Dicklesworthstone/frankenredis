@@ -3670,3 +3670,17 @@ Untested-write dispatch levers this session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, L
 PEXPIREAT ~1.6x, PSETEX 1.9x. Generalization pattern (one core + per-variant wrappers) reused 3x now
 (EXPIRE-kinds, SETEX-kinds). Remaining untested writes are niche/structural (LPUSHX/RPUSHX family-churn,
 RPOPLPUSH/LMOVE 2-key, LINSERT 5-elem, PFADD structural-HLL).
+
+### 2026-06-22 (part 35) RPOPLPUSH borrowed fast-path SHIPPED — ~1.5x (2-key, mirrors RENAME) (cc/BlackThrush)
+RPOPLPUSH lacked a fast path. `RPOPLPUSH source destination` is a 2-key WRITE → bulk, the SAME shape as
+RENAME (BorrowedPlainKeyMemberPacket, key=src member=dst), so it mirrors execute_plain_rename_borrowed:
+store.rpoplpush(src,dst,now) → BulkString(Some moved elem) / nil (src missing/empty) / WRONGTYPE (either
+key not a list), with failed-call + errorstats accounting. A/B (generic-fr `fr_psetex` vs fast-fr, -c50 -P16,
+RPOPLPUSH k k self-rotate on a 200-elem list — clean, no size change): **~1.5x** (8 runs median ~1.5:
+1.41/1.49/1.50/1.52/1.54 cluster; outliers 1.17 + 1.94 = generic load noise). BYTE-EXACT vs redis incl edges
+(move c→dst, src=[a,b]; self-rotate [1,2,3]→[3,1,2]; missing src → nil; wrong-type → WRONGTYPE); cmdstat
+rpoplpush calls=3 failed=1, keyspace 0/0 (write; missing-src nil doesn't bump keyspace_misses), errorstat_WRONGTYPE=1,
+gate PASS; fr-runtime 683/0; fr-conformance 347/0.
+2-key write fast-path infra (RENAME/SMOVE/RPOPLPUSH) is reusable; LMOVE (*5 src dst LEFT|RIGHT LEFT|RIGHT) is
+the generalized sibling but needs a 4-arg parser. Session untested-write levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x,
+LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x.

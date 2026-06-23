@@ -3974,6 +3974,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_rpoplpush_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_rename_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -10595,6 +10615,33 @@ fn parse_borrowed_plain_rename_packet<'a>(
         rest.get(..6)
             .filter(|command| command.eq_ignore_ascii_case(b"RENAME"))
             .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-rpoplpushfast) Byte-prefix fast path for `RPOPLPUSH source dest`
+// (3-element, 2-key like RENAME); `key` = source, `member` = destination.
+fn parse_borrowed_plain_rpoplpush_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"RPOPLPUSH".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$9\r\n").and_then(|rest| {
+        rest.get(..9)
+            .filter(|command| command.eq_ignore_ascii_case(b"RPOPLPUSH"))
+            .map(|_| input.len() - rest.len() + 9)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
