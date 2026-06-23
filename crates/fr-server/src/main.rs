@@ -11925,7 +11925,7 @@ fn parse_borrowed_plain_hset_two_packet<'a>(
 struct BorrowedPlainHsetMultiPacket<'a> {
     consumed: usize,
     key: &'a [u8],
-    pairs: [&'a [u8]; 8],
+    pairs: [&'a [u8]; 16],
     len: usize,
 }
 
@@ -11933,7 +11933,7 @@ fn parse_borrowed_plain_hset_multi_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
 ) -> Option<BorrowedPlainHsetMultiPacket<'a>> {
-    if config.max_array_len < 8 || config.max_bulk_len < b"HSET".len() {
+    if config.max_bulk_len < b"HSET".len() {
         return None;
     }
     let hset_at = |pfx: &[u8]| {
@@ -11943,20 +11943,33 @@ fn parse_borrowed_plain_hset_multi_packet<'a>(
                 .map(|_| input.len() - rest.len() + 4)
         })
     };
-    let (mut cursor, npairs_x2) = if let Some(c) = hset_at(b"*8\r\n$4\r\n") {
-        (c, 6usize) // 3 field/value pairs
+    // 3..8 field/value pairs (*8..*18); 1-2 pairs handled by the dedicated paths,
+    // 9+ falls through to the generic. npairs_x2 = array_count - 2.
+    let (mut cursor, npairs_x2, arr_len) = if let Some(c) = hset_at(b"*8\r\n$4\r\n") {
+        (c, 6usize, 8)
     } else if let Some(c) = hset_at(b"*10\r\n$4\r\n") {
-        (c, 8usize) // 4 field/value pairs
+        (c, 8usize, 10)
+    } else if let Some(c) = hset_at(b"*12\r\n$4\r\n") {
+        (c, 10usize, 12)
+    } else if let Some(c) = hset_at(b"*14\r\n$4\r\n") {
+        (c, 12usize, 14)
+    } else if let Some(c) = hset_at(b"*16\r\n$4\r\n") {
+        (c, 14usize, 16)
+    } else if let Some(c) = hset_at(b"*18\r\n$4\r\n") {
+        (c, 16usize, 18)
     } else {
         return None;
     };
+    if config.max_array_len < arr_len {
+        return None;
+    }
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
     }
     cursor += 2;
     let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let empty: &[u8] = &[];
-    let mut pairs = [empty; 8];
+    let mut pairs = [empty; 16];
     let mut consumed = next;
     for slot in pairs.iter_mut().take(npairs_x2) {
         let (bulk, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;

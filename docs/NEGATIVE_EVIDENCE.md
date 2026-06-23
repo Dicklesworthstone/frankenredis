@@ -3876,3 +3876,14 @@ gate PASS; fr-server 280/0; fr-conformance 347/0. fr-runtime untouched (execute 
 LESSON: when the runtime execute is already variadic-capable (chunks_exact), extending coverage is a cheap
 parser-only change. Session levers now include the full SET surface + HSET 1/2/3/4-field. Remaining: HSET 5+
 fields (rare), LINSERT (scan), structural (PFADD/6lgnu/b1o02, CoralOx).
+
+### 2026-06-23 (part 48) HSET 5-8 field fast-path SHIPPED — ~1.44x (extend multi parser to MGET/MSET 8-cap) (cc/BlackThrush)
+Extended parse_borrowed_plain_hset_multi_packet from 3-4 fields (*8/*10) to 3-8 fields (*8..*18), matching the
+MGET/MSET 8-arity convention; reuses the variadic execute. Also tightened the max_array_len guard to a per-N
+check (was a coarse `< 8`; mget_eight uses `< 9`) so a degenerate proto-max-multibulk-len config rejects
+correctly. pairs array bumped [&[u8];8]→[16]. A/B (generic-fr `fr_hsetm` vs fast-fr, -c50 -P16, HSET 6-field
+update path): **~1.44x** (1.405/1.464/1.428/1.474, at load 77; lower than 3/4-field's 1.7x — per-field store
+work grows so dispatch is a smaller fraction). BYTE-EXACT vs redis: 5/6/7/8-field fresh = 5/6/7/8, 9-field via
+generic = 9, 2-field regression = 1. cmdstat_hset calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1,
+gate PASS; fr-server 280/0; fr-conformance 347/0. HSET arity now 1-8 (matches MGET/MSET). Remaining: ZADD 3+
+members (structural-diluted), HSET/MGET/MSET 9+ (rare), LINSERT (scan), structural PFADD/6lgnu/b1o02 (CoralOx).
