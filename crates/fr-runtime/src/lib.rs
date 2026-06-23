@@ -987,6 +987,21 @@ fn plain_rpoplpush_owned_argv(src: &[u8], dst: &[u8]) -> Vec<Vec<u8>> {
     vec![b"RPOPLPUSH".to_vec(), src.to_vec(), dst.to_vec()]
 }
 
+fn plain_lmove_owned_argv(
+    src: &[u8],
+    dst: &[u8],
+    wherefrom: &[u8],
+    whereto: &[u8],
+) -> Vec<Vec<u8>> {
+    vec![
+        b"LMOVE".to_vec(),
+        src.to_vec(),
+        dst.to_vec(),
+        wherefrom.to_vec(),
+        whereto.to_vec(),
+    ]
+}
+
 fn plain_setex_owned_argv(
     name_upper: &[u8],
     key: &[u8],
@@ -13578,6 +13593,165 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'RPOPLPUSH' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_lmove_borrowed(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LMOVE".len()
+            || src.len() > self.policy.gate.max_bulk_len
+            || dst.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-lmovefast) Conservative borrowed WRITE fast path for `LMOVE
+    /// source destination LEFT|RIGHT LEFT|RIGHT` — the generalized RPOPLPUSH. Mirrors
+    /// the generic exactly: defer (None) when either direction token is not
+    /// LEFT/RIGHT so the generic emits the canonical syntax error; otherwise
+    /// store.lmove pops from the source end + pushes to the destination end
+    /// (src == dst rotates) → BulkString(Some moved) / nil (source missing or empty)
+    /// / WRONGTYPE (either key not a list), with failed-call + errorstats accounting.
+    /// Gated by the WRITE predicate, so keyspace events, propagation, AOF, and
+    /// tracking are provably inactive.
+    pub fn execute_plain_lmove_borrowed(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms) {
+            return None;
+        }
+        // Direction tokens must be LEFT/RIGHT (case-insensitive); defer otherwise so
+        // the generic emits the canonical "syntax error".
+        let valid_dir =
+            |d: &[u8]| d.eq_ignore_ascii_case(b"LEFT") || d.eq_ignore_ascii_case(b"RIGHT");
+        if !valid_dir(wherefrom) || !valid_dir(whereto) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lmove");
+        self.session.last_argv_len_sum =
+            b"LMOVE".len() + src.len() + dst.len() + wherefrom.len() + whereto.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.lmove(src, dst, wherefrom, whereto, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(Some(v)) => RespFrame::BulkString(Some(v)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lmove_borrowed_metrics(
+            src, dst, wherefrom, whereto, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed lmove metrics carry src/dst/from/to slices plus failed flag"
+    )]
+    fn record_plain_lmove_borrowed_metrics(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || plain_lmove_owned_argv(src, dst, wherefrom, whereto);
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("lmove", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'LMOVE' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),

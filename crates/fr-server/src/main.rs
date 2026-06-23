@@ -3974,6 +3974,30 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_lmove_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_lmove_borrowed(
+                        packet.src,
+                        packet.dst,
+                        packet.wherefrom,
+                        packet.whereto,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -10626,6 +10650,44 @@ fn parse_borrowed_plain_rename_packet<'a>(
         consumed,
         key,
         member,
+    })
+}
+
+// (frankenredis-lmovefast) `LMOVE source dest LEFT|RIGHT LEFT|RIGHT` (5-element).
+struct BorrowedPlainLmovePacket<'a> {
+    consumed: usize,
+    src: &'a [u8],
+    dst: &'a [u8],
+    wherefrom: &'a [u8],
+    whereto: &'a [u8],
+}
+
+fn parse_borrowed_plain_lmove_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainLmovePacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"LMOVE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"LMOVE"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (src, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (dst, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (wherefrom, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (whereto, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainLmovePacket {
+        consumed,
+        src,
+        dst,
+        wherefrom,
+        whereto,
     })
 }
 

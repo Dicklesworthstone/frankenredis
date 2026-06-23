@@ -3684,3 +3684,18 @@ gate PASS; fr-runtime 683/0; fr-conformance 347/0.
 2-key write fast-path infra (RENAME/SMOVE/RPOPLPUSH) is reusable; LMOVE (*5 src dst LEFT|RIGHT LEFT|RIGHT) is
 the generalized sibling but needs a 4-arg parser. Session untested-write levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x,
 LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x.
+
+### 2026-06-22 (part 36) LMOVE borrowed fast-path SHIPPED — ~1.6x (4-field packet, generalizes RPOPLPUSH) (cc/BlackThrush)
+LMOVE (`LMOVE src dst LEFT|RIGHT LEFT|RIGHT`, *5) lacked a fast path. Added a dedicated 4-field
+BorrowedPlainLmovePacket (src/dst/wherefrom/whereto) + execute_plain_lmove_borrowed: defers (None) when either
+direction token isn't LEFT/RIGHT (case-insensitive) so the generic emits the canonical "syntax error";
+otherwise store.lmove(src,dst,from,to,now) → BulkString(Some moved)/nil(src missing or empty)/WRONGTYPE,
+with failed-call + errorstats accounting. A/B (generic-fr `fr_rpoplpush` vs fast-fr, -c50 -P16, LMOVE k k
+RIGHT LEFT self-rotate on a 200-elem list): **~1.6x** (1.643/1.601/1.778/1.601, tight even at load 34).
+BYTE-EXACT vs redis incl edges (LEFT pop head=a, RIGHT pop tail=c, dst=[c,a]; self-rotate [1,2,3]→[3,1,2];
+missing src → nil; invalid keyword → "syntax error"; wrong-type → WRONGTYPE); cmdstat lmove calls=4
+failed_calls=2, keyspace 0/0, errorstat_ERR=1 + errorstat_WRONGTYPE=1, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0.
+Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/
+PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x. Remaining untested writes: LPUSHX/RPUSHX
+(keyed_values $6-block churn across 18 arity parsers), LINSERT (*5 BEFORE/AFTER pivot-scan), PFADD (structural HLL).
