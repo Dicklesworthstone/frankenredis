@@ -897,8 +897,78 @@ fn plain_command_count_owned_argv() -> Vec<Vec<u8>> {
     vec![b"COMMAND".to_vec(), b"COUNT".to_vec()]
 }
 
-fn plain_expire_owned_argv(key: &[u8], seconds_arg: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"EXPIRE".to_vec(), key.to_vec(), seconds_arg.to_vec()]
+/// (frankenredis-expirekindfast) The four `*3 key time` expiry-set commands,
+/// which differ only in how the raw time argument maps to an absolute-ms deadline
+/// and in the overflow validation. Mirrors fr_command's ExpireCommandKind.
+#[derive(Clone, Copy)]
+enum PlainExpireKind {
+    RelativeSeconds,
+    RelativeMilliseconds,
+    AbsoluteSeconds,
+    AbsoluteMilliseconds,
+}
+
+impl PlainExpireKind {
+    fn name_upper(self) -> &'static [u8] {
+        match self {
+            Self::RelativeSeconds => b"EXPIRE",
+            Self::RelativeMilliseconds => b"PEXPIRE",
+            Self::AbsoluteSeconds => b"EXPIREAT",
+            Self::AbsoluteMilliseconds => b"PEXPIREAT",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            Self::RelativeSeconds => "expire",
+            Self::RelativeMilliseconds => "pexpire",
+            Self::AbsoluteSeconds => "expireat",
+            Self::AbsoluteMilliseconds => "pexpireat",
+        }
+    }
+
+    /// Mirror expire_like's overflow validation: `Some` deadline-ms when valid,
+    /// `None` when the conversion/addition overflows (caller defers so the generic
+    /// emits "invalid expire time in '<cmd>' command").
+    fn validated_when_ms(self, raw_time: i64, now_ms: u64) -> Option<i64> {
+        match self {
+            Self::RelativeSeconds | Self::AbsoluteSeconds => {
+                if !(i64::MIN / 1000..=i64::MAX / 1000).contains(&raw_time) {
+                    return None;
+                }
+                let ms = raw_time.saturating_mul(1000);
+                if matches!(self, Self::RelativeSeconds) {
+                    let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+                    ms.checked_add(now_i)
+                } else {
+                    Some(ms)
+                }
+            }
+            Self::RelativeMilliseconds => {
+                let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+                raw_time.checked_add(now_i)
+            }
+            Self::AbsoluteMilliseconds => Some(raw_time),
+        }
+    }
+
+    /// Mirror deadline_from_expire_kind: the i128 absolute-ms deadline.
+    fn deadline_ms_i128(self, raw_time: i64, now_ms: u64) -> i128 {
+        match self {
+            Self::RelativeSeconds => {
+                i128::from(now_ms).saturating_add(i128::from(raw_time).saturating_mul(1000))
+            }
+            Self::RelativeMilliseconds => {
+                i128::from(now_ms).saturating_add(i128::from(raw_time))
+            }
+            Self::AbsoluteSeconds => i128::from(raw_time).saturating_mul(1000),
+            Self::AbsoluteMilliseconds => i128::from(raw_time),
+        }
+    }
+}
+
+fn plain_expire_owned_argv(name_upper: &[u8], key: &[u8], time_arg: &[u8]) -> Vec<Vec<u8>> {
+    vec![name_upper.to_vec(), key.to_vec(), time_arg.to_vec()]
 }
 
 fn plain_persist_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
@@ -12966,49 +13036,98 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_expire_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
-        if self.policy.gate.max_array_len < 3
-            || self.policy.gate.max_bulk_len < b"EXPIRE".len()
-            || key.len() > self.policy.gate.max_bulk_len
-        {
-            return false;
-        }
-        self.plain_borrowed_default_key_write_allows(now_ms)
-    }
-
-    /// Conservative borrowed WRITE fast path for the no-flag `EXPIRE key seconds`
-    /// form. Mirrors the generic expire_like(RelativeSeconds) and the no-option
-    /// apply_expiry_with_options path EXACTLY: the same overflow validation, the
-    /// same i128 deadline (deadline_from_expire_kind), then pttl_no_stats
-    /// (missing yields 0) followed by store.expire_at_milliseconds, which handles
-    /// delete-on-past, dirty, and the "del" keyspace event. Returns None (defers
-    /// to the generic path, no side effects) on a malformed or out-of-range
-    /// seconds value so the canonical "value is not an integer" / "invalid expire
-    /// time" error is emitted there, and on any flagged form (argc 3 only; the
-    /// recognizer rejects more). Gated by the WRITE predicate, so propagation,
-    /// AOF, keyspace events, and tracking are provably inactive. (cold-cmd audit)
+    /// Conservative borrowed WRITE fast path for the no-flag `EXPIRE key seconds`.
     pub fn execute_plain_expire_borrowed(
         &mut self,
         key: &[u8],
         seconds_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_expire_borrowed(key, now_ms) {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::RelativeSeconds,
+            key,
+            seconds_arg,
+            now_ms,
+        )
+    }
+
+    /// Borrowed WRITE fast path for the no-flag `PEXPIRE key milliseconds`.
+    pub fn execute_plain_pexpire_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::RelativeMilliseconds,
+            key,
+            time_arg,
+            now_ms,
+        )
+    }
+
+    /// Borrowed WRITE fast path for the no-flag `EXPIREAT key unix-seconds`.
+    pub fn execute_plain_expireat_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::AbsoluteSeconds,
+            key,
+            time_arg,
+            now_ms,
+        )
+    }
+
+    /// Borrowed WRITE fast path for the no-flag `PEXPIREAT key unix-milliseconds`.
+    pub fn execute_plain_pexpireat_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::AbsoluteMilliseconds,
+            key,
+            time_arg,
+            now_ms,
+        )
+    }
+
+    /// Shared core for the four no-flag `*3 key time` expiry-set commands. Mirrors
+    /// the generic expire_like(kind) + no-option apply_expiry_with_options EXACTLY:
+    /// the same per-kind overflow validation, the same i128 deadline
+    /// (deadline_from_expire_kind), then pttl_no_stats (missing yields 0) followed
+    /// by store.expire_at_milliseconds, which handles delete-on-past, dirty, and
+    /// the "del" keyspace event. Returns None (defers to the generic, no side
+    /// effects) on a malformed / out-of-range time so the canonical "value is not
+    /// an integer" / "invalid expire time in '<cmd>' command" error is emitted
+    /// there, and on any flagged form (the recognizer matches only argc 3). Gated
+    /// by the WRITE predicate, so propagation, AOF, keyspace events, and tracking
+    /// are provably inactive.
+    fn execute_plain_expire_kind_borrowed(
+        &mut self,
+        kind: PlainExpireKind,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let name_upper = kind.name_upper();
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < name_upper.len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
             return None;
         }
-        // Same validation as expire_like(RelativeSeconds): parse, range-check the
-        // s->ms conversion, and the now+ms addition. Defer on any failure so the
-        // generic path emits the exact error.
-        let raw_time = parse_i64_arg(seconds_arg).ok()?;
-        if !(i64::MIN / 1000..=i64::MAX / 1000).contains(&raw_time) {
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
-        let ms = raw_time.saturating_mul(1000);
-        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
-        ms.checked_add(now_i)?; // overflow -> defer to generic ("invalid expire time")
-        // deadline_from_expire_kind(RelativeSeconds): now + raw*1000 (i128).
-        let when_ms_i128 =
-            i128::from(now_ms).saturating_add(i128::from(raw_time).saturating_mul(1000));
+        // Same validation as expire_like(kind); defer on any failure for exact errors.
+        let raw_time = parse_i64_arg(time_arg).ok()?;
+        kind.validated_when_ms(raw_time, now_ms)?; // overflow -> defer ("invalid expire time")
+        let when_ms_i128 = kind.deadline_ms_i128(raw_time, now_ms);
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -13016,8 +13135,8 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("expire");
-        self.session.last_argv_len_sum = b"EXPIRE".len() + key.len() + seconds_arg.len();
+        self.session.last_command_name.push_str(kind.name_lower());
+        self.session.last_argv_len_sum = name_upper.len() + key.len() + time_arg.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -13037,7 +13156,7 @@ impl Runtime {
         let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(i64::from(applied));
 
-        self.record_plain_expire_borrowed_metrics(key, seconds_arg, elapsed_us, now_ms, packet_id);
+        self.record_plain_expire_borrowed_metrics(kind, key, time_arg, elapsed_us, now_ms, packet_id);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -13048,24 +13167,28 @@ impl Runtime {
     #[allow(clippy::too_many_arguments)]
     fn record_plain_expire_borrowed_metrics(
         &mut self,
+        kind: PlainExpireKind,
         key: &[u8],
-        seconds_arg: &[u8],
+        time_arg: &[u8],
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
     ) {
+        let name_upper = kind.name_upper();
         let mut argv: Option<Vec<Vec<u8>>> = None;
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_expire_owned_argv(key, seconds_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_expire_owned_argv(key, seconds_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -13074,14 +13197,15 @@ impl Runtime {
             self.server
                 .store
                 .record_command_histogram_canonical_with_kind(
-                    "expire",
+                    kind.name_lower(),
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_expire_owned_argv(key, seconds_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -13091,8 +13215,9 @@ impl Runtime {
                 action: "slow_command_detected",
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
-                    "command 'EXPIRE' took {}us, exceeding budget {}ms",
-                    elapsed_us, self.server.command_time_budget_ms
+                    "command '{}' took {elapsed_us}us, exceeding budget {}ms",
+                    String::from_utf8_lossy(name_upper),
+                    self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::Integer(0),

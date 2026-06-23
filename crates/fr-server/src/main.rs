@@ -5234,6 +5234,66 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_setrange_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_setrange_borrowed(
@@ -10350,6 +10410,84 @@ fn parse_borrowed_plain_expire_packet<'a>(
         rest.get(..6)
             .filter(|command| command.eq_ignore_ascii_case(b"EXPIRE"))
             .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-expirekindfast) Byte-prefix fast paths for the no-flag `*3 key time`
+// expiry-set siblings of EXPIRE (PEXPIRE/EXPIREAT/PEXPIREAT); `member` carries the
+// time argument. execute_plain_<cmd>_borrowed validates per kind and defers on edges.
+fn parse_borrowed_plain_pexpire_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"PEXPIRE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$7\r\n").and_then(|rest| {
+        rest.get(..7)
+            .filter(|command| command.eq_ignore_ascii_case(b"PEXPIRE"))
+            .map(|_| input.len() - rest.len() + 7)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+fn parse_borrowed_plain_expireat_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"EXPIREAT".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$8\r\n").and_then(|rest| {
+        rest.get(..8)
+            .filter(|command| command.eq_ignore_ascii_case(b"EXPIREAT"))
+            .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+fn parse_borrowed_plain_pexpireat_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"PEXPIREAT".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$9\r\n").and_then(|rest| {
+        rest.get(..9)
+            .filter(|command| command.eq_ignore_ascii_case(b"PEXPIREAT"))
+            .map(|_| input.len() - rest.len() + 9)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;

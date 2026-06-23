@@ -3637,3 +3637,19 @@ dominated, so the win came from ELIMINATING the redundant peek (single keyed loo
 dispatch. Always A/B fast-vs-generic; if ~0, look for redundant store work the fast path can drop.
 LREM is parity (don't add a fast path). Untested-write dispatch levers now: SETBIT 1.94x, HINCRBYFLOAT 1.73x,
 LSET 1.19x.
+
+### 2026-06-22 (part 33) PEXPIRE/EXPIREAT/PEXPIREAT fast-paths SHIPPED — ~1.55-1.8x each (cc/BlackThrush)
+EXPIRE had a borrowed fast path but its 3 no-flag siblings did not. Generalized the EXPIRE fast path into
+execute_plain_expire_kind_borrowed(PlainExpireKind) — same `*3 key time` shape (BorrowedPlainKeyMemberPacket),
+the kind only changes the per-kind overflow validation (validated_when_ms, mirrors expire_like) + the i128
+deadline (deadline_ms_i128, mirrors deadline_from_expire_kind: rel-sec=now+raw*1000, rel-ms=now+raw,
+abs-sec=raw*1000, abs-ms=raw) + the command name. EXPIRE + 3 new wrappers all delegate to the core; the
+metrics fn is name-parameterized. Defers on parse/overflow so the generic emits "value is not an integer" /
+"invalid expire time in '<cmd>' command".
+A/B (generic-fr `fr_lset2` vs fast-fr, -c50 -P16): PEXPIRE ~1.6-1.8x, EXPIREAT ~1.59x, PEXPIREAT ~1.55-1.79x.
+BYTE-EXACT vs redis incl edges (set/PTTL readback / far-future EXPIREAT+PEXPIREAT / missing-key→0 /
+non-int→"value is not an integer" / i64-overflow→same / past-time→delete+exists 0); cmdstat byte-exact
+(pexpire calls=3 failed=1, expireat/pexpireat calls=1 failed=0), keyspace 0/0 (writes use pttl_no_stats,
+miss returns 0 without bumping keyspace_misses), errorstat_ERR=1, gate PASS; fr-runtime 683/0; fr-conformance
+347/0. Untested-write dispatch levers this session: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/
+EXPIREAT/PEXPIREAT ~1.6x. (ZINCRBY already has a fast path; APPEND/SETRANGE/GETDEL too.)
