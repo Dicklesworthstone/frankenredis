@@ -2764,6 +2764,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_set_ex_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_set_ex_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
                     let default_write_allowed =
@@ -11479,6 +11502,41 @@ fn parse_borrowed_plain_set_packet<'a>(
         consumed,
         key,
         value,
+    })
+}
+
+// (frankenredis-setexfast) Byte-prefix fast path for the no-flag `SET key value EX
+// seconds` (5-element, the dominant set-with-TTL). Requires a literal EX token in
+// slot 3; PX/EXAT/PXAT/NX/XX/GET/KEEPTTL and every other shape fall through to the
+// generic. Reuses BorrowedPlainKeyRangePacket (start = value, end = seconds).
+fn parse_borrowed_plain_set_ex_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (unit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !unit.eq_ignore_ascii_case(b"EX") {
+        return None;
+    }
+    let (seconds, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start: value,
+        end: seconds,
     })
 }
 

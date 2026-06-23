@@ -3717,3 +3717,19 @@ PARTIAL COVERAGE NOTE: only keyed_values1 (1 value) has the fast path; 2+-value 
 Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/
 PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x. Remaining: LINSERT (*5 scan-dominated),
 PFADD (structural HLL).
+
+### 2026-06-22 (part 38) SET key value EX seconds fast-path SHIPPED — ~2.2x (most common set-with-TTL) (cc/BlackThrush)
+Plain SET (*3) had a fast path but `SET key value EX seconds` (*5, the dominant cache-with-TTL form) went
+through the generic option-scanner. Added parse_borrowed_plain_set_ex_packet (requires a literal EX token in
+slot 3; reuses BorrowedPlainKeyRangePacket start=value end=seconds) + execute_plain_set_ex_borrowed: SETEX-style
+seconds validation (>0, *1000 no overflow, now+px fits i64), then store.set(.., Some(px), ..) → +OK, recorded
+as `set`. PX/EXAT/PXAT/NX/XX/GET/KEEPTTL and all other shapes fall through to the generic; SET never type-checks
+(overwrites) so no WRONGTYPE; bad seconds defers → "value is not an integer"/"invalid expire time in 'set' command".
+A/B (generic-fr `fr_pushx` vs fast-fr, -c50 -P16, SET k vvv EX 500): **~2.2x** (low-load 2.02/2.37/2.21/2.23/2.41;
+a 1.40 appeared under load spike). BYTE-EXACT vs redis incl ALL deferred forms + regressions: lowercase "ex"=OK,
+PX→generic OK+250000ms, NX→generic OK, plain SET (no TTL) ttl=-1, SET..EX GET (*6)→generic returns old value;
+edge errors match. cmdstat_set calls=5 failed_calls=2 (fast + plain + generic-PX + 2 deferred all record "set"),
+keyspace 0/0, errorstat_ERR=2, gate PASS; fr-runtime 683/0; fr-conformance 347/0.
+Session untested-write dispatch levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT
+~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x. Next: SET..PX (same parser,
+unit=PX), LINSERT (scan-dominated), PFADD (structural HLL).

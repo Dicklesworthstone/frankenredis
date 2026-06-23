@@ -7334,6 +7334,140 @@ impl Runtime {
         Some(RespFrame::SimpleString("OK".to_string()))
     }
 
+    /// (frankenredis-setexfast) Conservative borrowed WRITE fast path for the
+    /// no-flag `SET key value EX seconds` form (the dominant set-with-TTL). Mirrors
+    /// the generic set() for that exact option set: validate `seconds` as the
+    /// generic does (getExpireMillisecondsOrReply — strictly positive, `seconds*1000`
+    /// not overflowing, `now + px` fitting i64), then store.set with the derived px
+    /// and reply `+OK`. The parser only matches *5 with a literal EX token, so NX/
+    /// XX/GET/KEEPTTL/PX/EXAT/PXAT and every other shape fall through to the generic
+    /// path; a malformed/<=0/overflowing seconds value returns None so the generic
+    /// emits the exact "value is not an integer" / "invalid expire time in 'set'
+    /// command". SET never type-checks (it overwrites), so there is no WRONGTYPE.
+    /// Recorded as `set` (it IS the SET command). Gated by the WRITE predicate.
+    pub fn execute_plain_set_ex_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        seconds_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        // Same validation as generic set()/getExpireMillisecondsOrReply for EX; defer
+        // on any failure so the canonical error text is emitted by the generic path.
+        let raw = parse_i64_arg(seconds_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let seconds = raw as u64;
+        if seconds > i64::MAX as u64 / 1000 {
+            return None;
+        }
+        let px = seconds.saturating_mul(1000);
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum =
+            b"SET".len() + key.len() + value.len() + b"EX".len() + seconds_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        self.server
+            .store
+            .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_set_ex_borrowed_metrics(key, value, seconds_arg, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_set_ex_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        seconds_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || {
+            vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                value.to_vec(),
+                b"EX".to_vec(),
+                seconds_arg.to_vec(),
+            ]
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_canonical_with_kind(
+                "set",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SET' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     pub fn execute_plain_set_owned(
         &mut self,
         key: Vec<u8>,
