@@ -2960,6 +2960,33 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hset_multi_packet(unparsed, &parser_config)
+                {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_hset_borrowed_with_default_write_gate(
+                            packet.key,
+                            &packet.pairs[..packet.len],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_mset_packet(unparsed, &parser_config)
                 {
                     let consumed = packet.consumed();
@@ -11887,6 +11914,61 @@ fn parse_borrowed_plain_hset_two_packet<'a>(
         value1,
         field2,
         value2,
+    })
+}
+
+// (frankenredis-hsetmulti) Three- and four-field HSET (`HSET key f1 v1 f2 v2 [f3 v3
+// [f4 v4]]`, *8/*10) — common for small-object writes. Reuses the existing borrowed
+// multi-pair runtime (execute_plain_hset_borrowed_with_default_write_gate already
+// loops chunks_exact(2)); only the parser was single/two-pair. `pairs[..len]` holds
+// the borrowed field/value bulks. 5+ fields fall through to the generic path.
+struct BorrowedPlainHsetMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    pairs: [&'a [u8]; 8],
+    len: usize,
+}
+
+fn parse_borrowed_plain_hset_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHsetMultiPacket<'a>> {
+    if config.max_array_len < 8 || config.max_bulk_len < b"HSET".len() {
+        return None;
+    }
+    let hset_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..4)
+                .filter(|c| c.eq_ignore_ascii_case(b"HSET"))
+                .map(|_| input.len() - rest.len() + 4)
+        })
+    };
+    let (mut cursor, npairs_x2) = if let Some(c) = hset_at(b"*8\r\n$4\r\n") {
+        (c, 6usize) // 3 field/value pairs
+    } else if let Some(c) = hset_at(b"*10\r\n$4\r\n") {
+        (c, 8usize) // 4 field/value pairs
+    } else {
+        return None;
+    };
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut pairs = [empty; 8];
+    let mut consumed = next;
+    for slot in pairs.iter_mut().take(npairs_x2) {
+        let (bulk, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = bulk;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainHsetMultiPacket {
+        consumed,
+        key,
+        pairs,
+        len: npairs_x2,
     })
 }
 

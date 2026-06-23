@@ -3863,3 +3863,16 @@ HDEL/SREM, the 6s9dx cold cluster, etc. — all ~1.5-2.6x, byte-exact, keyspace-
 workloads are NOT dispatch: LINSERT (scan-dominated, low fast-path ceiling like LSET-mid) and the STRUCTURAL
 fr-store gaps — PFADD 2.75x (HLL decode/re-encode per add), zset cluster 6lgnu (ZADD/ZRANK/ZINCRBY 1.3-1.4x),
 RESTORE-decode 0.37x b1o02, random-pick 1.3-1.4x. These need fr-store rewrites (multi-session, CoralOx domain).
+
+### 2026-06-23 (part 47) HSET 3/4-field fast-path SHIPPED — ~1.7x (parser-only; execute already multi-pair) (cc/BlackThrush)
+HSET single-pair (*4) and 2-field (*6, ohsk5) had fast paths; 3-field (*8) and 4-field (*10) deferred to
+generic. KEY: execute_plain_hset_borrowed_with_default_write_gate ALREADY loops pairs.chunks_exact(2) over any
+pairs &[&[u8]] — only the PARSER was limited. So this is a fr-server-ONLY add: parse_borrowed_plain_hset_multi_packet
+(*8 → 3 pairs, *10 → 4 pairs) builds the borrowed pairs slice ([&[u8];8] + len) and reuses the existing execute.
+5+ fields fall through to generic. A/B (generic-fr `fr_setat` vs fast-fr, -c50 -P16, HSET k a 1 b 2 c 3 update
+path): **~1.7x** (1.602/1.676/1.702/1.920). BYTE-EXACT vs redis: 3-field fresh=3, 4-field=4, mixed add/update=1,
+5-field via generic=5, WRONGTYPE. cmdstat_hset calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1,
+gate PASS; fr-server 280/0; fr-conformance 347/0. fr-runtime untouched (execute reused).
+LESSON: when the runtime execute is already variadic-capable (chunks_exact), extending coverage is a cheap
+parser-only change. Session levers now include the full SET surface + HSET 1/2/3/4-field. Remaining: HSET 5+
+fields (rare), LINSERT (scan), structural (PFADD/6lgnu/b1o02, CoralOx).
