@@ -2787,6 +2787,30 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some((is_seconds, packet)) =
+                    parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_set_absexpire_borrowed(
+                        is_seconds,
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_set_nx_packet(unparsed, &parser_config)
                 {
@@ -11598,6 +11622,48 @@ fn parse_borrowed_plain_set_relexpire_packet<'a>(
     let is_seconds = if unit.eq_ignore_ascii_case(b"EX") {
         true
     } else if unit.eq_ignore_ascii_case(b"PX") {
+        false
+    } else {
+        return None;
+    };
+    let (time, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some((
+        is_seconds,
+        BorrowedPlainKeyRangePacket {
+            consumed,
+            key,
+            start: value,
+            end: time,
+        },
+    ))
+}
+
+// (frankenredis-setatfast) Byte-prefix fast path for `SET key value EXAT|PXAT ts`
+// (5-element, absolute deadline). Requires a literal EXAT/PXAT token in slot 3
+// (returns is_seconds: EXAT=true, PXAT=false); NX/XX/GET/KEEPTTL/EX/PX and every
+// other shape fall through to the generic. Reuses BorrowedPlainKeyRangePacket.
+fn parse_borrowed_plain_set_absexpire_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(bool, BorrowedPlainKeyRangePacket<'a>)> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (unit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let is_seconds = if unit.eq_ignore_ascii_case(b"EXAT") {
+        true
+    } else if unit.eq_ignore_ascii_case(b"PXAT") {
         false
     } else {
         return None;

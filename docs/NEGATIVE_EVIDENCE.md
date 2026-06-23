@@ -3827,3 +3827,21 @@ Session levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/P
 RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x,
 SET..XX 2.17x, SET..XX..EX|PX 2.39x (+ hjk0m generic keyspace fix). Remaining: SET..EXAT/PXAT (abs, needs
 set_with_abs_expiry + past-deadline), LINSERT (scan), PFADD (HLL structural).
+
+### 2026-06-23 (part 45) SET..EXAT/PXAT fast-path SHIPPED — ~2.56x (absolute deadline; COMPLETES the SET surface) (cc/BlackThrush)
+The last common SET form: `SET key value EXAT|PXAT timestamp` (*5, absolute deadline). Added
+parse_borrowed_plain_set_absexpire_packet (literal EXAT/PXAT in slot 3 → is_seconds) +
+execute_plain_set_absexpire_borrowed: parse the ts (parse_set_expire_arg == >0; EXAT also rejects sec*1000
+overflow), abs_ms = ts*1000 (EXAT) / ts (PXAT) with NO basetime addition, then store.set_with_abs_expiry(Some(abs_ms))
+→ +OK. NX/XX/GET/KEEPTTL/EX/PX defer to generic. A/B (generic-fr `fr_setxxex` vs fast-fr, -c50 -P16, SET k vvv
+EXAT 99999999999): **~2.56x** (2.676/2.517/2.414/2.629, clean even at load 82). BYTE-EXACT vs redis incl edges:
+far-future EXAT/PXAT=OK+large TTL, lowercase exat=OK, PAST-but-positive EXAT 1 → set OK then EXISTS 0 (lazily
+expired, matching redis), 0 → "invalid expire time in 'set' command", non-int → "value is not an integer", EX
+regression OK. cmdstat_set calls=4 failed_calls=1, keyspace 0/0, errorstat_ERR=1, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0.
+**SET OPTION SURFACE NOW COMPLETE: plain, EX, PX, NX, XX, NX+EX|PX, XX+EX|PX, EXAT, PXAT — every common form
+fast-pathed.** Session levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x,
+PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x,
+SET..NX..EX|PX 1.93x, SET..XX 2.17x, SET..XX..EX|PX 2.39x, SET..EXAT/PXAT 2.56x (+ hjk0m keyspace fix).
+Remaining un-dominated: LINSERT (scan), PFADD/zset/RESTORE (structural, CoralOx domain). Dispatch vein on the
+write surface now genuinely exhausted.

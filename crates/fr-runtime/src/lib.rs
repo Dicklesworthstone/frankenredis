@@ -7728,6 +7728,81 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-setatfast) Conservative borrowed WRITE fast path for the
+    /// no-flag `SET key value EXAT|PXAT timestamp` form (absolute deadline). Mirrors
+    /// the generic set() for that exact option set: parse the timestamp as the
+    /// generic does (parse_set_expire_arg == parse_expire_time_arg "set" — strictly
+    /// positive; EXAT additionally rejects when seconds*1000 overflows), then
+    /// store.set_with_abs_expiry with the absolute-ms deadline (NO basetime addition,
+    /// unlike EX/PX; a past-but-positive timestamp sets then lazily expires, matching
+    /// redis) → `+OK`. The parser only matches *5 with a literal EXAT/PXAT token;
+    /// NX/XX/GET/KEEPTTL/EX/PX and every other shape fall through to the generic.
+    /// Recorded as `set`. Gated by the WRITE predicate.
+    pub fn execute_plain_set_absexpire_borrowed(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let abs_ms = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let unit_upper: &[u8] = if is_seconds { b"EXAT" } else { b"PXAT" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum =
+            b"SET".len() + key.len() + value.len() + unit_upper.len() + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        self.server
+            .store
+            .set_with_abs_expiry(key.to_vec(), value.to_vec(), Some(abs_ms), now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        // Same *5 argv shape as SET..EX/PX (SET key value <unit> <time>).
+        self.record_plain_set_relexpire_borrowed_metrics(
+            unit_upper, key, value, time_arg, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
     pub fn execute_plain_set_relexpire_borrowed(
         &mut self,
         is_seconds: bool,
