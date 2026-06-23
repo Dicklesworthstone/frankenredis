@@ -7580,8 +7580,10 @@ impl Runtime {
     /// → `+OK`. The parser only matches *6 with exactly one NX and one EX/PX, so
     /// XX/GET/KEEPTTL/EXAT/PXAT/conflicts fall through to the generic. Recorded as
     /// `set`. Gated by the WRITE predicate.
-    pub fn execute_plain_set_nx_relexpire_borrowed(
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_set_cond_relexpire_borrowed(
         &mut self,
+        is_xx: bool,
         is_seconds: bool,
         key: &[u8],
         value: &[u8],
@@ -7614,6 +7616,7 @@ impl Runtime {
         let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
         i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
         let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+        let cond_upper: &[u8] = if is_xx { b"XX" } else { b"NX" };
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -7625,7 +7628,7 @@ impl Runtime {
         self.session.last_argv_len_sum = b"SET".len()
             + key.len()
             + value.len()
-            + b"NX".len()
+            + cond_upper.len()
             + unit_upper.len()
             + time_arg.len();
         let packet_id = next_packet_id();
@@ -7635,20 +7638,22 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // NX existence check via the NON-counting peek (redis SET uses lookupKeyWrite,
+        // NX/XX existence check via the NON-counting peek (redis SET uses lookupKeyWrite,
         // which does NOT bump keyspace_hits/misses); exists_no_touch would over-count.
-        let reply = if self.server.store.peek_value_type(key, now_ms).is_some() {
-            RespFrame::BulkString(None)
-        } else {
+        // XX sets only when present, NX only when absent: set iff (exists == is_xx).
+        let exists = self.server.store.peek_value_type(key, now_ms).is_some();
+        let reply = if exists == is_xx {
             self.server
                 .store
                 .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
             RespFrame::SimpleString("OK".to_string())
+        } else {
+            RespFrame::BulkString(None)
         };
         let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_set_nx_relexpire_borrowed_metrics(
-            unit_upper, key, value, time_arg, elapsed_us, now_ms, packet_id,
+            cond_upper, unit_upper, key, value, time_arg, elapsed_us, now_ms, packet_id,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -7660,6 +7665,7 @@ impl Runtime {
     #[allow(clippy::too_many_arguments)]
     fn record_plain_set_nx_relexpire_borrowed_metrics(
         &mut self,
+        cond_upper: &[u8],
         unit_upper: &[u8],
         key: &[u8],
         value: &[u8],
@@ -7674,7 +7680,7 @@ impl Runtime {
                 b"SET".to_vec(),
                 key.to_vec(),
                 value.to_vec(),
-                b"NX".to_vec(),
+                cond_upper.to_vec(),
                 unit_upper.to_vec(),
                 time_arg.to_vec(),
             ]

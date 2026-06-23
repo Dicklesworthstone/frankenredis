@@ -2827,10 +2827,11 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some((is_seconds, packet)) =
-                    parse_borrowed_plain_set_nx_relexpire_packet(unparsed, &parser_config)
+                } else if let Some((is_xx, is_seconds, packet)) =
+                    parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_nx_relexpire_borrowed(
+                    if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed(
+                        is_xx,
                         is_seconds,
                         packet.key,
                         packet.start,
@@ -11683,10 +11684,13 @@ fn parse_borrowed_plain_set_xx_packet<'a>(
 // the EX|PX value pair first). Returns is_seconds (EX=true, PX=false). Any other
 // *6 SET shape (XX/GET/KEEPTTL/EXAT/PXAT/conflicts) falls through to the generic.
 // Reuses BorrowedPlainKeyRangePacket (start = value, end = time).
-fn parse_borrowed_plain_set_nx_relexpire_packet<'a>(
+// (frankenredis-setnxexfast/setxxexfast) `SET key value NX|XX EX|PX time` (*6),
+// both option orders. Returns (is_xx, is_seconds). EXAT/PXAT/GET/KEEPTTL/conflicts
+// fall through to the generic.
+fn parse_borrowed_plain_set_cond_relexpire_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
-) -> Option<(bool, BorrowedPlainKeyRangePacket<'a>)> {
+) -> Option<(bool, bool, BorrowedPlainKeyRangePacket<'a>)> {
     if config.max_array_len < 6 || config.max_bulk_len < b"SET".len() {
         return None;
     }
@@ -11713,16 +11717,26 @@ fn parse_borrowed_plain_set_nx_relexpire_packet<'a>(
             None
         }
     };
-    let (is_seconds, time) = if a.eq_ignore_ascii_case(b"NX") {
-        // NX EX|PX <time>
-        (unit_is_seconds(b)?, c)
-    } else if c.eq_ignore_ascii_case(b"NX") {
-        // EX|PX <time> NX
-        (unit_is_seconds(a)?, b)
+    let cond_is_xx = |t: &[u8]| {
+        if t.eq_ignore_ascii_case(b"NX") {
+            Some(false)
+        } else if t.eq_ignore_ascii_case(b"XX") {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    let (is_xx, is_seconds, time) = if let Some(xx) = cond_is_xx(a) {
+        // NX|XX EX|PX <time>
+        (xx, unit_is_seconds(b)?, c)
+    } else if let Some(xx) = cond_is_xx(c) {
+        // EX|PX <time> NX|XX
+        (xx, unit_is_seconds(a)?, b)
     } else {
         return None;
     };
     Some((
+        is_xx,
         is_seconds,
         BorrowedPlainKeyRangePacket {
             consumed,

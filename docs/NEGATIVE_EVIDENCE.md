@@ -3812,3 +3812,18 @@ SET option fast-paths now: plain, EX, PX, NX, XX, NX+EX|PX. Session untested-wri
 HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x, RPOPLPUSH 1.5x, LMOVE 1.6x,
 LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x, SET..XX 2.17x (+ hjk0m
 generic keyspace fix). Remaining: SET..XX..EX|PX (lock-refresh), SET..EXAT/PXAT (abs), LINSERT (scan), PFADD (HLL).
+
+### 2026-06-23 (part 44) SET..XX..EX|PX fast-path SHIPPED — ~2.39x (generalized SET..NX..EX|PX to NX|XX) (cc/BlackThrush)
+Generalized the *6 SET..NX..EX|PX path to a condition flag: execute_plain_set_cond_relexpire_borrowed(is_xx, ...)
++ parser parse_borrowed_plain_set_cond_relexpire_packet recognizes NX OR XX (both option orders). Set iff
+(exists == is_xx) — XX sets when present (lock-value-refresh), NX when absent. Existence via NON-counting peek
+(keyspace 0). A/B (generic-fr `fr_setxx` vs fast-fr, -c50 -P16, SET k vvv XX EX 500 on existing key): **~2.39x**
+(2.307/2.356/2.389/2.503). BYTE-EXACT vs redis incl both orders (XX EX = OK, EX 300 XX = OK), PX variant,
+XX-on-missing → nil + NOT created, NX..EX regression intact (99998), invalid → "invalid expire time in 'set'
+command". cmdstat_set calls=5 failed_calls=1, keyspace 0/0, errorstat_ERR=1, gate PASS; fr-runtime 683/0;
+fr-conformance 347/0.
+SET option fast-paths now: plain, EX, PX, NX, XX, NX+EX|PX, XX+EX|PX — the full common SET surface.
+Session levers: SETBIT 1.94x, HINCRBYFLOAT 1.73x, LSET 1.19x, PEXPIRE/EXPIREAT/PEXPIREAT ~1.6x, PSETEX 1.9x,
+RPOPLPUSH 1.5x, LMOVE 1.6x, LPUSHX/RPUSHX 1.5x, SET..EX 2.2x, SET..PX 2.25x, SET..NX 1.86x, SET..NX..EX|PX 1.93x,
+SET..XX 2.17x, SET..XX..EX|PX 2.39x (+ hjk0m generic keyspace fix). Remaining: SET..EXAT/PXAT (abs, needs
+set_with_abs_expiry + past-deadline), LINSERT (scan), PFADD (HLL structural).
