@@ -4668,6 +4668,30 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_linsert_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_linsert_borrowed(
+                        packet.key,
+                        packet.before,
+                        packet.pivot,
+                        packet.element,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -8865,6 +8889,54 @@ fn parse_borrowed_plain_getrange_packet<'a>(
         key,
         start,
         end,
+    })
+}
+
+// (frankenredis-linsfast) LINSERT key BEFORE|AFTER pivot element (5-element). The
+// direction token is resolved here to a `before` bool; any non BEFORE/AFTER token
+// returns None so the generic borrowed path emits the same syntax error. pivot and
+// element are borrowed; execute_plain_linsert_borrowed copies element once.
+struct BorrowedPlainLinsertPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    before: bool,
+    pivot: &'a [u8],
+    element: &'a [u8],
+}
+
+fn parse_borrowed_plain_linsert_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainLinsertPacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"LINSERT".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$7\r\n").and_then(|rest| {
+        rest.get(..7)
+            .filter(|command| command.eq_ignore_ascii_case(b"LINSERT"))
+            .map(|_| input.len() - rest.len() + 7)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (dir, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let before = if dir.eq_ignore_ascii_case(b"BEFORE") {
+        true
+    } else if dir.eq_ignore_ascii_case(b"AFTER") {
+        false
+    } else {
+        return None;
+    };
+    let (pivot, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (element, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainLinsertPacket {
+        consumed,
+        key,
+        before,
+        pivot,
+        element,
     })
 }
 
