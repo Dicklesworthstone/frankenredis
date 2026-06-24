@@ -4691,6 +4691,75 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$15\r\n",
+                    b"ZREMRANGEBYRANK",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zremrangebyrank_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$16\r\n",
+                    b"ZREMRANGEBYSCORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zremrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$14\r\n",
+                    b"ZREMRANGEBYLEX",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zremrangebylex_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config)
                 {
@@ -9117,6 +9186,41 @@ fn parse_borrowed_plain_zrevrangebylex_packet<'a>(
         max,
         min,
     })
+}
+
+// (frankenredis-zremrangefast) Generic *4 `CMD key arg1 arg2` parser used by the
+// ZREMRANGEBY{RANK,SCORE,LEX} write fast paths. `prefix` is the literal
+// `*4\r\n$<len>\r\n` header and `cmd` the (case-insensitive) verb; the two arg
+// bulks are borrowed and passed through to the command-specific execute.
+struct BorrowedPlainKeyArg2Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    a: &'a [u8],
+    b: &'a [u8],
+}
+
+fn parse_borrowed_plain_key_arg2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    prefix: &[u8],
+    cmd: &[u8],
+) -> Option<BorrowedPlainKeyArg2Packet<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < cmd.len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+        rest.get(..cmd.len())
+            .filter(|c| c.eq_ignore_ascii_case(cmd))
+            .map(|_| input.len() - rest.len() + cmd.len())
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyArg2Packet { consumed, key, a, b })
 }
 
 // (frankenredis-pg6jj) key+arg read GETBIT (`GETBIT key offset`); the offset bulk

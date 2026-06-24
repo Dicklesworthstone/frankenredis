@@ -16262,6 +16262,248 @@ impl Runtime {
         }
     }
 
+    // (frankenredis-zremrangefast) Shared slowlog/latency/histogram/threat metrics
+    // for the *4 ZREMRANGEBY{RANK,SCORE,LEX} write fast paths. `build_argv` is only
+    // invoked on the rare slowlog/latency/threat branches.
+    fn record_plain_zremrange_borrowed_metrics(
+        &mut self,
+        name_lower: &'static str,
+        name_upper: &'static str,
+        build_argv: impl Fn() -> Vec<Vec<u8>>,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(name_lower, elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{name_upper}' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    // (frankenredis-zremrangefast) Shared error-reply accounting tail for the
+    // ZREMRANGEBY* write fast paths (mirrors every other borrowed handler).
+    fn account_plain_borrowed_error_reply(&mut self, reply: &RespFrame) {
+        if let RespFrame::Error(msg) = reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    fn plain_zremrange_write_preamble(&mut self, name_lower: &'static str, argv_len_sum: usize, now_ms: u64) -> u64 {
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(name_lower);
+        self.session.last_argv_len_sum = argv_len_sum;
+        let packet_id = next_packet_id();
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+        packet_id
+    }
+
+    fn can_execute_plain_zremrange_borrowed(
+        &mut self,
+        name_len: usize,
+        key: &[u8],
+        a: &[u8],
+        b: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < name_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || a.len() > self.policy.gate.max_bulk_len
+            || b.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-zremrangefast) Borrowed WRITE fast path for `ZREMRANGEBYRANK
+    /// key start stop`. Mirrors fr-command::zremrangebyrank: parse start/stop as
+    /// i64 (defer not-an-integer to generic), then store.zremrangebyrank (type-check,
+    /// rank removal, dirty, empty-zset autodelete) → Integer(removed) / WRONGTYPE.
+    pub fn execute_plain_zremrangebyrank_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYRANK".len(), key, start_arg, stop_arg, now_ms) {
+            return None;
+        }
+        let start = parse_i64_arg(start_arg).ok()?;
+        let stop = parse_i64_arg(stop_arg).ok()?;
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zremrangebyrank",
+            b"ZREMRANGEBYRANK".len() + key.len() + start_arg.len() + stop_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = self.server.store.zremrangebyrank(key, start, stop, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(removed) => RespFrame::Integer(i64::try_from(removed).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zremrangebyrank",
+            "ZREMRANGEBYRANK",
+            || vec![b"ZREMRANGEBYRANK".to_vec(), key.to_vec(), start_arg.to_vec(), stop_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-zremrangefast) Borrowed WRITE fast path for `ZREMRANGEBYSCORE
+    /// key min max`. Mirrors fr-command::zremrangebyscore: parse score bounds (defer
+    /// not-a-float to generic), then store.zremrangebyscore → Integer(removed).
+    pub fn execute_plain_zremrangebyscore_borrowed(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYSCORE".len(), key, min_arg, max_arg, now_ms) {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zremrangebyscore",
+            b"ZREMRANGEBYSCORE".len() + key.len() + min_arg.len() + max_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = self.server.store.zremrangebyscore(key, min, max, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(removed) => RespFrame::Integer(i64::try_from(removed).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zremrangebyscore",
+            "ZREMRANGEBYSCORE",
+            || vec![b"ZREMRANGEBYSCORE".to_vec(), key.to_vec(), min_arg.to_vec(), max_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-zremrangefast) Borrowed WRITE fast path for `ZREMRANGEBYLEX key
+    /// min max`. Mirrors fr-command::zremrangebylex: pass raw min/max bytes straight
+    /// to store.zremrangebylex (which owns lex-bound validation — same call the
+    /// generic makes, so the error wording matches), → Integer(removed) / WRONGTYPE
+    /// / bound error.
+    pub fn execute_plain_zremrangebylex_borrowed(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYLEX".len(), key, min, max, now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zremrangebylex",
+            b"ZREMRANGEBYLEX".len() + key.len() + min.len() + max.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = self.server.store.zremrangebylex(key, min, max, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(removed) => RespFrame::Integer(i64::try_from(removed).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zremrangebylex",
+            "ZREMRANGEBYLEX",
+            || vec![b"ZREMRANGEBYLEX".to_vec(), key.to_vec(), min.to_vec(), max.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
