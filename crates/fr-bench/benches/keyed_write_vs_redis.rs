@@ -13,7 +13,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 const HOST: &str = "127.0.0.1";
 const COMMANDS_PER_ITER: usize = 64;
 const ARITIES: [usize; 6] = [1, 4, 5, 8, 12, 16];
-const COMMANDS: [&str; 3] = ["LPUSH", "RPUSH", "SADD"];
+const COMMANDS: [&str; 4] = ["LPUSH", "RPUSH", "SADD", "PFADD"];
 const REMOVE_COMMANDS: [RemoveCommand; 2] = [
     RemoveCommand {
         remove: "HDEL",

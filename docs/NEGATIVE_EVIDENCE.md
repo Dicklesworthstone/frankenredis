@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-24 cod-b `frankenredis-uhthd` PFADD decoded-register cache rejected
+
+BOLD-VERIFY targeted the ledgered PFADD structural loss against Redis 7.2.4:
+FrankenRedis reparses the serialized HLL payload on each existing-key PFADD,
+while Redis mutates the HLL representation in place. The alien-graveyard route
+tested a narrow decoded-register cache reuse in `Store::pfadd`: if the internal
+HLL register cache matched the entry modification counter, PFADD reused cached
+registers instead of reparsing. The source hunk is rejected and not present in
+this commit.
+
+Focused gate:
+`AGENT_NAME=IvoryCoyote RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server
+rch exec -- cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- PFADD_1v --noplot`.
+
+Same-worker `ovh-a` evidence:
+
+| gate | Redis median throughput | FrankenRedis median throughput | fr/Redis throughput | direct FR vs control | verdict |
+|---|---:|---:|---:|---:|---|
+| current control | `1.7976 Melem/s` | `543.30 Kelem/s` | `0.302x` | baseline | target loss |
+| decoded-register cache candidate | `1.8358 Melem/s` | `551.39 Kelem/s` | `0.300x` | `1.015x` | reject; noise-scale direct gain and no Redis-ratio improvement |
+
+Discarded routing-only row: an earlier rch local-fallback candidate bench used a
+different host/load path and produced Redis `1.1577 Melem/s`, FrankenRedis
+`196.53 Kelem/s`, fr/Redis `0.170x`; it is not comparable to the `ovh-a`
+control/candidate pair.
+
+Scorecard: **0 wins / 0 losses / 1 neutral** versus the current control, and
+the Redis-relative cell remains a severe loss (`~0.30x`). Decision: **REJECT /
+source reverted**. Keep only the benchmark coverage so future PFADD work can be
+filtered directly. Next credible route is the structural fix already identified
+in this ledger: decoded-register storage or in-place sparse/dense HLL mutation,
+not a side cache that still re-encodes the whole payload on writes.
+
+Gates while the candidate hunk was applied: RCH `cargo test -p fr-store
+pfadd_reuses_register_cache_without_changing_hll_bytes -- --nocapture`, RCH
+`cargo test -p fr-store hll -- --nocapture`, RCH `cargo check -p fr-store
+--all-targets`, RCH `cargo clippy -p fr-store --all-targets -- -D warnings`,
+and `cargo fmt -p fr-store --check` passed. Post-revert gates for the evidence
+commit: `cargo fmt -p fr-bench --check`, RCH `cargo check -p fr-bench
+--all-targets`, RCH `cargo clippy -p fr-bench --all-targets -- -D warnings`,
+and RCH `cargo test -p fr-conformance -- --nocapture` passed.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE listpack-span fast path rejected
 
 BOLD-VERIFY targeted the quicklist2 packed RESTORE loss against Redis 7.2.4.
