@@ -4692,6 +4692,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zrevrangebylex_borrowed(
+                        packet.key,
+                        packet.max,
+                        packet.min,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_zrangebylex_borrowed(
@@ -9057,6 +9080,42 @@ fn parse_borrowed_plain_zrangebylex_packet<'a>(
         key,
         min,
         max,
+    })
+}
+
+// (frankenredis-zrbylexfast) ZREVRANGEBYLEX key max min (4-element, no-option form).
+// Wire order is key, max, min (mirror of ZRANGEBYLEX with reversed bounds).
+struct BorrowedPlainZrevrangebylexPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    max: &'a [u8],
+    min: &'a [u8],
+}
+
+fn parse_borrowed_plain_zrevrangebylex_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZrevrangebylexPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZREVRANGEBYLEX".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$14\r\n").and_then(|rest| {
+        rest.get(..14)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZREVRANGEBYLEX"))
+            .map(|_| input.len() - rest.len() + 14)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (max, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (min, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainZrevrangebylexPacket {
+        consumed,
+        key,
+        max,
+        min,
     })
 }
 
