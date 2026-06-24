@@ -14,6 +14,25 @@ const HOST: &str = "127.0.0.1";
 const COMMANDS_PER_ITER: usize = 64;
 const ARITIES: [usize; 6] = [1, 4, 5, 8, 12, 16];
 const COMMANDS: [&str; 3] = ["LPUSH", "RPUSH", "SADD"];
+const REMOVE_COMMANDS: [RemoveCommand; 2] = [
+    RemoveCommand {
+        remove: "HDEL",
+        prefill: "HSET",
+    },
+    RemoveCommand {
+        remove: "SREM",
+        prefill: "SADD",
+    },
+];
+
+#[derive(Clone, Copy)]
+struct RemoveCommand {
+    remove: &'static str,
+    prefill: &'static str,
+}
+const DELETE_ARITIES: [usize; 4] = [1, 4, 8, 16];
+const DELETE_COMMANDS: [&str; 2] = ["HDEL", "SREM"];
+const LINSERT_LIST_LEN: usize = 64;
 
 #[derive(Clone, Copy)]
 struct Engine {
@@ -159,7 +178,89 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
         }
     }
 
+    for cmd in DELETE_COMMANDS {
+        for arity in DELETE_ARITIES {
+            let (prefill_packet, delete_packet) =
+                pipelined_keyed_delete_packets(cmd, arity, COMMANDS_PER_ITER);
+            for engine in engines {
+                let id = BenchmarkId::new(format!("{cmd}_{arity}v"), engine.name);
+                group.bench_with_input(id, &engine, |b, engine| {
+                    let mut client = Client::connect(engine.port);
+                    b.iter_custom(|iters| {
+                        client.flushall();
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iters {
+                            client.run_packet(&prefill_packet, COMMANDS_PER_ITER);
+                            let start = Instant::now();
+                            client.run_packet(&delete_packet, COMMANDS_PER_ITER);
+                            elapsed += start.elapsed();
+                        }
+                        client.flushall();
+                        elapsed
+                    });
+                });
+            }
+        }
+    }
+
     group.finish();
+
+    let mut remove_group = c.benchmark_group("keyed_remove_vs_redis");
+    remove_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+
+    for cmd in REMOVE_COMMANDS {
+        let prefill = pipelined_remove_prefill_packet(cmd, COMMANDS_PER_ITER);
+        let remove = pipelined_keyed_remove_packet(cmd.remove, COMMANDS_PER_ITER);
+        for engine in engines {
+            let id = BenchmarkId::new(cmd.remove, engine.name);
+            remove_group.bench_with_input(id, &engine, |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&prefill, COMMANDS_PER_ITER);
+                        let start = Instant::now();
+                        client.run_packet(&remove, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            });
+        }
+    }
+
+    remove_group.finish();
+
+    let mut linsert_group = c.benchmark_group("linsert_vs_redis");
+    linsert_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+
+    let linsert_prefill = linsert_prefill_packet(LINSERT_LIST_LEN);
+    let linsert_insert = pipelined_linsert_packet(COMMANDS_PER_ITER, LINSERT_LIST_LEN / 2);
+    for engine in engines {
+        linsert_group.bench_with_input(
+            BenchmarkId::new("LINSERT_mid", engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&linsert_prefill, 1);
+                        let start = Instant::now();
+                        client.run_packet(&linsert_insert, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            },
+        );
+    }
+
+    linsert_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -264,12 +365,111 @@ fn keyed_write_command(cmd: &str, arity: usize) -> Vec<u8> {
     encode_command(&args)
 }
 
+fn pipelined_remove_prefill_packet(cmd: RemoveCommand, count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for idx in 0..count {
+        let member = remove_member(idx);
+        if cmd.prefill == "HSET" {
+            packet.extend_from_slice(&encode_command(&[cmd.prefill, "k", &member, "v"]));
+        } else {
+            packet.extend_from_slice(&encode_command(&[cmd.prefill, "k", &member]));
+        }
+    }
+    packet
+}
+
+fn pipelined_keyed_remove_packet(cmd: &str, count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for idx in 0..count {
+        let member = remove_member(idx);
+        packet.extend_from_slice(&encode_command(&[cmd, "k", &member]));
+    }
+    packet
+}
+
+fn remove_member(idx: usize) -> String {
+    format!("m{idx:03}")
+}
+
+fn pipelined_keyed_delete_packets(cmd: &str, arity: usize, count: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut prefill = Vec::with_capacity(count * (48 + arity * 16));
+    let mut delete = Vec::with_capacity(count * (40 + arity * 12));
+    for index in 0..count {
+        prefill.extend_from_slice(&keyed_delete_prefill_command(cmd, arity, index));
+        delete.extend_from_slice(&keyed_delete_command(cmd, arity, index));
+    }
+    (prefill, delete)
+}
+
+fn keyed_delete_prefill_command(cmd: &str, arity: usize, index: usize) -> Vec<u8> {
+    let mut args = Vec::with_capacity(arity * 2 + 2);
+    if cmd == "HDEL" {
+        args.push(b"HSET".to_vec());
+        args.push(b"k".to_vec());
+        for value_index in 0..arity {
+            args.push(format!("f{index}_{value_index}").into_bytes());
+            args.push(b"v".to_vec());
+        }
+    } else {
+        args.push(b"SADD".to_vec());
+        args.push(b"k".to_vec());
+        for value_index in 0..arity {
+            args.push(format!("m{index}_{value_index}").into_bytes());
+        }
+    }
+    encode_command_vecs(&args)
+}
+
+fn keyed_delete_command(cmd: &str, arity: usize, index: usize) -> Vec<u8> {
+    let mut args = Vec::with_capacity(arity + 2);
+    args.push(cmd.as_bytes().to_vec());
+    args.push(b"k".to_vec());
+    let prefix = if cmd == "HDEL" { b'f' } else { b'm' };
+    for value_index in 0..arity {
+        args.push(format!("{}{index}_{value_index}", prefix as char).into_bytes());
+    }
+    encode_command_vecs(&args)
+}
+
+fn linsert_prefill_packet(list_len: usize) -> Vec<u8> {
+    let mut args = Vec::with_capacity(list_len + 2);
+    args.push(b"RPUSH".to_vec());
+    args.push(b"k".to_vec());
+    for index in 0..list_len {
+        args.push(format!("v{index:03}").into_bytes());
+    }
+    encode_command_vecs(&args)
+}
+
+fn pipelined_linsert_packet(count: usize, pivot_index: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 56);
+    let pivot = format!("v{pivot_index:03}");
+    for index in 0..count {
+        let element = format!("x{index:03}");
+        packet.extend_from_slice(&encode_command(&[
+            "LINSERT", "k", "BEFORE", &pivot, &element,
+        ]));
+    }
+    packet
+}
+
 fn encode_command(args: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
     for arg in args {
         out.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
         out.extend_from_slice(arg.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+fn encode_command_vecs(args: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
+    for arg in args {
+        out.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+        out.extend_from_slice(arg);
         out.extend_from_slice(b"\r\n");
     }
     out

@@ -3877,6 +3877,23 @@ LESSON: when the runtime execute is already variadic-capable (chunks_exact), ext
 parser-only change. Session levers now include the full SET surface + HSET 1/2/3/4-field. Remaining: HSET 5+
 fields (rare), LINSERT (scan), structural (PFADD/6lgnu/b1o02, CoralOx).
 
+### 2026-06-24 (part 49) LINSERT borrowed fast-path LANDED — ~1.71-1.74x vs prior fr, still workload-sensitive vs Redis 7.2.4 (cc/BlackThrush)
+Verified main/origin at `951ca286a382bcc1b62ffae795e2a0993d49fc8e` contains the LINSERT borrowed fast path in
+fr-runtime/fr-server. The landed proof records `LINSERT key BEFORE|AFTER pivot element` (*5) as byte-exact vs
+Redis 7.2.4 across BEFORE/AFTER hit, lowercase token, pivot-absent (-1), key-missing (0), WRONGTYPE,
+bad-direction, wrong-arity, and empty pivot. A/B proof from the commit: pipelined absent-pivot BEFORE improved
+candidate/control **1.735x** and measured candidate/Redis **0.860x**; AFTER improved **1.713x** and measured
+candidate/Redis **0.829x**. fr-conformance in the landing proof: 99/0 GREEN.
+
+Added focused Criterion coverage for this surface in `fr-bench` (`linsert_vs_redis/LINSERT_mid`, 64-element list,
+mid-pivot hit, 64-command packet) plus HDEL/SREM delete/remove Redis-ratio rows. A local warm-target rerun was
+needed because the remote RCH bench worker did not have `REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server`;
+with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, the focused LINSERT_mid run measured Redis
+median throughput **35.074 Kelem/s** vs FrankenRedis **37.253 Kelem/s**, i.e. **1.062x** fr/Redis throughput
+(time median 1.8247 ms Redis vs 1.7180 ms fr, **0.942x** fr/Redis time). Treat this as a workload-specific guard,
+not a broad dominance claim: the absent-pivot commit proof remains below Redis, while the mid-pivot Criterion row
+is slightly above Redis but has overlapping intervals.
+
 ### 2026-06-23 (part 48) HSET 5-8 field fast-path SHIPPED — ~1.44x (extend multi parser to MGET/MSET 8-cap) (cc/BlackThrush)
 Extended parse_borrowed_plain_hset_multi_packet from 3-4 fields (*8/*10) to 3-8 fields (*8..*18), matching the
 MGET/MSET 8-arity convention; reuses the variadic execute. Also tightened the max_array_len guard to a per-N
