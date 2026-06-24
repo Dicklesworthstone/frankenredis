@@ -49,6 +49,49 @@ commit: `cargo fmt -p fr-bench --check`, RCH `cargo check -p fr-bench
 --all-targets`, RCH `cargo clippy -p fr-bench --all-targets -- -D warnings`,
 and RCH `cargo test -p fr-conformance -- --nocapture` passed.
 
+## 2026-06-24 BlackThrush XINFO CONSUMERS fused consumer-state map kept, Redis parity gap remains
+
+LANDED a measured `.worktrees` win from
+`/data/projects/.worktrees/frankenredis-coralox-20260611T1925`: fuse stream
+consumer metadata and pending counts into one ordered `consumer_states` map in
+`fr-store`, while preserving the public `consumers` and `consumer_metadata`
+mirrors for persistence/runtime readers. The old hot path walked the consumer
+set, looked up per-consumer pending counts in a second map, and fell back to a
+pending scan for legacy restored metadata; the landed path walks the fused map
+directly for `XINFO CONSUMERS`.
+
+Historical same-worker store harness proof from the worktree:
+
+| gate | baseline | candidate | direct candidate/control | verdict |
+|---|---:|---:|---:|---|
+| paired, 50k pending / 1k consumers / 5k iters | `881.5 ms +/- 24.1` | `242.7 ms +/- 12.6` | `3.63x +/- 0.21` | keep |
+| reversed order | `886.2 ms +/- 24.1` | `236.4 ms +/- 4.3` | `3.75x +/- 0.12` | keep |
+
+Fresh head-to-head TCP ratio vs Redis 7.2.4 after porting to current `main`
+(`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, release
+`fr-server` built with `cargo build --release -p fr-server`):
+
+| workload | Redis median | FrankenRedis median | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `XINFO CONSUMERS s g`, 50k pending / 1k consumers, 5x100 pipelined calls | `3.342199 ms` (`299.20/s`) | `3.414762 ms` (`292.85/s`) | `0.979x` | near parity; no Redis domination claim |
+
+Decision: **KEEP as a real FrankenRedis hot-path win, but record the Redis
+7.2.4 ratio as still slightly red on TCP output-heavy traffic**. This is not a
+~0-gain revert because the worktree's direct same-worker store proof is a
+3.6-3.8x candidate/control improvement, and the fresh Redis ratio is close to
+parity rather than a structural regression. Next credible route for Redis
+domination is response encoding/output buffering, not another consumer-count
+map micro-lever.
+
+Gates: `cargo fmt -p fr-store -- --check`; RCH
+`cargo check -p fr-store --all-targets`; RCH
+`cargo clippy -p fr-store --all-targets -- -D warnings`; RCH
+`cargo test -p fr-store stream_ -- --nocapture` (`75` stream-related unit
+tests plus filtered integrations); local warm-target
+`cargo test -p fr-conformance -- --nocapture` after an ignored
+`legacy_redis_code` symlink (RCH remote ignores the oracle checkout), green:
+`194` library tests, all conformance binaries, `99` smoke tests, doctests.
+
 ## 2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE listpack-span fast path rejected
 
 BOLD-VERIFY targeted the quicklist2 packed RESTORE loss against Redis 7.2.4.

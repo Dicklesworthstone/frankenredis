@@ -430,6 +430,12 @@ pub struct StreamConsumerMetadata {
     pub active_time_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct StreamConsumerState {
+    metadata: StreamConsumerMetadata,
+    pending_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamGroup {
     pub last_delivered_id: StreamId,
@@ -440,8 +446,8 @@ pub struct StreamGroup {
     /// upstream Redis 7.2.4. Populated alongside `consumers` on
     /// every consumer create/touch path.
     pub consumer_metadata: BTreeMap<Vec<u8>, StreamConsumerMetadata>,
+    consumer_states: BTreeMap<Vec<u8>, StreamConsumerState>,
     pub pending: StreamPendingEntries,
-    pending_by_consumer: BTreeMap<Vec<u8>, usize>,
 }
 
 impl StreamGroup {
@@ -453,40 +459,117 @@ impl StreamGroup {
         counts
     }
 
-    fn increment_pending_consumer(&mut self, consumer: &[u8]) {
-        *self
-            .pending_by_consumer
-            .entry(consumer.to_vec())
-            .or_default() += 1;
+    fn pending_counts_from_consumer_states(&self) -> BTreeMap<Vec<u8>, usize> {
+        self.consumer_states
+            .iter()
+            .filter(|(_, state)| state.pending_count > 0)
+            .map(|(consumer, state)| (consumer.clone(), state.pending_count))
+            .collect()
     }
 
-    fn decrement_pending_consumer(&mut self, consumer: &[u8]) {
-        let Some(count) = self.pending_by_consumer.get_mut(consumer) else {
+    fn consumer_states_from_parts(
+        consumers: &BTreeSet<Vec<u8>>,
+        consumer_metadata: &BTreeMap<Vec<u8>, StreamConsumerMetadata>,
+        pending: &StreamPendingEntries,
+    ) -> BTreeMap<Vec<u8>, StreamConsumerState> {
+        let mut states: BTreeMap<Vec<u8>, StreamConsumerState> = consumers
+            .iter()
+            .map(|consumer| {
+                (
+                    consumer.clone(),
+                    StreamConsumerState {
+                        metadata: consumer_metadata.get(consumer).copied().unwrap_or_default(),
+                        pending_count: 0,
+                    },
+                )
+            })
+            .collect();
+        for pending_entry in pending.values() {
+            let Some(state) = states.get_mut(&pending_entry.consumer) else {
+                debug_assert!(false, "pending consumer missing from stream group");
+                continue;
+            };
+            state.pending_count = state.pending_count.saturating_add(1);
+        }
+        states
+    }
+
+    fn insert_consumer(&mut self, consumer: Vec<u8>) -> bool {
+        let created = self.consumers.insert(consumer.clone());
+        let metadata = self
+            .consumer_metadata
+            .get(&consumer)
+            .copied()
+            .unwrap_or_default();
+        self.consumer_states
+            .entry(consumer.clone())
+            .or_insert(StreamConsumerState {
+                metadata,
+                pending_count: 0,
+            });
+        self.consumer_metadata.entry(consumer).or_default();
+        created
+    }
+
+    fn set_consumer_metadata(&mut self, consumer: Vec<u8>, metadata: StreamConsumerMetadata) {
+        self.consumer_metadata.insert(consumer.clone(), metadata);
+        self.consumer_states.entry(consumer).or_default().metadata = metadata;
+    }
+
+    fn set_consumer_seen_time(&mut self, consumer: &[u8], now_ms: u64) {
+        let metadata = self.consumer_metadata.entry(consumer.to_vec()).or_default();
+        metadata.seen_time_ms = now_ms;
+        let state = self.consumer_states.entry(consumer.to_vec()).or_default();
+        state.metadata.seen_time_ms = now_ms;
+        state.metadata.active_time_ms = metadata.active_time_ms;
+    }
+
+    fn set_consumer_active_time(&mut self, consumer: &[u8], now_ms: u64) {
+        let metadata = self.consumer_metadata.entry(consumer.to_vec()).or_default();
+        metadata.active_time_ms = Some(now_ms);
+        let state = self.consumer_states.entry(consumer.to_vec()).or_default();
+        state.metadata.seen_time_ms = metadata.seen_time_ms;
+        state.metadata.active_time_ms = Some(now_ms);
+    }
+
+    fn touch_consumer_active(&mut self, consumer: &[u8], now_ms: u64) {
+        self.set_consumer_seen_time(consumer, now_ms);
+        self.set_consumer_active_time(consumer, now_ms);
+    }
+
+    fn increment_pending_consumer(&mut self, consumer: &[u8]) {
+        let Some(state) = self.consumer_states.get_mut(consumer) else {
             debug_assert!(false, "pending consumer count missing");
             return;
         };
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            self.pending_by_consumer.remove(consumer);
-        }
+        state.pending_count = state.pending_count.saturating_add(1);
+    }
+
+    fn decrement_pending_consumer(&mut self, consumer: &[u8]) {
+        let Some(state) = self.consumer_states.get_mut(consumer) else {
+            debug_assert!(false, "pending consumer count missing");
+            return;
+        };
+        state.pending_count = state.pending_count.saturating_sub(1);
     }
 
     fn pending_count_for_consumer(&self, consumer: &[u8]) -> usize {
-        self.pending_by_consumer
+        self.consumer_states
             .get(consumer)
-            .copied()
+            .map(|state| state.pending_count)
             .unwrap_or_default()
     }
 
     fn pending_summary_consumers(&self) -> Vec<StreamPendingSummaryConsumer> {
         debug_assert_eq!(
-            self.pending_by_consumer,
+            self.pending_counts_from_consumer_states(),
             Self::pending_counts_from_entries(&self.pending),
             "stream PEL per-consumer count drift"
         );
-        self.pending_by_consumer
+        self.consumer_states
             .iter()
-            .map(|(consumer, &count)| (consumer.clone(), count))
+            .filter(|(_, state)| state.pending_count > 0)
+            .map(|(consumer, state)| (consumer.clone(), state.pending_count))
             .collect()
     }
 }
@@ -15584,6 +15667,8 @@ impl Store {
     ) {
         let groups = self.stream_groups.entry(key.to_vec()).or_default();
         let consumers: BTreeSet<Vec<u8>> = consumer_metadata.keys().cloned().collect();
+        let consumer_states =
+            StreamGroup::consumer_states_from_parts(&consumers, &consumer_metadata, &pending);
         groups.insert(
             group_name,
             StreamGroup {
@@ -15591,7 +15676,7 @@ impl Store {
                 entries_read,
                 consumers,
                 consumer_metadata,
-                pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
+                consumer_states,
                 pending,
             },
         );
@@ -16168,7 +16253,7 @@ impl Store {
             return Ok(None);
         };
         let consumer = consumer.to_vec();
-        let consumer_created = group_state.consumers.insert(consumer.clone());
+        let consumer_created = group_state.insert_consumer(consumer.clone());
         if consumer_created {
             // (frankenredis-6zb4d) Upstream t_stream.c xreadCommand creates a
             // missing consumer via streamCreateConsumer(SCC_DEFAULT), which does
@@ -16178,12 +16263,7 @@ impl Store {
         }
         // (frankenredis-p4dpj) XREADGROUP is the canonical "active"
         // path: stamp both seen_time and active_time to now_ms.
-        let meta = group_state
-            .consumer_metadata
-            .entry(consumer.clone())
-            .or_insert(StreamConsumerMetadata::default());
-        meta.seen_time_ms = now_ms;
-        meta.active_time_ms = Some(now_ms);
+        group_state.touch_consumer_active(&consumer, now_ms);
         if let StreamGroupReadCursor::NewEntries = cursor
             && let Some(last_seen_id) = last_seen_id
         {
@@ -16452,7 +16532,7 @@ impl Store {
         // destination consumer. fr was deferring this insertion to the
         // bottom of the function and gating it on a non-empty
         // claimed_ids — empty claims left the consumer absent.
-        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.insert_consumer(consumer_vec.clone());
         if consumer_created {
             // (frankenredis-6zb4d) Upstream xclaimCommand creates the
             // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
@@ -16460,11 +16540,7 @@ impl Store {
             // claimed (the per-entry bump below is in addition to this).
             self.dirty = self.dirty.saturating_add(1);
         }
-        let meta = group_state
-            .consumer_metadata
-            .entry(consumer_vec.clone())
-            .or_insert(StreamConsumerMetadata::default());
-        meta.seen_time_ms = now_ms;
+        group_state.set_consumer_seen_time(&consumer_vec, now_ms);
 
         for id in ids {
             let Some(fields) = stream_records.get(id) else {
@@ -16540,11 +16616,7 @@ impl Store {
             // The consumer/seen_time were already upserted up-front
             // (frankenredis-v9p5j); here we only bump active_time and
             // the dirty counter when entries actually moved.
-            let meta = group_state
-                .consumer_metadata
-                .entry(consumer_vec)
-                .or_insert(StreamConsumerMetadata::default());
-            meta.active_time_ms = Some(now_ms);
+            group_state.set_consumer_active_time(&consumer_vec, now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
@@ -16657,7 +16729,7 @@ impl Store {
         // bumps its seen_time. fr was gating the insertion on a
         // non-empty claimed_ids, so XINFO CONSUMERS showed nothing for
         // the cursor-driven first call.
-        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.insert_consumer(consumer_vec.clone());
         if consumer_created {
             // (frankenredis-6zb4d) Upstream xautoclaimCommand creates the
             // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
@@ -16665,11 +16737,7 @@ impl Store {
             // claimed (the per-entry bump below is in addition to this).
             self.dirty = self.dirty.saturating_add(1);
         }
-        let meta = group_state
-            .consumer_metadata
-            .entry(consumer_vec.clone())
-            .or_insert(StreamConsumerMetadata::default());
-        meta.seen_time_ms = now_ms;
+        group_state.set_consumer_seen_time(&consumer_vec, now_ms);
 
         for id in &claimed_ids {
             if let Some(pending_entry) = group_state.pending.get_mut(id) {
@@ -16690,11 +16758,7 @@ impl Store {
             // event. Seen/insertion already happened up-front
             // (frankenredis-v9p5j); only bump active_time + dirty
             // when entries actually moved.
-            let meta = group_state
-                .consumer_metadata
-                .entry(consumer_vec)
-                .or_insert(StreamConsumerMetadata::default());
-            meta.active_time_ms = Some(now_ms);
+            group_state.set_consumer_active_time(&consumer_vec, now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
@@ -16879,7 +16943,7 @@ impl Store {
                 entries_read,
                 consumers: BTreeSet::new(),
                 consumer_metadata: BTreeMap::new(),
-                pending_by_consumer: BTreeMap::new(),
+                consumer_states: BTreeMap::new(),
                 pending: BTreeMap::new(),
             },
         );
@@ -17037,7 +17101,7 @@ impl Store {
                     let Some(group_state) = groups.get_mut(group) else {
                         return Ok(None);
                     };
-                    let created = group_state.consumers.insert(consumer.to_vec());
+                    let created = group_state.insert_consumer(consumer.to_vec());
                     if created {
                         // (frankenredis-p4dpj) XGROUP CREATECONSUMER
                         // seeds seen_time_ms at creation but leaves
@@ -17045,7 +17109,7 @@ impl Store {
                         // first claims/reads entries. This is the path
                         // where vendored's XINFO CONSUMERS emits
                         // inactive = -1.
-                        group_state.consumer_metadata.insert(
+                        group_state.set_consumer_metadata(
                             consumer.to_vec(),
                             StreamConsumerMetadata {
                                 seen_time_ms: now_ms,
@@ -17080,43 +17144,45 @@ impl Store {
                     let Some(group_state) = groups.get(group) else {
                         return Ok(None);
                     };
-                    let mut result: Vec<StreamConsumerInfoEx> = Vec::new();
-                    for consumer_name in &group_state.consumers {
-                        let pending_count = group_state.pending_count_for_consumer(consumer_name);
+                    debug_assert_eq!(
+                        group_state.consumers.len(),
+                        group_state.consumer_states.len(),
+                        "stream consumer state drift"
+                    );
+                    let mut result: Vec<StreamConsumerInfoEx> =
+                        Vec::with_capacity(group_state.consumer_states.len());
+                    for (consumer_name, consumer_state) in &group_state.consumer_states {
+                        let pending_count = consumer_state.pending_count;
                         // (frankenredis-p4dpj) Idle = ms since seen_time;
                         // for legacy compatibility (consumers restored
                         // from RDB with seen_time = 0) fall back to
                         // the last_delivered_ms across pending entries.
-                        let meta = group_state.consumer_metadata.get(consumer_name);
-                        let idle_ms = match meta {
-                            Some(m) if m.seen_time_ms > 0 => now_ms.saturating_sub(m.seen_time_ms),
-                            _ => {
-                                let last_delivery = group_state
-                                    .pending
-                                    .values()
-                                    .filter(|pe| pe.consumer == *consumer_name)
-                                    .map(|pe| pe.last_delivered_ms)
-                                    .max()
-                                    .unwrap_or(0);
-                                if last_delivery > 0 {
-                                    now_ms.saturating_sub(last_delivery)
-                                } else {
-                                    0
-                                }
+                        let metadata = consumer_state.metadata;
+                        let idle_ms = if metadata.seen_time_ms > 0 {
+                            now_ms.saturating_sub(metadata.seen_time_ms)
+                        } else {
+                            let last_delivery = group_state
+                                .pending
+                                .values()
+                                .filter(|pe| pe.consumer == *consumer_name)
+                                .map(|pe| pe.last_delivered_ms)
+                                .max()
+                                .unwrap_or(0);
+                            if last_delivery > 0 {
+                                now_ms.saturating_sub(last_delivery)
+                            } else {
+                                0
                             }
                         };
                         // (frankenredis-p4dpj) inactive = ms since
                         // active_time when set; -1 sentinel otherwise
                         // (matching upstream consumer->active_time =
                         // -1 default until first XREADGROUP/XCLAIM).
-                        let inactive_ms_or_neg_one: i64 = match meta {
-                            Some(m) => match m.active_time_ms {
-                                Some(at) if at > 0 => {
-                                    i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
-                                }
-                                _ => -1,
-                            },
-                            None => -1,
+                        let inactive_ms_or_neg_one: i64 = match metadata.active_time_ms {
+                            Some(at) if at > 0 => {
+                                i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
+                            }
+                            _ => -1,
                         };
                         result.push((
                             consumer_name.clone(),
@@ -17151,11 +17217,12 @@ impl Store {
                     let Some(group_state) = groups.get_mut(group) else {
                         return Ok(None);
                     };
+                    let cached_removed_pending = group_state.pending_count_for_consumer(consumer);
                     let consumer_existed = group_state.consumers.remove(consumer);
                     // (frankenredis-p4dpj) Drop the metadata alongside.
                     group_state.consumer_metadata.remove(consumer);
+                    group_state.consumer_states.remove(consumer);
                     let mut removed_pending = 0_u64;
-                    let cached_removed_pending = group_state.pending_count_for_consumer(consumer);
                     group_state.pending.retain(|_, pending_entry| {
                         let keep = pending_entry.consumer.as_slice() != consumer;
                         if !keep {
@@ -17163,9 +17230,6 @@ impl Store {
                         }
                         keep
                     });
-                    if cached_removed_pending > 0 {
-                        group_state.pending_by_consumer.remove(consumer);
-                    }
                     debug_assert_eq!(removed_pending as usize, cached_removed_pending);
                     // (frankenredis-xgdelcon-dirty) Upstream t_stream.c::
                     // xgroupCommand bumps server.dirty (and fires the
@@ -20768,15 +20832,12 @@ impl Store {
                         // CONSUMERS idle/inactive survive a dump/load round-trip.
                         // (frankenredis-sq4ov)
                         consumers: group
-                            .consumers
+                            .consumer_states
                             .iter()
-                            .map(|name| {
-                                let meta = group.consumer_metadata.get(name).copied();
-                                fr_persist::RdbStreamConsumer {
-                                    name: name.clone(),
-                                    seen_time_ms: meta.map(|m| m.seen_time_ms).unwrap_or(0),
-                                    active_time_ms: meta.and_then(|m| m.active_time_ms),
-                                }
+                            .map(|(name, state)| fr_persist::RdbStreamConsumer {
+                                name: name.clone(),
+                                seen_time_ms: state.metadata.seen_time_ms,
+                                active_time_ms: state.metadata.active_time_ms,
                             })
                             .collect(),
                         pending: group
@@ -22309,12 +22370,14 @@ fn restore_stream_groups(
             }
         }
         let group_name = group.name;
+        let consumer_states =
+            StreamGroup::consumer_states_from_parts(&consumers_set, &consumer_metadata, &pending);
         let restored_group = StreamGroup {
             last_delivered_id: (group.last_delivered_id_ms, group.last_delivered_id_seq),
             entries_read: group.entries_read,
             consumers: consumers_set,
             consumer_metadata,
-            pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
+            consumer_states,
             pending,
         };
         if restored.insert(group_name, restored_group).is_some() {
@@ -34457,7 +34520,10 @@ mod tests {
     // edge shapes; plus a Score microbench on a many-consumer / large-PEL group.
     #[test]
     fn append_group_consumer_aof_commands_isomorphic_and_faster_aofpel() {
-        use super::{StreamGroup, StreamPendingEntry, append_group_consumer_aof_commands};
+        use super::{
+            StreamConsumerState, StreamGroup, StreamPendingEntry,
+            append_group_consumer_aof_commands,
+        };
         use std::collections::{BTreeMap, BTreeSet};
 
         // Old behavior: nested per-consumer filter over the whole PEL.
@@ -34548,12 +34614,16 @@ mod tests {
                     },
                 );
             }
+            let consumer_states = cset
+                .iter()
+                .map(|consumer| (consumer.clone(), StreamConsumerState::default()))
+                .collect();
             let group = StreamGroup {
                 last_delivered_id: (0, 0),
                 entries_read: None,
                 consumers: cset,
                 consumer_metadata: BTreeMap::new(),
-                pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
+                consumer_states,
                 pending,
             };
             let mut got = Vec::new();
@@ -34594,12 +34664,14 @@ mod tests {
                 },
             );
         }
+        let consumer_states =
+            StreamGroup::consumer_states_from_parts(&cset, &BTreeMap::new(), &pending);
         let group = StreamGroup {
             last_delivered_id: (0, 0),
             entries_read: None,
             consumers: cset,
             consumer_metadata: BTreeMap::new(),
-            pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
+            consumer_states,
             pending,
         };
         let reps = 200;
