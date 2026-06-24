@@ -411,6 +411,12 @@ pub enum PlainKeyedValuesCmd {
     // notifications/replication/AOF/tracking are active, so no extra side effects).
     Hdel,
     Srem,
+    // (frankenredis-zremfast) Variadic zset DELETE sibling — `ZREM key member
+    // [member ...]` -> Integer(count removed). Identical wire shape + reply +
+    // accounting to SREM (store.zrem mirrors store.srem: type-check, keyspace
+    // hit/miss, dirty, empty-key autodelete), so it shares this borrowed fast path;
+    // gated off whenever notifications/replication/AOF/tracking are active.
+    Zrem,
     // (frankenredis-pushxfast) Conditional variadic push siblings — `CMD key member
     // [member ...]` -> Integer(new length, 0 when the key is absent so it is NOT
     // created). Same wire shape + reply as LPUSH/RPUSH; routed to store.lpushx/rpushx
@@ -430,6 +436,7 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Rpush => "RPUSH",
             PlainKeyedValuesCmd::Hdel => "HDEL",
             PlainKeyedValuesCmd::Srem => "SREM",
+            PlainKeyedValuesCmd::Zrem => "ZREM",
             PlainKeyedValuesCmd::Lpushx => "LPUSHX",
             PlainKeyedValuesCmd::Rpushx => "RPUSHX",
         }
@@ -444,6 +451,7 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Rpush => "rpush",
             PlainKeyedValuesCmd::Hdel => "hdel",
             PlainKeyedValuesCmd::Srem => "srem",
+            PlainKeyedValuesCmd::Zrem => "zrem",
             PlainKeyedValuesCmd::Lpushx => "lpushx",
             PlainKeyedValuesCmd::Rpushx => "rpushx",
         }
@@ -9117,6 +9125,11 @@ impl Runtime {
                 .server
                 .store
                 .srem(key, values, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Zrem => self
+                .server
+                .store
+                .zrem(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
             // (frankenredis-pushxfast) store.lpushx/rpushx take owned values + own
             // the exists-check, keyspace/dirty accounting, and (no) autocreate —

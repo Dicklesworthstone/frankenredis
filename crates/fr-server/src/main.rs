@@ -9243,6 +9243,8 @@ fn parse_borrowed_plain_keyed_values18_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9353,6 +9355,8 @@ fn parse_borrowed_plain_keyed_values17_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9460,6 +9464,8 @@ fn parse_borrowed_plain_keyed_values16_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9564,6 +9570,8 @@ fn parse_borrowed_plain_keyed_values15_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9665,6 +9673,8 @@ fn parse_borrowed_plain_keyed_values14_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9763,6 +9773,8 @@ fn parse_borrowed_plain_keyed_values13_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9858,6 +9870,8 @@ fn parse_borrowed_plain_keyed_values12_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -9950,6 +9964,8 @@ fn parse_borrowed_plain_keyed_values11_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10039,6 +10055,8 @@ fn parse_borrowed_plain_keyed_values10_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10125,6 +10143,8 @@ fn parse_borrowed_plain_keyed_values9_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10208,6 +10228,8 @@ fn parse_borrowed_plain_keyed_values8_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10288,6 +10310,8 @@ fn parse_borrowed_plain_keyed_values7_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10365,6 +10389,8 @@ fn parse_borrowed_plain_keyed_values6_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10439,6 +10465,8 @@ fn parse_borrowed_plain_keyed_values5_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10510,6 +10538,8 @@ fn parse_borrowed_plain_keyed_values4_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10570,6 +10600,8 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10629,6 +10661,8 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
@@ -10687,6 +10721,8 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
             (PlainKeyedValuesCmd::Hdel, 4)
         } else if name.eq_ignore_ascii_case(b"SREM") {
             (PlainKeyedValuesCmd::Srem, 4)
+        } else if name.eq_ignore_ascii_case(b"ZREM") {
+            (PlainKeyedValuesCmd::Zrem, 4)
         } else {
             return None;
         }
