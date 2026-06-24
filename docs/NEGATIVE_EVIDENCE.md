@@ -3972,3 +3972,16 @@ All gated by plain_borrowed_default_key_write_allows (writes) so keyspace events
 fr-conformance 99/0 GREEN for each. STILL UNCOVERED & MEASURED-SLOW (next levers, same recipe): ZRANGEBYLEX 0.49x
 (read, lex-range parse), SPOP 0.43x (mutating — needs count-form handling), ZREMRANGEBYRANK (rank compute).
 LESSON: "vein exhausted" is only true for the commands actually re-measured — grep-for-zero + probe before believing it.
+
+### 2026-06-24 (part 51) ZRANGEBYLEX borrowed READ fast-path SHIPPED — ~1.38-1.55x (0.49x→1.16-1.18x, BEATS redis) (cc/BlackThrush)
+Continuation of part-50's uncovered-command sweep. ZRANGEBYLEX key min max (no-option *4 form) had NO fast-path
+and measured 0.49x vs Redis 7.2.4. First READ lever of the batch (LIMIT/WITHSCORES *5+ stay generic). Key
+subtlety vs the writes: keyspace hit/miss accounting — the generic records it via record_source_key_lookups
+SEPARATELY from the no-stat store walk, so the fast-path calls fr_command::record_source_key_lookups(key) then
+no-stat store.zrangebylex. Malformed lex bounds fall back to generic (plain_lex_bound_well_formed mirrors
+validate_lex_bound EXACTLY, same accepted set + same "ERR min or max not valid string range item" wording) to
+preserve the pre-keyspace-accounting error order. A/B (3-way pipelined best-of-6): small-range cand/ctrl 1.553,
+cand/redis 1.157; full-range cand/ctrl 1.375, cand/redis 1.178 — fr now BEATS redis. Byte-exact incl cmdstat
+calls/failed/rejected AND keyspace_hits/misses (verified hit-on-present + miss-on-absent). fr-conformance 99/0.
+Session fast-path tally: HMGET4-8 / LINSERT / ZREM / LREM / ZRANGEBYLEX. Still uncovered+slow: SPOP 0.43x
+(mutating/random — needs structural-not-byte-exact verification), ZREMRANGEBYRANK (rank compute).
