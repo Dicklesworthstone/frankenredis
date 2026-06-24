@@ -3997,3 +3997,15 @@ timing-flaky core_object (OBJECT IDLETIME/FREQ, 97wc2) which PASSES on isolated 
 SESSION TALLY (6 fast-paths, all byte-exact): HMGET4-8 / LINSERT / ZREM / LREM / ZRANGEBYLEX / ZREVRANGEBYLEX.
 Still uncovered+slow: SPOP 0.43x (mutating/random), ZREMRANGEBYRANK/ZREMRANGEBYSCORE/ZREMRANGEBYLEX (range-delete writes),
 ZDIFF (read). The uncovered-command vein remains productive — keep grep-for-zero + probing.
+
+### 2026-06-24 (part 53) ZREMRANGEBYRANK/BYSCORE/BYLEX fast-paths SHIPPED — ~1.61-1.80x (0.45x→~0.75x vs redis) (cc/BlackThrush)
+The three *4 zset range-delete writes were 0.45-0.47x vs Redis 7.2.4 (non-matching range → :0). Each mirrors its
+fr-command handler: RANK parse_i64_arg start/stop, SCORE fr_command::parse_score_bound min/max, LEX raw bytes to
+store.zremrangebylex; all defer parse errors to generic (return None) and call the store method DIRECTLY so keyspace
+accounting matches by construction (these writes record 0/0 hits/misses — verified). Shared write-preamble + metrics +
+error-accounting + a generic *4 `CMD key arg arg` parser (parse_borrowed_plain_key_arg2_packet) to cut boilerplate.
+A/B (3-way pipelined best-of-6): RANK cand/ctrl 1.804 cand/redis 0.795; SCORE 1.673 / 0.779; LEX 1.608 / 0.721.
+Byte-exact incl zset state, autodelete, all error cases (non-int/non-float/malformed-bound → generic), cmdstat
+calls/failed/rejected + keyspace. fr-conformance 99/0 GREEN. SESSION TALLY 9 fast-paths: HMGET4-8/LINSERT/ZREM/LREM/
+ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/ZREMRANGEBYLEX. Still uncovered+slow: ZDIFF 0.62x (read),
+SPOP 0.43x (mutating/random). The "dispatch vein exhausted" claim was wrong by ~9 commands and counting.
