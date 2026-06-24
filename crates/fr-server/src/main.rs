@@ -4692,6 +4692,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_lrem_borrowed(
+                        packet.key,
+                        packet.count,
+                        packet.element,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -8936,6 +8959,43 @@ fn parse_borrowed_plain_linsert_packet<'a>(
         key,
         before,
         pivot,
+        element,
+    })
+}
+
+// (frankenredis-lremfast) LREM key count element (4-element). count bulk is passed
+// through as bytes; execute_plain_lrem_borrowed parses it as i64 and defers a
+// not-an-integer count to the generic path. element is borrowed.
+struct BorrowedPlainLremPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    count: &'a [u8],
+    element: &'a [u8],
+}
+
+fn parse_borrowed_plain_lrem_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainLremPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"LREM".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"LREM"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (count, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (element, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainLremPacket {
+        consumed,
+        key,
+        count,
         element,
     })
 }
