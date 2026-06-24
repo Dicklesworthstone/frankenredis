@@ -3985,3 +3985,15 @@ cand/redis 1.157; full-range cand/ctrl 1.375, cand/redis 1.178 — fr now BEATS 
 calls/failed/rejected AND keyspace_hits/misses (verified hit-on-present + miss-on-absent). fr-conformance 99/0.
 Session fast-path tally: HMGET4-8 / LINSERT / ZREM / LREM / ZRANGEBYLEX. Still uncovered+slow: SPOP 0.43x
 (mutating/random — needs structural-not-byte-exact verification), ZREMRANGEBYRANK (rank compute).
+
+### 2026-06-24 (part 52) ZREVRANGEBYLEX borrowed READ fast-path SHIPPED — ~1.39-1.48x (0.49x-class→1.15-1.16x, BEATS redis) (cc/BlackThrush)
+Direct mirror of part-51 ZRANGEBYLEX for the no-option *4 form `ZREVRANGEBYLEX key max min` (wire order key/max/min,
+descending walk via store.zrevrangebylex(key, max, min)). Same recipe: well-formed lex bounds only (else generic for
+canonical error), record_source_key_lookups(key) then no-stat store walk; LIMIT/WITHSCORES *5+ stay generic.
+A/B (3-way pipelined best-of-6): small cand/ctrl 1.482, cand/redis 1.145; full cand/ctrl 1.391, cand/redis 1.163 —
+fr BEATS redis. Byte-exact incl descending order, [/( inclusive/exclusive, malformed→generic, LIMIT/arity fall-through,
+cmdstat calls/failed/rejected + keyspace_hits/misses. fr-conformance: 98/1 with the SOLE failure being the known
+timing-flaky core_object (OBJECT IDLETIME/FREQ, 97wc2) which PASSES on isolated re-run — unrelated to this zset change.
+SESSION TALLY (6 fast-paths, all byte-exact): HMGET4-8 / LINSERT / ZREM / LREM / ZRANGEBYLEX / ZREVRANGEBYLEX.
+Still uncovered+slow: SPOP 0.43x (mutating/random), ZREMRANGEBYRANK/ZREMRANGEBYSCORE/ZREMRANGEBYLEX (range-delete writes),
+ZDIFF (read). The uncovered-command vein remains productive — keep grep-for-zero + probing.
