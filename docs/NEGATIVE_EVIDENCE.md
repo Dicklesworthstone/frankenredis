@@ -3949,3 +3949,26 @@ work grows so dispatch is a smaller fraction). BYTE-EXACT vs redis: 5/6/7/8-fiel
 generic = 9, 2-field regression = 1. cmdstat_hset calls=3 failed_calls=1, keyspace 0/0, errorstat_WRONGTYPE=1,
 gate PASS; fr-server 280/0; fr-conformance 347/0. HSET arity now 1-8 (matches MGET/MSET). Remaining: ZADD 3+
 members (structural-diluted), HSET/MGET/MSET 9+ (rare), LINSERT (scan), structural PFADD/6lgnu/b1o02 (CoralOx).
+
+### 2026-06-24 (part 50) HMGET 4-8 + ZREM + LREM borrowed fast-paths SHIPPED — 1.13-1.78x (uncovered-command vein REOPENED) (cc/BlackThrush)
+Three dispatch fast-paths on commands that had NO borrowed coverage, found by re-measuring commands the parts-46/48
+"vein EXHAUSTED" claim skipped. Method: `grep -c "parse_borrowed_plain_<cmd>_packet\|execute_plain_<cmd>_borrowed"`
+== 0 → measure with a non-mutating repeatable probe (absent member/element → :0 or -1, pipelined best-of-6).
+This REFUTES the blanket "exhausted" claim — several common commands were still 0.43-0.60x (pure dispatch).
+
+- **HMGET 4-8 field (d8f36394d, parser-only):** dispatch was capped at 3 fields (*5); execute_plain_hmget_borrowed
+  already variadic. Extended parser to *6..*10. cand/ctrl **1.13-1.23x**, cand/redis 0.84-0.99x. Byte-exact:
+  interleaved nils, missing key, WRONGTYPE, empty field names.
+- **ZREM (71ac89202, PlainKeyedValuesCmd):** ZREM was 0.51-0.60x. Structurally identical to SREM/HDEL (variadic
+  member removal → Integer count, store.zrem mirrors store.srem), so added as a PlainKeyedValuesCmd::Zrem variant +
+  18 keyed_valuesN parser branches → free 1-18 member coverage. cand/ctrl **1.36-1.62x**, cand/redis 0.76→1.13x
+  (fr BEATS redis at nf≥6). Byte-exact incl cmdstat calls/failed/rejected, keyspace_hits/misses, empty-zset autodelete.
+- **LREM (0447eddfd, dedicated parser+execute):** LREM was 0.55x. can/execute_plain_lrem_borrowed mirrors
+  fr-command::lrem (parse_i64_arg count, defer not-an-integer to generic like LINDEX; store.lrem owns head/tail
+  removal + autodelete). cand/ctrl **1.60-1.78x**, cand/redis 0.76-0.99x. Byte-exact across count 0/+/- /over-count
+  both dirs, +5 and notanint → generic error, missing-key, WRONGTYPE, wrong-arity, autodelete.
+
+All gated by plain_borrowed_default_key_write_allows (writes) so keyspace events/replica/AOF/tracking stay inactive.
+fr-conformance 99/0 GREEN for each. STILL UNCOVERED & MEASURED-SLOW (next levers, same recipe): ZRANGEBYLEX 0.49x
+(read, lex-range parse), SPOP 0.43x (mutating — needs count-form handling), ZREMRANGEBYRANK (rank compute).
+LESSON: "vein exhausted" is only true for the commands actually re-measured — grep-for-zero + probe before believing it.
