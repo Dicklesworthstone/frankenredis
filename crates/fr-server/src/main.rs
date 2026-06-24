@@ -4468,6 +4468,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hmget_multi_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_hmget_borrowed(
+                        packet.key,
+                        &packet.fields[..packet.len],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hget_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -9031,6 +9053,70 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         f1,
         f2,
         f3,
+    })
+}
+
+// (frankenredis-hmgetmulti) HMGET key f1..fN for 4-8 fields (*6..*10) — common
+// multi-field object reads. Reuses the variadic execute_plain_hmget_borrowed (HGET
+// is fast, so this is dispatch-bound); only the parser was capped at 3. 9+ fields
+// fall through to the generic. `fields[..len]` holds the borrowed field bulks.
+struct BorrowedPlainHmgetMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    fields: [&'a [u8]; 8],
+    len: usize,
+}
+
+fn parse_borrowed_plain_hmget_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHmgetMultiPacket<'a>> {
+    if config.max_bulk_len < b"HMGET".len() {
+        return None;
+    }
+    let hmget_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..5)
+                .filter(|c| c.eq_ignore_ascii_case(b"HMGET"))
+                .map(|_| input.len() - rest.len() + 5)
+        })
+    };
+    // nfields = array_count - 2 (HMGET + key). 1-3 fields use dedicated paths.
+    let (mut cursor, nfields, arr_len) = if let Some(c) = hmget_at(b"*6\r\n$5\r\n") {
+        (c, 4usize, 6)
+    } else if let Some(c) = hmget_at(b"*7\r\n$5\r\n") {
+        (c, 5usize, 7)
+    } else if let Some(c) = hmget_at(b"*8\r\n$5\r\n") {
+        (c, 6usize, 8)
+    } else if let Some(c) = hmget_at(b"*9\r\n$5\r\n") {
+        (c, 7usize, 9)
+    } else if let Some(c) = hmget_at(b"*10\r\n$5\r\n") {
+        (c, 8usize, 10)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arr_len {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut fields = [empty; 8];
+    let mut consumed = next;
+    for slot in fields.iter_mut().take(nfields) {
+        let (f, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = f;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainHmgetMultiPacket {
+        consumed,
+        key,
+        fields,
+        len: nfields,
     })
 }
 
