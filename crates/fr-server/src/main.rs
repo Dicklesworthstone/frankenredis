@@ -4692,6 +4692,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zrangebylex_borrowed(
+                        packet.key,
+                        packet.min,
+                        packet.max,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_lrem_borrowed(
@@ -8997,6 +9020,43 @@ fn parse_borrowed_plain_lrem_packet<'a>(
         key,
         count,
         element,
+    })
+}
+
+// (frankenredis-zbylexfast) ZRANGEBYLEX key min max (4-element, no-option form).
+// min/max bulks borrowed; execute_plain_zrangebylex_borrowed format-checks them and
+// defers malformed bounds + any LIMIT/WITHSCORES (*5+) form to the generic path.
+struct BorrowedPlainZrangebylexPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    min: &'a [u8],
+    max: &'a [u8],
+}
+
+fn parse_borrowed_plain_zrangebylex_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZrangebylexPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZRANGEBYLEX".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$11\r\n").and_then(|rest| {
+        rest.get(..11)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANGEBYLEX"))
+            .map(|_| input.len() - rest.len() + 11)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (min, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (max, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainZrangebylexPacket {
+        consumed,
+        key,
+        min,
+        max,
     })
 }
 
