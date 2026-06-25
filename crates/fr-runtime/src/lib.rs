@@ -22999,6 +22999,139 @@ impl Runtime {
         Some(())
     }
 
+    /// (BlackThrush) Borrowed READ fast path for `ZREVRANGEBYSCORE key max min
+    /// WITHSCORES`. Reverse mirror of execute_plain_zrangebyscore_withscores_borrowed_
+    /// into: wire order max then min, the guard still takes (min, max), and the store
+    /// walk runs rev=true. RESP2 flat / RESP3 [member,Double] pairs.
+    pub fn execute_plain_zrevrangebyscore_withscores_borrowed_into(
+        &mut self,
+        key: &[u8],
+        max_arg: &[u8],
+        min_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYSCORE".len(), key, max_arg, min_arg, now_ms)
+            || self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
+        {
+            return None;
+        }
+        let (max, min) = match (
+            fr_command::parse_score_bound(max_arg),
+            fr_command::parse_score_bound(min_arg),
+        ) {
+            (Ok(mx), Ok(mn)) => (mx, mn),
+            _ => return None,
+        };
+
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebyscore",
+            b"ZREVRANGEBYSCORE".len()
+                + key.len()
+                + max_arg.len()
+                + min_arg.len()
+                + b"WITHSCORES".len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+
+        let st = self.chained_command_start();
+        let result: Result<Vec<(Vec<u8>, f64)>, RespFrame> =
+            match fr_command::zscore_inverted_wrongtype_guard(
+                &mut self.server.store,
+                key,
+                min,
+                max,
+                now_ms,
+            ) {
+                Ok(true) => Ok(Vec::new()),
+                Ok(false) => self
+                    .server
+                    .store
+                    .zrangebyscore_withscores_limited(key, min, max, true, 0, None, now_ms)
+                    .map_err(|err| CommandError::Store(err).to_resp()),
+                Err(err) => Err(err.to_resp()),
+            };
+        let elapsed_us = self.finish_chained_command(st);
+
+        let mut error_msg = None;
+        match result {
+            Ok(pairs) => {
+                if !suppress_reply {
+                    if resp3 {
+                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
+                        for (member, score) in pairs {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                            encode_bulk_string_slice(Some(&member), resp3, out);
+                            fr_protocol::encode_redis_double(score, resp3, out);
+                        }
+                    } else {
+                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
+                        for (member, score) in pairs {
+                            encode_bulk_string_slice(Some(&member), resp3, out);
+                            fr_protocol::encode_redis_double(score, resp3, out);
+                        }
+                    }
+                }
+            }
+            Err(reply) => {
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebyscore",
+            "ZREVRANGEBYSCORE",
+            || {
+                vec![
+                    b"ZREVRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    max_arg.to_vec(),
+                    min_arg.to_vec(),
+                    b"WITHSCORES".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[allow(clippy::too_many_arguments)] // Mirrors the other borrowed range metrics helpers.
     fn record_plain_zrange_borrowed_metrics(
         &mut self,
