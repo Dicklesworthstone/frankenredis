@@ -16504,6 +16504,161 @@ impl Runtime {
         Some(reply)
     }
 
+    // (frankenredis-zbyscorefast) READ preamble (no last_eviction_loop reset — that
+    // is a write-path concern) shared by the ZRANGEBYSCORE/ZREVRANGEBYSCORE fast paths.
+    fn plain_read_borrowed_preamble(
+        &mut self,
+        name_lower: &'static str,
+        argv_len_sum: usize,
+        now_ms: u64,
+    ) -> u64 {
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(name_lower);
+        self.session.last_argv_len_sum = argv_len_sum;
+        let packet_id = next_packet_id();
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+        packet_id
+    }
+
+    // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
+    // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
+    // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
+    // non-zset key, neither touching the keyspace stats), then the no-stat-free
+    // store walk (store.zrangebyscore_withscores_limited records the one keyspace
+    // lookup), then a member-only array (withscores=false → identical in RESP2/3).
+    fn execute_plain_zrangebyscore_core(
+        &mut self,
+        key: &[u8],
+        min: fr_store::ScoreBound,
+        max: fr_store::ScoreBound,
+        rev: bool,
+        now_ms: u64,
+    ) -> RespFrame {
+        match fr_command::zscore_inverted_wrongtype_guard(&mut self.server.store, key, min, max, now_ms) {
+            Ok(true) => RespFrame::Array(Some(Vec::new())),
+            Ok(false) => match self.server.store.zrangebyscore_withscores_limited(
+                key, min, max, rev, 0, None, now_ms,
+            ) {
+                Ok(pairs) => RespFrame::Array(Some(
+                    pairs
+                        .into_iter()
+                        .map(|(m, _)| RespFrame::BulkString(Some(m)))
+                        .collect(),
+                )),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Err(err) => err.to_resp(),
+        }
+    }
+
+    fn can_execute_plain_zbyscore_borrowed(
+        &mut self,
+        name_len: usize,
+        key: &[u8],
+        a: &[u8],
+        b: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < name_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || a.len() > self.policy.gate.max_bulk_len
+            || b.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// (frankenredis-zbyscorefast) Borrowed READ fast path for `ZRANGEBYSCORE key
+    /// min max` (no WITHSCORES/LIMIT). Mirrors fr-command::zrangebyscore for the *4
+    /// form: parse_score_bound min/max (defer non-float to generic), guard, no-stat
+    /// store walk (rev=false), member-only array.
+    pub fn execute_plain_zrangebyscore_borrowed(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGEBYSCORE".len(), key, min_arg, max_arg, now_ms) {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrangebyscore",
+            b"ZRANGEBYSCORE".len() + key.len() + min_arg.len() + max_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let reply = self.execute_plain_zrangebyscore_core(key, min, max, false, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangebyscore",
+            "ZRANGEBYSCORE",
+            || vec![b"ZRANGEBYSCORE".to_vec(), key.to_vec(), min_arg.to_vec(), max_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-zbyscorefast) Borrowed READ fast path for `ZREVRANGEBYSCORE key
+    /// max min`. Mirror with reversed wire order (max=argv[2], min=argv[3]) and the
+    /// descending walk (rev=true).
+    pub fn execute_plain_zrevrangebyscore_borrowed(
+        &mut self,
+        key: &[u8],
+        max_arg: &[u8],
+        min_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYSCORE".len(), key, max_arg, min_arg, now_ms) {
+            return None;
+        }
+        let (max, min) = match (
+            fr_command::parse_score_bound(max_arg),
+            fr_command::parse_score_bound(min_arg),
+        ) {
+            (Ok(mx), Ok(mn)) => (mx, mn),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebyscore",
+            b"ZREVRANGEBYSCORE".len() + key.len() + max_arg.len() + min_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let reply = self.execute_plain_zrangebyscore_core(key, min, max, true, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebyscore",
+            "ZREVRANGEBYSCORE",
+            || vec![b"ZREVRANGEBYSCORE".to_vec(), key.to_vec(), max_arg.to_vec(), min_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
