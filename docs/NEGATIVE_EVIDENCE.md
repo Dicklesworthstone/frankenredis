@@ -4161,3 +4161,14 @@ SESSION TALLY 29 fast-paths. PATTERN: arity-extending a shipped variadic fast-pa
 one parser arity) — could similarly extend ZUNION/ZINTER/ZDIFFSTORE to 3-key (*6, needs key_arg4 parser) and the
 read-algebra ZDIFF/ZINTER to 3-key. Remaining single-command uncovered: SPOP 0.43x (random); LCS 0.52x (DP, risky to
 replicate); SORT/GEOSEARCH/BITFIELD_RO (complex).
+
+### 2026-06-24 (part 67) ZINTER 3-key read fast-path SHIPPED — ~1.36x (0.48x→~0.65x vs redis) (cc/BlackThrush)
+Extended part-58 2-key ZINTER to 3 keys (*5), which was 0.477x. (ZDIFF 3-key already 0.94x — compute-dominated, no
+dispatch headroom — left on generic.) Generalized execute_plain_zinter2_core/borrowed → keys-slice (intersection of
+all keys, default WEIGHTS=[1..]/SUM, nan→0 guards); fires when numkeys==keys.len(). A/B: cand/ctrl 1.360. Byte-exact
+RESP2+RESP3 incl 3-key summed-score intersection, missing-breaks, set-source, WRONGTYPE, 2-key (no regression),
+numkeys/key-count-mismatch syntax errors; cmdstat+keyspace. conformance 99/0. SESSION TALLY 30 fast-paths across this
+campaign. The dispatch fast-path campaign (parts 49-67) has now covered ~30 commands/arities, all byte-exact,
+0.40-0.94x→parity-or-faster. Remaining: SPOP 0.43x (random — structural only); LCS 0.52x (DP-replication risk);
+SORT/GEOSEARCH/BITFIELD_RO (complex/dominated). Further arity extensions (zset *STORE 3-key *6) possible but
+diminishing (3-key store less common).
