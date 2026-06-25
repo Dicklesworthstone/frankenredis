@@ -5382,6 +5382,24 @@ fn process_buffered_frames(
                             &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$3\r\n",
+                    b"DEL",
+                ) {
+                    // 5-key DEL: key + a + b + c + d are the five keys.
+                    if let Some(response) = runtime.execute_plain_del_borrowed(
+                        &[packet.key, packet.a, packet.b, packet.c, packet.d],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                     unparsed,
                     &parser_config,
