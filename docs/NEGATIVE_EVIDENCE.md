@@ -4461,3 +4461,22 @@ the hot loop had hoistable redundant keyspace-dict probes. When a multi-key stor
 CHECK whether the per-key resolve (self.entries.get) is inside the member loop; if so, hoist it. fr-store perf-A/B unit
 tests (_ab_ratio / _isomorphic_and_faster_) flake 2-4 at a time under multi-agent load — confirm unrelated to your diff
 (name = zadd/zset-index/scan, not your fn) before trusting/blaming.
+
+### 2026-06-25 (part 81) 2-key SINTER fresh-build (drop clone+retain) — ~0-GAIN, REVERTED; gap is STRUCTURAL dest-build (cc/BlackThrush)
+NEGATIVE RESULT pinning down the part-78 sinterstore residual. The broad sweep's sinterstore is 2-KEY (setA∩setB, ~50%
+overlap) → it takes sinter_value's `_ =>` clone+retain arm (the >=3-key fresh-build was deliberately gated off for 2-key
+by a prior author: "clone is a bulk copy + one in-place retain beats per-survivor inserts when result is a large
+fraction"). Hypothesis: redis fresh-builds (copies only survivors) so fr's clone-of-the-whole-smallest is wasteful.
+TESTED by removing the `if keys.len() >= 3` gate (2-key string sets also fresh-build). A/B 2-key SINTERSTORE,
+smallest=2000, across overlap (cand=fresh-build vs ctrl=clone+retain vs redis):
+  10% inter: cand/ctrl 0.991  cand/redis 1.174 (fr already beats redis here)
+  50% inter: cand/ctrl 1.000  cand/redis 0.944
+  90% inter: cand/ctrl 0.975  cand/redis 0.730   <- fr's WORST case, and fresh-build REGRESSES it
+=> fresh-build is ~0-gain at low/mid overlap and a SLIGHT LOSS at high overlap → REVERTED (stashed). The prior
+clone+retain choice was correct. CONCLUSION: 2-key sinterstore's gap vs redis is concentrated at HIGH overlap (0.73x @
+90%) and is STRUCTURAL — the cost is cloning/building the large result GenericSet + set_value_entry RE-DERIVING the dest
+encoding from membership (an O(n) pass redis folds into its member-by-member dest build), NOT the intersection algorithm.
+That's set-rep / dest-build = CoralOx fr-store structural domain, confirming part 78. LESSON: when an algorithm-swap A/B
+is flat across the whole input-regime sweep, the gap is in the DATA STRUCTURE (build/clone/encode), not the algorithm —
+stop swapping algorithms. The 3+key hoist (parts 79/80) was a real win because it removed REDUNDANT work; this 2-key swap
+only MOVED the same work around.
