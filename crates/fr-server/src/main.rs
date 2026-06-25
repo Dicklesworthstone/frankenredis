@@ -4766,13 +4766,16 @@ fn process_buffered_frames(
                     b"*5\r\n$6\r\n",
                     b"ZRANGE",
                 ) {
-                    // ZRANGE key min max BYSCORE: a=min, b=max, c=BYSCORE token. Only
-                    // the no-REV/LIMIT/WITHSCORES BYSCORE form is fast-pathed.
-                    if packet.c.eq_ignore_ascii_case(b"BYSCORE")
-                        && let Some(response) = runtime.execute_plain_zrange_byscore_borrowed(
-                            packet.key, packet.a, packet.b, ts,
-                        )
-                    {
+                    // ZRANGE key min max BYSCORE|BYLEX: a=min, b=max, c=option
+                    // token. Only the no-REV/LIMIT/WITHSCORES BYSCORE/BYLEX forms.
+                    let fast = if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
+                        runtime.execute_plain_zrange_byscore_borrowed(packet.key, packet.a, packet.b, ts)
+                    } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
+                        runtime.execute_plain_zrange_bylex_borrowed(packet.key, packet.a, packet.b, ts)
+                    } else {
+                        None
+                    };
+                    if let Some(response) = fast {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(

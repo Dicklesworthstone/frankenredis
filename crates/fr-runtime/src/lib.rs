@@ -17316,6 +17316,66 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlackThrush) Borrowed READ fast path for the modern unified
+    /// `ZRANGE key min max BYLEX` (no REV/LIMIT) — same lexicographic-range
+    /// semantics as ZRANGEBYLEX but recorded under the `zrange` command name.
+    /// Well-formed lex bounds only (malformed defers for canonical wording);
+    /// records the one keyspace lookup (the store walk does not), then
+    /// store.zrangebylex. REV/LIMIT shapes never reach here.
+    pub fn execute_plain_zrange_bylex_borrowed(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms) {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrange",
+            b"ZRANGE".len() + key.len() + min.len() + max.len() + b"BYLEX".len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let reply = match self.server.store.zrangebylex(key, min, max, now_ms) {
+            Ok(members) => RespFrame::Array(Some(
+                members
+                    .into_iter()
+                    .map(|m| RespFrame::BulkString(Some(m)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrange",
+            "ZRANGE",
+            || {
+                vec![
+                    b"ZRANGE".to_vec(),
+                    key.to_vec(),
+                    min.to_vec(),
+                    max.to_vec(),
+                    b"BYLEX".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
     // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
     // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
