@@ -4512,3 +4512,17 @@ preserved on reject, updated on apply), lowercase, error/conflict replies, cmdst
 STILL-OPEN uncovered option-forms from the same batch (NEXT, same recipe): SET..KEEPTTL 0.487x, SET..XX..GET,
 ZADD GT/NX flag-forms 0.53x (CAUTION: ZADD base gap is store-side per part 74 — verify cand/ctrl isolates dispatch),
 SINTERCARD..LIMIT 0.547x, OBJECT REFCOUNT 0.783x, HSETNX 0.866x. EXPIRE-family option surface now COMPLETE.
+
+### 2026-06-25 (part 84) SET..KEEPTTL fast-path SHIPPED ~2.26x (0.487x->beats redis) (cc/BlackThrush)
+Third "measure every option-form" win in a row. SET key value KEEPTTL (*4) was EXPLICITLY excluded from every SET
+fast-path parser ("KEEPTTL falls through to generic") -> 0.487x. KEEPTTL = plain SET but preserves any existing TTL.
+execute_plain_set_keepttl_borrowed mirrors fr_command ExpiryMode::KeepTtl exactly: get_expires_at_ms (write-path read,
+no keyspace_hits) + set_with_abs_expiry(existing). *4 key_arg2 dispatch gated on token==KEEPTTL; KEEPTTL GET / other *4
+options fall through. Shared set metrics/argv builder gained a keepttl flag (slowlog argv + argv_len_sum include token).
+A/B: cand/ctrl 2.263, cand/redis 1.036 (BEATS redis). Byte-exact (TTL preserved-on-ttl/no-op-on-no-ttl-or-missing, type
+overwrite, lowercase, non-KEEPTTL *4 fall-through, cmdstat+keyspace=0). conformance 99/0.
+RUNNING SCORECARD of the option-form vein (parts 82-84): COPY REPLACE 1.95x, EXPIRE-family NX/XX/GT/LT 1.3-1.5x,
+SET KEEPTTL 2.26x — ALL were "plain form fast-pathed, option form fell to generic". STILL-OPEN (NEXT, same recipe):
+SINTERCARD..LIMIT 0.547x (sintercard2/3 parsers are *4/*5 bare; LIMIT is *6), SET..XX..GET, ZADD GT/NX flags 0.53x
+(verify dispatch-not-store per part74), OBJECT REFCOUNT 0.783x, HSETNX 0.866x. The "grep the parser's own doc-comment
+for 'falls through to generic'" is a fast way to LIST uncovered option-forms.
