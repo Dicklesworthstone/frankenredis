@@ -17998,6 +17998,63 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-msetnxfast) Borrowed WRITE fast path for `MSETNX k v [k v ...]`
+    /// (1- or 2-pair forms). Mirrors fr-command::msetnx EXACTLY: probe every key with
+    /// exists_no_stat (no keyspace bump — MSETNX is a write) and if ANY exists return
+    /// Integer(0) without setting; otherwise set_plain_borrowed every pair and return
+    /// Integer(1). `pairs` is a flat even-length slice [k0,v0,k1,v1,...]. Gated by the
+    /// WRITE predicate; odd/other-length forms fall through to generic.
+    pub fn execute_plain_msetnx_borrowed(&mut self, pairs: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        if pairs.is_empty() || pairs.len() % 2 != 0 {
+            return None;
+        }
+        if self.policy.gate.max_array_len < pairs.len() + 1
+            || self.policy.gate.max_bulk_len < b"MSETNX".len()
+            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"MSETNX".len() + pairs.iter().map(|p| p.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble("msetnx", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let mut any_exists = false;
+        let mut i = 0;
+        while i < pairs.len() {
+            if self.server.store.exists_no_stat(pairs[i], now_ms) {
+                any_exists = true;
+                break;
+            }
+            i += 2;
+        }
+        if !any_exists {
+            let mut j = 0;
+            while j < pairs.len() {
+                self.server.store.set_plain_borrowed(pairs[j], pairs[j + 1], now_ms);
+                j += 2;
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::from(!any_exists));
+        let pairs_owned: Vec<Vec<u8>> = pairs.iter().map(|p| p.to_vec()).collect();
+        self.record_plain_zremrange_borrowed_metrics(
+            "msetnx",
+            "MSETNX",
+            || {
+                let mut argv = Vec::with_capacity(pairs_owned.len() + 1);
+                argv.push(b"MSETNX".to_vec());
+                argv.extend(pairs_owned.iter().cloned());
+                argv
+            },
+            elapsed_us, now_ms, packet_id, false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(
         &mut self,
         key: &[u8],
