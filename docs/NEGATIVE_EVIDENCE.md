@@ -4642,3 +4642,16 @@ passed; `cargo check -p fr-bench --benches` via RCH remote passed; `cargo clippy
 warnings`, `cargo clippy -p fr-server --all-targets -- -D warnings`, and `cargo clippy -p fr-bench --benches -- -D
 warnings` passed locally after the same remote metadata miss; `cargo fmt --check -p fr-runtime -p fr-server -p fr-bench`
 passed; `cargo test -p fr-conformance -- --nocapture` green (194 lib tests, helper bins, 99 smoke tests, doc-tests).
+
+### 2026-06-25 (part 88) ZRANGEBYSCORE ..LIMIT offset count fast-path SHIPPED ~1.57x (0.535x->0.784x) (cc/BlackThrush)
+PIVOT to the UNCONTESTED ZSET vein (peers saturating string SET/GETEX). ZRANGEBYSCORE *4 was fast-pathed but the LIMIT
+pagination form (*7) fell to generic = 0.535x. execute_plain_zrangebyscore_limit_borrowed reuses the *4 score-bound parse
++ inverted-range/wrongtype guard + offset/count; DEFERS on negative offset/count (generic's usize::MAX-offset /
+unlimited-count edge semantics) + non-float bound, so only offset>=0 & count>=0 fast-pathed. Reused the peer-added
+key_arg5 *7 parser (no new parser). A/B cand/ctrl 1.567; cand/redis 0.784 (residual = store-side LIMITED zset walk, NOT
+dispatch — separate lever). Byte-exact: LIMIT 0 3/2 5/0 0(empty)/past-end/offset-past, exclusive + inf bounds, NEG
+offset(empty)+NEG count(unlimited) via fall-through, bad-token/bad-score errors, WRONGTYPE, keyspace_hits=1. conformance
+99/0. VERIFIED staged diff line-count (126) BEFORE commit -> NO sweep this time (part-87 lesson applied).
+BIG UNCONTESTED ZSET/HASH option-form vein REMAINING (all *uncovered* LIMIT/BY/WITHVALUES forms, dispatch-bound):
+ZRANGEBYLEX ..LIMIT 0.548x, ZRANGE ..BYSCORE 0.545x, ZRANGE ..BYSCORE REV LIMIT 0.543x, HRANDFIELD ..WITHVALUES 0.454x.
+ZADD CH/flags 0.50x = SKIP (store-bound per part74). Scorecard parts 82-88: 7 option-form wins.
