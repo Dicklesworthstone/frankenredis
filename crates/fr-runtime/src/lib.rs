@@ -17458,6 +17458,74 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-bitopfast) Borrowed WRITE fast path for `BITOP op dest src...`.
+    /// Mirrors fr-command::bitop EXACTLY: only well-formed ops are fast-pathed (op ∈
+    /// {AND,OR,XOR,NOT}; an unknown op or a NOT with !=1 source falls through so the
+    /// generic emits the exact "syntax error" / "NOT must be called with a single
+    /// source key" reply), then record_source_key_lookups(sources) (the per-source
+    /// lookupKeyRead hit/miss, after op/arity validation) and store.bitop(op, dest,
+    /// sources) → Integer(result length). Read-of-sources + write-of-dest; gated by
+    /// the WRITE predicate. Callers pass the 1-source (incl NOT) or 2-source slice.
+    pub fn execute_plain_bitop_borrowed(
+        &mut self,
+        op: &[u8],
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let is_not = op.eq_ignore_ascii_case(b"NOT");
+        let valid = op.eq_ignore_ascii_case(b"AND")
+            || op.eq_ignore_ascii_case(b"OR")
+            || op.eq_ignore_ascii_case(b"XOR")
+            || is_not;
+        if !valid || (is_not && sources.len() != 1) {
+            return None;
+        }
+        if self.policy.gate.max_array_len < sources.len() + 3
+            || self.policy.gate.max_bulk_len < b"BITOP".len()
+            || op.len() > self.policy.gate.max_bulk_len
+            || dest.len() > self.policy.gate.max_bulk_len
+            || sources.iter().any(|s| s.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum =
+            b"BITOP".len() + op.len() + dest.len() + sources.iter().map(|s| s.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble("bitop", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, sources, now_ms);
+        let result = self.server.store.bitop(op, dest, sources, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        let op_owned = op.to_vec();
+        let dest_owned = dest.to_vec();
+        let sources_owned: Vec<Vec<u8>> = sources.iter().map(|s| s.to_vec()).collect();
+        self.record_plain_zremrange_borrowed_metrics(
+            "bitop",
+            "BITOP",
+            || {
+                let mut argv = Vec::with_capacity(sources_owned.len() + 3);
+                argv.push(b"BITOP".to_vec());
+                argv.push(op_owned.clone());
+                argv.push(dest_owned.clone());
+                argv.extend(sources_owned.iter().cloned());
+                argv
+            },
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
