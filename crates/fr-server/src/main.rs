@@ -4259,6 +4259,26 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_getex_persist_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_getex_persist_borrowed(packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts) {
@@ -4978,11 +4998,18 @@ fn process_buffered_frames(
                     if let Some(response) =
                         runtime.execute_plain_msetnx_borrowed(&[packet.key, packet.arg], ts)
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4992,14 +5019,22 @@ fn process_buffered_frames(
                     b"MSETNX",
                 ) {
                     // 2-pair MSETNX: key=k0, a=v0, b=k1, c=v1.
-                    if let Some(response) = runtime
-                        .execute_plain_msetnx_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_msetnx_borrowed(
+                        &[packet.key, packet.a, packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -5306,11 +5341,18 @@ fn process_buffered_frames(
                     if let Some(response) =
                         runtime.execute_plain_exists_multi_borrowed(&[packet.key, packet.arg], ts)
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -5320,32 +5362,21 @@ fn process_buffered_frames(
                     b"EXISTS",
                 ) {
                     // 3-key EXISTS: key + a + b are the three keys.
-                    if let Some(response) =
-                        runtime.execute_plain_exists_multi_borrowed(&[packet.key, packet.a, packet.b], ts)
+                    if let Some(response) = runtime
+                        .execute_plain_exists_multi_borrowed(&[packet.key, packet.a, packet.b], ts)
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*3\r\n$5\r\n",
-                    b"GETEX",
-                ) {
-                    // GETEX key PERSIST: key + arg(=PERSIST). execute self-guards the
-                    // option token; non-PERSIST options fall through to generic.
-                    if let Some(response) =
-                        runtime.execute_plain_getex_persist_borrowed(packet.key, packet.arg, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
@@ -9216,6 +9247,44 @@ fn parse_borrowed_plain_getex_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainTypePacket { consumed, key })
+}
+
+fn parse_borrowed_plain_getex_persist_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainTypePacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"PERSIST".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"GETEX"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let option_start = next;
+    let option_len_end = option_start + b"$7\r\n".len();
+    if input.get(option_start..option_len_end)? != b"$7\r\n" {
+        return None;
+    }
+    let option_end = option_len_end + b"PERSIST".len();
+    if !input
+        .get(option_len_end..option_end)?
+        .eq_ignore_ascii_case(b"PERSIST")
+    {
+        return None;
+    }
+    if input.get(option_end..option_end + 2)? != b"\r\n" {
+        return None;
+    }
+    Some(BorrowedPlainTypePacket {
+        consumed: option_end + 2,
+        key,
+    })
 }
 
 struct BorrowedPlainExpiretimePacket<'a> {
@@ -18063,6 +18132,60 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_getex_persist_packet_parser_accepts_canonical_persist() {
+        let input = b"*3\r\n$5\r\ngEtEx\r\n$2\r\nk1\r\n$7\r\nPeRsIsT\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_getex_persist_packet(input, &ParserConfig::default())
+                .expect("canonical GETEX key PERSIST packet should parse");
+
+        assert_eq!(parsed.key, b"k1");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$5\r\ngEtEx\r\n$2\r\nk1\r\n$7\r\nPeRsIsT\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_getex_persist_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_getex_persist_packet(
+                b"*2\r\n$5\r\nGETEX\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "no-option GETEX stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getex_persist_packet(
+                b"*4\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$7\r\nPERSIST\r\n$7\r\nPERSIST\r\n",
+                &cfg
+            )
+            .is_none(),
+            "duplicate PERSIST stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getex_persist_packet(
+                b"*3\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$2\r\nEX\r\n",
+                &cfg
+            )
+            .is_none(),
+            "non-PERSIST option stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getex_persist_packet(
+                b"*3\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$7\r\nPERSIST\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
         );
     }
 

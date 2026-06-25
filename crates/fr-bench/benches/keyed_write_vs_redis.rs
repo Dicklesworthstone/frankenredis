@@ -35,6 +35,7 @@ const DELETE_COMMANDS: [&str; 2] = ["HDEL", "SREM"];
 const LINSERT_LIST_LEN: usize = 64;
 const SPOP_COUNT_SET_SIZE: usize = 8;
 const SPOP_COUNT_POP: usize = 4;
+const GETEX_PERSIST_EXAT: &str = "4102444800";
 
 #[derive(Clone, Copy)]
 struct Engine {
@@ -366,6 +367,34 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     }
 
     spop_group.finish();
+
+    let mut getex_group = c.benchmark_group("getex_persist_vs_redis");
+    getex_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let getex_prefill = pipelined_getex_persist_prefill_packet(COMMANDS_PER_ITER);
+    let getex_persist = pipelined_getex_persist_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        getex_group.bench_with_input(
+            BenchmarkId::new("GETEX_PERSIST", engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&getex_prefill, COMMANDS_PER_ITER);
+                        let start = Instant::now();
+                        client.run_resp_packet(&getex_persist, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            },
+        );
+    }
+
+    getex_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -578,6 +607,31 @@ fn pipelined_spop_count_packet(count: usize, pop_count: usize) -> Vec<u8> {
     for index in 0..count {
         let key = format!("s{index:03}");
         packet.extend_from_slice(&encode_command(&["SPOP", &key, &pop_count]));
+    }
+    packet
+}
+
+fn pipelined_getex_persist_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 64);
+    for index in 0..count {
+        let key = format!("g{index:03}");
+        let value = format!("v{index:03}");
+        packet.extend_from_slice(&encode_command(&[
+            "SET",
+            &key,
+            &value,
+            "EXAT",
+            GETEX_PERSIST_EXAT,
+        ]));
+    }
+    packet
+}
+
+fn pipelined_getex_persist_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("g{index:03}");
+        packet.extend_from_slice(&encode_command(&["GETEX", &key, "PERSIST"]));
     }
     packet
 }

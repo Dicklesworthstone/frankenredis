@@ -4326,11 +4326,33 @@ isolated; unrelated to read-only EXISTS). Protected-edit pattern used again (pee
 36 fast-paths. Remaining: GETEX-PERSIST 0.49x, SPOP (peer working), LCS/SORT/GEOSEARCH (complex). Clean byte-exact
 2-3 arg dispatch vein now deeply mined (36 commands/arities, parts 49-71).
 
-### 2026-06-25 (part 72) GETEX PERSIST fast-path SHIPPED — ~1.59x (0.49x→~0.78x) (cc/BlackThrush)
-GETEX key PERSIST (*3) fell to generic option-parsing (only no-option GETEX was fast-pathed), 0.49x.
-execute_plain_getex_persist_borrowed mirrors the no-option fast-path but store.getex(key, Some(None)) to clear TTL;
-self-guards PERSIST token; same WRITE gate + key_type guard. A/B: cand/ctrl 1.588. Byte-exact (reply + TTL state)
-incl PERSIST-on-TTL'd-key (TTL cleared), no-TTL, lowercase, missing→nil, WRONGTYPE, EX/BADOPT/no-option fall-through,
-cmdstat+keyspace(hits=1/misses=1). conformance 99/0. Protected-edit pattern again (peer on lib.rs spop). SESSION TALLY
-37 fast-paths (parts 49-72). Remaining clean: ~nothing trivial — SPOP (peer's), LCS/SORT/GEOSEARCH/BITFIELD_RO
-(complex/DP/dominated), 4+key arity extensions (diminishing). The clean byte-exact 1-3 arg dispatch vein is SATURATED.
+### 2026-06-25 (part 72) GETEX PERSIST fast-path SHIPPED - 2.09x vs prior fr, 0.360x->0.781x vs Redis 7.2.4 (cc+codex/BlackThrush)
+`GETEX key PERSIST` was the remaining GETEX option-form dispatch loss after the no-option `GETEX key` fast-path.
+The fast path is intentionally exact: the server parser accepts only canonical *3 `GETEX key PERSIST`; duplicate
+PERSIST, EX/PX/EXAT/PXAT, bad options, and all other arities fall through to the generic command parser. Runtime
+execution preserves the generic ordering: key lookup/type check before the TTL mutation, then `Store::getex(key,
+Some(None), now_ms)` handles the LFU access, dirty counter, TTL removal, and persist event under the existing borrowed
+write gate. The original focused A/B measured candidate/control 1.588 and byte-exact reply+TTL state parity including
+PERSIST-on-TTL'd-key, no-TTL, lowercase, missing nil, WRONGTYPE, EX/BADOPT/no-option fall-through, and
+cmdstat+keyspace(hits=1/misses=1).
+
+Measured on `ovh-a` with `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.worktrees/frankenredis-blackthrush-getexpersist-20260625T041623Z/.rch-target-ovh-a-pool-84d833bda793466aa412e25c3cc9c15d
+REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server FR_SERVER_BIN=<candidate-or-control-frankenredis>
+cargo bench -p fr-bench --bench keyed_write_vs_redis -- getex_persist_vs_redis/GETEX_PERSIST`. Redis oracle:
+`redis-server v=7.2.4 sha=d2c8a4b9`. The control server was rebuilt from the remote main mirror without the
+GETEX/PERSIST marker; the candidate server was rebuilt from the GETEX/PERSIST worktree.
+
+Same-host evidence:
+
+| gate | Redis median time | FrankenRedis median time | fr/Redis throughput | direct FR candidate/control | verdict |
+|---|---:|---:|---:|---:|---|
+| no-GETEX/PERSIST control | `47.391 us` | `131.55 us` | `0.360x` | baseline | target loss |
+| GETEX/PERSIST candidate | `49.080 us` | `62.849 us` | `0.781x` | `2.09x` | keep |
+
+Correctness: `scripts/getex_ttl_differ.py 16431 16432` passed byte-exact vs Redis 7.2.4 for no-option GETEX,
+PERSIST-clears, EXAT/PXAT setting, missing keys, wrong type, integer encoding preservation, and invalid option/error
+shapes. Focused Rust tests passed for runtime edge parity and server parser fall-through. Gates: per-crate
+`fmt --check`, `check --all-targets`, and `clippy --all-targets -- -D warnings` for `fr-runtime`/`fr-server`/
+`fr-bench`, release `fr-server`/`fr-bench` builds, focused `GETEX_PERSIST` benchmark, and
+`cargo test -p fr-conformance -- --nocapture` green (194 lib tests, all bins, 99 smoke tests, doctests). SESSION TALLY
+37 fast-paths.

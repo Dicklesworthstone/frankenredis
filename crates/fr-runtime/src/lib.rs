@@ -1058,6 +1058,10 @@ fn plain_getex_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETEX".to_vec(), key.to_vec()]
 }
 
+fn plain_getex_persist_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"GETEX".to_vec(), key.to_vec(), b"PERSIST".to_vec()]
+}
+
 fn plain_getset_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETSET".to_vec(), key.to_vec(), value.to_vec()]
 }
@@ -15254,8 +15258,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_getex_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
-        if self.policy.gate.max_array_len < 2
+    fn can_execute_plain_getex_borrowed(
+        &mut self,
+        key: &[u8],
+        arg_count: usize,
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < arg_count
             || self.policy.gate.max_bulk_len < b"GETEX".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
@@ -15276,7 +15285,7 @@ impl Runtime {
     /// are inactive (the no-option form never modifies, so there is nothing to
     /// propagate anyway).
     pub fn execute_plain_getex_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_getex_borrowed(key, now_ms) {
+        if !self.can_execute_plain_getex_borrowed(key, 2, now_ms) {
             return None;
         }
 
@@ -15309,7 +15318,13 @@ impl Runtime {
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_getex_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_owned_argv(key),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -15334,22 +15349,20 @@ impl Runtime {
         Some(reply)
     }
 
-    /// (frankenredis-getexpersistfast) Borrowed WRITE fast path for `GETEX key
-    /// PERSIST`. Identical to execute_plain_getex_borrowed but clears the TTL via
-    /// store.getex(key, Some(None)) (the PERSIST ExpiryKind → `Some(None)` new
-    /// expires) before returning the value. Same key_type guard (None → nil, non-
-    /// string → WRONGTYPE) and WRITE gate. Caller passes the literal PERSIST option
-    /// bytes only for accurate slowlog/argv reconstruction.
+    /// Borrowed WRITE fast path for `GETEX key PERSIST`. Generic GETEX permits
+    /// duplicate same-kind options, but this exact three-argument form is the hot
+    /// Redis-benchmark shape left on the generic path. It preserves the generic
+    /// order: key lookup/type check before the TTL mutation, then Store::getex
+    /// handles LFU, dirty, TTL removal, and the "persist" event when enabled
+    /// (the write gate disables notifications/AOF/replicas for this fast path).
     pub fn execute_plain_getex_persist_borrowed(
         &mut self,
         key: &[u8],
-        persist_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !persist_arg.eq_ignore_ascii_case(b"PERSIST") {
-            return None;
-        }
-        if !self.can_execute_plain_getex_borrowed(key, now_ms) {
+        if self.policy.gate.max_bulk_len < b"PERSIST".len()
+            || !self.can_execute_plain_getex_borrowed(key, 3, now_ms)
+        {
             return None;
         }
 
@@ -15360,7 +15373,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("getex");
-        self.session.last_argv_len_sum = b"GETEX".len() + key.len() + persist_arg.len();
+        self.session.last_argv_len_sum = b"GETEX".len() + key.len() + b"PERSIST".len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -15371,7 +15384,7 @@ impl Runtime {
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::BulkString(None),
             Some("string") => match self.server.store.getex(key, Some(None), now_ms) {
-                Ok(Some(v)) => RespFrame::BulkString(Some(v)),
+                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
                 Ok(None) => RespFrame::BulkString(None),
                 Err(err) => CommandError::Store(err).to_resp(),
             },
@@ -15380,51 +15393,43 @@ impl Runtime {
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_getex_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_persist_owned_argv(key),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        if let RespFrame::Error(msg) = &reply {
-            self.server.store.stat_total_error_replies += 1;
-            if self.execution_source.counts_as_unexpected_error_reply() {
-                self.server.store.stat_unexpected_error_replies += 1;
-            }
-            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
-                && !code.is_empty()
-            {
-                *self
-                    .server
-                    .store
-                    .errorstats_per_type
-                    .entry(code.to_string())
-                    .or_insert(0) += 1;
-            }
-        }
-
+        self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
     }
 
-    fn record_plain_getex_borrowed_metrics(
+    fn record_plain_getex_borrowed_metrics<F>(
         &mut self,
-        key: &[u8],
+        build_argv: F,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
         failed: bool,
-    ) {
+    ) where
+        F: Fn() -> Vec<Vec<u8>>,
+    {
         let mut argv: Option<Vec<Vec<u8>>> = None;
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -15441,7 +15446,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_getex_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -16252,7 +16257,7 @@ impl Runtime {
     /// the descending store walk: well-formed lex bounds only (else fall back for
     /// the canonical bound error), then fr_command::record_source_key_lookups(key)
     /// + no-stat store.zrevrangebylex(key, max, min). Read-only; LIMIT/WITHSCORES
-    /// and 5+ arg forms never reach here (parser is *4 only).
+    ///   and 5+ arg forms never reach here (parser is *4 only).
     pub fn execute_plain_zrevrangebylex_borrowed(
         &mut self,
         key: &[u8],
@@ -16389,6 +16394,10 @@ impl Runtime {
     // (frankenredis-zremrangefast) Shared slowlog/latency/histogram/threat metrics
     // for the *4 ZREMRANGEBY{RANK,SCORE,LEX} write fast paths. `build_argv` is only
     // invoked on the rare slowlog/latency/threat branches.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared borrowed metrics helper carries command names, lazy argv, timing, packet id, and failure state"
+    )]
     fn record_plain_zremrange_borrowed_metrics(
         &mut self,
         name_lower: &'static str,
@@ -16403,14 +16412,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -16427,7 +16436,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| build_argv());
+            let argv_ref = argv.get_or_insert_with(build_argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -17744,6 +17753,10 @@ impl Runtime {
     /// then store.{zunion,zinter}store(dest, [k1,k2], [1.0,1.0], b"SUM") → stored
     /// cardinality Integer. `which` = b'U' union / b'I' inter. Fires only when
     /// numkeys==2; WEIGHTS/AGGREGATE and other numkeys fall through to generic.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed zstore dispatcher carries command identity plus parsed wire slices"
+    )]
     pub fn execute_plain_zstore_borrowed(
         &mut self,
         which: u8,
@@ -18029,7 +18042,11 @@ impl Runtime {
     /// key for which exists_no_touch is true (EXISTS does NOT update access time;
     /// duplicate keys ARE counted separately) → Integer(count). Read-only; callers
     /// pass the 2- or 3-key slice (the 1-key form has its own fast path).
-    pub fn execute_plain_exists_multi_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_exists_multi_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"EXISTS".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
@@ -18060,7 +18077,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, false,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -18118,13 +18138,19 @@ impl Runtime {
     /// Integer(0) without setting; otherwise set_plain_borrowed every pair and return
     /// Integer(1). `pairs` is a flat even-length slice [k0,v0,k1,v1,...]. Gated by the
     /// WRITE predicate; odd/other-length forms fall through to generic.
-    pub fn execute_plain_msetnx_borrowed(&mut self, pairs: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        if pairs.is_empty() || pairs.len() % 2 != 0 {
+    pub fn execute_plain_msetnx_borrowed(
+        &mut self,
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if pairs.is_empty() || !pairs.len().is_multiple_of(2) {
             return None;
         }
         if self.policy.gate.max_array_len < pairs.len() + 1
             || self.policy.gate.max_bulk_len < b"MSETNX".len()
-            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+            || pairs
+                .iter()
+                .any(|p| p.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -18146,7 +18172,9 @@ impl Runtime {
         if !any_exists {
             let mut j = 0;
             while j < pairs.len() {
-                self.server.store.set_plain_borrowed(pairs[j], pairs[j + 1], now_ms);
+                self.server
+                    .store
+                    .set_plain_borrowed(pairs[j], pairs[j + 1], now_ms);
                 j += 2;
             }
         }
@@ -18162,7 +18190,10 @@ impl Runtime {
                 argv.extend(pairs_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, false,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -53251,6 +53282,54 @@ mod tests {
         assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
+    }
+
+    #[test]
+    fn borrowed_getex_persist_fast_path_matches_generic_edges() {
+        let setup = |runtime: &mut Runtime| {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", b"k", b"val", b"EXAT", b"4102444800"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", b"not", b"v"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"RPUSH", b"list", b"x"]), 3),
+                RespFrame::Integer(1)
+            );
+        };
+
+        let mut generic = Runtime::default_strict();
+        let mut fast = Runtime::default_strict();
+        setup(&mut generic);
+        setup(&mut fast);
+
+        let generic_reply = generic.execute_frame(command(&[b"GETEX", b"k", b"PERSIST"]), 4);
+        let fast_reply = fast
+            .execute_plain_getex_persist_borrowed(b"k", 4)
+            .expect("exact GETEX PERSIST should use fast path");
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(
+            fast.execute_frame(command(&[b"TTL", b"k"]), 5),
+            generic.execute_frame(command(&[b"TTL", b"k"]), 5)
+        );
+
+        assert_eq!(
+            fast.execute_plain_getex_persist_borrowed(b"missing", 6),
+            Some(generic.execute_frame(command(&[b"GETEX", b"missing", b"PERSIST"]), 6))
+        );
+        assert_eq!(
+            fast.execute_plain_getex_persist_borrowed(b"not", 7),
+            Some(generic.execute_frame(command(&[b"GETEX", b"not", b"PERSIST"]), 7))
+        );
+        let wrongtype = fast
+            .execute_plain_getex_persist_borrowed(b"list", 8)
+            .expect("wrong-type GETEX PERSIST should execute fast path");
+        let generic_wrongtype = generic.execute_frame(command(&[b"GETEX", b"list", b"PERSIST"]), 8);
+        assert_eq!(wrongtype, generic_wrongtype);
+        assert!(matches!(wrongtype, RespFrame::Error(ref msg) if msg.contains("WRONGTYPE")));
     }
 
     #[test]
