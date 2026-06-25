@@ -4667,3 +4667,15 @@ WRONGTYPE errors, keyspace_hits=1. conformance 99/0. Verified staged diff (109) 
 OPTION-FORM SCORECARD (parts 82-89): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x, GETEX EX/PX
 1.94x, SET GET 1.87x, SINTERCARD LIMIT 2.36x, ZRANGEBYSCORE LIMIT 1.57x, ZRANGEBYLEX LIMIT 1.66x. REMAINING uncontested:
 ZRANGE ..BYSCORE/BYLEX/REV/LIMIT (the unified ZRANGE option matrix) 0.54x, HRANDFIELD ..WITHVALUES 0.454x, ZADD GT/NX SKIP.
+
+### 2026-06-25 (part 90) ZRANGE key min max BYSCORE fast-path SHIPPED ~1.71x (0.545x->beats redis 1.052x) (cc/BlackThrush)
+Ninth option-form win, uncontested ZSET vein. The modern unified ZRANGE..BYSCORE (redis-recommended over ZRANGEBYSCORE)
+fell to generic = 0.545x. execute_plain_zrange_byscore_borrowed reuses the shared zrangebyscore guard->walk->emit core
+but records cmdstat under "zrange" (NOT zrangebyscore — verified cmdstat_zrange=1). *5 key_arg3 gated token==BYSCORE;
+REV/BYLEX/WITHSCORES(*6)/LIMIT(*8)/index(*4) all route elsewhere (verified fall-through). A/B cand/ctrl 1.710, cand/redis
+1.052 (BEATS redis). Byte-exact: full/subset/excl/inf/empty, WRONGTYPE, bad-score, lowercase, keyspace_hits=1.
+conformance 99/0. Verified staged diff (81) pre-commit -> no sweep.
+OPTION-FORM SCORECARD (parts 82-90): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT, SET KEEPTTL 2.26x, GETEX EX/PX 1.94x, SET
+GET 1.87x, SINTERCARD LIMIT 2.36x, ZRANGEBYSCORE LIMIT 1.57x, ZRANGEBYLEX LIMIT 1.66x, ZRANGE BYSCORE 1.71x. NEXT:
+ZRANGE ..BYLEX (*5, mirror), ZRANGE ..BYSCORE WITHSCORES (*6), ZRANGE ..REV (*5 reverse-index). HRANDFIELD WITHVALUES =
+random (NOT byte-exact, skip like SPOP). ZADD flags SKIP (store-bound).
