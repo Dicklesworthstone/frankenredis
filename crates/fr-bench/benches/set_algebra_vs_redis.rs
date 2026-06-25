@@ -13,7 +13,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 const HOST: &str = "127.0.0.1";
 const COMMANDS_PER_ITER: usize = 16;
 const SMALL_INTSET_MEMBERS: usize = 512;
+const MEDIUM_GENERIC_MEMBERS: usize = 2048;
 const LARGE_GENERIC_MEMBERS: usize = 4096;
+const SINTERCARD_LIMIT: &str = "16";
 const OPS: [(&str, &str, &str); 3] = [
     ("SINTERSTORE", "small", "large"),
     ("SDIFFSTORE", "small", "large_miss"),
@@ -168,6 +170,35 @@ fn set_algebra_vs_redis(c: &mut Criterion) {
         }
     }
 
+    for (op, packet) in [
+        (
+            "SINTERCARD_LIMIT2",
+            sintercard_limit_packet(&["small", "large"], SINTERCARD_LIMIT, COMMANDS_PER_ITER),
+        ),
+        (
+            "SINTERCARD_LIMIT3",
+            sintercard_limit_packet(
+                &["small", "medium", "large"],
+                SINTERCARD_LIMIT,
+                COMMANDS_PER_ITER,
+            ),
+        ),
+    ] {
+        for engine in engines {
+            let id = BenchmarkId::new(op, engine.name);
+            group.bench_with_input(id, &engine, |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        client.run_packet(&packet, COMMANDS_PER_ITER);
+                    }
+                    start.elapsed()
+                });
+            });
+        }
+    }
+
     group.finish();
 }
 
@@ -195,6 +226,12 @@ fn setup_dataset(client: &mut Client) {
     }
     client.run_packet(&command(&large), 1);
 
+    let mut medium = vec![bytes("SADD"), bytes("medium")];
+    for value in 0..MEDIUM_GENERIC_MEMBERS {
+        medium.push(value.to_string().into_bytes());
+    }
+    client.run_packet(&command(&medium), 1);
+
     let mut large_miss = vec![bytes("SADD"), bytes("large_miss")];
     for value in 10_000..10_000 + LARGE_GENERIC_MEMBERS {
         large_miss.push(value.to_string().into_bytes());
@@ -212,6 +249,22 @@ fn set_algebra_packet(op: &str, lhs: &str, rhs: &str, count: usize) -> Vec<u8> {
             bytes(lhs),
             bytes(rhs),
         ]));
+    }
+    packet
+}
+
+fn sintercard_limit_packet(keys: &[&str], limit: &str, count: usize) -> Vec<u8> {
+    let mut packet = Vec::new();
+    for _ in 0..count {
+        let mut args = Vec::with_capacity(keys.len() + 3);
+        args.push(bytes("SINTERCARD"));
+        args.push(keys.len().to_string().into_bytes());
+        for key in keys {
+            args.push(bytes(key));
+        }
+        args.push(bytes("LIMIT"));
+        args.push(bytes(limit));
+        packet.extend_from_slice(&command(&args));
     }
     packet
 }

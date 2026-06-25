@@ -4612,3 +4612,33 @@ tests) and the combined commit COMPILES + conformance 99/0 + fr-server lib 12/0 
 SINTERCARD LIMIT surface is now MORE complete (2-key AND 3-key) than my change alone. Peer's remaining bench WIP
 (set_algebra_vs_redis.rs) left untouched. THIRD duplicate-effort collision this session (GETEX-abs 688911ebf, SET GET
 cb7a9b565, now SINTERCARD LIMIT) — peers are mining the same option-form vein; refetch+grep origin before each lever.
+
+### 2026-06-25 (part 89) BOLD-VERIFY SINTERCARD LIMIT Criterion lanes added - LIMIT2 0.988x, LIMIT3 1.061x vs Redis 7.2.4 (codex/BlackThrush)
+Follow-up after `origin/main` already carried the SINTERCARD LIMIT runtime/server implementation (`316b35c52`) and the
+initial ledger (`7743d3125`). Added explicit `set_algebra_vs_redis/SINTERCARD_LIMIT2` and
+`set_algebra_vs_redis/SINTERCARD_LIMIT3` lanes so the option-form can be rerun directly against vendored Redis 7.2.4.
+Bench shape: release `fr-server`, 16-command pipelined packet, preloaded `small`/`medium`/`large` sets, timed
+`SINTERCARD <2|3> ... LIMIT 16`.
+
+`cargo bench --release` was attempted through `rch exec` as requested and Cargo rejected it (`unexpected argument
+'--release'`), matching prior bench-harness notes. Release-profile equivalent used:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis
+rch exec -- cargo +nightly-2026-06-09 bench --profile release -p fr-bench --bench set_algebra_vs_redis --
+SINTERCARD_LIMIT --noplot`.
+
+Repeat-confirmed head-to-head vs Redis 7.2.4:
+
+| gate | Redis median throughput | FrankenRedis median throughput | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| `SINTERCARD_LIMIT2` | `271.94 Kelem/s` | `268.60 Kelem/s` | `0.988x` | residual near-parity loss vs Redis; huge lift from ledgered 0.547x generic gap |
+| `SINTERCARD_LIMIT3` | `214.49 Kelem/s` | `227.65 Kelem/s` | `1.061x` | win vs Redis |
+
+Validation: `cargo check -p fr-runtime --all-targets` via RCH remote passed; focused
+`plain_sintercard_borrowed_matches_generic_and_defers` passed; `fr-server` remote check failed only because the worker
+mirror lacked `legacy_redis_code/redis/src/commands`, local per-crate check then passed; focused server parser test
+passed; `cargo check -p fr-bench --benches` via RCH remote passed; `cargo clippy -p fr-runtime --all-targets -- -D
+warnings`, `cargo clippy -p fr-server --all-targets -- -D warnings`, and `cargo clippy -p fr-bench --benches -- -D
+warnings` passed locally after the same remote metadata miss; `cargo fmt --check -p fr-runtime -p fr-server -p fr-bench`
+passed; `cargo test -p fr-conformance -- --nocapture` green (194 lib tests, helper bins, 99 smoke tests, doc-tests).
