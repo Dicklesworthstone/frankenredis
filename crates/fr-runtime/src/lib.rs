@@ -17304,6 +17304,86 @@ impl Runtime {
         self.execute_plain_setstore2_borrowed(b'D', "sdiffstore", "SDIFFSTORE", dest, src1, src2, now_ms)
     }
 
+    /// (frankenredis-zstore2fast) Borrowed WRITE fast path for the common 2-key,
+    /// no-option forms `ZUNIONSTORE|ZINTERSTORE dest 2 k1 k2` (default WEIGHTS=[1,1],
+    /// AGGREGATE=SUM). Mirrors fr-command exactly: per source key exists_no_touch
+    /// (the lookupKeyRead hit/miss upstream records before the type check) then
+    /// ensure_zset_or_set_source (WRONGTYPE on a bad type, surfaced ahead of options),
+    /// then store.{zunion,zinter}store(dest, [k1,k2], [1.0,1.0], b"SUM") → stored
+    /// cardinality Integer. `which` = b'U' union / b'I' inter. Fires only when
+    /// numkeys==2; WEIGHTS/AGGREGATE and other numkeys fall through to generic.
+    pub fn execute_plain_zstore2_borrowed(
+        &mut self,
+        which: u8,
+        name_lower: &'static str,
+        name_upper: &'static str,
+        dest: &[u8],
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < name_upper.len()
+            || dest.len() > self.policy.gate.max_bulk_len
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lower,
+            name_upper.len() + dest.len() + numkeys_arg.len() + k1.len() + k2.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let keys = [k1, k2];
+        let reply = 'reply: {
+            for &k in &keys {
+                let _ = self.server.store.exists_no_touch(k, now_ms);
+                if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
+                    break 'reply CommandError::Store(err).to_resp();
+                }
+            }
+            let weights = [1.0_f64, 1.0];
+            let result = if which == b'U' {
+                self.server.store.zunionstore(dest, &keys, &weights, b"SUM", now_ms)
+            } else {
+                self.server.store.zinterstore(dest, &keys, &weights, b"SUM", now_ms)
+            };
+            match result {
+                Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+                Err(err) => CommandError::Store(err).to_resp(),
+            }
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lower,
+            name_upper,
+            || vec![name_upper.as_bytes().to_vec(), dest.to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    pub fn execute_plain_zunionstore2_borrowed(&mut self, dest: &[u8], nk: &[u8], k1: &[u8], k2: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_zstore2_borrowed(b'U', "zunionstore", "ZUNIONSTORE", dest, nk, k1, k2, now_ms)
+    }
+    pub fn execute_plain_zinterstore2_borrowed(&mut self, dest: &[u8], nk: &[u8], k1: &[u8], k2: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_zstore2_borrowed(b'I', "zinterstore", "ZINTERSTORE", dest, nk, k1, k2, now_ms)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
