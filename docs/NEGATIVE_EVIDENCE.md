@@ -4526,3 +4526,16 @@ SET KEEPTTL 2.26x — ALL were "plain form fast-pathed, option form fell to gene
 SINTERCARD..LIMIT 0.547x (sintercard2/3 parsers are *4/*5 bare; LIMIT is *6), SET..XX..GET, ZADD GT/NX flags 0.53x
 (verify dispatch-not-store per part74), OBJECT REFCOUNT 0.783x, HSETNX 0.866x. The "grep the parser's own doc-comment
 for 'falls through to generic'" is a fast way to LIST uncovered option-forms.
+
+### 2026-06-25 (part 85) GETEX key EX|PX value fast-path SHIPPED ~1.94x (0.482x->parity) (cc/BlackThrush)
+Fourth option-form win. GETEX PERSIST(*3)+bare(*2) were fast-pathed; the relative GETEX EX|PX value (*4) fell to generic
+= 0.482x. execute_plain_getex_relexpire_borrowed reuses SET-relexpire's exact EX/PX validation (defer on <=0/overflow/
+non-int) then preserves redis's key-check-BEFORE-validation order (key_type: missing->nil, non-string->WRONGTYPE) then
+store.getex(Some(Some(abs_ms))). *4 key_arg2 gated on token in {EX,PX}; EXAT/PXAT/multi-opt fall through. A/B cand/ctrl
+1.938, cand/redis 1.001. Byte-exact incl the ORDER edge: EX 0 on a string->'invalid expire time' BUT EX 0 on a MISSING
+key->nil (deferring preserves the lazy-validation order); cmdstat+keyspace_hits=1. conformance 99/0.
+OPTION-FORM VEIN SCORECARD (parts 82-85): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x, GETEX
+EX/PX 1.94x. ALL = "plain form fast-pathed, an option form silently on generic". CONFIRMED NOT-LEVERS (already
+fast-pathed, residual=store-side floor): INCRBY 0.743x, APPEND 0.744x, GETEX PERSIST 0.793x, SETEX/PSETEX/GETSET ~parity.
+STILL-OPEN option-forms (NEXT): SET..GET 0.784x (returns old value — *4 GET token), GETEX EXAT/PXAT, SINTERCARD..LIMIT
+0.547x (niche, needs *6/*7 parsers), HSETNX 0.87x. ZADD GT/NX flags 0.53x = SKIP per part74 (store-bound, likely ~0-gain).
