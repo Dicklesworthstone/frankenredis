@@ -12969,21 +12969,30 @@ impl Store {
         };
         let result: Box<SetValue> = match first.as_generic() {
             Some(base) if keys.len() >= 3 => {
+                // (BlackThrush) Hoist the other-set references out of the per-member
+                // loop — same redundant-keyspace-dict-probe fix as sinter_value
+                // (part 79). The previous code re-probed self.entries.get(key) for
+                // every member of the first set times every other set. All other keys
+                // were type-checked above (skip-1 pass), so fetch each other set's
+                // &SetValue ONCE; the loop then only does s.contains(member). The
+                // membership test follows the missing-key semantics of the original
+                // (a missing other set contributed `false` = not in_other), so absent
+                // others are simply omitted from other_sets here. Byte-identical.
+                let other_sets: Vec<&SetValue> = keys
+                    .iter()
+                    .skip(1)
+                    .filter_map(|key| match &self.entries.get(*key)?.value {
+                        Value::Set(s) => Some(s.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
                 let mut out = GenericSet::with_capacity_and_hasher(
                     base.len(),
                     foldhash::quality::RandomState::default(),
                 );
                 'member: for member in base.iter() {
-                    for key in keys.iter().skip(1) {
-                        let in_other = self
-                            .entries
-                            .get(*key)
-                            .and_then(|e| match &e.value {
-                                Value::Set(s) => Some(s.contains(member)),
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-                        if in_other {
+                    for other in &other_sets {
+                        if other.contains(member) {
                             continue 'member;
                         }
                     }
