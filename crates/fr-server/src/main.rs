@@ -4734,6 +4734,54 @@ fn process_buffered_frames(
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                     unparsed,
                     &parser_config,
+                    b"*4\r\n$11\r\n",
+                    b"SINTERSTORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_sinterstore2_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$11\r\n",
+                    b"SUNIONSTORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_sunionstore2_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$10\r\n",
+                    b"SDIFFSTORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_sdiffstore2_borrowed(packet.key, packet.a, packet.b, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
                     b"*4\r\n$6\r\n",
                     b"ZINTER",
                 ) {

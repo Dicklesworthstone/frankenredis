@@ -17232,6 +17232,78 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-setstore2fast) Borrowed WRITE fast path for the common 2-source
+    /// forms `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src1 src2`. Mirrors fr-command
+    /// EXACTLY: record_source_key_lookups([src1, src2]) (upstream's source key
+    /// hit/miss accounting) then store.{sinter,sunion,sdiff}store(dest, [src1, src2])
+    /// — which owns the type-checks, the result build, dirty, and dest creation/
+    /// deletion — returning the stored cardinality as `Integer`, or
+    /// CommandError::Store(err).to_resp() (WRONGTYPE). `which` selects the op
+    /// (b'I' inter, b'U' union, b'D' diff). Gated by the WRITE predicate; 3+ source
+    /// forms fall through to the generic handler.
+    pub fn execute_plain_setstore2_borrowed(
+        &mut self,
+        which: u8,
+        name_lower: &'static str,
+        name_upper: &'static str,
+        dest: &[u8],
+        src1: &[u8],
+        src2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < name_upper.len()
+            || dest.len() > self.policy.gate.max_bulk_len
+            || src1.len() > self.policy.gate.max_bulk_len
+            || src2.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lower,
+            name_upper.len() + dest.len() + src1.len() + src2.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let keys = [src1, src2];
+        fr_command::record_source_key_lookups(&mut self.server.store, &keys, now_ms);
+        let result = match which {
+            b'I' => self.server.store.sinterstore(dest, &keys, now_ms),
+            b'U' => self.server.store.sunionstore(dest, &keys, now_ms),
+            _ => self.server.store.sdiffstore(dest, &keys, now_ms),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lower,
+            name_upper,
+            || vec![name_upper.as_bytes().to_vec(), dest.to_vec(), src1.to_vec(), src2.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-setstore2fast) Public entry points for the three 2-source stores.
+    pub fn execute_plain_sinterstore2_borrowed(&mut self, dest: &[u8], src1: &[u8], src2: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_setstore2_borrowed(b'I', "sinterstore", "SINTERSTORE", dest, src1, src2, now_ms)
+    }
+    pub fn execute_plain_sunionstore2_borrowed(&mut self, dest: &[u8], src1: &[u8], src2: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_setstore2_borrowed(b'U', "sunionstore", "SUNIONSTORE", dest, src1, src2, now_ms)
+    }
+    pub fn execute_plain_sdiffstore2_borrowed(&mut self, dest: &[u8], src1: &[u8], src2: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_setstore2_borrowed(b'D', "sdiffstore", "SDIFFSTORE", dest, src1, src2, now_ms)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
