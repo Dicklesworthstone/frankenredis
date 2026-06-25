@@ -984,8 +984,17 @@ impl PlainExpireKind {
     }
 }
 
-fn plain_expire_owned_argv(name_upper: &[u8], key: &[u8], time_arg: &[u8]) -> Vec<Vec<u8>> {
-    vec![name_upper.to_vec(), key.to_vec(), time_arg.to_vec()]
+fn plain_expire_owned_argv(
+    name_upper: &[u8],
+    key: &[u8],
+    time_arg: &[u8],
+    cond_token: Option<&[u8]>,
+) -> Vec<Vec<u8>> {
+    let mut argv = vec![name_upper.to_vec(), key.to_vec(), time_arg.to_vec()];
+    if let Some(tok) = cond_token {
+        argv.push(tok.to_vec());
+    }
+    argv
 }
 
 fn plain_persist_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
@@ -13793,6 +13802,7 @@ impl Runtime {
             PlainExpireKind::RelativeSeconds,
             key,
             seconds_arg,
+            None,
             now_ms,
         )
     }
@@ -13808,6 +13818,7 @@ impl Runtime {
             PlainExpireKind::RelativeMilliseconds,
             key,
             time_arg,
+            None,
             now_ms,
         )
     }
@@ -13823,6 +13834,7 @@ impl Runtime {
             PlainExpireKind::AbsoluteSeconds,
             key,
             time_arg,
+            None,
             now_ms,
         )
     }
@@ -13838,6 +13850,74 @@ impl Runtime {
             PlainExpireKind::AbsoluteMilliseconds,
             key,
             time_arg,
+            None,
+            now_ms,
+        )
+    }
+
+    /// Borrowed WRITE fast paths for the single-condition `<cmd> key time
+    /// NX|XX|GT|LT` forms. `cond_token` is the raw option bytes; a non-NX/XX/GT/LT
+    /// token defers to the generic path for the exact "Unsupported option" error.
+    pub fn execute_plain_expire_cond_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        cond_token: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::RelativeSeconds,
+            key,
+            time_arg,
+            Some(cond_token),
+            now_ms,
+        )
+    }
+
+    pub fn execute_plain_pexpire_cond_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        cond_token: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::RelativeMilliseconds,
+            key,
+            time_arg,
+            Some(cond_token),
+            now_ms,
+        )
+    }
+
+    pub fn execute_plain_expireat_cond_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        cond_token: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::AbsoluteSeconds,
+            key,
+            time_arg,
+            Some(cond_token),
+            now_ms,
+        )
+    }
+
+    pub fn execute_plain_pexpireat_cond_borrowed(
+        &mut self,
+        key: &[u8],
+        time_arg: &[u8],
+        cond_token: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_expire_kind_borrowed(
+            PlainExpireKind::AbsoluteMilliseconds,
+            key,
+            time_arg,
+            Some(cond_token),
             now_ms,
         )
     }
@@ -13858,6 +13938,7 @@ impl Runtime {
         kind: PlainExpireKind,
         key: &[u8],
         time_arg: &[u8],
+        cond_token: Option<&[u8]>,
         now_ms: u64,
     ) -> Option<RespFrame> {
         let name_upper = kind.name_upper();
@@ -13870,6 +13951,18 @@ impl Runtime {
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
+        // A single NX|XX|GT|LT condition token (matching parse_expire_options for one
+        // option). Any unknown/other token defers to the generic path for the exact
+        // "Unsupported option" error; multi-option and conflict cases are *5+ packets
+        // the recognizer never matches, so they fall through too.
+        let (nx, xx, gt, lt) = match cond_token {
+            None => (false, false, false, false),
+            Some(t) if t.eq_ignore_ascii_case(b"NX") => (true, false, false, false),
+            Some(t) if t.eq_ignore_ascii_case(b"XX") => (false, true, false, false),
+            Some(t) if t.eq_ignore_ascii_case(b"GT") => (false, false, true, false),
+            Some(t) if t.eq_ignore_ascii_case(b"LT") => (false, false, false, true),
+            Some(_) => return None,
+        };
         // Same validation as expire_like(kind); defer on any failure for exact errors.
         let raw_time = parse_i64_arg(time_arg).ok()?;
         kind.validated_when_ms(raw_time, now_ms)?; // overflow -> defer ("invalid expire time")
@@ -13882,7 +13975,10 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str(kind.name_lower());
-        self.session.last_argv_len_sum = name_upper.len() + key.len() + time_arg.len();
+        self.session.last_argv_len_sum = name_upper.len()
+            + key.len()
+            + time_arg.len()
+            + cond_token.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -13890,20 +13986,53 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror apply_expiry_with_options with no NX/XX/GT/LT options.
-        let applied = match self.server.store.pttl_no_stats(key, now_ms) {
-            fr_store::PttlValue::KeyMissing => false,
-            _ => self.server.store.expire_at_milliseconds(
-                key,
-                clamp_i128_to_i64_runtime(when_ms_i128),
-                now_ms,
-            ),
+        // Mirror fr_command::apply_expiry_with_options exactly (NX/XX/GT/LT use the
+        // non-counting PTTL so the comparison read does not bump keyspace_hits).
+        let applied = {
+            let current_remaining_ms = match self.server.store.pttl_no_stats(key, now_ms) {
+                fr_store::PttlValue::KeyMissing => None,
+                fr_store::PttlValue::NoExpiry => Some(None),
+                fr_store::PttlValue::Remaining(ms) => Some(Some(ms)),
+            };
+            match current_remaining_ms {
+                None => false, // key missing
+                Some(remaining) => 'apply: {
+                    if nx && remaining.is_some() {
+                        break 'apply false;
+                    }
+                    if xx && remaining.is_none() {
+                        break 'apply false;
+                    }
+                    if gt {
+                        let Some(rem) = remaining else {
+                            break 'apply false;
+                        };
+                        let cur = i128::from(now_ms).saturating_add(i128::from(rem));
+                        if when_ms_i128 <= cur {
+                            break 'apply false;
+                        }
+                    }
+                    if lt
+                        && let Some(rem) = remaining
+                    {
+                        let cur = i128::from(now_ms).saturating_add(i128::from(rem));
+                        if when_ms_i128 >= cur {
+                            break 'apply false;
+                        }
+                    }
+                    self.server.store.expire_at_milliseconds(
+                        key,
+                        clamp_i128_to_i64_runtime(when_ms_i128),
+                        now_ms,
+                    )
+                }
+            }
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(i64::from(applied));
 
         self.record_plain_expire_borrowed_metrics(
-            kind, key, time_arg, elapsed_us, now_ms, packet_id,
+            kind, key, time_arg, cond_token, elapsed_us, now_ms, packet_id,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -13918,6 +14047,7 @@ impl Runtime {
         kind: PlainExpireKind,
         key: &[u8],
         time_arg: &[u8],
+        cond_token: Option<&[u8]>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -13928,7 +14058,7 @@ impl Runtime {
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
@@ -13936,7 +14066,7 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -13953,7 +14083,7 @@ impl Runtime {
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg));
+                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
