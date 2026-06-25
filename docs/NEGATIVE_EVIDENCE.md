@@ -4043,3 +4043,16 @@ RPOP 1.848/0.776. Byte-exact incl count 0→empty, over-count→all+autodelete, 
 generic, no-count→bulk-string-via-generic, arity; cmdstat+keyspace. conformance 99/0. Added generic *3 parser
 parse_borrowed_plain_key_arg1_packet. SESSION TALLY 14 fast-paths. Still uncovered+slow: ZDIFF 0.57x/ZINTER 0.53x
 (variadic numkeys read). LESSON: measure BOTH the no-arg and with-arg forms — the gap can be entirely in one variant.
+
+### 2026-06-24 (part 57) ZDIFF 2-key READ fast-path SHIPPED — ~1.34-1.65x (0.46x→0.92x/1.69x vs redis) (cc/BlackThrush)
+First fast-path where the algorithm lives in fr-command (not a single store method). ZDIFF 2 k1 k2 was 0.46x.
+execute_plain_zdiff2_borrowed fires ONLY when numkeys==2 (the *4 form can't carry WITHSCORES — options follow the
+2 keys); execute_plain_zdiff2_core replicates fr-command::zdiff byte-for-byte using the SAME pub store primitives
+(record_source_key_lookups → ensure_zset_or_set_source on BOTH keys up front → zget_members_with_scores_no_stats →
+zget_score_or_set_member_no_stats → sort score-asc/member-lex → flat array). No new store logic; the algorithm shape
+is duplicated but each step is a stable pub primitive, so drift risk is low and the thorough differential (ties,
+zset-diff-SET, wrong-type-ordering incl second-key-when-first-empty, numkeys 0/1/3, WITHSCORES fall-through, RESP3,
+cmdstat+keyspace) is byte-exact. A/B (best-of-6): ZDIFF(empty) cand/ctrl 1.646 cand/redis 0.920; ZDIFF(18) 1.342/1.691
+(fr beats redis on larger results). conformance 99/0. SESSION TALLY 15 fast-paths. ZINTER (0.45x) is harder
+(WEIGHTS/AGGREGATE + score aggregation) — deferred. Pattern proven: a fr-command-resident algorithm CAN be fast-pathed
+if its sub-steps are pub store primitives and the differential is exhaustive.
