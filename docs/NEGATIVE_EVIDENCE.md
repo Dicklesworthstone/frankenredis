@@ -4723,3 +4723,12 @@ WITHSCORES; +LIMIT(*7)/no-opt(*4) route elsewhere. A/B cand/ctrl 1.416, cand/red
 RESP3 (floats 1.5/3.25/-inf, empty, WRONGTYPE, fall-throughs), cmdstat=1, keyspace=1. conformance 99/0. Verified diff (164).
 OPTION-FORM SCORECARD parts 82-94 = 13 wins. NEXT: ZREVRANGEBYSCORE/ZRANGE BYSCORE WITHSCORES (mirror the _into),
 ZRANGEBYLEX has no scores (skip WITHSCORES), ZRANGE ..REV (*5 -> zrevrange index).
+
+### 2026-06-25 (part 95) ZREVRANGEBYSCORE ..WITHSCORES fast-path SHIPPED ~1.58x (0.537x->0.916x) (cc/BlackThrush)
+Fourteenth option-form win. Reverse mirror of part-94. ZREVRANGEBYSCORE key max min WITHSCORES (*5) = 0.537x.
+execute_plain_zrevrangebyscore_withscores_borrowed_into: wire max-then-min, guard takes (min,max), zrangebyscore_
+withscores_limited rev=true, same RESP2-flat/RESP3-[member,Double]-pairs _into emit. *5 key_arg3 gated WITHSCORES.
+A/B cand/ctrl 1.584, cand/redis 0.916. Byte-exact RESP2 AND RESP3 (desc full/subset/empty, WRONGTYPE, bad-score,
++LIMIT/no-WS fall-through), cmdstat=1, keyspace=1. conformance 99/0. Verified diff (163).
+OPTION-FORM SCORECARD parts 82-95 = 14 wins. The score-range WITHSCORES surface (zrangebyscore + zrevrangebyscore)
+COMPLETE. NEXT: ZRANGE ..BYSCORE WITHSCORES (*6, cmdstat=zrange, mirror _into), ZRANGE ..REV (*5 reverse-index).
