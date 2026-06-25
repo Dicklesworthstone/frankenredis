@@ -4444,3 +4444,20 @@ cand/redis 1.373 (now BEATS redis, was ~parity); SINTER3 cand/ctrl 1.404 cand/re
 unrelated: foldhash passes isolated, scan_scanpfx fails on HEAD too). LESSON: even the "structural store-side" residuals
 can hide CLEAN algorithmic wins — profile the hot loop for REDUNDANT work (hoistable lookups, repeated probes) before
 declaring a gap structural. The 2-key path already hoisted (clone+retain has get() outside the loop); only >=3-key had it.
+
+### 2026-06-25 (part 80) STORE-SIDE WIN: sdiff_value loop-hoist — SDIFFSTORE 3+key ~1.13x; set-algebra hoist vein CLOSED (cc/BlackThrush)
+Mirror of part-79 sinter hoist applied to sdiff_value's >=3-key fresh-build path (same redundant self.entries.get(key)
+per-member-per-other-set probe). Fetch other-set &SetValue once before the member loop; missing others omitted (they
+contributed `false`=not-in-other originally). A/B (3-set, first=500, result=200): SDIFFSTORE3 cand/ctrl 1.127 cand/redis
+1.016 (was 0.901x — crosses to parity+). Byte-exact (SDIFF3 fr-vs-redis 0-diff, wrongtype + missing-other preserved).
+SET-ALGEBRA HOIST VEIN NOW CLOSED: audited all multi-key set/zset store loops —
+  • sinter (part 79) FIXED, sdiff (part 80) FIXED.
+  • zinterstore ALREADY hoisted (collects inputs: Vec<ZSetAlgebraInput> once before the per-member for_each — the
+    "frankenredis-zsetbulk" opt; that's why ZINTERSTORE was already 2.05x).
+  • sunion/zunionstore = UNIONS (iterate all sets inserting all members — no membership-probe inner loop, nothing to hoist).
+  • 2-key sinter/sdiff = clone+retain (get() already outside the member loop).
+GENERALIZABLE LESSON (confirmed twice): the part-78 "structural store-side" residual was WRONG for set intersection —
+the hot loop had hoistable redundant keyspace-dict probes. When a multi-key store op loops <members> x <other keys>,
+CHECK whether the per-key resolve (self.entries.get) is inside the member loop; if so, hoist it. fr-store perf-A/B unit
+tests (_ab_ratio / _isomorphic_and_faster_) flake 2-4 at a time under multi-agent load — confirm unrelated to your diff
+(name = zadd/zset-index/scan, not your fn) before trusting/blaming.
