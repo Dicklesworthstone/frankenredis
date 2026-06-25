@@ -4741,3 +4741,13 @@ bad-score, reversed-order + BYSCORE-only + REV-*7 fall-through), cmdstat_zrange=
 OPTION-FORM SCORECARD parts 82-96 = 15 wins. NEXT: ZRANGE ..REV (*5 reverse-index -> zrevrange), ZRANGEBYLEX WITHSCORES
 (lex sets DO have scores via WITHSCORES? NO - ZRANGEBYLEX has no WITHSCORES option, lex requires equal scores; skip).
 ZRANGE ..BYLEX has no WITHSCORES. Remaining: ZRANGE REV index, and the LIMIT+WITHSCORES combos (*8/*9, lower value).
+
+### 2026-06-25 (part 97) ZRANGE key start stop REV fast-path SHIPPED ~1.21x (0.628x->0.819x) (cc/BlackThrush)
+Sixteenth option-form win. ZRANGE..REV (reverse index) = 0.628x. execute_plain_zrange_rev_borrowed = ZREVRANGE body
+(store.zrevrange) but cmdstat="zrange". Extended *5 ZRANGE key_arg3 dispatch to route BYSCORE/BYLEX/REV; REV+LIMIT (no
+BY) falls through to the 'LIMIT only in BYSCORE/BYLEX' syntax error. A/B cand/ctrl 1.213, cand/redis 0.819. Byte-exact:
+full/subset/neg-idx/oor/empty/wrongtype/not-int(fallthru)/lowercase, siblings route, *4 unaffected, cmdstat_zrange=1,
+keyspace=1. conformance 99/0. Completes the ZRANGE *5 option matrix (BYSCORE/BYLEX/REV).
+OPTION-FORM SCORECARD parts 82-97 = 16 wins. ZSET/ZRANGE option surface now SATURATED (score/lex/rev/withscores/limit
+all covered). NEXT must PIVOT to a different class: non-byte-exact-skips=SCAN-COUNT(order differs)/HRANDFIELD(random);
+candidates=SINTERCARD 1-key (0.559x, trivial), OBJECT ENCODING (0.767x). Or broad re-sweep a fresh command family.
