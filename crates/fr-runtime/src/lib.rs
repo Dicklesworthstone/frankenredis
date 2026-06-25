@@ -1042,8 +1042,12 @@ fn plain_hincrby_owned_argv(key: &[u8], field: &[u8], increment_arg: &[u8]) -> V
     ]
 }
 
-fn plain_copy_owned_argv(key: &[u8], dest: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"COPY".to_vec(), key.to_vec(), dest.to_vec()]
+fn plain_copy_owned_argv(key: &[u8], dest: &[u8], replace: bool) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"COPY".to_vec(), key.to_vec(), dest.to_vec()];
+    if replace {
+        argv.push(b"REPLACE".to_vec());
+    }
+    argv
 }
 
 fn plain_incrbyfloat_owned_argv(key: &[u8], increment_arg: &[u8]) -> Vec<Vec<u8>> {
@@ -14980,6 +14984,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         dest: &[u8],
+        replace: bool,
         now_ms: u64,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_copy_borrowed(key, dest, now_ms) {
@@ -14996,7 +15001,10 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("copy");
-        self.session.last_argv_len_sum = b"COPY".len() + key.len() + dest.len();
+        self.session.last_argv_len_sum = b"COPY".len()
+            + key.len()
+            + dest.len()
+            + if replace { b"REPLACE".len() } else { 0 };
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -15004,7 +15012,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.copy(key, dest, false, now_ms);
+        let result = self.server.store.copy(key, dest, replace, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(copied) => RespFrame::Integer(i64::from(copied)),
@@ -15012,7 +15020,7 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_copy_borrowed_metrics(key, dest, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_copy_borrowed_metrics(key, dest, replace, elapsed_us, now_ms, packet_id, failed);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -15041,6 +15049,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         dest: &[u8],
+        replace: bool,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -15050,14 +15059,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest));
+            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest, replace));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest));
+            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest, replace));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -15074,7 +15083,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest));
+            let argv_ref = argv.get_or_insert_with(|| plain_copy_owned_argv(key, dest, replace));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,

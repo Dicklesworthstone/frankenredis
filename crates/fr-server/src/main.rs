@@ -4100,7 +4100,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_copy_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_copy_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_copy_borrowed(packet.key, packet.member, false, ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -4114,6 +4114,26 @@ fn process_buffered_frames(
                             ts,
                             &mut conn.write_buf,
                             &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$4\r\n",
+                    b"COPY",
+                ) {
+                    // COPY source destination REPLACE: key=source, a=destination,
+                    // b=the option token. Only the REPLACE option is fast-pathed
+                    // (case-insensitive); DB/other forms fall through to generic.
+                    if packet.b.eq_ignore_ascii_case(b"REPLACE")
+                        && let Some(response) =
+                            runtime.execute_plain_copy_borrowed(packet.key, packet.a, true, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =

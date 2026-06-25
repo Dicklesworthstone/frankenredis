@@ -19454,26 +19454,42 @@ impl Store {
             return Ok(false);
         }
 
-        self.stream_groups.remove(destination);
-        self.stream_last_ids.remove(destination);
-        self.stream_entries_added.remove(destination);
-        self.stream_max_deleted_ids.remove(destination);
-        // Copy stream consumer groups if source has them
-        if let Some(groups) = self.stream_groups.get(source) {
-            self.stream_groups
-                .insert(destination.to_vec(), groups.clone());
-        }
-        // Copy stream last-generated-id if source has one
-        if let Some(&last_id) = self.stream_last_ids.get(source) {
-            self.stream_last_ids.insert(destination.to_vec(), last_id);
-        }
-        if let Some(&entries_added) = self.stream_entries_added.get(source) {
-            self.stream_entries_added
-                .insert(destination.to_vec(), entries_added);
-        }
-        if let Some(&max_deleted_id) = self.stream_max_deleted_ids.get(source) {
-            self.stream_max_deleted_ids
-                .insert(destination.to_vec(), max_deleted_id);
+        // (BlackThrush) Stream consumer-group / last-id / entries-added /
+        // max-deleted-id side-maps only ever hold entries for STREAM keys. The
+        // previous code ran all 12 of these map ops (4 dest-removes + 4 source-gets
+        // + up to 4 inserts) on EVERY copy — redis's copyCommand is ~3 dict ops, so
+        // this was the bulk of COPY's overhead for the common (no-stream) DB. Skip
+        // the whole block unless the source is actually a stream (something to copy)
+        // or a side-map is non-empty (stale dest metadata that must be cleared).
+        // Correct because: empty maps + non-stream source ⇒ nothing to clear and
+        // nothing to copy.
+        if matches!(entry.value, Value::Stream(_))
+            || !self.stream_groups.is_empty()
+            || !self.stream_last_ids.is_empty()
+            || !self.stream_entries_added.is_empty()
+            || !self.stream_max_deleted_ids.is_empty()
+        {
+            self.stream_groups.remove(destination);
+            self.stream_last_ids.remove(destination);
+            self.stream_entries_added.remove(destination);
+            self.stream_max_deleted_ids.remove(destination);
+            // Copy stream consumer groups if source has them
+            if let Some(groups) = self.stream_groups.get(source) {
+                self.stream_groups
+                    .insert(destination.to_vec(), groups.clone());
+            }
+            // Copy stream last-generated-id if source has one
+            if let Some(&last_id) = self.stream_last_ids.get(source) {
+                self.stream_last_ids.insert(destination.to_vec(), last_id);
+            }
+            if let Some(&entries_added) = self.stream_entries_added.get(source) {
+                self.stream_entries_added
+                    .insert(destination.to_vec(), entries_added);
+            }
+            if let Some(&max_deleted_id) = self.stream_max_deleted_ids.get(source) {
+                self.stream_max_deleted_ids
+                    .insert(destination.to_vec(), max_deleted_id);
+            }
         }
         self.internal_entries_insert_with_expiry(destination.to_vec(), entry, source_expiry);
         self.dirty = self.dirty.saturating_add(1);
