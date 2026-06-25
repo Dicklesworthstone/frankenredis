@@ -4323,6 +4323,31 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$5\r\n",
+                    b"GETEX",
+                ) {
+                    // GETEX key EX|PX value: a=option token, b=time. Only the relative
+                    // EX/PX forms are fast-pathed; EXAT/PXAT and others fall through.
+                    let is_ex = packet.a.eq_ignore_ascii_case(b"EX");
+                    let is_px = packet.a.eq_ignore_ascii_case(b"PX");
+                    if (is_ex || is_px)
+                        && let Some(response) = runtime.execute_plain_getex_relexpire_borrowed(
+                            is_ex,
+                            packet.key,
+                            packet.b,
+                            ts,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {

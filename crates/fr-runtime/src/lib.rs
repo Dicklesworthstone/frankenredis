@@ -1079,6 +1079,15 @@ fn plain_getex_persist_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETEX".to_vec(), key.to_vec(), b"PERSIST".to_vec()]
 }
 
+fn plain_getex_relexpire_owned_argv(unit: &[u8], key: &[u8], time_arg: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"GETEX".to_vec(),
+        key.to_vec(),
+        unit.to_vec(),
+        time_arg.to_vec(),
+    ]
+}
+
 fn plain_getset_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETSET".to_vec(), key.to_vec(), value.to_vec()]
 }
@@ -15589,6 +15598,86 @@ impl Runtime {
 
         self.record_plain_getex_borrowed_metrics(
             || plain_getex_persist_owned_argv(key),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (BlackThrush) Borrowed WRITE fast path for `GETEX key EX|PX value` — read the
+    /// value AND set a relative TTL. Mirrors the generic getex EX/PX arm: validate
+    /// the time exactly as SET's relexpire fast path does (defer on <=0, overflow,
+    /// or non-int so the canonical "invalid expire time" error is emitted by the
+    /// generic), preserve the generic order (key lookup/type check first → missing
+    /// is nil, non-string is WRONGTYPE, regardless of the time value), then
+    /// store.getex with the absolute deadline. EXAT/PXAT and multi-option forms are
+    /// left on the generic path.
+    pub fn execute_plain_getex_relexpire_borrowed(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms) {
+            return None;
+        }
+        // Same validation as SET's EX/PX relexpire; defer on any failure.
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+        let abs_ms = now_ms.saturating_add(px);
+        let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getex");
+        self.session.last_argv_len_sum =
+            b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = match self.server.store.key_type(key, now_ms) {
+            None => RespFrame::BulkString(None),
+            Some("string") => match self.server.store.getex(key, Some(Some(abs_ms)), now_ms) {
+                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
+                Ok(None) => RespFrame::BulkString(None),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_relexpire_owned_argv(unit_upper, key, time_arg),
             elapsed_us,
             now_ms,
             packet_id,
