@@ -2763,6 +2763,29 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*3\r\n$4\r\n",
+                    b"SPOP",
+                ) {
+                    if let Some(response) =
+                        runtime.execute_plain_spop_count_borrowed(packet.key, packet.arg, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
                 {
@@ -4238,9 +4261,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_persist_borrowed(packet.key, ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -4707,8 +4728,12 @@ fn process_buffered_frames(
                         })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -4727,8 +4752,12 @@ fn process_buffered_frames(
                         })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4738,14 +4767,24 @@ fn process_buffered_frames(
                     b"BITOP",
                 ) {
                     // packet.key=op, a=dest, b=src1, c=src2 (AND/OR/XOR 2-source form).
-                    if let Some(response) = runtime
-                        .execute_plain_bitop_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_bitop_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -4758,11 +4797,18 @@ fn process_buffered_frames(
                     if let Some(response) =
                         runtime.execute_plain_bitop_borrowed(packet.key, packet.a, &[packet.b], ts)
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
@@ -4772,14 +4818,24 @@ fn process_buffered_frames(
                     b"ZUNIONSTORE",
                 ) {
                     // 3-key: key=dest, a=numkeys, b/c/d = k1/k2/k3.
-                    if let Some(response) = runtime
-                        .execute_plain_zunionstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zunionstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c, packet.d],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
@@ -4788,14 +4844,24 @@ fn process_buffered_frames(
                     b"*6\r\n$11\r\n",
                     b"ZINTERSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zinterstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zinterstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c, packet.d],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
@@ -4804,14 +4870,24 @@ fn process_buffered_frames(
                     b"*6\r\n$10\r\n",
                     b"ZDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zdiffstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zdiffstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c, packet.d],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4820,14 +4896,24 @@ fn process_buffered_frames(
                     b"*5\r\n$10\r\n",
                     b"ZDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zdiffstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zdiffstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4836,14 +4922,24 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"ZUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zunionstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zunionstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4852,14 +4948,24 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"ZINTERSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zinterstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zinterstore_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4869,14 +4975,23 @@ fn process_buffered_frames(
                     b"SINTERSTORE",
                 ) {
                     // 3-source: key=dest, a/b/c = src1/src2/src3.
-                    if let Some(response) = runtime
-                        .execute_plain_sinterstore_borrowed(packet.key, &[packet.a, packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sinterstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4885,14 +5000,23 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"SUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_sunionstore_borrowed(packet.key, &[packet.a, packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sunionstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4901,14 +5025,23 @@ fn process_buffered_frames(
                     b"*5\r\n$10\r\n",
                     b"SDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_sdiffstore_borrowed(packet.key, &[packet.a, packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sdiffstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -4917,14 +5050,23 @@ fn process_buffered_frames(
                     b"*4\r\n$11\r\n",
                     b"SINTERSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_sinterstore_borrowed(packet.key, &[packet.a, packet.b], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sinterstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -4933,14 +5075,23 @@ fn process_buffered_frames(
                     b"*4\r\n$11\r\n",
                     b"SUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_sunionstore_borrowed(packet.key, &[packet.a, packet.b], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sunionstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -4949,14 +5100,23 @@ fn process_buffered_frames(
                     b"*4\r\n$10\r\n",
                     b"SDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_sdiffstore_borrowed(packet.key, &[packet.a, packet.b], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_sdiffstore_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4966,14 +5126,23 @@ fn process_buffered_frames(
                     b"ZINTER",
                 ) {
                     // 3-key: key=numkeys, a/b/c = k1/k2/k3.
-                    if let Some(response) =
-                        runtime.execute_plain_zinter_borrowed(packet.key, &[packet.a, packet.b, packet.c], ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    if let Some(response) = runtime.execute_plain_zinter_borrowed(
+                        packet.key,
+                        &[packet.a, packet.b, packet.c],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -5039,8 +5208,12 @@ fn process_buffered_frames(
                         })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
@@ -5058,8 +5231,12 @@ fn process_buffered_frames(
                         })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
@@ -5077,8 +5254,60 @@ fn process_buffered_frames(
                         })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*3\r\n$5\r\n",
+                    b"TOUCH",
+                ) {
+                    // 2-key TOUCH: key + arg are the two keys.
+                    if let Some(response) =
+                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$5\r\n",
+                    b"TOUCH",
+                ) {
+                    // 3-key TOUCH: key + a + b are the three keys.
+                    if let Some(response) =
+                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
@@ -5269,10 +5498,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_zrevrangebylex_borrowed(
-                        packet.key,
-                        packet.max,
-                        packet.min,
-                        ts,
+                        packet.key, packet.max, packet.min, ts,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -5291,12 +5517,9 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zrangebylex_borrowed(
-                        packet.key,
-                        packet.min,
-                        packet.max,
-                        ts,
-                    ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zrangebylex_borrowed(packet.key, packet.min, packet.max, ts)
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -7324,6 +7547,15 @@ fn parse_borrowed_multibulk_action(
                             borrowed_plain_setrange_args(&borrowed_args)
                             && let Some(response) =
                                 runtime.execute_plain_setrange_borrowed(key, offset, value, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, count)) = borrowed_plain_spop_count_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_spop_count_borrowed(key, count, ts)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -9725,7 +9957,13 @@ fn parse_borrowed_plain_key_arg3_packet<'a>(
     let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (c, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainKeyArg3Packet { consumed, key, a, b, c })
+    Some(BorrowedPlainKeyArg3Packet {
+        consumed,
+        key,
+        a,
+        b,
+        c,
+    })
 }
 
 // (frankenredis-zstore3fast) Generic *6 `CMD key arg1 arg2 arg3 arg4` parser for the
@@ -9762,7 +10000,14 @@ fn parse_borrowed_plain_key_arg4_packet<'a>(
     let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (c, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (d, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainKeyArg4Packet { consumed, key, a, b, c, d })
+    Some(BorrowedPlainKeyArg4Packet {
+        consumed,
+        key,
+        a,
+        b,
+        c,
+        d,
+    })
 }
 
 // (frankenredis-lrpopcountfast) Generic *3 `CMD key arg` parser. `prefix` is the
@@ -9828,7 +10073,12 @@ fn parse_borrowed_plain_key_arg2_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (b, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainKeyArg2Packet { consumed, key, a, b })
+    Some(BorrowedPlainKeyArg2Packet {
+        consumed,
+        key,
+        a,
+        b,
+    })
 }
 
 // (frankenredis-pg6jj) key+arg read GETBIT (`GETBIT key offset`); the offset bulk
@@ -14194,6 +14444,15 @@ fn borrowed_plain_keyed_pop_args<'a>(
         return None;
     };
     Some((cmd, *key))
+}
+
+fn borrowed_plain_spop_count_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, count] if command.eq_ignore_ascii_case(b"SPOP") => Some((*key, *count)),
+        _ => None,
+    }
 }
 
 fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {

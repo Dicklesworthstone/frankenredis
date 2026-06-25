@@ -977,9 +977,7 @@ impl PlainExpireKind {
             Self::RelativeSeconds => {
                 i128::from(now_ms).saturating_add(i128::from(raw_time).saturating_mul(1000))
             }
-            Self::RelativeMilliseconds => {
-                i128::from(now_ms).saturating_add(i128::from(raw_time))
-            }
+            Self::RelativeMilliseconds => i128::from(now_ms).saturating_add(i128::from(raw_time)),
             Self::AbsoluteSeconds => i128::from(raw_time).saturating_mul(1000),
             Self::AbsoluteMilliseconds => i128::from(raw_time),
         }
@@ -1081,7 +1079,11 @@ fn plain_linsert_owned_argv(key: &[u8], before: bool, pivot: &[u8], value: &[u8]
     vec![
         b"LINSERT".to_vec(),
         key.to_vec(),
-        if before { b"BEFORE".to_vec() } else { b"AFTER".to_vec() },
+        if before {
+            b"BEFORE".to_vec()
+        } else {
+            b"AFTER".to_vec()
+        },
         pivot.to_vec(),
         value.to_vec(),
     ]
@@ -7440,8 +7442,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("set");
-        self.session.last_argv_len_sum =
-            b"SET".len() + key.len() + value.len() + b"XX".len();
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"XX".len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -7460,7 +7461,9 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_cond_borrowed_metrics(b"XX", key, value, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_cond_borrowed_metrics(
+            b"XX", key, value, elapsed_us, now_ms, packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -7478,7 +7481,14 @@ impl Runtime {
         packet_id: u64,
     ) {
         let mut argv: Option<Vec<Vec<u8>>> = None;
-        let build = || vec![b"SET".to_vec(), key.to_vec(), value.to_vec(), cond_upper.to_vec()];
+        let build = || {
+            vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                value.to_vec(),
+                cond_upper.to_vec(),
+            ]
+        };
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
@@ -7495,11 +7505,13 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "set",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7546,8 +7558,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("set");
-        self.session.last_argv_len_sum =
-            b"SET".len() + key.len() + value.len() + b"NX".len();
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"NX".len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -7580,7 +7591,14 @@ impl Runtime {
         packet_id: u64,
     ) {
         let mut argv: Option<Vec<Vec<u8>>> = None;
-        let build = || vec![b"SET".to_vec(), key.to_vec(), value.to_vec(), b"NX".to_vec()];
+        let build = || {
+            vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                value.to_vec(),
+                b"NX".to_vec(),
+            ]
+        };
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
@@ -7597,11 +7615,13 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "set",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7755,11 +7775,13 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "set",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7962,11 +7984,13 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "set",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13870,7 +13894,9 @@ impl Runtime {
         let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(i64::from(applied));
 
-        self.record_plain_expire_borrowed_metrics(kind, key, time_arg, elapsed_us, now_ms, packet_id);
+        self.record_plain_expire_borrowed_metrics(
+            kind, key, time_arg, elapsed_us, now_ms, packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -13955,11 +13981,7 @@ impl Runtime {
     /// dirty + the volatile-key bookkeeping), and the reply is `Integer(removed)`.
     /// Gated by the WRITE predicate, so propagation, AOF, the "persist" keyspace
     /// event, and tracking are provably inactive — no side effects are skipped.
-    pub fn execute_plain_persist_borrowed(
-        &mut self,
-        key: &[u8],
-        now_ms: u64,
-    ) -> Option<RespFrame> {
+    pub fn execute_plain_persist_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
         if !self.can_execute_plain_persist_borrowed(key, now_ms) {
             return None;
         }
@@ -14210,7 +14232,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_rpoplpush_borrowed_metrics(src, dst, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_rpoplpush_borrowed_metrics(
+            src, dst, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -14291,12 +14315,7 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_lmove_borrowed(
-        &mut self,
-        src: &[u8],
-        dst: &[u8],
-        now_ms: u64,
-    ) -> bool {
+    fn can_execute_plain_lmove_borrowed(&mut self, src: &[u8], dst: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"LMOVE".len()
             || src.len() > self.policy.gate.max_bulk_len
@@ -14351,7 +14370,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.lmove(src, dst, wherefrom, whereto, now_ms);
+        let result = self
+            .server
+            .store
+            .lmove(src, dst, wherefrom, whereto, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(Some(v)) => RespFrame::BulkString(Some(v)),
@@ -14450,7 +14472,12 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_rename_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_rename_borrowed(
+        &mut self,
+        key: &[u8],
+        newkey: &[u8],
+        now_ms: u64,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAME".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -14504,7 +14531,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_rename_borrowed_metrics(key, newkey, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_rename_borrowed_metrics(
+            key, newkey, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -14594,7 +14623,15 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_setex_kind_borrowed(true, b"SETEX", "setex", key, seconds_arg, value, now_ms)
+        self.execute_plain_setex_kind_borrowed(
+            true,
+            b"SETEX",
+            "setex",
+            key,
+            seconds_arg,
+            value,
+            now_ms,
+        )
     }
 
     /// (frankenredis-psetexfast) Borrowed WRITE fast path for `PSETEX key
@@ -14607,7 +14644,9 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_setex_kind_borrowed(false, b"PSETEX", "psetex", key, ms_arg, value, now_ms)
+        self.execute_plain_setex_kind_borrowed(
+            false, b"PSETEX", "psetex", key, ms_arg, value, now_ms,
+        )
     }
 
     /// Shared core for SETEX/PSETEX. Mirrors the generic exactly on the clean path:
@@ -14707,16 +14746,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -14732,8 +14771,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_setex_owned_argv(name_upper, key, time_arg, value));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -14753,7 +14792,12 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_hincrby_borrowed(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_hincrby_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HINCRBY".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -15164,14 +15208,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -15188,7 +15234,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_incrbyfloat_owned_argv(key, increment_arg));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -15393,7 +15440,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_getset_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_getset_borrowed_metrics(
+            key, value, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -15516,8 +15565,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("hsetnx");
-        self.session.last_argv_len_sum =
-            b"HSETNX".len() + key.len() + field.len() + value.len();
+        self.session.last_argv_len_sum = b"HSETNX".len() + key.len() + field.len() + value.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -15537,13 +15585,7 @@ impl Runtime {
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_hsetnx_borrowed_metrics(
-            key,
-            field,
-            value,
-            elapsed_us,
-            now_ms,
-            packet_id,
-            failed,
+            key, field, value, elapsed_us, now_ms, packet_id, failed,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -15682,7 +15724,11 @@ impl Runtime {
         self.session.last_command_name.push_str("linsert");
         self.session.last_argv_len_sum = b"LINSERT".len()
             + key.len()
-            + if before { b"BEFORE".len() } else { b"AFTER".len() }
+            + if before {
+                b"BEFORE".len()
+            } else {
+                b"AFTER".len()
+            }
             + pivot.len()
             + value.len();
         let packet_id = next_packet_id();
@@ -15847,8 +15893,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("lrem");
-        self.session.last_argv_len_sum =
-            b"LREM".len() + key.len() + count_arg.len() + value.len();
+        self.session.last_argv_len_sum = b"LREM".len() + key.len() + count_arg.len() + value.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -16002,8 +16047,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("zrangebylex");
-        self.session.last_argv_len_sum =
-            b"ZRANGEBYLEX".len() + key.len() + min.len() + max.len();
+        self.session.last_argv_len_sum = b"ZRANGEBYLEX".len() + key.len() + min.len() + max.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -16015,7 +16059,10 @@ impl Runtime {
         fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let reply = match self.server.store.zrangebylex(key, min, max, now_ms) {
             Ok(members) => RespFrame::Array(Some(
-                members.into_iter().map(|m| RespFrame::BulkString(Some(m))).collect(),
+                members
+                    .into_iter()
+                    .map(|m| RespFrame::BulkString(Some(m)))
+                    .collect(),
             )),
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -16167,7 +16214,10 @@ impl Runtime {
         fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let reply = match self.server.store.zrevrangebylex(key, max, min, now_ms) {
             Ok(members) => RespFrame::Array(Some(
-                members.into_iter().map(|m| RespFrame::BulkString(Some(m))).collect(),
+                members
+                    .into_iter()
+                    .map(|m| RespFrame::BulkString(Some(m)))
+                    .collect(),
             )),
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -16219,14 +16269,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -16243,7 +16295,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_zrevrangebylex_owned_argv(key, max, min));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -16343,7 +16396,12 @@ impl Runtime {
         }
     }
 
-    fn plain_zremrange_write_preamble(&mut self, name_lower: &'static str, argv_len_sum: usize, now_ms: u64) -> u64 {
+    fn plain_zremrange_write_preamble(
+        &mut self,
+        name_lower: &'static str,
+        argv_len_sum: usize,
+        now_ms: u64,
+    ) -> u64 {
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
             self.session.connected_at_ms = now_ms;
@@ -16389,7 +16447,13 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYRANK".len(), key, start_arg, stop_arg, now_ms) {
+        if !self.can_execute_plain_zremrange_borrowed(
+            b"ZREMRANGEBYRANK".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) {
             return None;
         }
         let start = parse_i64_arg(start_arg).ok()?;
@@ -16410,8 +16474,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zremrangebyrank",
             "ZREMRANGEBYRANK",
-            || vec![b"ZREMRANGEBYRANK".to_vec(), key.to_vec(), start_arg.to_vec(), stop_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZREMRANGEBYRANK".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16429,7 +16503,13 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYSCORE".len(), key, min_arg, max_arg, now_ms) {
+        if !self.can_execute_plain_zremrange_borrowed(
+            b"ZREMRANGEBYSCORE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) {
             return None;
         }
         let (min, max) = match (
@@ -16455,8 +16535,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zremrangebyscore",
             "ZREMRANGEBYSCORE",
-            || vec![b"ZREMRANGEBYSCORE".to_vec(), key.to_vec(), min_arg.to_vec(), max_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZREMRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16476,7 +16566,13 @@ impl Runtime {
         max: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zremrange_borrowed(b"ZREMRANGEBYLEX".len(), key, min, max, now_ms) {
+        if !self.can_execute_plain_zremrange_borrowed(
+            b"ZREMRANGEBYLEX".len(),
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -16495,8 +16591,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zremrangebylex",
             "ZREMRANGEBYLEX",
-            || vec![b"ZREMRANGEBYLEX".to_vec(), key.to_vec(), min.to_vec(), max.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZREMRANGEBYLEX".to_vec(),
+                    key.to_vec(),
+                    min.to_vec(),
+                    max.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16540,11 +16646,19 @@ impl Runtime {
         rev: bool,
         now_ms: u64,
     ) -> RespFrame {
-        match fr_command::zscore_inverted_wrongtype_guard(&mut self.server.store, key, min, max, now_ms) {
+        match fr_command::zscore_inverted_wrongtype_guard(
+            &mut self.server.store,
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
             Ok(true) => RespFrame::Array(Some(Vec::new())),
-            Ok(false) => match self.server.store.zrangebyscore_withscores_limited(
-                key, min, max, rev, 0, None, now_ms,
-            ) {
+            Ok(false) => match self
+                .server
+                .store
+                .zrangebyscore_withscores_limited(key, min, max, rev, 0, None, now_ms)
+            {
                 Ok(pairs) => RespFrame::Array(Some(
                     pairs
                         .into_iter()
@@ -16587,7 +16701,13 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGEBYSCORE".len(), key, min_arg, max_arg, now_ms) {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGEBYSCORE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) {
             return None;
         }
         let (min, max) = match (
@@ -16609,8 +16729,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zrangebyscore",
             "ZRANGEBYSCORE",
-            || vec![b"ZRANGEBYSCORE".to_vec(), key.to_vec(), min_arg.to_vec(), max_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16628,7 +16758,13 @@ impl Runtime {
         min_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYSCORE".len(), key, max_arg, min_arg, now_ms) {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYSCORE".len(),
+            key,
+            max_arg,
+            min_arg,
+            now_ms,
+        ) {
             return None;
         }
         let (max, min) = match (
@@ -16650,8 +16786,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zrevrangebyscore",
             "ZREVRANGEBYSCORE",
-            || vec![b"ZREVRANGEBYSCORE".to_vec(), key.to_vec(), max_arg.to_vec(), min_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZREVRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    max_arg.to_vec(),
+                    min_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16671,7 +16817,13 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGE".len(), key, start_arg, stop_arg, now_ms) {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGE".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) {
             return None;
         }
         let start = fr_command::parse_i64_arg(start_arg).ok()?;
@@ -16697,8 +16849,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zrevrange",
             "ZREVRANGE",
-            || vec![b"ZREVRANGE".to_vec(), key.to_vec(), start_arg.to_vec(), stop_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZREVRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16740,7 +16902,8 @@ impl Runtime {
     ) -> Option<RespFrame> {
         let name_lower = if is_left { "lpop" } else { "rpop" };
         let name_upper = if is_left { "LPOP" } else { "RPOP" };
-        if !self.can_execute_plain_key_arg1_write_borrowed(name_upper.len(), key, count_arg, now_ms) {
+        if !self.can_execute_plain_key_arg1_write_borrowed(name_upper.len(), key, count_arg, now_ms)
+        {
             return None;
         }
         // parse_list_pop_count_arg accepts only count >= 0; defer non-integer /
@@ -16775,8 +16938,89 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             name_lower,
             name_upper,
-            || vec![name_upper.as_bytes().to_vec(), key.to_vec(), count_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    name_upper.as_bytes().to_vec(),
+                    key.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// Borrowed WRITE fast path for `SPOP key count`. The random member choice
+    /// and mutation semantics remain inside `Store::spop_count`; this only skips
+    /// argv materialization and generic dispatch for a valid non-negative count.
+    /// Invalid counts fall back to the generic handler for Redis's exact error
+    /// wording. Count zero still type-checks before returning an empty set/array,
+    /// matching fr-command's Redis-compatibility guard.
+    pub fn execute_plain_spop_count_borrowed(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        const NAME_LOWER: &str = "spop";
+        const NAME_UPPER: &str = "SPOP";
+        if !self.can_execute_plain_key_arg1_write_borrowed(NAME_UPPER.len(), key, count_arg, now_ms)
+        {
+            return None;
+        }
+        let count = fr_command::parse_i64_arg(count_arg)
+            .ok()
+            .filter(|value| *value >= 0)
+            .and_then(|value| usize::try_from(value).ok())?;
+
+        let packet_id = self.plain_zremrange_write_preamble(
+            NAME_LOWER,
+            NAME_UPPER.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        let start = self.chained_command_start();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let reply = match self.server.store.peek_value_type(key, now_ms) {
+            Some(fr_store::ValueType::Set) | None => {
+                if count > 0
+                    && let Some(card) = self.server.store.set_cardinality_no_stats(key, now_ms)
+                    && count >= card
+                {
+                    let _ = self.server.store.exists_no_touch(key, now_ms);
+                }
+                match self.server.store.spop_count(key, count, now_ms) {
+                    Ok(members) => {
+                        let frames = members
+                            .into_iter()
+                            .map(|member| RespFrame::BulkString(Some(member)))
+                            .collect();
+                        if resp3 {
+                            RespFrame::Set(Some(frames))
+                        } else {
+                            RespFrame::Array(Some(frames))
+                        }
+                    }
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            NAME_LOWER,
+            NAME_UPPER,
+            || vec![b"SPOP".to_vec(), key.to_vec(), count_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16803,7 +17047,11 @@ impl Runtime {
         };
         let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
         for (member, score) in first {
-            match self.server.store.zget_score_or_set_member_no_stats(k2, &member) {
+            match self
+                .server
+                .store
+                .zget_score_or_set_member_no_stats(k2, &member)
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => result.push((member, score)),
                 Err(err) => return CommandError::Store(err).to_resp(),
@@ -16859,8 +17107,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zdiff",
             "ZDIFF",
-            || vec![b"ZDIFF".to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZDIFF".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -16891,7 +17149,11 @@ impl Runtime {
             // normalize_weighted_score_cmd(score, 1.0)
             let mut combined = nan0(score);
             for &k in &keys[1..] {
-                match self.server.store.zget_score_or_set_member_no_stats(k, &member) {
+                match self
+                    .server
+                    .store
+                    .zget_score_or_set_member_no_stats(k, &member)
+                {
                     // aggregate_scores_for_cmd(combined, s*1.0, SUM)
                     Ok(Some(s)) => combined = nan0(combined + s),
                     Ok(None) => continue 'members,
@@ -16938,9 +17200,8 @@ impl Runtime {
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
-        let argv_len_sum = b"ZINTER".len()
-            + numkeys_arg.len()
-            + keys.iter().map(|k| k.len()).sum::<usize>();
+        let argv_len_sum =
+            b"ZINTER".len() + numkeys_arg.len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = self.plain_read_borrowed_preamble("zinter", argv_len_sum, now_ms);
         let st = self.chained_command_start();
         let reply = self.execute_plain_zinter_core(keys, now_ms);
@@ -16958,7 +17219,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17059,8 +17323,17 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             name_lower,
             name_upper,
-            || vec![name_upper.as_bytes().to_vec(), key.to_vec(), cursor_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    name_upper.as_bytes().to_vec(),
+                    key.to_vec(),
+                    cursor_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17069,13 +17342,28 @@ impl Runtime {
     }
 
     /// (frankenredis-scan0fast) Public entry points for the three cursor-0 scans.
-    pub fn execute_plain_sscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_sscan0_borrowed(
+        &mut self,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         self.execute_plain_scan0_borrowed(b'S', "sscan", "SSCAN", key, cursor_arg, now_ms)
     }
-    pub fn execute_plain_hscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_hscan0_borrowed(
+        &mut self,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         self.execute_plain_scan0_borrowed(b'H', "hscan", "HSCAN", key, cursor_arg, now_ms)
     }
-    pub fn execute_plain_zscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_zscan0_borrowed(
+        &mut self,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         self.execute_plain_scan0_borrowed(b'Z', "zscan", "ZSCAN", key, cursor_arg, now_ms)
     }
 
@@ -17145,8 +17433,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "lmpop",
             "LMPOP",
-            || vec![b"LMPOP".to_vec(), numkeys_arg.to_vec(), key.to_vec(), dir_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17232,8 +17530,18 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             "zmpop",
             "ZMPOP",
-            || vec![b"ZMPOP".to_vec(), numkeys_arg.to_vec(), key.to_vec(), dir_arg.to_vec()],
-            elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17262,16 +17570,17 @@ impl Runtime {
         if self.policy.gate.max_array_len < sources.len() + 2
             || self.policy.gate.max_bulk_len < name_upper.len()
             || dest.len() > self.policy.gate.max_bulk_len
-            || sources.iter().any(|s| s.len() > self.policy.gate.max_bulk_len)
+            || sources
+                .iter()
+                .any(|s| s.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
-        let argv_len_sum = name_upper.len()
-            + dest.len()
-            + sources.iter().map(|s| s.len()).sum::<usize>();
+        let argv_len_sum =
+            name_upper.len() + dest.len() + sources.iter().map(|s| s.len()).sum::<usize>();
         let packet_id = self.plain_zremrange_write_preamble(name_lower, argv_len_sum, now_ms);
         let st = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, sources, now_ms);
@@ -17298,7 +17607,10 @@ impl Runtime {
                 argv.extend(sources_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17307,14 +17619,50 @@ impl Runtime {
     }
 
     /// (frankenredis-setstore2fast) Public entry points for the 2/3-source stores.
-    pub fn execute_plain_sinterstore_borrowed(&mut self, dest: &[u8], sources: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_setstore_borrowed(b'I', "sinterstore", "SINTERSTORE", dest, sources, now_ms)
+    pub fn execute_plain_sinterstore_borrowed(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed(
+            b'I',
+            "sinterstore",
+            "SINTERSTORE",
+            dest,
+            sources,
+            now_ms,
+        )
     }
-    pub fn execute_plain_sunionstore_borrowed(&mut self, dest: &[u8], sources: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_setstore_borrowed(b'U', "sunionstore", "SUNIONSTORE", dest, sources, now_ms)
+    pub fn execute_plain_sunionstore_borrowed(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed(
+            b'U',
+            "sunionstore",
+            "SUNIONSTORE",
+            dest,
+            sources,
+            now_ms,
+        )
     }
-    pub fn execute_plain_sdiffstore_borrowed(&mut self, dest: &[u8], sources: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_setstore_borrowed(b'D', "sdiffstore", "SDIFFSTORE", dest, sources, now_ms)
+    pub fn execute_plain_sdiffstore_borrowed(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed(
+            b'D',
+            "sdiffstore",
+            "SDIFFSTORE",
+            dest,
+            sources,
+            now_ms,
+        )
     }
 
     /// (frankenredis-zstore2fast) Borrowed WRITE fast path for the common 2-key,
@@ -17364,9 +17712,13 @@ impl Runtime {
             }
             let weights = vec![1.0_f64; keys.len()];
             let result = if which == b'U' {
-                self.server.store.zunionstore(dest, keys, &weights, b"SUM", now_ms)
+                self.server
+                    .store
+                    .zunionstore(dest, keys, &weights, b"SUM", now_ms)
             } else {
-                self.server.store.zinterstore(dest, keys, &weights, b"SUM", now_ms)
+                self.server
+                    .store
+                    .zinterstore(dest, keys, &weights, b"SUM", now_ms)
             };
             match result {
                 Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
@@ -17389,7 +17741,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17397,11 +17752,39 @@ impl Runtime {
         Some(reply)
     }
 
-    pub fn execute_plain_zunionstore_borrowed(&mut self, dest: &[u8], nk: &[u8], keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_zstore_borrowed(b'U', "zunionstore", "ZUNIONSTORE", dest, nk, keys, now_ms)
+    pub fn execute_plain_zunionstore_borrowed(
+        &mut self,
+        dest: &[u8],
+        nk: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed(
+            b'U',
+            "zunionstore",
+            "ZUNIONSTORE",
+            dest,
+            nk,
+            keys,
+            now_ms,
+        )
     }
-    pub fn execute_plain_zinterstore_borrowed(&mut self, dest: &[u8], nk: &[u8], keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_zstore_borrowed(b'I', "zinterstore", "ZINTERSTORE", dest, nk, keys, now_ms)
+    pub fn execute_plain_zinterstore_borrowed(
+        &mut self,
+        dest: &[u8],
+        nk: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed(
+            b'I',
+            "zinterstore",
+            "ZINTERSTORE",
+            dest,
+            nk,
+            keys,
+            now_ms,
+        )
     }
 
     /// (frankenredis-zdiffstore2fast) Borrowed WRITE fast path for `ZDIFFSTORE dest
@@ -17452,7 +17835,11 @@ impl Runtime {
             let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
             'members: for (member, score) in first {
                 for &k in &keys[1..] {
-                    match self.server.store.zget_score_or_set_member_no_stats(k, &member) {
+                    match self
+                        .server
+                        .store
+                        .zget_score_or_set_member_no_stats(k, &member)
+                    {
                         Ok(Some(_)) => continue 'members,
                         Ok(None) => {}
                         Err(err) => break 'reply CommandError::Store(err).to_resp(),
@@ -17461,7 +17848,9 @@ impl Runtime {
                 result.push((member, score));
             }
             let count = result.len();
-            self.server.store.store_sorted_set_from_pairs(dest, result, now_ms);
+            self.server
+                .store
+                .store_sorted_set_from_pairs(dest, result, now_ms);
             RespFrame::Integer(count as i64)
         };
         let elapsed_us = self.finish_chained_command(st);
@@ -17480,7 +17869,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17515,7 +17907,9 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"BITOP".len()
             || op.len() > self.policy.gate.max_bulk_len
             || dest.len() > self.policy.gate.max_bulk_len
-            || sources.iter().any(|s| s.len() > self.policy.gate.max_bulk_len)
+            || sources
+                .iter()
+                .any(|s| s.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -17548,7 +17942,10 @@ impl Runtime {
                 argv.extend(sources_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17556,7 +17953,57 @@ impl Runtime {
         Some(reply)
     }
 
-    fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-touchfast) Borrowed READ fast path for `TOUCH key [key ...]`.
+    /// Mirrors fr-command::touch: store.touch(keys) (which counts the existing keys
+    /// and bumps their access time / keyspace hit-miss accounting internally) →
+    /// Integer(count). Read-only, no propagation. Callers pass the 2- or 3-key slice;
+    /// other arities fall through to generic.
+    pub fn execute_plain_touch_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < keys.len() + 1
+            || self.policy.gate.max_bulk_len < b"TOUCH".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"TOUCH".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("touch", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let count = self.server.store.touch(keys, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(count);
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        self.record_plain_zremrange_borrowed_metrics(
+            "touch",
+            "TOUCH",
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                argv.push(b"TOUCH".to_vec());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
+    fn can_execute_plain_renamenx_borrowed(
+        &mut self,
+        key: &[u8],
+        newkey: &[u8],
+        now_ms: u64,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -17608,7 +18055,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_renamenx_borrowed_metrics(key, newkey, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_renamenx_borrowed_metrics(
+            key, newkey, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17749,7 +18198,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_smove_borrowed_metrics(src, dst, member, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_smove_borrowed_metrics(
+            src, dst, member, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -17889,7 +18340,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("setbit");
-        self.session.last_argv_len_sum = b"SETBIT".len() + key.len() + offset_arg.len() + value_arg.len();
+        self.session.last_argv_len_sum =
+            b"SETBIT".len() + key.len() + offset_arg.len() + value_arg.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -17909,13 +18361,7 @@ impl Runtime {
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_setbit_borrowed_metrics(
-            key,
-            offset_arg,
-            value_arg,
-            elapsed_us,
-            now_ms,
-            packet_id,
-            failed,
+            key, offset_arg, value_arg, elapsed_us, now_ms, packet_id, failed,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -17959,14 +18405,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -17983,7 +18431,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setbit_owned_argv(key, offset_arg, value_arg));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -18130,16 +18579,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -18156,8 +18605,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
+            let argv_ref = argv
+                .get_or_insert_with(|| plain_hincrbyfloat_owned_argv(key, field, increment_arg));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -18247,13 +18696,7 @@ impl Runtime {
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_lset_borrowed_metrics(
-            key,
-            index_arg,
-            value,
-            elapsed_us,
-            now_ms,
-            packet_id,
-            failed,
+            key, index_arg, value, elapsed_us, now_ms, packet_id, failed,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
