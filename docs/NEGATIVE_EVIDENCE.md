@@ -4383,3 +4383,14 @@ fr-store domain) is the real lever, not borrowed dispatch. This CONFIRMS the cle
 SPOP (random, a peer's domain) and LCS/SORT/GEOSEARCH (complex/DP). LESSON: a command being "uncovered + slow vs redis"
 does NOT guarantee a dispatch win — verify cand-vs-control isolates a REAL dispatch fraction before shipping; for
 already-fast-pathed siblings still slow (ZADD 1-member 0.636x), the residual is structural.
+
+### 2026-06-25 (part 75) DEL/TOUCH 4-key fast-path SHIPPED (DEL4 1.57x, TOUCH4 1.39x); EXISTS4 ~0-gain REVERTED (cc/BlackThrush)
+4-key (*5) DEL/TOUCH/EXISTS were uncovered: DEL4 0.37x, TOUCH4 0.44x, EXISTS4 0.57x. Parser/dispatch-only extension via
+key_arg3 (execute fns already slice-based, NO fr-runtime change). A/B: DEL4 cand/ctrl 1.570 (SHIPPED), TOUCH4 1.390
+(SHIPPED), but EXISTS4 0.994x = ~0-GAIN → REVERTED. EXISTS's 4 key-lookups (exists_no_touch) dominate — gain declined
+2-key 1.18x → 3-key 1.13x → 4-key ~1.0x as the store-lookup fraction grew. DEL4-of-missing and TOUCH still win because
+DEL-missing does ~no store work and TOUCH's path is leaner. Byte-exact (counts, dups, removal state, 5-key fall-through),
+conformance 99/0. SESSION TALLY 40 fast-paths. LESSON: arity extensions have a CEILING — past ~3 keys the per-key store
+work overtakes the fixed dispatch saving; bench EACH arity, ship only those above noise. This + part-74 (ZADD3) mark the
+practical edge of the dispatch vein: gains now depend on store-work-fraction, not just coverage. Remaining genuinely-
+uncovered+dispatch-bound surface is essentially exhausted; further wins are store-side (CoralOx) or arity past the ceiling.
