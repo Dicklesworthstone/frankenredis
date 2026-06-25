@@ -4805,6 +4805,8 @@ fn process_buffered_frames(
                         runtime.execute_plain_zrange_byscore_borrowed(packet.key, packet.a, packet.b, ts)
                     } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
                         runtime.execute_plain_zrange_bylex_borrowed(packet.key, packet.a, packet.b, ts)
+                    } else if packet.c.eq_ignore_ascii_case(b"REV") {
+                        runtime.execute_plain_zrange_rev_borrowed(packet.key, packet.a, packet.b, ts)
                     } else {
                         None
                     };

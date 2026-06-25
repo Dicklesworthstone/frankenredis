@@ -17571,6 +17571,68 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlackThrush) Borrowed READ fast path for the unified `ZRANGE key start stop
+    /// REV` (reverse index range) — identical to ZREVRANGE but recorded under the
+    /// `zrange` command name. Member-only array; not-an-integer index defers.
+    pub fn execute_plain_zrange_rev_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let start = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrange",
+            b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"REV".len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = self.server.store.zrevrange(key, start, stop, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(members) => RespFrame::Array(Some(
+                members
+                    .into_iter()
+                    .map(|member| RespFrame::BulkString(Some(member)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrange",
+            "ZRANGE",
+            || {
+                vec![
+                    b"ZRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                    b"REV".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
     // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
     // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
