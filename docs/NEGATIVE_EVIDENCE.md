@@ -4689,3 +4689,14 @@ Byte-exact: full/incl/excl/empty, WRONGTYPE, malformed-bound, lowercase; BYSCORE
 fall-through; cmdstat_zrange=1, keyspace_hits=1. conformance 99/0. Verified staged diff pre-commit -> no sweep.
 OPTION-FORM SCORECARD parts 82-91 = 10 wins. NEXT uncontested: ZRANGE ..BYSCORE WITHSCORES (*6 -> withscores=true),
 ZRANGE ..REV (*5 reverse-index -> zrevrange), ZREVRANGEBYSCORE/BYLEX ..LIMIT. HRANDFIELD WITHVALUES = random skip.
+
+### 2026-06-25 (part 92) ZREVRANGEBYSCORE ..LIMIT fast-path SHIPPED ~1.30x (0.642x->0.791x) (cc/BlackThrush)
+Eleventh option-form win. Reverse mirror of part-88. ZREVRANGEBYSCORE key max min LIMIT offset count (*7) fell to generic
+= 0.642x. execute_plain_zrevrangebyscore_limit_borrowed: wire max-then-min, guard takes (min,max), store.zrangebyscore_
+withscores_limited rev=true (same method forward uses); defer neg offset/count + non-float. *7 key_arg5 gated LIMIT.
+A/B cand/ctrl 1.300, cand/redis 0.791. Byte-exact: desc pagination/empty/subset, excl+inf, neg-offset(empty)+neg-count
+(unlimited) fall-through, WRONGTYPE/bad-score/bad-token, no-LIMIT *4 unaffected, cmdstat_zrevrangebyscore=1, keyspace=1.
+conformance 99/0. Verified staged diff (127) -> no sweep.
+OPTION-FORM SCORECARD parts 82-92 = 11 wins. NEXT uncontested: ZREVRANGEBYLEX ..LIMIT (*7, 0.573x — but uses store.
+zrevrangebylex NOT a limited+rev variant; verify zrangebylex_limited(rev=true)==zrevrangebylex BEFORE using), ZRANGE
+..BYSCORE WITHSCORES (*6, needs RESP2/3 score-emit), ZRANGE ..REV (*5 reverse-index). HRANDFIELD WITHVALUES=random skip.
