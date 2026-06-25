@@ -4655,3 +4655,15 @@ offset(empty)+NEG count(unlimited) via fall-through, bad-token/bad-score errors,
 BIG UNCONTESTED ZSET/HASH option-form vein REMAINING (all *uncovered* LIMIT/BY/WITHVALUES forms, dispatch-bound):
 ZRANGEBYLEX ..LIMIT 0.548x, ZRANGE ..BYSCORE 0.545x, ZRANGE ..BYSCORE REV LIMIT 0.543x, HRANDFIELD ..WITHVALUES 0.454x.
 ZADD CH/flags 0.50x = SKIP (store-bound per part74). Scorecard parts 82-88: 7 option-form wins.
+
+### 2026-06-25 (part 89) ZRANGEBYLEX ..LIMIT offset count fast-path SHIPPED ~1.66x (0.548x->0.991x) (cc/BlackThrush)
+Eighth option-form win, uncontested ZSET vein. Mirror of part-88 ZRANGEBYSCORE LIMIT for the LEX range. *4 fast-pathed,
+*7 LIMIT form deferred = 0.548x. execute_plain_zrangebylex_limit_borrowed: well-formed-lex-bound guard (defer malformed)
++ defer neg offset/count; record_source_key_lookups (store walk doesn't record keyspace, UNLIKE zrangebyscore_withscores_
+limited which does — verified) + store.zrangebylex_limited; reused key_arg5 *7 parser. A/B cand/ctrl 1.655, cand/redis
+0.991 (NEAR-PARITY, better than ZRANGEBYSCORE LIMIT 0.784x — lex walk is leaner than score walk). Byte-exact: pagination/
+empty/past-offset, incl[+excl( ranges, neg offset(empty)+neg count(unlimited) fall-through, malformed-bound/bad-token/
+WRONGTYPE errors, keyspace_hits=1. conformance 99/0. Verified staged diff (109) pre-commit -> no sweep.
+OPTION-FORM SCORECARD (parts 82-89): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x, GETEX EX/PX
+1.94x, SET GET 1.87x, SINTERCARD LIMIT 2.36x, ZRANGEBYSCORE LIMIT 1.57x, ZRANGEBYLEX LIMIT 1.66x. REMAINING uncontested:
+ZRANGE ..BYSCORE/BYLEX/REV/LIMIT (the unified ZRANGE option matrix) 0.54x, HRANDFIELD ..WITHVALUES 0.454x, ZADD GT/NX SKIP.
