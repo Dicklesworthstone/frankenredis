@@ -4539,3 +4539,19 @@ EX/PX 1.94x. ALL = "plain form fast-pathed, an option form silently on generic".
 fast-pathed, residual=store-side floor): INCRBY 0.743x, APPEND 0.744x, GETEX PERSIST 0.793x, SETEX/PSETEX/GETSET ~parity.
 STILL-OPEN option-forms (NEXT): SET..GET 0.784x (returns old value — *4 GET token), GETEX EXAT/PXAT, SINTERCARD..LIMIT
 0.547x (niche, needs *6/*7 parsers), HSETNX 0.87x. ZADD GT/NX flags 0.53x = SKIP per part74 (store-bound, likely ~0-gain).
+
+### 2026-06-25 (part 86) SET key value GET fast-path SHIPPED ~1.87x (0.784x->beats redis) (cc/BlackThrush)
+Fifth option-form win. SET key value GET (*4, atomic get-and-set) fell to generic = 0.784x. execute_plain_set_get_
+borrowed mirrors the generic set COMMAND_GET arm: store.get FIRST (records keyspace hit/miss + WRONGTYPE on non-string
+WITHOUT writing), then on success set_plain_borrowed (TTL cleared) + reply old value. Generalized shared set metrics:
+keepttl:bool -> trailing:Option<&[u8]> (None/KEEPTTL/GET) + a failed:bool so WRONGTYPE records cmdstat failed_calls.
+*4 key_arg2 gated token GET (or KEEPTTL); NX/XX/expiry forms *5+ fall through. A/B cand/ctrl 1.872, cand/redis 1.273.
+Byte-exact incl int-encoded old value, nil-on-missing, TTL-cleared, WRONGTYPE-no-write, cmdstat failed_calls=1 +
+keyspace_hits=2/misses=1. conformance 99/0.
+GOTCHA (cost me a build): a python replace_all of the SET histogram block (`"set", elapsed_us, Success`) hit 6 IDENTICAL
+blocks across 6 SET-metrics fns, not just the target; only one had the new `failed` param -> E0425 x5. FIX: revert all,
+then target the ONE via unique following context (the `trailing` threat line). When mass-editing, check the pattern's
+occurrence count first.
+OPTION-FORM SCORECARD (parts 82-86): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x, GETEX EX/PX
+1.94x, SET GET 1.87x. STILL-OPEN: GETEX EXAT/PXAT, SINTERCARD..LIMIT 0.547x (needs *6/*7 parsers), HSETNX 0.87x,
+OBJECT REFCOUNT 0.783x. ZADD GT/NX = SKIP (store-bound per part74).
