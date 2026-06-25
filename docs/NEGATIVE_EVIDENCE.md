@@ -4315,3 +4315,13 @@ made my MSETNX edit + built + committed ONLY my 91-line diff (verified spop refs
 their WIP via stash apply (msetnx@impl ~18001 vs spop@tests ~33619, no overlap → clean). This is the correct pattern
 for a contended hot file: stash-peer-WIP → edit clean → commit-mine → restore-peer-WIP. Remaining: EXISTS-multi 0.70x,
 GETEX-PERSIST 0.49x, SPOP (peer working it), LCS/SORT/GEOSEARCH (complex).
+
+### 2026-06-25 (part 71) EXISTS multi-key fast-path SHIPPED — ~1.13-1.18x (0.70x→~0.81x) (cc/BlackThrush)
+EXISTS key [key...] 2/3-key fell to generic (only 1-key was fast-pathed), 0.70x. execute_plain_exists_multi_borrowed
+(keys): count one per exists_no_touch-true key (no LRU bump; dups counted) → Integer(count). 2-key *3 key_arg1 / 3-key
+*4 key_arg2. A/B: EXISTS2 cand/ctrl 1.183, EXISTS3 1.128 (smaller win than the 0.43x commands — EXISTS was less
+dispatch-bound, but consistent + above noise, NOT ~0-gain). Byte-exact incl dups-counted, missing, 1-key/4-key
+fall-through, cmdstat+keyspace(hits=2/misses=1). conformance 98/1 (lone core_server_conformance = load-flake, passes
+isolated; unrelated to read-only EXISTS). Protected-edit pattern used again (peer still on lib.rs spop). SESSION TALLY
+36 fast-paths. Remaining: GETEX-PERSIST 0.49x, SPOP (peer working), LCS/SORT/GEOSEARCH (complex). Clean byte-exact
+2-3 arg dispatch vein now deeply mined (36 commands/arities, parts 49-71).
