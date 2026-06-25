@@ -4237,3 +4237,21 @@ TOUCH commit 199c87a09. Main compiles + conformance 99/0 (their work is function
 breaking their live feature; their #[test] borrowed_spop_count_fast_path remains uncommitted in the worktree for them.
 LESSON (reinforces feedback_shared_tree_commit_race): `git add <whole-file>` on a shared hot file sweeps peer WIP —
 prefer `git add -p` or re-grep for ONLY your sentinel before staging on contended crates.
+
+### 2026-06-25 (part 70) SPOP count fast-path BOLD-VERIFIED - 2.25x vs prior fr, 0.461x->1.147x vs Redis 7.2.4 (codex/BlackThrush)
+`SPOP key count` was the remaining count-form branch after the no-count keyed-pop fast path. The runtime/server
+implementation is already on `main` via the shared-tree co-commit noted in part 69; this pass lands the missing
+Criterion lane and the head-to-head evidence against Redis 7.2.4.
+
+Measured with `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server cargo +nightly-2026-06-09
+bench --profile release -p fr-bench --bench keyed_write_vs_redis -- SPOP_count4 --noplot`. Control server was built
+from `21e8c05ab`; candidate server was rebuilt from current `main` after the fast path. Control: Redis 602.81 Kelem/s,
+fr 278.08 Kelem/s, fr/Redis 0.461x. Candidate confirmation: Redis 546.25 Kelem/s, fr 626.59 Kelem/s, fr/Redis
+1.147x. Direct fr candidate/control throughput ratio: 2.253x. Earlier candidate warm-up was Redis 427.20 Kelem/s,
+fr 394.58 Kelem/s, fr/Redis 0.924x; the final same-window candidate run is the keep signal.
+
+Correctness: `scripts/set_differ.py --oracle 46831 --fr 46832 --iters 1200 --seed 65065` passed against fresh
+Redis/fr servers, including its SPOP count property checks. Gates: fmt/check/clippy for fr-runtime/fr-server/fr-bench,
+release fr-server/fr-bench builds with the warm nightly-2026-06-09 target, focused SPOP_count4 bench, and
+`cargo test -p fr-conformance -- --nocapture` green (194 lib tests, all bins, 99 smoke tests, doctests).

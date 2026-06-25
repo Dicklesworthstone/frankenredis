@@ -33,6 +33,8 @@ struct RemoveCommand {
 const DELETE_ARITIES: [usize; 4] = [1, 4, 8, 16];
 const DELETE_COMMANDS: [&str; 2] = ["HDEL", "SREM"];
 const LINSERT_LIST_LEN: usize = 64;
+const SPOP_COUNT_SET_SIZE: usize = 8;
+const SPOP_COUNT_POP: usize = 4;
 
 #[derive(Clone, Copy)]
 struct Engine {
@@ -82,6 +84,13 @@ impl Client {
         self.read_integer_replies(replies);
     }
 
+    fn run_resp_packet(&mut self, packet: &[u8], replies: usize) {
+        self.stream
+            .write_all(packet)
+            .expect("write benchmark packet");
+        self.read_resp_replies(replies);
+    }
+
     fn read_integer_replies(&mut self, replies: usize) {
         self.buf.clear();
         let mut seen = 0usize;
@@ -108,10 +117,78 @@ impl Client {
             }
         }
     }
+
+    fn read_resp_replies(&mut self, replies: usize) {
+        self.buf.clear();
+        let mut seen = 0usize;
+        let mut scan_from = 0usize;
+        while seen < replies {
+            let mut tmp = [0u8; 8192];
+            let read = self.stream.read(&mut tmp).expect("read benchmark replies");
+            assert!(read > 0, "server closed benchmark connection");
+            self.buf.extend_from_slice(&tmp[..read]);
+
+            while seen < replies {
+                let Some(next) = resp_frame_end(&self.buf, scan_from) else {
+                    break;
+                };
+                seen += 1;
+                scan_from = next;
+            }
+        }
+    }
 }
 
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|pair| pair == b"\r\n")
+}
+
+fn resp_frame_end(buf: &[u8], start: usize) -> Option<usize> {
+    let first = *buf.get(start)?;
+    let line_end = start + find_crlf(&buf[start..])?;
+    let line = &buf[start + 1..line_end];
+    match first {
+        b'+' | b'-' | b':' | b',' | b'_' => Some(line_end + 2),
+        b'$' => {
+            let len = parse_resp_len(line)?;
+            if len < 0 {
+                return Some(line_end + 2);
+            }
+            let payload_end = line_end + 2 + usize::try_from(len).ok()?;
+            if buf.get(payload_end..payload_end + 2)? == b"\r\n" {
+                Some(payload_end + 2)
+            } else {
+                None
+            }
+        }
+        b'*' | b'~' => {
+            let len = parse_resp_len(line)?;
+            if len < 0 {
+                return Some(line_end + 2);
+            }
+            let mut pos = line_end + 2;
+            for _ in 0..usize::try_from(len).ok()? {
+                pos = resp_frame_end(buf, pos)?;
+            }
+            Some(pos)
+        }
+        b'%' => {
+            let len = parse_resp_len(line)?;
+            if len < 0 {
+                return Some(line_end + 2);
+            }
+            let mut pos = line_end + 2;
+            for _ in 0..usize::try_from(len).ok()?.saturating_mul(2) {
+                pos = resp_frame_end(buf, pos)?;
+            }
+            Some(pos)
+        }
+        _ => None,
+    }
+}
+
+fn parse_resp_len(line: &[u8]) -> Option<i64> {
+    std::str::from_utf8(line).ok()?.parse().ok()
 }
 
 fn criterion_config() -> Criterion {
@@ -261,6 +338,34 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     }
 
     linsert_group.finish();
+
+    let mut spop_group = c.benchmark_group("spop_count_vs_redis");
+    spop_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let spop_prefill = pipelined_spop_count_prefill_packet(COMMANDS_PER_ITER, SPOP_COUNT_SET_SIZE);
+    let spop_count = pipelined_spop_count_packet(COMMANDS_PER_ITER, SPOP_COUNT_POP);
+    for engine in engines {
+        spop_group.bench_with_input(
+            BenchmarkId::new(format!("SPOP_count{SPOP_COUNT_POP}"), engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&spop_prefill, COMMANDS_PER_ITER);
+                        let start = Instant::now();
+                        client.run_resp_packet(&spop_count, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            },
+        );
+    }
+
+    spop_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -449,6 +554,30 @@ fn pipelined_linsert_packet(count: usize, pivot_index: usize) -> Vec<u8> {
         packet.extend_from_slice(&encode_command(&[
             "LINSERT", "k", "BEFORE", &pivot, &element,
         ]));
+    }
+    packet
+}
+
+fn pipelined_spop_count_prefill_packet(count: usize, set_size: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * (48 + set_size * 8));
+    for index in 0..count {
+        let mut args = Vec::with_capacity(set_size + 2);
+        args.push(b"SADD".to_vec());
+        args.push(format!("s{index:03}").into_bytes());
+        for member_index in 0..set_size {
+            args.push(format!("m{index:03}_{member_index}").into_bytes());
+        }
+        packet.extend_from_slice(&encode_command_vecs(&args));
+    }
+    packet
+}
+
+fn pipelined_spop_count_packet(count: usize, pop_count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    let pop_count = pop_count.to_string();
+    for index in 0..count {
+        let key = format!("s{index:03}");
+        packet.extend_from_slice(&encode_command(&["SPOP", &key, &pop_count]));
     }
     packet
 }
