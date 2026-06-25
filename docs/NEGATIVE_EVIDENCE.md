@@ -4215,3 +4215,14 @@ campaign. The dispatch fast-path campaign (parts 49-67) has now covered ~30 comm
 0.40-0.94x→parity-or-faster. Remaining: SPOP 0.43x (random — structural only); LCS 0.52x (DP-replication risk);
 SORT/GEOSEARCH/BITFIELD_RO (complex/dominated). Further arity extensions (zset *STORE 3-key *6) possible but
 diminishing (3-key store less common).
+
+### 2026-06-24 (part 68) ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE 3-key fast-path SHIPPED — ~1.35-1.53x (0.67-0.78x→parity) (cc/BlackThrush)
+Extended part-63/64 2-key zset *STORE to 3 keys (*6, CMD dest 3 k1 k2 k3), which were 0.67-0.78x. Generalized
+execute_plain_zstore2_borrowed/zdiffstore2_borrowed → keys-slice (default WEIGHTS=[1..]/SUM); new generic *6 parser
+parse_borrowed_plain_key_arg4_packet. A/B: ZINTERSTORE3 cand/ctrl 1.447, ZUNIONSTORE3 1.354, ZDIFFSTORE3 1.530.
+Byte-exact (reply+dest WITHSCORES) incl 3-key inter/union/diff, missing→0/delete, set-source, WRONGTYPE middle,
+2-key (no regression), numkeys-mismatch/WEIGHTS fall-through, cmdstat+keyspace(hits=2/misses=1). conformance 99/0.
+SESSION TALLY 33 fast-paths (campaign parts 49-68). Generic parsers key_arg1(*3)/2(*4)/3(*5)/4(*6) now all exist —
+arity extensions are cheap (slice generalize + parser arity). The set/zset algebra + *STORE families are now covered
+for 2- AND 3-key/source forms. Remaining: SPOP 0.43x (random — structural only), LCS 0.52x (DP risk), SORT/GEOSEARCH/
+BITFIELD_RO (complex/dominated). Dispatch campaign is approaching saturation for clean byte-exact 2-3 arg/key forms.
