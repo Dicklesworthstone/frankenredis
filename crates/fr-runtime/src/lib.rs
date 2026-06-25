@@ -16957,6 +16957,119 @@ impl Runtime {
         Some(reply)
     }
 
+    // (frankenredis-scan0fast) Borrowed READ fast path for the cursor-0, no-option
+    // forms `SSCAN|HSCAN|ZSCAN key 0`. Restricted to the literal "0" cursor so the
+    // cursor never needs the private parse_scan_cursor (=0, unambiguous); count is
+    // the default 10 and pattern None, identical to fr-command's no-option parse, so
+    // store.{s,h,z}scan returns the exact same (next_cursor, items) for ANY size.
+    // Mirrors the generic: key_type guard (None→empty `["0", []]`, wrong-type→
+    // WRONGTYPE, matching type→scan). Other cursors / MATCH / COUNT / NOVALUES forms
+    // fall through to generic. Returns None unless the cursor bulk is exactly "0".
+    fn scan0_reply_from_items(next_cursor: u64, items: Vec<RespFrame>) -> RespFrame {
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
+            RespFrame::Array(Some(items)),
+        ]))
+    }
+
+    fn empty_scan0_reply() -> RespFrame {
+        Self::scan0_reply_from_items(0, Vec::new())
+    }
+
+    fn execute_plain_scan0_borrowed(
+        &mut self,
+        which: u8, // b'S' set, b'H' hash, b'Z' zset
+        name_lower: &'static str,
+        name_upper: &'static str,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < name_upper.len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if cursor_arg != b"0" {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            name_lower,
+            name_upper.len() + key.len() + cursor_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let store = &mut self.server.store;
+        let reply = match store.key_type(key, now_ms) {
+            None => Self::empty_scan0_reply(),
+            Some(t) => match (which, t) {
+                (b'S', "set") => match store.sscan(key, 0, None, 10, now_ms) {
+                    Ok((nc, members)) => Self::scan0_reply_from_items(
+                        nc,
+                        members
+                            .into_iter()
+                            .map(|m| RespFrame::BulkString(Some(m)))
+                            .collect(),
+                    ),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                },
+                (b'H', "hash") => match store.hscan(key, 0, None, 10, now_ms) {
+                    Ok((nc, pairs)) => {
+                        let mut items = Vec::with_capacity(pairs.len() * 2);
+                        for (f, v) in pairs {
+                            items.push(RespFrame::BulkString(Some(f)));
+                            items.push(RespFrame::BulkString(Some(v)));
+                        }
+                        Self::scan0_reply_from_items(nc, items)
+                    }
+                    Err(err) => CommandError::Store(err).to_resp(),
+                },
+                (b'Z', "zset") => match store.zscan(key, 0, None, 10, now_ms) {
+                    Ok((nc, pairs)) => {
+                        let mut items = Vec::with_capacity(pairs.len() * 2);
+                        for (m, score) in pairs {
+                            items.push(RespFrame::BulkString(Some(m)));
+                            items.push(RespFrame::BulkString(Some(
+                                fr_store::redis_score_to_string(score).into_bytes(),
+                            )));
+                        }
+                        Self::scan0_reply_from_items(nc, items)
+                    }
+                    Err(err) => CommandError::Store(err).to_resp(),
+                },
+                _ => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+            },
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lower,
+            name_upper,
+            || vec![name_upper.as_bytes().to_vec(), key.to_vec(), cursor_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-scan0fast) Public entry points for the three cursor-0 scans.
+    pub fn execute_plain_sscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_scan0_borrowed(b'S', "sscan", "SSCAN", key, cursor_arg, now_ms)
+    }
+    pub fn execute_plain_hscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_scan0_borrowed(b'H', "hscan", "HSCAN", key, cursor_arg, now_ms)
+    }
+    pub fn execute_plain_zscan0_borrowed(&mut self, key: &[u8], cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_scan0_borrowed(b'Z', "zscan", "ZSCAN", key, cursor_arg, now_ms)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
