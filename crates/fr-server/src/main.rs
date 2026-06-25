@@ -4765,6 +4765,55 @@ fn process_buffered_frames(
                             &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$11\r\n",
+                    b"ZUNIONSTORE",
+                ) {
+                    // 3-key: key=dest, a=numkeys, b/c/d = k1/k2/k3.
+                    if let Some(response) = runtime
+                        .execute_plain_zunionstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$11\r\n",
+                    b"ZINTERSTORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zinterstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$10\r\n",
+                    b"ZDIFFSTORE",
+                ) {
+                    if let Some(response) = runtime
+                        .execute_plain_zdiffstore_borrowed(packet.key, packet.a, &[packet.b, packet.c, packet.d], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                     unparsed,
                     &parser_config,
@@ -4772,7 +4821,7 @@ fn process_buffered_frames(
                     b"ZDIFFSTORE",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_zdiffstore2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_zdiffstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
@@ -4788,7 +4837,7 @@ fn process_buffered_frames(
                     b"ZUNIONSTORE",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_zunionstore2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_zunionstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
@@ -4804,7 +4853,7 @@ fn process_buffered_frames(
                     b"ZINTERSTORE",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_zinterstore2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_zinterstore_borrowed(packet.key, packet.a, &[packet.b, packet.c], ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
@@ -9677,6 +9726,43 @@ fn parse_borrowed_plain_key_arg3_packet<'a>(
     let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (c, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainKeyArg3Packet { consumed, key, a, b, c })
+}
+
+// (frankenredis-zstore3fast) Generic *6 `CMD key arg1 arg2 arg3 arg4` parser for the
+// 3-key zset *STORE forms (key=dest, args=numkeys,k1,k2,k3).
+struct BorrowedPlainKeyArg4Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    a: &'a [u8],
+    b: &'a [u8],
+    c: &'a [u8],
+    d: &'a [u8],
+}
+
+fn parse_borrowed_plain_key_arg4_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    prefix: &[u8],
+    cmd: &[u8],
+) -> Option<BorrowedPlainKeyArg4Packet<'a>> {
+    if config.max_array_len < 6 || config.max_bulk_len < cmd.len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+        rest.get(..cmd.len())
+            .filter(|c| c.eq_ignore_ascii_case(cmd))
+            .map(|_| input.len() - rest.len() + cmd.len())
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (c, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (d, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyArg4Packet { consumed, key, a, b, c, d })
 }
 
 // (frankenredis-lrpopcountfast) Generic *3 `CMD key arg` parser. `prefix` is the

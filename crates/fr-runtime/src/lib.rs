@@ -17325,51 +17325,48 @@ impl Runtime {
     /// then store.{zunion,zinter}store(dest, [k1,k2], [1.0,1.0], b"SUM") → stored
     /// cardinality Integer. `which` = b'U' union / b'I' inter. Fires only when
     /// numkeys==2; WEIGHTS/AGGREGATE and other numkeys fall through to generic.
-    pub fn execute_plain_zstore2_borrowed(
+    pub fn execute_plain_zstore_borrowed(
         &mut self,
         which: u8,
         name_lower: &'static str,
         name_upper: &'static str,
         dest: &[u8],
         numkeys_arg: &[u8],
-        k1: &[u8],
-        k2: &[u8],
+        keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 5
+        if self.policy.gate.max_array_len < keys.len() + 3
             || self.policy.gate.max_bulk_len < name_upper.len()
             || dest.len() > self.policy.gate.max_bulk_len
             || numkeys_arg.len() > self.policy.gate.max_bulk_len
-            || k1.len() > self.policy.gate.max_bulk_len
-            || k2.len() > self.policy.gate.max_bulk_len
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
-        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
             return None;
         }
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
-        let packet_id = self.plain_zremrange_write_preamble(
-            name_lower,
-            name_upper.len() + dest.len() + numkeys_arg.len() + k1.len() + k2.len(),
-            now_ms,
-        );
+        let argv_len_sum = name_upper.len()
+            + dest.len()
+            + numkeys_arg.len()
+            + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble(name_lower, argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        let keys = [k1, k2];
         let reply = 'reply: {
-            for &k in &keys {
+            for &k in keys {
                 let _ = self.server.store.exists_no_touch(k, now_ms);
                 if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
-            let weights = [1.0_f64, 1.0];
+            let weights = vec![1.0_f64; keys.len()];
             let result = if which == b'U' {
-                self.server.store.zunionstore(dest, &keys, &weights, b"SUM", now_ms)
+                self.server.store.zunionstore(dest, keys, &weights, b"SUM", now_ms)
             } else {
-                self.server.store.zinterstore(dest, &keys, &weights, b"SUM", now_ms)
+                self.server.store.zinterstore(dest, keys, &weights, b"SUM", now_ms)
             };
             match result {
                 Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
@@ -17378,10 +17375,20 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
+        let dest_owned = dest.to_vec();
+        let nk_owned = numkeys_arg.to_vec();
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
         self.record_plain_zremrange_borrowed_metrics(
             name_lower,
             name_upper,
-            || vec![name_upper.as_bytes().to_vec(), dest.to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 3);
+                argv.push(name_upper.as_bytes().to_vec());
+                argv.push(dest_owned.clone());
+                argv.push(nk_owned.clone());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
             elapsed_us, now_ms, packet_id, failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -17390,11 +17397,11 @@ impl Runtime {
         Some(reply)
     }
 
-    pub fn execute_plain_zunionstore2_borrowed(&mut self, dest: &[u8], nk: &[u8], k1: &[u8], k2: &[u8], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_zstore2_borrowed(b'U', "zunionstore", "ZUNIONSTORE", dest, nk, k1, k2, now_ms)
+    pub fn execute_plain_zunionstore_borrowed(&mut self, dest: &[u8], nk: &[u8], keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed(b'U', "zunionstore", "ZUNIONSTORE", dest, nk, keys, now_ms)
     }
-    pub fn execute_plain_zinterstore2_borrowed(&mut self, dest: &[u8], nk: &[u8], k1: &[u8], k2: &[u8], now_ms: u64) -> Option<RespFrame> {
-        self.execute_plain_zstore2_borrowed(b'I', "zinterstore", "ZINTERSTORE", dest, nk, k1, k2, now_ms)
+    pub fn execute_plain_zinterstore_borrowed(&mut self, dest: &[u8], nk: &[u8], keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed(b'I', "zinterstore", "ZINTERSTORE", dest, nk, keys, now_ms)
     }
 
     /// (frankenredis-zdiffstore2fast) Borrowed WRITE fast path for `ZDIFFSTORE dest
@@ -17404,54 +17411,54 @@ impl Runtime {
     /// → Integer(count). (ZDIFFSTORE does NOT sort the result before storing — the
     /// sorted-set build orders by score; the reply is just the count.) Fires only
     /// when numkeys==2; other numkeys forms fall through to generic.
-    pub fn execute_plain_zdiffstore2_borrowed(
+    pub fn execute_plain_zdiffstore_borrowed(
         &mut self,
         dest: &[u8],
         numkeys_arg: &[u8],
-        k1: &[u8],
-        k2: &[u8],
+        keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 5
+        if self.policy.gate.max_array_len < keys.len() + 3
             || self.policy.gate.max_bulk_len < b"ZDIFFSTORE".len()
             || dest.len() > self.policy.gate.max_bulk_len
             || numkeys_arg.len() > self.policy.gate.max_bulk_len
-            || k1.len() > self.policy.gate.max_bulk_len
-            || k2.len() > self.policy.gate.max_bulk_len
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
-        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
             return None;
         }
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
-        let packet_id = self.plain_zremrange_write_preamble(
-            "zdiffstore",
-            b"ZDIFFSTORE".len() + dest.len() + numkeys_arg.len() + k1.len() + k2.len(),
-            now_ms,
-        );
+        let argv_len_sum = b"ZDIFFSTORE".len()
+            + dest.len()
+            + numkeys_arg.len()
+            + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble("zdiffstore", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        let keys = [k1, k2];
         let reply = 'reply: {
-            fr_command::record_source_key_lookups(&mut self.server.store, &keys, now_ms);
-            for &k in &keys {
+            fr_command::record_source_key_lookups(&mut self.server.store, keys, now_ms);
+            for &k in keys {
                 if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
-            let first = match self.server.store.zget_members_with_scores_no_stats(k1) {
+            let first = match self.server.store.zget_members_with_scores_no_stats(keys[0]) {
                 Ok(members) => members,
                 Err(err) => break 'reply CommandError::Store(err).to_resp(),
             };
             let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-            for (member, score) in first {
-                match self.server.store.zget_score_or_set_member_no_stats(k2, &member) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => result.push((member, score)),
-                    Err(err) => break 'reply CommandError::Store(err).to_resp(),
+            'members: for (member, score) in first {
+                for &k in &keys[1..] {
+                    match self.server.store.zget_score_or_set_member_no_stats(k, &member) {
+                        Ok(Some(_)) => continue 'members,
+                        Ok(None) => {}
+                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                    }
                 }
+                result.push((member, score));
             }
             let count = result.len();
             self.server.store.store_sorted_set_from_pairs(dest, result, now_ms);
@@ -17459,10 +17466,20 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
+        let dest_owned = dest.to_vec();
+        let nk_owned = numkeys_arg.to_vec();
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
         self.record_plain_zremrange_borrowed_metrics(
             "zdiffstore",
             "ZDIFFSTORE",
-            || vec![b"ZDIFFSTORE".to_vec(), dest.to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 3);
+                argv.push(b"ZDIFFSTORE".to_vec());
+                argv.push(dest_owned.clone());
+                argv.push(nk_owned.clone());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
             elapsed_us, now_ms, packet_id, failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
