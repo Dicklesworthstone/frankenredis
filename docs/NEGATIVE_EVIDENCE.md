@@ -4032,3 +4032,14 @@ WRONGTYPE, not-int→generic, WITHSCORES/bad-option/arity fall-through, cmdstat 
 99/0. SESSION TALLY 12 fast-paths (HMGET4-8/LINSERT/ZREM/LREM/ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/BYSCORE/BYLEX/
 ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZREVRANGE). Still uncovered+slow: ZDIFF 0.57x / ZINTER 0.53x (variadic numkeys read
 set-algebra), SPOP 0.43x (mutating/random). HGETALL already beats redis (1.15x).
+
+### 2026-06-24 (part 56) LPOP/RPOP COUNT-form fast-path SHIPPED — ~1.83-1.85x (0.38x→0.76-0.78x vs redis) (cc/BlackThrush)
+KEY MEASUREMENT INSIGHT: LPOP/RPOP NO-count (*2) form is already fr-FASTER (1.1-1.2x), but the COUNT form
+(LPOP|RPOP key count, *3) is 0.38x — so only the count form needed a fast-path. execute_plain_list_pop_count_borrowed
+mirrors fr-command lpop/rpop COUNT branch: count via parse_i64_arg+non-negative filter (== parse_list_pop_count_arg;
+defer non-int/negative/overflow to generic for "value is out of range, must be positive"), store.{l,r}pop_count
+(None→nil Array(None), Some→bulk array, autodelete). A/B (best-of-6): LPOP(missing c2) cand/ctrl 1.829 cand/redis 0.759;
+RPOP 1.848/0.776. Byte-exact incl count 0→empty, over-count→all+autodelete, missing→*-1, WRONGTYPE, negative/non-int→
+generic, no-count→bulk-string-via-generic, arity; cmdstat+keyspace. conformance 99/0. Added generic *3 parser
+parse_borrowed_plain_key_arg1_packet. SESSION TALLY 14 fast-paths. Still uncovered+slow: ZDIFF 0.57x/ZINTER 0.53x
+(variadic numkeys read). LESSON: measure BOTH the no-arg and with-arg forms — the gap can be entirely in one variant.
