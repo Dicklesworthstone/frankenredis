@@ -4596,3 +4596,19 @@ Validation: `cargo test -p fr-runtime plain_set_get_borrowed -- --nocapture` (3/
 `cargo test -p fr-conformance -- --nocapture` (fr-conformance lib 194/0, smoke 99/0, bins/doc-tests green). A
 pre-existing side-effectful Lua assignment block needed a local `collapsible_match` allow so the runtime clippy gate
 could pass through the `fr-command` path dependency.
+
+### 2026-06-25 (part 87) SINTERCARD ..LIMIT fast-path SHIPPED ~2.36x (0.542x->near-parity) (cc/BlackThrush)
+SINTERCARD numkeys key... LIMIT n fell to generic (bare no-LIMIT form already 0.948x; the LIMIT suffix deferred) = 0.542x,
+purely dispatch. Extended execute_plain_sintercard_borrowed to accept the `LIMIT <non-neg int>` suffix (store.sintercard
+limit 0 == unlimited; negative/non-int/other-trailing defer for the exact error); reused key_arg4 (*6, key=numkeys) — no
+new parser — so it covers `2 k1 k2 LIMIT n` AND bonus `4 k1 k2 k3 k4` (4-key no-limit). A/B cand/ctrl 2.363, cand/redis
+0.951. Byte-exact: LIMIT 2/0/10, no-limit, negative->'LIMIT can't be negative', non-int+bad-trailing, 4-key, WRONGTYPE,
+lowercase. conformance 99/0; fr-server lib 12/0.
+⚠️ SHARED-TREE CO-COMMIT (agent-mail DB corrupt this turn -> NO reservations): `git add` of my 2 files also swept a
+PEER's parallel SINTERCARD-LIMIT WIP (a key_arg5 *7 parser for the 3-KEY LIMIT form + unit tests) that was uncommitted in
+the shared tree, into 316b35c52. The two efforts were COMPLEMENTARY (my 2-key key_arg4 + their 3-key key_arg5 + their
+tests) and the combined commit COMPILES + conformance 99/0 + fr-server lib 12/0 + my differential 2.36x — so NOT reverted
+(rewriting a pushed commit = destructive, forbidden; and it would break the peer's now-landed 3-key support). Net: the
+SINTERCARD LIMIT surface is now MORE complete (2-key AND 3-key) than my change alone. Peer's remaining bench WIP
+(set_algebra_vs_redis.rs) left untouched. THIRD duplicate-effort collision this session (GETEX-abs 688911ebf, SET GET
+cb7a9b565, now SINTERCARD LIMIT) — peers are mining the same option-form vein; refetch+grep origin before each lever.
