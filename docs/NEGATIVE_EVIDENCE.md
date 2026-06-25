@@ -4498,3 +4498,17 @@ PFCOUNT/SETRANGE/GETEX/TYPE...) surfaced gaps the 16-cmd broad sweep misses. STI
 shipped): PFCOUNT multi-key 0.239x = STRUCTURAL (fr decodes sparse HLL to a dense 16384-register array + operates on all
 of them; redis stays O(cardinality) on the sparse rep — dense-vs-sparse HLL rewrite, CoralOx-class); SETRANGE 0.709x,
 GETEX-no-opt 0.877x, TYPE 0.841x (dispatch-floor candidates — next dispatch fast-paths); GETRANGE noisy 0.57-0.88x.
+
+### 2026-06-25 (part 83) EXPIRE-family NX|XX|GT|LT fast-path SHIPPED ~1.3-1.5x (cc/BlackThrush)
+The "measure every option-form" lesson (part 82) paid off again: an option-form probe batch found EXPIRE/PEXPIRE/
+EXPIREAT/PEXPIREAT with NX|XX|GT|LT at 0.43-0.46x (plain *3 forms fast-pathed; the *4 condition forms fell to generic).
+Threaded an optional cond_token through execute_plain_expire_kind_borrowed: parse one NX|XX|GT|LT (else defer for exact
+"Unsupported option"; multi-opt/conflict are *5+ = never matched), apply the condition by MIRRORING fr_command::
+apply_expiry_with_options exactly (compare via non-counting pttl_no_stats so keyspace_hits stays 0). 4 *4 dispatch
+branches (key_arg2). A/B: EXPIRE XX 1.543, EXPIRE GT 1.290, PEXPIRE XX 1.333 cand/ctrl. cand/redis 0.53-0.69x — the
+RESIDUAL below redis is a store-side floor shared with plain EXPIRE (run_active_expire_cycle + expire_at_milliseconds),
+NOT dispatch. Byte-exact across NX/XX/GT/LT × {no-ttl/has-ttl/gt-bigger-smaller/lt/missing} for all 4 cmds (TTL
+preserved on reject, updated on apply), lowercase, error/conflict replies, cmdstat+keyspace=0. conformance 99/0.
+STILL-OPEN uncovered option-forms from the same batch (NEXT, same recipe): SET..KEEPTTL 0.487x, SET..XX..GET,
+ZADD GT/NX flag-forms 0.53x (CAUTION: ZADD base gap is store-side per part 74 — verify cand/ctrl isolates dispatch),
+SINTERCARD..LIMIT 0.547x, OBJECT REFCOUNT 0.783x, HSETNX 0.866x. EXPIRE-family option surface now COMPLETE.
