@@ -4009,3 +4009,16 @@ Byte-exact incl zset state, autodelete, all error cases (non-int/non-float/malfo
 calls/failed/rejected + keyspace. fr-conformance 99/0 GREEN. SESSION TALLY 9 fast-paths: HMGET4-8/LINSERT/ZREM/LREM/
 ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/ZREMRANGEBYLEX. Still uncovered+slow: ZDIFF 0.62x (read),
 SPOP 0.43x (mutating/random). The "dispatch vein exhausted" claim was wrong by ~9 commands and counting.
+
+### 2026-06-24 (part 54) ZRANGEBYSCORE/ZREVRANGEBYSCORE READ fast-paths SHIPPED — ~1.60-1.67x (0.62x→parity+ vs redis) (cc/BlackThrush)
+The two common *4 zset score-range reads (no-option form) were 0.62-0.64x vs Redis 7.2.4. Each mirrors fr-command:
+parse_score_bound min/max (defer non-float to generic), zscore_inverted_wrongtype_guard (empty on inverted, WRONGTYPE
+on non-zset), then store.zrangebyscore_withscores_limited (records the one keyspace lookup) → member-only array
+(withscores=false ⇒ identical RESP2/RESP3, so emit inlined since zrange_emit_with_resp isn't pub). ZREVRANGEBYSCORE
+flips wire order max=argv[2]/min=argv[3] + rev=true. WITHSCORES/LIMIT (*5+) stay generic (parser is *4). A/B
+(best-of-6): ZRANGEBYSCORE(3) cand/ctrl 1.603 cand/redis 0.997; full 1.305/1.046; ZREVRANGEBYSCORE(3) 1.668/1.099 —
+parity-to-beating redis. Byte-exact RESP2+RESP3 incl inverted→empty, WRONGTYPE, non-float→generic, WITHSCORES/LIMIT/
+arity fall-through, cmdstat + keyspace_hits/misses (hit+miss). fr-conformance 99/0.
+SESSION TALLY 11 fast-paths: HMGET4-8/LINSERT/ZREM/LREM/ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/BYSCORE/BYLEX/
+ZRANGEBYSCORE/ZREVRANGEBYSCORE. Still uncovered+slow: ZDIFF 0.57x, ZINTER 0.53x (read set-algebra), SPOP 0.43x
+(mutating/random). The "dispatch vein exhausted" claim refuted by 11 commands.
