@@ -4150,3 +4150,14 @@ A/B (load-invariant): AND cand/ctrl 1.473, NOT 1.521. Byte-exact (reply + dest G
 cmdstat+keyspace. conformance 99/0. SESSION TALLY 26 fast-paths. Remaining uncovered (niche/complex): SORT/SORT_RO
 (BY/GET/LIMIT — fr already dominates 1.43x per memory), LCS, GEOSEARCH, BITFIELD_RO; SPOP 0.43x (random, structural-
 verify only). The 2-arg byte-exact dispatch vein is now very thoroughly mined (26 commands).
+
+### 2026-06-24 (part 66) SINTERSTORE/SUNIONSTORE/SDIFFSTORE 3-source fast-path SHIPPED — ~1.36-1.53x (0.71-0.84x→parity) (cc/BlackThrush)
+Extended part-62 2-source set *STORE to the 3-source forms (*5), which were 0.71-0.84x. Generalized
+execute_plain_setstore2_borrowed → execute_plain_setstore_borrowed taking a sources slice (store methods already
+variadic over &[&[u8]]); added *5 dispatch branches via the generic *5 parser. A/B: SINTERSTORE_3 cand/ctrl 1.364,
+SDIFFSTORE_3 1.531. Byte-exact (reply+dest) incl 3-source inter/union/diff, missing→0/delete, WRONGTYPE middle,
+dest-string overwrite, 2-source (NO regression), 4-source fall-through, cmdstat+keyspace(hits=3). conformance 99/0.
+SESSION TALLY 29 fast-paths. PATTERN: arity-extending a shipped variadic fast-path is cheap (slice generalization +
+one parser arity) — could similarly extend ZUNION/ZINTER/ZDIFFSTORE to 3-key (*6, needs key_arg4 parser) and the
+read-algebra ZDIFF/ZINTER to 3-key. Remaining single-command uncovered: SPOP 0.43x (random); LCS 0.52x (DP, risky to
+replicate); SORT/GEOSEARCH/BITFIELD_RO (complex).
