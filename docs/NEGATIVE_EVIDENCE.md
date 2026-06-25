@@ -4226,3 +4226,14 @@ SESSION TALLY 33 fast-paths (campaign parts 49-68). Generic parsers key_arg1(*3)
 arity extensions are cheap (slice generalize + parser arity). The set/zset algebra + *STORE families are now covered
 for 2- AND 3-key/source forms. Remaining: SPOP 0.43x (random — structural only), LCS 0.52x (DP risk), SORT/GEOSEARCH/
 BITFIELD_RO (complex/dominated). Dispatch campaign is approaching saturation for clean byte-exact 2-3 arg/key forms.
+
+### 2026-06-24 (part 69) TOUCH multi-key fast-path SHIPPED — ~1.49-1.60x (0.43x→~0.68x) + shared-tree spop co-commit NOTE (cc/BlackThrush)
+TOUCH key [key...] (2/3-key) was 0.425x. execute_plain_touch_borrowed(keys) → store.touch(keys) → Integer(count);
+2-key via *3 key_arg1, 3-key via *4 key_arg2. A/B: TOUCH2 cand/ctrl 1.601, TOUCH3 1.491. Byte-exact incl dup-counted,
+missing, 1-key/4-key fall-through, cmdstat+keyspace(hits=2/misses=1). conformance 99/0. SESSION TALLY 34 fast-paths.
+*** SHARED-TREE RACE NOTE ***: a peer added execute_plain_spop_count_borrowed (impl+main.rs dispatch wiring) to the
+SHARED lib.rs while I worked; my `git add crates/fr-runtime/src/lib.rs` swept their COMPLETE+WIRED spop impl into my
+TOUCH commit 199c87a09. Main compiles + conformance 99/0 (their work is functional, not broken) — NOT reverted to avoid
+breaking their live feature; their #[test] borrowed_spop_count_fast_path remains uncommitted in the worktree for them.
+LESSON (reinforces feedback_shared_tree_commit_race): `git add <whole-file>` on a shared hot file sweeps peer WIP —
+prefer `git add -p` or re-grep for ONLY your sentinel before staging on contended crates.
