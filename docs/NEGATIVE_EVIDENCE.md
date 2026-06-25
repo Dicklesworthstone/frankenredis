@@ -4356,3 +4356,17 @@ shapes. Focused Rust tests passed for runtime edge parity and server parser fall
 `fr-bench`, release `fr-server`/`fr-bench` builds, focused `GETEX_PERSIST` benchmark, and
 `cargo test -p fr-conformance -- --nocapture` green (194 lib tests, all bins, 99 smoke tests, doctests). SESSION TALLY
 37 fast-paths.
+
+### 2026-06-25 (part 73) DEL multi-key fast-path SHIPPED — ~1.44-1.62x (0.49x→~0.74x) + rebase-recovery (cc/BlackThrush)
+DEL key [key...] 2/3-key was 0.49x (one of the most common writes). execute_plain_del_borrowed(keys) → store.del(keys)
+→ Integer(count); WRITE gate makes the del event/replica/AOF/tracking inactive so it just drains last_del_removed.
+A/B: DEL2 cand/ctrl 1.442, DEL3 1.622. Byte-exact (reply + EXISTS removal state) incl dups-counted-once, missing,
+mixed types, 1-key/4-key fall-through, cmdstat+keyspace(0/0). conformance 99/0. SESSION TALLY 38 fast-paths.
+*** REBASE-RECOVERY NOTE ***: a peer landed a 373-line refactor (18d79788c, their own GETEX-PERSIST + dispatch
+restructure) ON TOP of my work mid-turn; my DEL commit hit a rebase conflict in the restructured dispatch chain, and
+the ACTIVE peer kept re-writing the shared main.rs DURING resolution (reverted my hand-merge → stale markers → E0061).
+RECOVERY: extract my change as a patch → `git reset --keep origin/main` (dcg-safe, my tree was clean; --hard blocked)
+→ re-apply the small DEL diff on the peer's FRESH built-clean base → rebuild/reverify/commit/push. LESSON: when a
+rebase conflict collides with an actively-editing peer, DON'T hand-merge in the volatile tree — reset to origin and
+re-apply your (small) change on the clean base. Two agents + one working tree + big refactors = use reset+reapply, not
+in-place conflict resolution.
