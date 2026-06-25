@@ -18200,6 +18200,52 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-delfast) Borrowed WRITE fast path for the multi-key `DEL key
+    /// [key ...]` form. store.del removes each present key (duplicate/missing keys
+    /// are NOT counted twice) + tracks dirty internally and records the removed keys
+    /// in last_del_removed for the "del" keyspace event / replica+AOF propagation —
+    /// ALL of which the WRITE gate guarantees are inactive here (notify==0, no
+    /// replicas/AOF/tracking), so the fast path just drains that buffer and returns
+    /// Integer(count). Callers pass the 2- or 3-key slice; 1-key and 4+ forms fall
+    /// through to generic. (DEL does not record keyspace_hits/misses — matches the
+    /// generic.)
+    pub fn execute_plain_del_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < keys.len() + 1
+            || self.policy.gate.max_bulk_len < b"DEL".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"DEL".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble("del", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let count = self.server.store.del(&keys_owned, now_ms);
+        // Drain the removed-keys buffer the generic would consume for keyspace
+        // events / propagation (no-ops under the plain-mode gate) so it does not
+        // leak into a later command.
+        let _ = self.server.store.take_last_del_removed();
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX));
+        self.record_plain_zremrange_borrowed_metrics(
+            "del",
+            "DEL",
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                argv.push(b"DEL".to_vec());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
+            elapsed_us, now_ms, packet_id, false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(
         &mut self,
         key: &[u8],
