@@ -4325,3 +4325,12 @@ fall-through, cmdstat+keyspace(hits=2/misses=1). conformance 98/1 (lone core_ser
 isolated; unrelated to read-only EXISTS). Protected-edit pattern used again (peer still on lib.rs spop). SESSION TALLY
 36 fast-paths. Remaining: GETEX-PERSIST 0.49x, SPOP (peer working), LCS/SORT/GEOSEARCH (complex). Clean byte-exact
 2-3 arg dispatch vein now deeply mined (36 commands/arities, parts 49-71).
+
+### 2026-06-25 (part 72) GETEX PERSIST fast-path SHIPPED — ~1.59x (0.49x→~0.78x) (cc/BlackThrush)
+GETEX key PERSIST (*3) fell to generic option-parsing (only no-option GETEX was fast-pathed), 0.49x.
+execute_plain_getex_persist_borrowed mirrors the no-option fast-path but store.getex(key, Some(None)) to clear TTL;
+self-guards PERSIST token; same WRITE gate + key_type guard. A/B: cand/ctrl 1.588. Byte-exact (reply + TTL state)
+incl PERSIST-on-TTL'd-key (TTL cleared), no-TTL, lowercase, missing→nil, WRONGTYPE, EX/BADOPT/no-option fall-through,
+cmdstat+keyspace(hits=1/misses=1). conformance 99/0. Protected-edit pattern again (peer on lib.rs spop). SESSION TALLY
+37 fast-paths (parts 49-72). Remaining clean: ~nothing trivial — SPOP (peer's), LCS/SORT/GEOSEARCH/BITFIELD_RO
+(complex/DP/dominated), 4+key arity extensions (diminishing). The clean byte-exact 1-3 arg dispatch vein is SATURATED.
