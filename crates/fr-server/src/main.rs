@@ -3656,6 +3656,55 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*7\r\n$10\r\n",
+                    b"SINTERCARD",
+                ) {
+                    // SINTERCARD numkeys a b c d e: covers `3 k1 k2 k3 LIMIT n`
+                    // (key=numkeys) and `5 k1 k2 k3 k4 k5`; execute validates
+                    // numkeys/LIMIT before using the fast path.
+                    let tail = [packet.key, packet.a, packet.b, packet.c, packet.d, packet.e];
+                    if let Some(response) = runtime.execute_plain_sintercard_borrowed(&tail, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$10\r\n",
+                    b"SINTERCARD",
+                ) {
+                    // SINTERCARD numkeys a b c d: covers `2 k1 k2 LIMIT n` (key=numkeys)
+                    // and `4 k1 k2 k3 k4` (no-limit) — execute validates numkeys/LIMIT.
+                    let tail = [packet.key, packet.a, packet.b, packet.c, packet.d];
+                    if let Some(response) = runtime.execute_plain_sintercard_borrowed(&tail, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 {
@@ -10585,6 +10634,53 @@ fn parse_borrowed_plain_key_arg4_packet<'a>(
         b,
         c,
         d,
+    })
+}
+
+// Generic *7 `CMD key arg1 arg2 arg3 arg4 arg5` parser for option forms such as
+// `SINTERCARD 3 k1 k2 k3 LIMIT n`.
+struct BorrowedPlainKeyArg5Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    a: &'a [u8],
+    b: &'a [u8],
+    c: &'a [u8],
+    d: &'a [u8],
+    e: &'a [u8],
+}
+
+fn parse_borrowed_plain_key_arg5_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    prefix: &[u8],
+    cmd: &[u8],
+) -> Option<BorrowedPlainKeyArg5Packet<'a>> {
+    if config.max_array_len < 7 || config.max_bulk_len < cmd.len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+        rest.get(..cmd.len())
+            .filter(|c| c.eq_ignore_ascii_case(cmd))
+            .map(|_| input.len() - rest.len() + cmd.len())
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (c, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (d, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (e, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyArg5Packet {
+        consumed,
+        key,
+        a,
+        b,
+        c,
+        d,
+        e,
     })
 }
 
@@ -24514,6 +24610,50 @@ mod tests {
             )
             .is_none(),
             "malformed second-key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_sintercard_limit_packet_parsers_accept_exact_limit_arities() {
+        let cfg = ParserConfig::default();
+        let two_key = crate::parse_borrowed_plain_key_arg4_packet(
+            b"*6\r\n$10\r\nsInTeRcArD\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\nb\r\n$5\r\nLIMIT\r\n$2\r\n16\r\n",
+            &cfg,
+            b"*6\r\n$10\r\n",
+            b"SINTERCARD",
+        )
+        .expect("two-key SINTERCARD LIMIT packet should parse");
+        assert_eq!(two_key.key, b"2");
+        assert_eq!(two_key.a, b"a");
+        assert_eq!(two_key.b, b"b");
+        assert_eq!(two_key.c, b"LIMIT");
+        assert_eq!(two_key.d, b"16");
+
+        let three_key = crate::parse_borrowed_plain_key_arg5_packet(
+            b"*7\r\n$10\r\nSINTERCARD\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$5\r\nlimit\r\n$1\r\n4\r\n",
+            &cfg,
+            b"*7\r\n$10\r\n",
+            b"SINTERCARD",
+        )
+        .expect("three-key SINTERCARD LIMIT packet should parse");
+        assert_eq!(three_key.key, b"3");
+        assert_eq!(three_key.a, b"a");
+        assert_eq!(three_key.b, b"b");
+        assert_eq!(three_key.c, b"c");
+        assert_eq!(three_key.d, b"limit");
+        assert_eq!(three_key.e, b"4");
+        assert!(
+            crate::parse_borrowed_plain_key_arg5_packet(
+                b"*7\r\n$10\r\nSINTERCARD\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$5\r\nlimit\r\n$1\r\n4\r\n",
+                &ParserConfig {
+                    max_array_len: 6,
+                    ..ParserConfig::default()
+                },
+                b"*7\r\n$10\r\n",
+                b"SINTERCARD",
+            )
+            .is_none(),
+            "array-limit errors stay on generic"
         );
     }
 

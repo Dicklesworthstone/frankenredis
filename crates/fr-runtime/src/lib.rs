@@ -11685,14 +11685,12 @@ impl Runtime {
         }
     }
 
-    /// Borrowed fast path for the no-LIMIT exact `SINTERCARD numkeys key [key ...]`
-    /// form. `tail` is borrowed_args[1..] = [numkeys, key...]. Defers (returns
-    /// None) on a bad numkeys, a numkeys that does not exactly match the key count
-    /// (a LIMIT clause or arg mismatch), or any disabling state — the generic path
-    /// then emits the canonical error / handles LIMIT. Mirrors the generic:
-    /// record_source_key_lookups (one exists_no_touch per key, the keyspace
-    /// hit/miss accounting) then the no-stat store.sintercard(keys, 0). Integer
-    /// cardinality or WRONGTYPE for a non-set key. (cold-cmd audit)
+    /// Borrowed fast path for exact `SINTERCARD numkeys key [key ...]` and
+    /// `SINTERCARD numkeys key [key ...] LIMIT count` forms. `tail` is
+    /// borrowed_args[1..]. Defers (returns None) on a bad numkeys, arg mismatch,
+    /// malformed / negative LIMIT, or any disabling state so the generic path emits
+    /// the canonical error. Mirrors generic key lookup accounting before the
+    /// no-stat store.sintercard call. (cold-cmd audit)
     pub fn execute_plain_sintercard_borrowed(
         &mut self,
         tail: &[&[u8]],
@@ -11704,15 +11702,35 @@ impl Runtime {
             return None;
         }
         let numkeys = usize::try_from(numkeys).ok()?;
-        // Exact no-LIMIT form only: numkeys keys and nothing after them.
-        if tail.len() != numkeys.saturating_add(1) {
+        // Accept the no-LIMIT form (numkeys keys, nothing after) and the
+        // `LIMIT <count>` suffix form (numkeys keys + "LIMIT" + a non-negative
+        // integer). store.sintercard treats limit 0 as "no limit", which also covers
+        // an explicit `LIMIT 0`. Any other trailing shape / negative limit defers to
+        // the generic for its exact error. (BlackThrush)
+        let keys_end = numkeys.saturating_add(1);
+        let limit: u64 = if tail.len() == keys_end {
+            0
+        } else if tail.len() == keys_end.saturating_add(2)
+            && tail
+                .get(keys_end)
+                .is_some_and(|t| t.eq_ignore_ascii_case(b"LIMIT"))
+        {
+            let raw = parse_i64_arg(tail[keys_end + 1]).ok()?;
+            if raw < 0 {
+                return None;
+            }
+            u64::try_from(raw).ok()?
+        } else {
             return None;
-        }
-        let keys = &tail[1..];
-        if numkeys.saturating_add(2) > MAX_COMMAND_ARITY
-            || self.policy.gate.max_array_len < numkeys.saturating_add(2)
+        };
+        let keys = &tail[1..keys_end];
+        let argc = tail.len().saturating_add(1);
+        if argc > MAX_COMMAND_ARITY
+            || self.policy.gate.max_array_len < argc
             || self.policy.gate.max_bulk_len < b"SINTERCARD".len()
-            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+            || tail
+                .iter()
+                .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -11739,7 +11757,7 @@ impl Runtime {
         for key in keys {
             let _ = self.server.store.exists_no_touch(key, now_ms);
         }
-        let result = self.server.store.sintercard(keys, 0, now_ms);
+        let result = self.server.store.sintercard(keys, limit, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
@@ -37643,8 +37661,8 @@ mod tests {
 
     #[test]
     fn plain_sintercard_borrowed_matches_generic_and_defers() {
-        // (cold-cmd audit) SINTERCARD no-LIMIT exact form borrow == generic;
-        // LIMIT / numkeys-mismatch / bad-numkeys forms DEFER to generic.
+        // (cold-cmd audit) SINTERCARD exact no-LIMIT and non-negative LIMIT forms
+        // borrow == generic; invalid LIMIT / numkeys mismatch / bad numkeys defer.
         let mut direct = Runtime::default_strict();
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {
@@ -37653,12 +37671,15 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
         }
         let mut ts = 2;
-        // exact no-LIMIT forms (tail = [numkeys, keys...])
-        let ok_tails: [&[&[u8]]; 4] = [
+        // exact forms (tail = [numkeys, keys..., optional LIMIT count])
+        let ok_tails: [&[&[u8]]; 7] = [
             &[b"2", b"a", b"b"],
             &[b"1", b"a"],
             &[b"2", b"a", b"missing"],
             &[b"1", b"s"], // wrong type
+            &[b"2", b"a", b"b", b"LIMIT", b"1"],
+            &[b"2", b"a", b"b", b"limit", b"0"],
+            &[b"1", b"s", b"LIMIT", b"1"], // wrong type
         ];
         for tail in ok_tails {
             let f = direct
@@ -37671,10 +37692,23 @@ mod tests {
             assert_eq!(f, g, "tail={tail:?}");
             ts += 1;
         }
-        // defer cases: LIMIT clause, numkeys mismatch, bad numkeys
+        // defer cases: malformed/negative LIMIT, numkeys mismatch, bad numkeys
         assert!(
             direct
-                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"1"], ts)
+                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"-1"], ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"x"], ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_sintercard_borrowed(
+                    &[b"2", b"a", b"b", b"LIMIT", b"1", b"LIMIT", b"2"],
+                    ts,
+                )
                 .is_none()
         );
         assert!(
