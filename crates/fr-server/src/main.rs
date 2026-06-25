@@ -4760,6 +4760,39 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$6\r\n",
+                    b"ZRANGE",
+                ) {
+                    // ZRANGE key min max BYSCORE WITHSCORES: a=min, b=max, c=BYSCORE,
+                    // d=WITHSCORES. Only this exact two-option order is fast-pathed.
+                    if packet.c.eq_ignore_ascii_case(b"BYSCORE")
+                        && packet.d.eq_ignore_ascii_case(b"WITHSCORES")
+                    {
+                        let client_resp3 =
+                            runtime.client_session().resp_protocol_version() == 3;
+                        if runtime
+                            .execute_plain_zrange_byscore_withscores_borrowed_into(
+                                packet.key, packet.a, packet.b, ts, client_resp3,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
+                        {
+                            Ok(BorrowedMultibulkAction::FastEncodedReply { consumed: packet.consumed })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed, parser_config, runtime, ts,
+                                &mut conn.write_buf, &mut argv_scratch,
+                            )
+                        }
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                     unparsed,
                     &parser_config,
