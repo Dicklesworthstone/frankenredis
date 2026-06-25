@@ -4080,3 +4080,13 @@ design (encoded in core_scan.json, NOT a regression; verified candidate==control
 incl core_scan_conformance + core_scan_live. SESSION TALLY 19 fast-paths (16+SSCAN/HSCAN/ZSCAN). Remaining uncovered+slow:
 SPOP 0.43x (mutating/random — needs structural-not-byte-exact verify). LESSON: when a command has fr-specific semantics
 (SCAN order), bench candidate-vs-CONTROL not just vs redis — the "mismatch" vs redis may be intentional pre-existing.
+
+### 2026-06-24 (part 60) LMPOP 1-key fast-path SHIPPED — ~1.70-1.80x (0.40x→0.66-0.76x vs redis) (cc/BlackThrush)
+LMPOP 1 key LEFT|RIGHT (*4, count defaults to 1) was 0.40x. execute_plain_lmpop1_borrowed mirrors fr-command::lmpop
+for that shape: llen_no_stat probe (no keyspace bump, like upstream lookupKeyWrite), then one lpop/rpop on a
+non-empty list → [key, [element]]; empty/missing → nil Array(None); WRONGTYPE; pop-last autodeletes. Fires only when
+numkeys==1 and dir LEFT/RIGHT; COUNT/numkeys!=1/bad-dir/arity → generic. A/B (best-of-6): LMPOP(miss L) cand/ctrl 1.705
+cand/redis 0.662; (miss R) 1.799/0.757. Byte-exact incl LEFT/RIGHT, lowercase, pop-last-autodelete, missing→nil,
+WRONGTYPE, fall-throughs; cmdstat+keyspace(0/0 no-stat probe). conformance 99/0. SESSION TALLY 20 fast-paths.
+Remaining uncovered+slow: ZMPOP 0.46x (the MIN/MAX pair — needs zpop_score_frame for nested [member,score]; next),
+SPOP 0.43x (mutating/random → structural-not-byte-exact verify only).
