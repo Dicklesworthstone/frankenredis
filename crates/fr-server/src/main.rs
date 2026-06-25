@@ -2905,18 +2905,31 @@ fn process_buffered_frames(
                     b"*4\r\n$3\r\n",
                     b"SET",
                 ) {
-                    // SET key value KEEPTTL: a=value, b=option token. Only KEEPTTL is
-                    // fast-pathed (case-insensitive); other *4 options fall through.
-                    let default_write_allowed = packet.b.eq_ignore_ascii_case(b"KEEPTTL")
+                    // SET key value KEEPTTL|GET: a=value, b=option token. Only the
+                    // KEEPTTL and GET single-option forms are fast-pathed (case-
+                    // insensitive); other *4 options fall through.
+                    let is_keepttl = packet.b.eq_ignore_ascii_case(b"KEEPTTL");
+                    let is_get = packet.b.eq_ignore_ascii_case(b"GET");
+                    let default_write_allowed = (is_keepttl || is_get)
                         && cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if packet.b.eq_ignore_ascii_case(b"KEEPTTL")
-                        && let Some(response) = runtime.execute_plain_set_keepttl_borrowed(
+                    let fast = if is_keepttl {
+                        runtime.execute_plain_set_keepttl_borrowed(
                             packet.key,
                             packet.a,
                             ts,
                             default_write_allowed,
                         )
-                    {
+                    } else if is_get {
+                        runtime.execute_plain_set_get_borrowed(
+                            packet.key,
+                            packet.a,
+                            ts,
+                            default_write_allowed,
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(response) = fast {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(

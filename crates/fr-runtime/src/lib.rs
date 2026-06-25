@@ -263,10 +263,10 @@ fn set_command_keys(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     .then(|| vec![argv[1].clone()])
 }
 
-fn plain_set_owned_argv(key: &[u8], value: &[u8], keepttl: bool) -> Vec<Vec<u8>> {
+fn plain_set_owned_argv(key: &[u8], value: &[u8], trailing: Option<&[u8]>) -> Vec<Vec<u8>> {
     let mut argv = vec![b"SET".to_vec(), key.to_vec(), value.to_vec()];
-    if keepttl {
-        argv.push(b"KEEPTTL".to_vec());
+    if let Some(t) = trailing {
+        argv.push(t.to_vec());
     }
     argv
 }
@@ -7412,7 +7412,7 @@ impl Runtime {
         self.server.store.set_plain_borrowed(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_borrowed_metrics(key, value, false, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_borrowed_metrics(key, value, None, false, elapsed_us, now_ms, packet_id);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -7463,12 +7463,78 @@ impl Runtime {
             .set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_borrowed_metrics(key, value, true, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_borrowed_metrics(key, value, Some(b"KEEPTTL"), false, elapsed_us, now_ms, packet_id);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Borrowed WRITE fast path for `SET key value GET` (no NX/XX/
+    /// expiry). Mirrors the generic set's COMMAND_GET arm: read the old value FIRST
+    /// via store.get (which records the keyspace hit/miss exactly like the generic's
+    /// `old_value = store.get(..)?`, and surfaces WRONGTYPE on a non-string key
+    /// WITHOUT writing), then — only when the read succeeded — store the new value
+    /// with plain-SET semantics (TTL cleared) and reply the old value (nil if it was
+    /// absent). SET..GET with NX/XX/KEEPTTL/expiry is *5+ and falls through.
+    pub fn execute_plain_set_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"GET".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Read old value first (records the hit/miss + WRONGTYPE) exactly like the
+        // generic; only write when the key holds a string (or is absent).
+        let reply = match self.server.store.get(key, now_ms) {
+            Ok(old) => {
+                self.server.store.set_plain_borrowed(key, value, now_ms);
+                RespFrame::BulkString(old)
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_set_borrowed_metrics(
+            key,
+            value,
+            Some(b"GET"),
+            failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
     }
 
     /// (frankenredis-setexfast) Conservative borrowed WRITE fast path for the
@@ -22509,7 +22575,8 @@ impl Runtime {
         &mut self,
         key: &[u8],
         value: &[u8],
-        keepttl: bool,
+        trailing: Option<&[u8]>,
+        failed: bool,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -22518,14 +22585,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, trailing));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, trailing));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -22536,12 +22603,16 @@ impl Runtime {
                 .record_command_histogram_canonical_with_kind(
                     "set",
                     elapsed_us,
-                    CommandRecordKind::Success,
+                    if failed {
+                        CommandRecordKind::Failed
+                    } else {
+                        CommandRecordKind::Success
+                    },
                 );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, trailing));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
