@@ -4712,3 +4712,14 @@ OPTION-FORM SCORECARD parts 82-93 = 12 wins (COPY REPLACE, EXPIRE flags, SET KEE
 LIMIT, ZRANGEBYSCORE LIMIT, ZRANGEBYLEX LIMIT, ZRANGE BYSCORE, ZRANGE BYLEX, ZREVRANGEBYSCORE LIMIT, ZREVRANGEBYLEX LIMIT).
 The reverse-LIMIT zset surface is now COMPLETE. NEXT: ZRANGE ..BYSCORE/BYLEX WITHSCORES (*6, needs RESP2/3 score-emit
 helper — check the existing ZRANGE WITHSCORES index fast-path for a reusable emit), ZRANGE ..REV (*5 -> zrevrange).
+
+### 2026-06-25 (part 94) ZRANGEBYSCORE ..WITHSCORES fast-path SHIPPED ~1.42x (0.623x->0.903x) (cc/BlackThrush)
+Thirteenth option-form win; FIRST WITHSCORES form (RESP2/3 score-emit). ZRANGEBYSCORE key min max WITHSCORES (*5) = 0.623x.
+execute_plain_zrangebyscore_withscores_borrowed_into uses the _into direct-buffer-encode pattern of the existing ZRANGE-
+WITHSCORES index path: same inverted/wrongtype guard + store.zrangebyscore_withscores_limited + RESP-aware interleaved emit
+(RESP2 flat [member,score-bulk]; RESP3 array of [member,Double] pairs via encode_aggregate_header + encode_redis_double).
+GUARD returns CommandError not StoreError -> result type is Result<Vec,RespFrame> (map_err to_resp). *5 key_arg3 gated
+WITHSCORES; +LIMIT(*7)/no-opt(*4) route elsewhere. A/B cand/ctrl 1.416, cand/redis 0.903. Byte-exact in BOTH RESP2 AND
+RESP3 (floats 1.5/3.25/-inf, empty, WRONGTYPE, fall-throughs), cmdstat=1, keyspace=1. conformance 99/0. Verified diff (164).
+OPTION-FORM SCORECARD parts 82-94 = 13 wins. NEXT: ZREVRANGEBYSCORE/ZRANGE BYSCORE WITHSCORES (mirror the _into),
+ZRANGEBYLEX has no scores (skip WITHSCORES), ZRANGE ..REV (*5 -> zrevrange index).
