@@ -4140,3 +4140,13 @@ ZREMRANGEBY{RANK,SCORE,LEX}, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZREVRANGE, LPOP/RP
 ZSCAN, LMPOP, ZMPOP, SINTERSTORE/SUNIONSTORE/SDIFFSTORE, ZUNIONSTORE/ZINTERSTORE, ZDIFFSTORE). Set/zset *STORE +
 read-algebra 2-key vein now COMPLETE. Remaining uncovered: SPOP 0.43x (random — structural verify only); ZRANGESTORE
 already 2.3x faster.
+
+### 2026-06-24 (part 65) BITOP fast-path SHIPPED — ~1.47-1.52x (0.50x→~0.74x vs redis) (cc/BlackThrush)
+BITOP AND|OR|XOR|NOT dest src... was 0.50-0.56x. execute_plain_bitop_borrowed: only well-formed ops fast-pathed
+(op∈{AND,OR,XOR,NOT}; unknown op or NOT-with-!=1-source → generic for the exact error), then record_source_key_lookups
+(sources) + store.bitop(op,dest,sources) → Integer(len). Two dispatch branches: *5 AND/OR/XOR 2-source, *4 NOT/1-source.
+A/B (load-invariant): AND cand/ctrl 1.473, NOT 1.521. Byte-exact (reply + dest GET) incl diff-length sources,
+1-source AND copy, missing/all-missing(0+delete), NOT-2-source error, invalid-op syntax err, lowercase op, WRONGTYPE;
+cmdstat+keyspace. conformance 99/0. SESSION TALLY 26 fast-paths. Remaining uncovered (niche/complex): SORT/SORT_RO
+(BY/GET/LIMIT — fr already dominates 1.43x per memory), LCS, GEOSEARCH, BITFIELD_RO; SPOP 0.43x (random, structural-
+verify only). The 2-arg byte-exact dispatch vein is now very thoroughly mined (26 commands).
