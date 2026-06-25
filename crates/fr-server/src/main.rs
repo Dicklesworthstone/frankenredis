@@ -6030,6 +6030,26 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*7\r\n$11\r\n",
+                    b"ZRANGEBYLEX",
+                ) {
+                    // ZRANGEBYLEX key min max LIMIT offset count: a=min, b=max,
+                    // c=LIMIT, d=offset, e=count.
+                    if packet.c.eq_ignore_ascii_case(b"LIMIT")
+                        && let Some(response) = runtime.execute_plain_zrangebylex_limit_borrowed(
+                            packet.key, packet.a, packet.b, packet.d, packet.e, ts,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
                 {
