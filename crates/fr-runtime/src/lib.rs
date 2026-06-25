@@ -17482,6 +17482,95 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlackThrush) Borrowed READ fast path for `ZREVRANGEBYLEX key max min LIMIT
+    /// offset count`. Reverse mirror of execute_plain_zrangebylex_limit_borrowed:
+    /// wire order max then min, and store.zrangebylex_limited runs rev=true with the
+    /// bounds in (min, max) order (verified byte-exact vs redis). Well-formed lex
+    /// bounds only; defers on negative offset/count. Records the one keyspace lookup
+    /// (the store walk does not). Member-only array.
+    pub fn execute_plain_zrevrangebylex_limit_borrowed(
+        &mut self,
+        key: &[u8],
+        max: &[u8],
+        min: &[u8],
+        offset_arg: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms)
+        {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
+            return None;
+        }
+        let offset_raw = parse_i64_arg(offset_arg).ok()?;
+        if offset_raw < 0 {
+            return None;
+        }
+        let offset = usize::try_from(offset_raw).ok()?;
+        let count_raw = parse_i64_arg(count_arg).ok()?;
+        if count_raw < 0 {
+            return None;
+        }
+        let count = usize::try_from(count_raw).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebylex",
+            b"ZREVRANGEBYLEX".len()
+                + key.len()
+                + max.len()
+                + min.len()
+                + b"LIMIT".len()
+                + offset_arg.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let reply = match self.server.store.zrangebylex_limited(
+            key,
+            min,
+            max,
+            true,
+            offset,
+            Some(count),
+            now_ms,
+        ) {
+            Ok(members) => RespFrame::Array(Some(
+                members
+                    .into_iter()
+                    .map(|m| RespFrame::BulkString(Some(m)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebylex",
+            "ZREVRANGEBYLEX",
+            || {
+                vec![
+                    b"ZREVRANGEBYLEX".to_vec(),
+                    key.to_vec(),
+                    max.to_vec(),
+                    min.to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset_arg.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
     // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
     // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
