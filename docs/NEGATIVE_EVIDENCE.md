@@ -4480,3 +4480,21 @@ That's set-rep / dest-build = CoralOx fr-store structural domain, confirming par
 is flat across the whole input-regime sweep, the gap is in the DATA STRUCTURE (build/clone/encode), not the algorithm —
 stop swapping algorithms. The 3+key hoist (parts 79/80) was a real win because it removed REDUNDANT work; this 2-key swap
 only MOVED the same work around.
+
+### 2026-06-25 (part 82) COPY..REPLACE fast-path SHIPPED ~1.95x + COPY stream-meta guard (cc/BlackThrush)
+Off-sweep measurement batch (commands NOT in broad_command_headtohead) found COPY..REPLACE 0.499x. The no-REPLACE *3
+COPY was already fast-pathed (0.883x) but the *4 REPLACE form fell to generic dispatch. Parameterized the EXISTING
+execute_plain_copy_borrowed with a `replace` flag (threaded into store.copy + plain_copy_owned_argv so REPLACE token +
+argv_len_sum stay byte-exact) + *4 dispatch via key_arg2 gated on token==REPLACE (case-insensitive); COPY..DB falls
+through. A/B: cand/ctrl 1.953, cand/redis 1.033 (0.499x -> BEATS redis). Byte-exact (overwrite reply+value+type-change,
+lowercase replace, missing-src 0, same-key ERR, COPY..DB fall-through, cmdstat_copy row). conformance 99/0.
+ALSO fr-store copy_inner stream-meta guard: the 4 stream side-maps (groups/last-id/entries-added/max-deleted) only hold
+stream keys, but COPY ran ~12 of their map ops on EVERY copy; guarded behind 'source is stream OR a side-map non-empty'
+(redis copyCommand ~3 dict ops). Adds ~4% to the no-REPLACE path; stream COPY still carries consumer groups + dest-clear
+preserved (verified XINFO GROUPS + COPY-over-stream-dest).
+LESSON (high-yield): MEASURE EVERY OPTION-FORM of a command, not just the bare form — a command can have its plain form
+fast-pathed while an option arity (REPLACE/EX/GET/...) silently falls to generic. The off-sweep probe batch (COPY/SMOVE/
+PFCOUNT/SETRANGE/GETEX/TYPE...) surfaced gaps the 16-cmd broad sweep misses. STILL-OPEN off-sweep losses (logged, NOT yet
+shipped): PFCOUNT multi-key 0.239x = STRUCTURAL (fr decodes sparse HLL to a dense 16384-register array + operates on all
+of them; redis stays O(cardinality) on the sparse rep — dense-vs-sparse HLL rewrite, CoralOx-class); SETRANGE 0.709x,
+GETEX-no-opt 0.877x, TYPE 0.841x (dispatch-floor candidates — next dispatch fast-paths); GETRANGE noisy 0.57-0.88x.
