@@ -4394,3 +4394,12 @@ conformance 99/0. SESSION TALLY 40 fast-paths. LESSON: arity extensions have a C
 work overtakes the fixed dispatch saving; bench EACH arity, ship only those above noise. This + part-74 (ZADD3) mark the
 practical edge of the dispatch vein: gains now depend on store-work-fraction, not just coverage. Remaining genuinely-
 uncovered+dispatch-bound surface is essentially exhausted; further wins are store-side (CoralOx) or arity past the ceiling.
+
+### 2026-06-25 (part 76) DEL 5-key fast-path SHIPPED — ~1.37x (0.40x→parity-ish) (cc/BlackThrush)
+DEL5 (*6 via existing key_arg4 parser, no fr-runtime change). REFINES the part-75 arity-ceiling lesson: the ceiling is
+COMMAND-SPECIFIC. EXISTS hit a ceiling at 4 keys (per-key store-lookup dominates) but DEL keeps winning at 5 keys
+(cand/ctrl 1.373, DEL5/DEL6-missing still 0.40/0.44x vs redis) because DEL-of-missing does NO store work at any count
+and DEL's removal is cheap when present. RULE: a command is dispatch-bound-at-any-arity iff its per-key store work is
+~free (DEL, and TOUCH's lean path); commands with real per-key store work (EXISTS lookups, ZADD inserts) hit a low
+arity ceiling. Byte-exact (5-key counts, mixed exist/missing, dups-once, removal state), conformance 99/0. SESSION TALLY
+41 fast-paths. DEL6+ would also win but needs a new key_arg5 (*7) parser — diminishing commonality; stopping at DEL5.
