@@ -5299,6 +5299,40 @@ fn process_buffered_frames(
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
                     &parser_config,
+                    b"*3\r\n$6\r\n",
+                    b"EXISTS",
+                ) {
+                    // 2-key EXISTS: key + arg are the two keys.
+                    if let Some(response) =
+                        runtime.execute_plain_exists_multi_borrowed(&[packet.key, packet.arg], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$6\r\n",
+                    b"EXISTS",
+                ) {
+                    // 3-key EXISTS: key + a + b are the three keys.
+                    if let Some(response) =
+                        runtime.execute_plain_exists_multi_borrowed(&[packet.key, packet.a, packet.b], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
                     b"*3\r\n$5\r\n",
                     b"TOUCH",
                 ) {

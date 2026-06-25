@@ -17953,6 +17953,49 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-existsmultifast) Borrowed READ fast path for the multi-key
+    /// `EXISTS key [key ...]` form. Mirrors fr-command::exists EXACTLY: count one per
+    /// key for which exists_no_touch is true (EXISTS does NOT update access time;
+    /// duplicate keys ARE counted separately) → Integer(count). Read-only; callers
+    /// pass the 2- or 3-key slice (the 1-key form has its own fast path).
+    pub fn execute_plain_exists_multi_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < keys.len() + 1
+            || self.policy.gate.max_bulk_len < b"EXISTS".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"EXISTS".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("exists", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let mut count = 0_i64;
+        for &k in keys {
+            if self.server.store.exists_no_touch(k, now_ms) {
+                count = count.saturating_add(1);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(count);
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        self.record_plain_zremrange_borrowed_metrics(
+            "exists",
+            "EXISTS",
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                argv.push(b"EXISTS".to_vec());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
+            elapsed_us, now_ms, packet_id, false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     /// (frankenredis-touchfast) Borrowed READ fast path for `TOUCH key [key ...]`.
     /// Mirrors fr-command::touch: store.touch(keys) (which counts the existing keys
     /// and bumps their access time / keyspace hit-miss accounting internally) →
