@@ -5365,6 +5365,40 @@ fn process_buffered_frames(
                             &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*5\r\n$3\r\n",
+                    b"DEL",
+                ) {
+                    // 4-key DEL: key + a + b + c are the four keys.
+                    if let Some(response) = runtime
+                        .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*5\r\n$5\r\n",
+                    b"TOUCH",
+                ) {
+                    // 4-key TOUCH.
+                    if let Some(response) = runtime
+                        .execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
                     &parser_config,
