@@ -4255,3 +4255,15 @@ Correctness: `scripts/set_differ.py --oracle 46831 --fr 46832 --iters 1200 --see
 Redis/fr servers, including its SPOP count property checks. Gates: fmt/check/clippy for fr-runtime/fr-server/fr-bench,
 release fr-server/fr-bench builds with the warm nightly-2026-06-09 target, focused SPOP_count4 bench, and
 `cargo test -p fr-conformance -- --nocapture` green (194 lib tests, all bins, 99 smoke tests, doctests).
+
+### 2026-06-25 (part 70) MSETNX 1/2-pair fast-path SHIPPED — ~1.39-1.60x (0.43x→~0.65x) + clean protected-edit (cc/BlackThrush)
+MSETNX k v [k v] was 0.425x. execute_plain_msetnx_borrowed(pairs): exists_no_stat probe per key (no keyspace bump,
+write); ANY exists → Integer(0) no-set; else set_plain_borrowed per pair → Integer(1). 1-pair *3 key_arg1 / 2-pair *5
+key_arg3. A/B: MSETNX1 cand/ctrl 1.595, MSETNX2 1.391. Byte-exact (reply + MGET state) incl all-or-nothing
+(neither set when any exists), same-key-twice, odd-arity/3-pair fall-through, cmdstat+keyspace(0/0). conformance 99/0.
+SESSION TALLY 35 fast-paths. *** PROTECTED-EDIT WIN ***: lib.rs was under ACTIVE peer editing (their spop WIP growing
+1→5 refs); applied the lesson from part 69 — stashed the peer's uncommitted lib.rs spop WIP to a CLEAN HEAD base,
+made my MSETNX edit + built + committed ONLY my 91-line diff (verified spop refs back to 1, no sweep), then restored
+their WIP via stash apply (msetnx@impl ~18001 vs spop@tests ~33619, no overlap → clean). This is the correct pattern
+for a contended hot file: stash-peer-WIP → edit clean → commit-mine → restore-peer-WIP. Remaining: EXISTS-multi 0.70x,
+GETEX-PERSIST 0.49x, SPOP (peer working it), LCS/SORT/GEOSEARCH (complex).
