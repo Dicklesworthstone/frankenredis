@@ -16874,29 +16874,31 @@ impl Runtime {
     // normalize_weighted_score_cmd / aggregate_scores_for_cmd nan→0 guards (weight
     // 1.0 ⇒ s*1.0; SUM ⇒ a+b, nan→0). The aggregated score is needed even without
     // WITHSCORES because it drives the score-asc/member-lex sort order.
-    fn execute_plain_zinter2_core(&mut self, k1: &[u8], k2: &[u8], now_ms: u64) -> RespFrame {
-        let keys = [k1, k2];
-        fr_command::record_source_key_lookups(&mut self.server.store, &keys, now_ms);
-        for &k in &keys {
+    fn execute_plain_zinter_core(&mut self, keys: &[&[u8]], now_ms: u64) -> RespFrame {
+        fr_command::record_source_key_lookups(&mut self.server.store, keys, now_ms);
+        for &k in keys {
             if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
                 return CommandError::Store(err).to_resp();
             }
         }
-        let first = match self.server.store.zget_members_with_scores_no_stats(k1) {
+        let first = match self.server.store.zget_members_with_scores_no_stats(keys[0]) {
             Ok(members) => members,
             Err(err) => return CommandError::Store(err).to_resp(),
         };
         let nan0 = |x: f64| if x.is_nan() { 0.0 } else { x };
         let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-        for (member, score) in first {
+        'members: for (member, score) in first {
             // normalize_weighted_score_cmd(score, 1.0)
-            let combined = nan0(score);
-            match self.server.store.zget_score_or_set_member_no_stats(k2, &member) {
-                // aggregate_scores_for_cmd(combined, s*1.0, SUM)
-                Ok(Some(s)) => result.push((member, nan0(combined + s))),
-                Ok(None) => {}
-                Err(err) => return CommandError::Store(err).to_resp(),
+            let mut combined = nan0(score);
+            for &k in &keys[1..] {
+                match self.server.store.zget_score_or_set_member_no_stats(k, &member) {
+                    // aggregate_scores_for_cmd(combined, s*1.0, SUM)
+                    Ok(Some(s)) => combined = nan0(combined + s),
+                    Ok(None) => continue 'members,
+                    Err(err) => return CommandError::Store(err).to_resp(),
+                }
             }
+            result.push((member, combined));
         }
         result.sort_by(|a, b| {
             a.1.partial_cmp(&b.1)
@@ -16911,44 +16913,51 @@ impl Runtime {
         ))
     }
 
-    /// (frankenredis-zinter2fast) Borrowed READ fast path for the common 2-key form
-    /// `ZINTER 2 k1 k2`. Fires only when numkeys==2; every other numkeys / WEIGHTS /
-    /// AGGREGATE / WITHSCORES form falls through to the generic handler (the *4 form
-    /// can carry none of those — options follow the 2 keys). Read-only.
-    pub fn execute_plain_zinter2_borrowed(
+    /// (frankenredis-zinter2fast) Borrowed READ fast path for the no-option
+    /// `ZINTER <numkeys> k...` form (numkeys==keys.len(), 2 or 3). Fires only when
+    /// the numkeys bulk equals the number of keys the parser supplied; every
+    /// WEIGHTS / AGGREGATE / WITHSCORES form falls through to the generic handler
+    /// (the *N form with N==numkeys+2 can carry none of those — options follow the
+    /// keys). Read-only.
+    pub fn execute_plain_zinter_borrowed(
         &mut self,
         numkeys_arg: &[u8],
-        k1: &[u8],
-        k2: &[u8],
+        keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 4
+        if self.policy.gate.max_array_len < keys.len() + 2
             || self.policy.gate.max_bulk_len < b"ZINTER".len()
             || numkeys_arg.len() > self.policy.gate.max_bulk_len
-            || k1.len() > self.policy.gate.max_bulk_len
-            || k2.len() > self.policy.gate.max_bulk_len
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
-        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
             return None;
         }
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
-        let packet_id = self.plain_read_borrowed_preamble(
-            "zinter",
-            b"ZINTER".len() + numkeys_arg.len() + k1.len() + k2.len(),
-            now_ms,
-        );
+        let argv_len_sum = b"ZINTER".len()
+            + numkeys_arg.len()
+            + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("zinter", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        let reply = self.execute_plain_zinter2_core(k1, k2, now_ms);
+        let reply = self.execute_plain_zinter_core(keys, now_ms);
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
+        let numkeys_owned = numkeys_arg.to_vec();
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
         self.record_plain_zremrange_borrowed_metrics(
             "zinter",
             "ZINTER",
-            || vec![b"ZINTER".to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 2);
+                argv.push(b"ZINTER".to_vec());
+                argv.push(numkeys_owned.clone());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
             elapsed_us, now_ms, packet_id, failed,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
