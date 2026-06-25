@@ -4575,3 +4575,24 @@ Gates: fr-runtime/fr-server/fr-bench check+clippy green; focused borrowed_getex_
 OPTION-FORM SCORECARD (parts 82-87): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x,
 GETEX EX/PX 1.94x, SET GET 1.87x, GETEX EXAT/PXAT 1.43-1.49x. STILL OPEN: SINTERCARD..LIMIT 0.547x,
 HSETNX 0.87x, OBJECT REFCOUNT 0.783x. ZADD GT/NX remains skipped/store-bound per part74.
+
+### 2026-06-25 (part 88) BOLD-VERIFY SET key value GET vs Redis 7.2.4 CONFIRMED 1.36x (cc/BlackThrush)
+Follow-up BOLD-VERIFY after `origin/main` already carried the part 86 implementation. Added a reusable Criterion group
+`set_get_vs_redis/SET_GET` so this option-form win can be re-run directly against Redis 7.2.4. Bench shape: release
+`fr-server`, 64-command pipelined packet, per-iteration prefill with `SET sgNNN oldNNN`, then timed `SET sgNNN newNNN
+GET` so every command returns the old value.
+
+Head-to-head on ovh-a against Redis 7.2.4 (`sha=d2c8a4b9`):
+
+| engine | median packet time | throughput | ratio |
+|---|---:|---:|---:|
+| Redis 7.2.4 | 48.451 us | 1.3209 Melem/s | baseline |
+| FrankenRedis candidate | 35.622 us | 1.7966 Melem/s | **1.36x Redis throughput** |
+
+Validation: `cargo test -p fr-runtime plain_set_get_borrowed -- --nocapture` (3/0), `cargo check -p fr-runtime
+--all-targets`, `cargo check -p fr-server --all-targets`, `cargo check -p fr-bench --all-targets`, `cargo fmt --check
+-p fr-runtime -p fr-server -p fr-bench`, `cargo clippy -p fr-runtime --all-targets -- -D warnings`, `cargo clippy
+-p fr-server --all-targets -- -D warnings`, `cargo clippy -p fr-bench --all-targets -- -D warnings`,
+`cargo test -p fr-conformance -- --nocapture` (fr-conformance lib 194/0, smoke 99/0, bins/doc-tests green). A
+pre-existing side-effectful Lua assignment block needed a local `collapsible_match` allow so the runtime clippy gate
+could pass through the `fr-command` path dependency.

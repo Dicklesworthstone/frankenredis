@@ -430,6 +430,34 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     }
 
     getex_abs_group.finish();
+
+    let mut set_get_group = c.benchmark_group("set_get_vs_redis");
+    set_get_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let set_get_prefill = pipelined_set_get_prefill_packet(COMMANDS_PER_ITER);
+    let set_get = pipelined_set_get_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        set_get_group.bench_with_input(
+            BenchmarkId::new("SET_GET", engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&set_get_prefill, COMMANDS_PER_ITER);
+                        let start = Instant::now();
+                        client.run_resp_packet(&set_get, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            },
+        );
+    }
+
+    set_get_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -681,11 +709,31 @@ fn pipelined_getex_absexpire_prefill_packet(count: usize) -> Vec<u8> {
     packet
 }
 
+fn pipelined_set_get_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("sg{index:03}");
+        let value = format!("old{index:03}");
+        packet.extend_from_slice(&encode_command(&["SET", &key, &value]));
+    }
+    packet
+}
+
 fn pipelined_getex_absexpire_packet(count: usize, unit: &str, deadline: &str) -> Vec<u8> {
     let mut packet = Vec::with_capacity(count * 64);
     for index in 0..count {
         let key = format!("a{index:03}");
         packet.extend_from_slice(&encode_command(&["GETEX", &key, unit, deadline]));
+    }
+    packet
+}
+
+fn pipelined_set_get_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 56);
+    for index in 0..count {
+        let key = format!("sg{index:03}");
+        let value = format!("new{index:03}");
+        packet.extend_from_slice(&encode_command(&["SET", &key, &value, "GET"]));
     }
     packet
 }

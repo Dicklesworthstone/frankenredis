@@ -4932,7 +4932,7 @@ impl<'a> LuaState<'a> {
                 )?;
                 // Write back table mutations (table.sort/insert/remove mutate args[0] in-place).
                 // The inner `if` has a side-effect (set_existing_local) so must not be collapsed.
-                #[allow(clippy::collapsible_if)]
+                #[allow(clippy::collapsible_if, clippy::collapsible_match)]
                 if let LuaValue::RustFunction(ref name) = func
                     && matches!(
                         name.as_str(),

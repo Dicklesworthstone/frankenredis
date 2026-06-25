@@ -34433,6 +34433,122 @@ mod tests {
     }
 
     #[test]
+    fn plain_set_get_borrowed_fast_path_is_disabled_when_aof_is_configured() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+        let gate = rt.plain_borrowed_default_key_write_gate(1);
+
+        assert_eq!(
+            rt.execute_plain_set_get_borrowed(b"aof-key", b"value", 1, gate),
+            None
+        );
+        assert!(rt.aof_records().is_empty());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"aof-key"]), 2),
+            RespFrame::BulkString(None)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"aof-key", b"value", b"GET"]), 3),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.aof_records()
+                .last()
+                .expect("generic SET GET captures AOF")
+                .argv,
+            argv(&[b"SET", b"aof-key", b"value", b"GET"])
+        );
+    }
+
+    #[test]
+    fn plain_set_get_borrowed_fast_path_matches_generic_hit_miss_and_ttl() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"hot", b"old", b"PX", b"5000"]), 10),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let gate = fast.plain_borrowed_default_key_write_gate(20);
+        let fast_reply = fast
+            .execute_plain_set_get_borrowed(b"hot", b"new", 20, gate)
+            .expect("borrowed SET GET should engage");
+        let generic_reply = generic.execute_frame(command(&[b"SET", b"hot", b"new", b"GET"]), 20);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast_reply, RespFrame::BulkString(Some(b"old".to_vec())));
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"hot"]), 21),
+            generic.execute_frame(command(&[b"GET", b"hot"]), 21)
+        );
+        assert_eq!(
+            fast.server.store.get_expires_at_ms(b"hot", 21),
+            generic.server.store.get_expires_at_ms(b"hot", 21)
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+
+        let gate = fast.plain_borrowed_default_key_write_gate(30);
+        let fast_reply = fast
+            .execute_plain_set_get_borrowed(b"missing", b"value", 30, gate)
+            .expect("borrowed SET GET miss should engage");
+        let generic_reply =
+            generic.execute_frame(command(&[b"SET", b"missing", b"value", b"GET"]), 30);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast_reply, RespFrame::BulkString(None));
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"missing"]), 31),
+            generic.execute_frame(command(&[b"GET", b"missing"]), 31)
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+    }
+
+    #[test]
+    fn plain_set_get_borrowed_fast_path_matches_generic_wrongtype_no_write() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"LPUSH", b"list", b"old"]), 10),
+                RespFrame::Integer(1)
+            );
+        }
+
+        let gate = fast.plain_borrowed_default_key_write_gate(20);
+        let fast_reply = fast
+            .execute_plain_set_get_borrowed(b"list", b"new", 20, gate)
+            .expect("borrowed SET GET wrongtype should engage");
+        let generic_reply = generic.execute_frame(command(&[b"SET", b"list", b"new", b"GET"]), 20);
+        assert_eq!(fast_reply, generic_reply);
+        assert!(matches!(
+            fast_reply,
+            RespFrame::Error(ref message) if message.starts_with("WRONGTYPE")
+        ));
+        assert_eq!(
+            fast.execute_frame(command(&[b"TYPE", b"list"]), 21),
+            generic.execute_frame(command(&[b"TYPE", b"list"]), 21)
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.server.store.errorstats_per_type.get("WRONGTYPE"),
+            generic.server.store.errorstats_per_type.get("WRONGTYPE")
+        );
+    }
+
+    #[test]
     fn plain_set_owned_fast_path_matches_borrowed_set_result() {
         let policy = RuntimePolicy {
             emit_evidence_ledger: false,
