@@ -4115,3 +4115,15 @@ dest-string overwrite, 3/1-source fall-through. conformance 99/0. SESSION TALLY 
 benches timed out repeatedly and are noisy; cand/ctrl (both fr, equally slowed) is LOAD-INVARIANT and the reliable win
 metric. Use small iters + socket timeouts + cand-vs-control under contention. Remaining uncovered: SPOP 0.43x (random),
 ZRANGESTORE already 2.3x faster, ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE (zset *STORE, next — same recipe).
+
+### 2026-06-24 (part 63) ZUNIONSTORE/ZINTERSTORE 2-key fast-path SHIPPED — ~1.49-1.55x (0.71-0.85x→BEATS redis) (cc/BlackThrush)
+The 2-key forms {ZUNION,ZINTER}STORE dest 2 k1 k2 (*5, default WEIGHTS=[1,1]/AGGREGATE=SUM) were 0.71-0.85x.
+execute_plain_zstore2_borrowed(which): per-source exists_no_touch (keyspace before type-check) +
+ensure_zset_or_set_source (WRONGTYPE ahead of options), then store.{zunion,zinter}store(dest,[k1,k2],[1,1],b"SUM")
+→ Integer(card). New generic *5 parser parse_borrowed_plain_key_arg3_packet. A/B: ZUNIONSTORE cand/ctrl 1.494
+cand/redis 1.436; ZINTERSTORE 1.552/1.185 — both now BEAT redis. Byte-exact (reply + dest WITHSCORES) incl set-source
+score-1 aggregation, missing-source (union passthrough / inter 0+dest-delete), WRONGTYPE both, numkeys3/WEIGHTS/
+AGGREGATE/numkeys1 fall-through, cmdstat+keyspace. conformance 99/0. NOTE: earlier memory claim "zinterstore 2.05x/
+zunionstore 1.75x dominate" was for LARGER sets — small 3-elem 2-key was 0.71-0.85x (dispatch-bound) until this.
+SESSION TALLY 24 fast-paths. ZDIFFSTORE is inline (no store method) — would need ZDIFF-style replication w/ dest store
+(next candidate). SPOP 0.43x random remains (structural-verify only).
