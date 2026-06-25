@@ -4700,3 +4700,15 @@ conformance 99/0. Verified staged diff (127) -> no sweep.
 OPTION-FORM SCORECARD parts 82-92 = 11 wins. NEXT uncontested: ZREVRANGEBYLEX ..LIMIT (*7, 0.573x — but uses store.
 zrevrangebylex NOT a limited+rev variant; verify zrangebylex_limited(rev=true)==zrevrangebylex BEFORE using), ZRANGE
 ..BYSCORE WITHSCORES (*6, needs RESP2/3 score-emit), ZRANGE ..REV (*5 reverse-index). HRANDFIELD WITHVALUES=random skip.
+
+### 2026-06-25 (part 93) ZREVRANGEBYLEX ..LIMIT fast-path SHIPPED ~1.48x (0.573x->0.912x) (cc/BlackThrush)
+Twelfth option-form win. Reverse mirror of part-89. The part-92 CAUTION resolved: VERIFIED byte-exact vs redis that
+store.zrangebylex_limited(key, min, max, rev=true, offset, Some(count)) reproduces store.zrevrangebylex (the *4 form's
+non-limited+rev method) across descending pagination / incl+excl ranges / empty / fall-throughs -> safe to reuse.
+execute_plain_zrevrangebylex_limit_borrowed: wire max-then-min, well-formed lex guard, record_source_key_lookups, defer
+neg offset/count. *7 key_arg5 gated LIMIT. A/B cand/ctrl 1.481, cand/redis 0.912 (near-parity). cmdstat_zrevrangebylex=1,
+keyspace=1, no-LIMIT *4 unaffected. conformance 99/0. Verified staged diff (110) -> no sweep.
+OPTION-FORM SCORECARD parts 82-93 = 12 wins (COPY REPLACE, EXPIRE flags, SET KEEPTTL, GETEX EX/PX, SET GET, SINTERCARD
+LIMIT, ZRANGEBYSCORE LIMIT, ZRANGEBYLEX LIMIT, ZRANGE BYSCORE, ZRANGE BYLEX, ZREVRANGEBYSCORE LIMIT, ZREVRANGEBYLEX LIMIT).
+The reverse-LIMIT zset surface is now COMPLETE. NEXT: ZRANGE ..BYSCORE/BYLEX WITHSCORES (*6, needs RESP2/3 score-emit
+helper — check the existing ZRANGE WITHSCORES index fast-path for a reusable emit), ZRANGE ..REV (*5 -> zrevrange).
