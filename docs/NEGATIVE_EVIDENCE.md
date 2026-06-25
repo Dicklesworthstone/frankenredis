@@ -4090,3 +4090,16 @@ cand/redis 0.662; (miss R) 1.799/0.757. Byte-exact incl LEFT/RIGHT, lowercase, p
 WRONGTYPE, fall-throughs; cmdstat+keyspace(0/0 no-stat probe). conformance 99/0. SESSION TALLY 20 fast-paths.
 Remaining uncovered+slow: ZMPOP 0.46x (the MIN/MAX pair — needs zpop_score_frame for nested [member,score]; next),
 SPOP 0.43x (mutating/random → structural-not-byte-exact verify only).
+
+### 2026-06-24 (part 61) ZMPOP 1-key fast-path SHIPPED — ~1.70-1.83x (0.46x→0.75-0.77x vs redis) (cc/BlackThrush)
+Pairs with part-60 LMPOP. ZMPOP 1 key MIN|MAX (*4) was 0.46x. execute_plain_zmpop1_borrowed: zcard_no_stat probe →
+one zpopmin/zpopmax → [key, [[member, score]]]; nil/WRONGTYPE/autodelete. A/B (best-of-6): MIN cand/ctrl 1.696
+cand/redis 0.753; MAX 1.831/0.767. Byte-exact RESP2+RESP3.
+*** IMPORTANT BUG CAUGHT BY CANDIDATE-vs-CONTROL DIFFERENTIAL ***: the inlined zpop_score_frame must read
+self.session.resp_protocol_version, NOT self.server.store.dispatch_client_ctx.resp_protocol_version. The store ctx
+is only synced FROM the session during GENERIC dispatch (lib.rs:23867) — on a borrowed fast path it still reads RESP2,
+so the first cut emitted a RESP2 bulk score under HELLO 3 (control+redis both emit ,1 Double). Always diff candidate
+vs CONTROL (fr generic) for any RESP3-aware fast-path, not just vs redis. All other borrowed paths already use
+session.resp_protocol_version (9653/9813/11697/19221/20507). conformance 99/0. SESSION TALLY 21 fast-paths.
+Remaining uncovered+slow: SPOP 0.43x (mutating/random → structural verify only). The byte-exact dispatch vein is now
+very deep — 21 commands the "exhausted" claim missed.
