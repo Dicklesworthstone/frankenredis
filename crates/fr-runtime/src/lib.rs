@@ -16659,6 +16659,53 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrevrangefast) Borrowed READ fast path for the no-WITHSCORES
+    /// form `ZREVRANGE key start stop`. Mirror of execute_plain_zrange_borrowed with
+    /// store.zrevrange: parse start/stop as i64 (defer not-an-integer to generic),
+    /// no-stat store walk (which records the keyspace lookup), member-only array.
+    /// The WITHSCORES (*5) form and any bad arity fall through to generic.
+    pub fn execute_plain_zrevrange_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGE".len(), key, start_arg, stop_arg, now_ms) {
+            return None;
+        }
+        let start = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrange",
+            b"ZREVRANGE".len() + key.len() + start_arg.len() + stop_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = self.server.store.zrevrange(key, start, stop, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(members) => RespFrame::Array(Some(
+                members
+                    .into_iter()
+                    .map(|member| RespFrame::BulkString(Some(member)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrange",
+            "ZREVRANGE",
+            || vec![b"ZREVRANGE".to_vec(), key.to_vec(), start_arg.to_vec(), stop_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
