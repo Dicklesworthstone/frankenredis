@@ -12513,24 +12513,31 @@ impl Store {
             // order is the smallest set's iteration order in both paths
             // (byte-identical; verified fr-vs-fr 0-diff). (frankenredis-sinterfresh)
             Some(base) if keys.len() >= 3 => {
+                // (BlackThrush) Hoist the other-set references out of the per-member
+                // loop. The previous code re-probed the key-dict (self.entries.get)
+                // for EVERY member of the smallest set times EVERY other set —
+                // O(min_card * (k-1)) redundant HashMap lookups (each hashing the key
+                // name + probing the whole keyspace dict, a likely cache miss on a
+                // large keyspace). All keys exist + were type-checked above, so fetch
+                // each other set's &SetValue ONCE here; the loop then only does the
+                // necessary s.contains(member) membership tests. Byte-identical output
+                // (same smallest-set iteration order, same survivors).
+                let other_sets: Vec<&SetValue> = keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != min_idx)
+                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                        Value::Set(s) => Some(s.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
                 let mut out = GenericSet::with_capacity_and_hasher(
                     base.len(),
                     foldhash::quality::RandomState::default(),
                 );
                 'member: for member in base.iter() {
-                    for (i, key) in keys.iter().enumerate() {
-                        if i == min_idx {
-                            continue;
-                        }
-                        let in_other = self
-                            .entries
-                            .get(*key)
-                            .and_then(|e| match &e.value {
-                                Value::Set(s) => Some(s.contains(member)),
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-                        if !in_other {
+                    for other in &other_sets {
+                        if !other.contains(member) {
                             continue 'member;
                         }
                     }
