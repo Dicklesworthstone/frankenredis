@@ -4679,3 +4679,13 @@ OPTION-FORM SCORECARD (parts 82-90): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT, SET
 GET 1.87x, SINTERCARD LIMIT 2.36x, ZRANGEBYSCORE LIMIT 1.57x, ZRANGEBYLEX LIMIT 1.66x, ZRANGE BYSCORE 1.71x. NEXT:
 ZRANGE ..BYLEX (*5, mirror), ZRANGE ..BYSCORE WITHSCORES (*6), ZRANGE ..REV (*5 reverse-index). HRANDFIELD WITHVALUES =
 random (NOT byte-exact, skip like SPOP). ZADD flags SKIP (store-bound).
+
+### 2026-06-25 (part 91) ZRANGE key min max BYLEX fast-path SHIPPED ~1.41x (0.548x->beats redis 1.174x) (cc/BlackThrush)
+Tenth option-form win. Direct mirror of part-90 ZRANGE BYSCORE for the lex range. ZRANGE..BYLEX fell to generic = 0.548x.
+execute_plain_zrange_bylex_borrowed = ZRANGEBYLEX fast-path body (lex-bound guard + record_source_key_lookups +
+store.zrangebylex) but cmdstat="zrange". Reused param-taking zbyscore gate (ZRANGE len). Extended the *5 ZRANGE key_arg3
+dispatch to route BYSCORE->byscore fn / BYLEX->bylex fn / else fall-through. A/B cand/ctrl 1.412, cand/redis 1.174.
+Byte-exact: full/incl/excl/empty, WRONGTYPE, malformed-bound, lowercase; BYSCORE sibling still routes, index/REV/LIMIT
+fall-through; cmdstat_zrange=1, keyspace_hits=1. conformance 99/0. Verified staged diff pre-commit -> no sweep.
+OPTION-FORM SCORECARD parts 82-91 = 10 wins. NEXT uncontested: ZRANGE ..BYSCORE WITHSCORES (*6 -> withscores=true),
+ZRANGE ..REV (*5 reverse-index -> zrevrange), ZREVRANGEBYSCORE/BYLEX ..LIMIT. HRANDFIELD WITHVALUES = random skip.
