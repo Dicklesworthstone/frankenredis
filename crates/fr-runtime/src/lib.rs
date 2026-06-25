@@ -15334,6 +15334,77 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-getexpersistfast) Borrowed WRITE fast path for `GETEX key
+    /// PERSIST`. Identical to execute_plain_getex_borrowed but clears the TTL via
+    /// store.getex(key, Some(None)) (the PERSIST ExpiryKind → `Some(None)` new
+    /// expires) before returning the value. Same key_type guard (None → nil, non-
+    /// string → WRONGTYPE) and WRITE gate. Caller passes the literal PERSIST option
+    /// bytes only for accurate slowlog/argv reconstruction.
+    pub fn execute_plain_getex_persist_borrowed(
+        &mut self,
+        key: &[u8],
+        persist_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !persist_arg.eq_ignore_ascii_case(b"PERSIST") {
+            return None;
+        }
+        if !self.can_execute_plain_getex_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getex");
+        self.session.last_argv_len_sum = b"GETEX".len() + key.len() + persist_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = match self.server.store.key_type(key, now_ms) {
+            None => RespFrame::BulkString(None),
+            Some("string") => match self.server.store.getex(key, Some(None), now_ms) {
+                Ok(Some(v)) => RespFrame::BulkString(Some(v)),
+                Ok(None) => RespFrame::BulkString(None),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_getex_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
     fn record_plain_getex_borrowed_metrics(
         &mut self,
         key: &[u8],
