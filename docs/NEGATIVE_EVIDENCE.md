@@ -4370,3 +4370,16 @@ RECOVERY: extract my change as a patch → `git reset --keep origin/main` (dcg-s
 rebase conflict collides with an actively-editing peer, DON'T hand-merge in the volatile tree — reset to origin and
 re-apply your (small) change on the clean base. Two agents + one working tree + big refactors = use reset+reapply, not
 in-place conflict resolution.
+
+### 2026-06-25 (part 74) ZADD 3-member (*8) dispatch fast-path — ~0-GAIN, REVERTED (cc/BlackThrush)
+NEGATIVE RESULT. ZADD3 (*8) was uncovered (only *4/*6 parsers exist) and measured 0.642x vs redis, so it looked like a
+dispatch gap. Built a parser-only fast-path (parse_borrowed_plain_zadd3_packet → existing variadic execute_plain_zadd_
+borrowed, no lib.rs change), byte-exact (new/mixed/update counts, floats, GT *9 + bad-score fall-through, ZRANGE scores,
+cmdstat). But A/B (idempotent re-add of 3 existing members → :0): cand/ctrl **0.994x = ~0-gain → REVERTED** (stashed).
+CONCLUSION: ZADD's 0.64x gap is STORE-SIDE not dispatch — even the already-shipped 1-member ZADD fast-path is still
+0.636x, and removing dispatch for 3-member changes nothing. The zset insert/lookup path (uybhq structural, CoralOx
+fr-store domain) is the real lever, not borrowed dispatch. This CONFIRMS the clean byte-exact dispatch vein is SATURATED
+(38 fast-paths shipped, parts 49-73); remaining slow commands (ZADD/SMISMEMBER/ZMSCORE residuals) are store-bound, plus
+SPOP (random, a peer's domain) and LCS/SORT/GEOSEARCH (complex/DP). LESSON: a command being "uncovered + slow vs redis"
+does NOT guarantee a dispatch win — verify cand-vs-control isolates a REAL dispatch fraction before shipping; for
+already-fast-pathed siblings still slow (ZADD 1-member 0.636x), the residual is structural.
