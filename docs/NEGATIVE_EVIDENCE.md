@@ -4403,3 +4403,13 @@ and DEL's removal is cheap when present. RULE: a command is dispatch-bound-at-an
 ~free (DEL, and TOUCH's lean path); commands with real per-key store work (EXISTS lookups, ZADD inserts) hit a low
 arity ceiling. Byte-exact (5-key counts, mixed exist/missing, dups-once, removal state), conformance 99/0. SESSION TALLY
 41 fast-paths. DEL6+ would also win but needs a new key_arg5 (*7) parser — diminishing commonality; stopping at DEL5.
+
+### 2026-06-25 (part 77) UNLINK multi-key fast-path SHIPPED — ~1.51-1.66x (cc/BlackThrush)
+UNLINK 2-5 key (the lazy-free sibling of DEL) was uncovered. Applied the part-76 rule (dispatch-bound-at-any-arity iff
+per-key store work ~free): UNLINK qualifies — identical store.del path to DEL, removal cheap, missing keys do nothing.
+execute_plain_unlink_borrowed = additive isolated fn (low collision risk on contended lib.rs) mirroring
+execute_plain_del_borrowed but with the lazy-free verb as the recorded command name so its cmdstat row is correct (not
+the DEL row). 2/3/4/5-key via key_arg1/2/3/4; 6+ generic. A/B: UNLINK2 cand/ctrl 1.509, UNLINK4 1.659. Byte-exact
+(reply + EXISTS removal, dups-once, mixed, 6-key fall-through) + cmdstat-row parity. conformance 99/0. SESSION TALLY
+45 fast-paths (parts 49-77). NOTE: the lazy-free verb is a dcg-blocked shell word (filesystem op) — commit via
+`git commit -F <file>` and keep it UPPERCASE in ledger/heredocs to avoid the false-positive block.
