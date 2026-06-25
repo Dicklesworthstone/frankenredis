@@ -4022,3 +4022,13 @@ arity fall-through, cmdstat + keyspace_hits/misses (hit+miss). fr-conformance 99
 SESSION TALLY 11 fast-paths: HMGET4-8/LINSERT/ZREM/LREM/ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/BYSCORE/BYLEX/
 ZRANGEBYSCORE/ZREVRANGEBYSCORE. Still uncovered+slow: ZDIFF 0.57x, ZINTER 0.53x (read set-algebra), SPOP 0.43x
 (mutating/random). The "dispatch vein exhausted" claim refuted by 11 commands.
+
+### 2026-06-24 (part 55) ZREVRANGE borrowed READ fast-path SHIPPED — ~1.48-1.70x (0.64x→0.76-0.96x vs redis) (cc/BlackThrush)
+ZREVRANGE key start stop (no-WITHSCORES index form) was 0.64x vs Redis 7.2.4 (ZRANGE already had a fast-path;
+ZREVRANGE did not). Mirror of execute_plain_zrange_borrowed with store.zrevrange: parse start/stop i64 (defer to
+generic), no-stat store walk (records the keyspace lookup), member-only array. WITHSCORES (*5)/bad-arity stay
+generic. A/B (best-of-6): (0 2) cand/ctrl 1.695 cand/redis 0.761; (0 -1) 1.484 / 0.959. Byte-exact incl neg ranges,
+WRONGTYPE, not-int→generic, WITHSCORES/bad-option/arity fall-through, cmdstat + keyspace_hits/misses. fr-conformance
+99/0. SESSION TALLY 12 fast-paths (HMGET4-8/LINSERT/ZREM/LREM/ZRANGEBYLEX/ZREVRANGEBYLEX/ZREMRANGEBYRANK/BYSCORE/BYLEX/
+ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZREVRANGE). Still uncovered+slow: ZDIFF 0.57x / ZINTER 0.53x (variadic numkeys read
+set-algebra), SPOP 0.43x (mutating/random). HGETALL already beats redis (1.15x).
