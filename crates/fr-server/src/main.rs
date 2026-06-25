@@ -3705,6 +3705,23 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*3\r\n$10\r\n",
+                    b"SINTERCARD",
+                ) {
+                    // SINTERCARD 1 key (single-set cardinality): key=numkeys("1"),
+                    // arg=the set. execute validates numkeys and the no-LIMIT shape.
+                    let tail = [packet.key, packet.arg];
+                    if let Some(response) = runtime.execute_plain_sintercard_borrowed(&tail, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 {
