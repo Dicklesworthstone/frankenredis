@@ -4431,3 +4431,16 @@ ZREM/HDEL keyed-values; MSETNX done). EVERY remaining measurable gap is STORE-SI
 uybhq zset-insert, 99fwc ChunkedList, keyspace-RAM, set-intersection set-rep) or SPOP (random, a peer's active work) or
 LCS/SORT/GEOSEARCH (complex algorithm-replication, high byte-divergence risk). HANDOFF: next levers require fr-store
 structural work (multi-session) — not the per-turn byte-exact dispatch class this campaign owned.
+
+### 2026-06-25 (part 79) STORE-SIDE WIN: sinter_value loop-hoist — SINTER/SINTERSTORE 3+key ~1.33-1.40x (cc/BlackThrush)
+FIRST store-side (fr-store) win of the campaign — breaks through the part-78 dispatch saturation via /extreme-software-
+optimization (eliminate redundant work in a hot loop, NOT a structural rewrite). The >=3-key SINTER fresh-build path
+re-probed the keyspace dict (self.entries.get(key)) for EVERY member × EVERY other set = O(min_card*(k-1)) redundant
+HashMap lookups (each hashes the key name + probes the whole keyspace dict — cache miss on a large keyspace). Hoisted:
+fetch each other set's &SetValue ONCE before the member loop (all keys exist+type-checked in pass 1); the loop then only
+does the necessary s.contains(member). 33-line diff. A/B (3-set, smallest=500, inter=100): SINTERSTORE3 cand/ctrl 1.329
+cand/redis 1.373 (now BEATS redis, was ~parity); SINTER3 cand/ctrl 1.404 cand/redis 0.751 (was 0.535x). Byte-exact
+(fr-vs-redis 0-diff on sa∩sb∩sc=100). fr-store lib 654 pass (2 fails = pre-existing load-flaky perf-A/B tests, proven
+unrelated: foldhash passes isolated, scan_scanpfx fails on HEAD too). LESSON: even the "structural store-side" residuals
+can hide CLEAN algorithmic wins — profile the hot loop for REDUNDANT work (hoistable lookups, repeated probes) before
+declaring a gap structural. The 2-key path already hoisted (clone+retain has get() outside the loop); only >=3-key had it.
