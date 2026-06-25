@@ -4127,3 +4127,16 @@ AGGREGATE/numkeys1 fall-through, cmdstat+keyspace. conformance 99/0. NOTE: earli
 zunionstore 1.75x dominate" was for LARGER sets — small 3-elem 2-key was 0.71-0.85x (dispatch-bound) until this.
 SESSION TALLY 24 fast-paths. ZDIFFSTORE is inline (no store method) — would need ZDIFF-style replication w/ dest store
 (next candidate). SPOP 0.43x random remains (structural-verify only).
+
+### 2026-06-24 (part 64) ZDIFFSTORE 2-key fast-path SHIPPED — ~1.51x (0.70x→~parity+ vs redis) (cc/BlackThrush)
+ZDIFFSTORE dest 2 k1 k2 (*5) was 0.70x. Unlike ZUNION/ZINTERSTORE it has NO store method (diff computed inline), so
+execute_plain_zdiffstore2_borrowed replicates fr-command::zdiffstore via the SAME pub store primitives (as ZDIFF
+read): record_source_key_lookups → ensure_zset_or_set_source both → members of k1 absent from k2 →
+store_sorted_set_from_pairs(dest) → Integer(count) (no pre-sort; sorted-set build orders by score). A/B (load-invariant):
+cand/ctrl 1.508 (control 0.70x vs redis → ~parity+). Byte-exact (reply + dest WITHSCORES) incl self-diff(0+delete),
+missing, set-source, WRONGTYPE both, numkeys3/extra-token (syntax)/numkeys1(generic)/numkeys0; cmdstat+keyspace.
+conformance 99/0. SESSION TALLY 25 fast-paths (HMGET4-8, LINSERT, ZREM, LREM, ZRANGEBYLEX, ZREVRANGEBYLEX,
+ZREMRANGEBY{RANK,SCORE,LEX}, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZREVRANGE, LPOP/RPOP-count, ZDIFF, ZINTER, SSCAN/HSCAN/
+ZSCAN, LMPOP, ZMPOP, SINTERSTORE/SUNIONSTORE/SDIFFSTORE, ZUNIONSTORE/ZINTERSTORE, ZDIFFSTORE). Set/zset *STORE +
+read-algebra 2-key vein now COMPLETE. Remaining uncovered: SPOP 0.43x (random — structural verify only); ZRANGESTORE
+already 2.3x faster.
