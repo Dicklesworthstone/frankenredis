@@ -4555,3 +4555,23 @@ occurrence count first.
 OPTION-FORM SCORECARD (parts 82-86): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x, GETEX EX/PX
 1.94x, SET GET 1.87x. STILL-OPEN: GETEX EXAT/PXAT, SINTERCARD..LIMIT 0.547x (needs *6/*7 parsers), HSETNX 0.87x,
 OBJECT REFCOUNT 0.783x. ZADD GT/NX = SKIP (store-bound per part74).
+
+### 2026-06-25 (part 87) GETEX key EXAT|PXAT timestamp fast-path SHIPPED ~1.43-1.49x (0.52x -> 0.83-0.87x Redis) (codex/BlackThrush)
+Sixth option-form win. The part-85 GETEX EX|PX relative path deliberately left absolute EXAT/PXAT on generic dispatch;
+this pass mirrors SET's absolute-expiry validation for GETEX EXAT/PXAT (*4 exact packets only): strictly-positive integer
+timestamp, EXAT seconds->ms overflow guard, NO basetime addition, and Store::getex(Some(abs_ms)) so past-but-positive
+deadlines return the old value and expire/delete the key like Redis. Mixed/duplicate options remain generic. Bench harness
+now has explicit getex_absexpire_vs_redis lanes (64 pipelined commands, SET prefill, Redis 7.2.4 oracle).
+A/B medians:
+  GETEX_EXAT: exact-parent control fr=148.74us vs redis=76.931us -> 0.517x; candidate fr=104.09us vs redis=86.183us
+  -> 0.828x; cand/ctrl=1.429x.
+  GETEX_PXAT: exact-parent control fr=149.01us vs redis=77.148us -> 0.518x; candidate fr=100.09us vs redis=87.024us
+  -> 0.869x; cand/ctrl=1.489x.
+Byte-exact proof: scripts/getex_ttl_differ.py, scripts/expire_timestamp_edge_differ.py, and
+scripts/expire_overflow_differ.py PASS vs Redis 7.2.4 (EXAT/PXAT set/readback, past-delete, zero/overflow errors).
+Gates: fr-runtime/fr-server/fr-bench check+clippy green; focused borrowed_getex_absexpire unit green; fr-conformance green
+(194 lib tests, helper-bin tests, 99 smoke tests). Note: fr-runtime clippy also required behavior-free
+#[allow(clippy::too_many_arguments)] annotations on existing SET/COPY metrics helpers uncovered by the per-crate gate.
+OPTION-FORM SCORECARD (parts 82-87): COPY REPLACE 1.95x, EXPIRE NX/XX/GT/LT 1.3-1.5x, SET KEEPTTL 2.26x,
+GETEX EX/PX 1.94x, SET GET 1.87x, GETEX EXAT/PXAT 1.43-1.49x. STILL OPEN: SINTERCARD..LIMIT 0.547x,
+HSETNX 0.87x, OBJECT REFCOUNT 0.783x. ZADD GT/NX remains skipped/store-bound per part74.

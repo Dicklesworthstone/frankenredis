@@ -7412,7 +7412,9 @@ impl Runtime {
         self.server.store.set_plain_borrowed(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_borrowed_metrics(key, value, None, false, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_borrowed_metrics(
+            key, value, None, false, elapsed_us, now_ms, packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -7458,12 +7460,23 @@ impl Runtime {
 
         let start = self.chained_command_start();
         let existing_expiry = self.server.store.get_expires_at_ms(key, now_ms);
-        self.server
-            .store
-            .set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
+        self.server.store.set_with_abs_expiry(
+            key.to_vec(),
+            value.to_vec(),
+            existing_expiry,
+            now_ms,
+        );
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_borrowed_metrics(key, value, Some(b"KEEPTTL"), false, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_borrowed_metrics(
+            key,
+            value,
+            Some(b"KEEPTTL"),
+            false,
+            elapsed_us,
+            now_ms,
+            packet_id,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -14105,10 +14118,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str(kind.name_lower());
-        self.session.last_argv_len_sum = name_upper.len()
-            + key.len()
-            + time_arg.len()
-            + cond_token.map_or(0, <[u8]>::len);
+        self.session.last_argv_len_sum =
+            name_upper.len() + key.len() + time_arg.len() + cond_token.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -14142,9 +14153,7 @@ impl Runtime {
                             break 'apply false;
                         }
                     }
-                    if lt
-                        && let Some(rem) = remaining
-                    {
+                    if lt && let Some(rem) = remaining {
                         let cur = i128::from(now_ms).saturating_add(i128::from(rem));
                         if when_ms_i128 >= cur {
                             break 'apply false;
@@ -14187,16 +14196,18 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_expire_owned_argv(name_upper, key, time_arg, cond_token)
+            });
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_expire_owned_argv(name_upper, key, time_arg, cond_token)
+            });
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -14212,8 +14223,9 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref =
-                argv.get_or_insert_with(|| plain_expire_owned_argv(name_upper, key, time_arg, cond_token));
+            let argv_ref = argv.get_or_insert_with(|| {
+                plain_expire_owned_argv(name_upper, key, time_arg, cond_token)
+            });
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -15261,10 +15273,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("copy");
-        self.session.last_argv_len_sum = b"COPY".len()
-            + key.len()
-            + dest.len()
-            + if replace { b"REPLACE".len() } else { 0 };
+        self.session.last_argv_len_sum =
+            b"COPY".len() + key.len() + dest.len() + if replace { b"REPLACE".len() } else { 0 };
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -15280,7 +15290,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_copy_borrowed_metrics(key, dest, replace, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_copy_borrowed_metrics(
+            key, dest, replace, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -15305,6 +15317,7 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_plain_copy_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -15683,8 +15696,8 @@ impl Runtime {
     /// or non-int so the canonical "invalid expire time" error is emitted by the
     /// generic), preserve the generic order (key lookup/type check first → missing
     /// is nil, non-string is WRONGTYPE, regardless of the time value), then
-    /// store.getex with the absolute deadline. EXAT/PXAT and multi-option forms are
-    /// left on the generic path.
+    /// store.getex with the absolute deadline. Absolute EXAT/PXAT forms use the
+    /// sibling fast path below; multi-option forms are left on the generic path.
     pub fn execute_plain_getex_relexpire_borrowed(
         &mut self,
         is_seconds: bool,
@@ -15713,6 +15726,80 @@ impl Runtime {
         i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
         let abs_ms = now_ms.saturating_add(px);
         let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getex");
+        self.session.last_argv_len_sum =
+            b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = match self.server.store.key_type(key, now_ms) {
+            None => RespFrame::BulkString(None),
+            Some("string") => match self.server.store.getex(key, Some(Some(abs_ms)), now_ms) {
+                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
+                Ok(None) => RespFrame::BulkString(None),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_relexpire_owned_argv(unit_upper, key, time_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// Borrowed WRITE fast path for `GETEX key EXAT|PXAT timestamp` — read the
+    /// value AND set an absolute TTL. Mirrors SET's absolute-expiry validation:
+    /// strictly positive integer timestamp, seconds-to-ms overflow checked for
+    /// EXAT, and no basetime addition. Past-but-positive timestamps are allowed so
+    /// Store::getex can return the value and expire/delete the key like Redis.
+    /// Every edge parse failure defers to the generic path for canonical errors.
+    pub fn execute_plain_getex_absexpire_borrowed(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms) {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let abs_ms = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let unit_upper: &[u8] = if is_seconds { b"EXAT" } else { b"PXAT" };
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -18588,7 +18675,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, false,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -18601,7 +18691,11 @@ impl Runtime {
     /// separately, and by firing the "unlink" event vs "del", which the WRITE gate
     /// keeps inactive). Differs from execute_plain_del_borrowed ONLY in the command
     /// name recorded for cmdstat/argv ("unlink"), so cmdstat_unlink is correct.
-    pub fn execute_plain_unlink_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_unlink_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"UNLINK".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
@@ -18628,7 +18722,10 @@ impl Runtime {
                 argv.extend(keys_owned.iter().cloned());
                 argv
             },
-            elapsed_us, now_ms, packet_id, false,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
         );
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -22571,6 +22668,7 @@ impl Runtime {
             && user.all_keys
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_plain_set_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -53771,6 +53869,89 @@ mod tests {
         let generic_wrongtype = generic.execute_frame(command(&[b"GETEX", b"list", b"PERSIST"]), 8);
         assert_eq!(wrongtype, generic_wrongtype);
         assert!(matches!(wrongtype, RespFrame::Error(ref msg) if msg.contains("WRONGTYPE")));
+    }
+
+    #[test]
+    fn borrowed_getex_absexpire_fast_path_matches_generic_edges() {
+        let setup = |runtime: &mut Runtime| {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", b"k", b"val"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", b"not", b"v"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"RPUSH", b"list", b"x"]), 3),
+                RespFrame::Integer(1)
+            );
+        };
+
+        for (is_seconds, unit, time_arg, deadline_cmd) in [
+            (true, &b"EXAT"[..], &b"4102444801"[..], &b"EXPIRETIME"[..]),
+            (
+                false,
+                &b"PXAT"[..],
+                &b"4102444801000"[..],
+                &b"PEXPIRETIME"[..],
+            ),
+        ] {
+            let mut generic = Runtime::default_strict();
+            let mut fast = Runtime::default_strict();
+            setup(&mut generic);
+            setup(&mut fast);
+
+            let generic_reply =
+                generic.execute_frame(command(&[b"GETEX", b"k", unit, time_arg]), 4);
+            let fast_reply = fast
+                .execute_plain_getex_absexpire_borrowed(is_seconds, b"k", time_arg, 4)
+                .expect("exact GETEX EXAT/PXAT should use fast path");
+            assert_eq!(fast_reply, generic_reply);
+            assert_eq!(
+                fast.execute_frame(command(&[deadline_cmd, b"k"]), 5),
+                generic.execute_frame(command(&[deadline_cmd, b"k"]), 5)
+            );
+
+            assert_eq!(
+                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"missing", time_arg, 6),
+                Some(generic.execute_frame(command(&[b"GETEX", b"missing", unit, time_arg]), 6))
+            );
+            assert_eq!(
+                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"not", time_arg, 7),
+                Some(generic.execute_frame(command(&[b"GETEX", b"not", unit, time_arg]), 7))
+            );
+            let wrongtype = fast
+                .execute_plain_getex_absexpire_borrowed(is_seconds, b"list", time_arg, 8)
+                .expect("wrong-type GETEX EXAT/PXAT should execute fast path");
+            let generic_wrongtype =
+                generic.execute_frame(command(&[b"GETEX", b"list", unit, time_arg]), 8);
+            assert_eq!(wrongtype, generic_wrongtype);
+            assert!(matches!(wrongtype, RespFrame::Error(ref msg) if msg.contains("WRONGTYPE")));
+        }
+
+        let mut generic = Runtime::default_strict();
+        let mut fast = Runtime::default_strict();
+        setup(&mut generic);
+        setup(&mut fast);
+        assert_eq!(
+            fast.execute_plain_getex_absexpire_borrowed(true, b"k", b"0", 9),
+            None
+        );
+        assert_eq!(
+            fast.execute_plain_getex_absexpire_borrowed(false, b"k", b"abc", 9),
+            None
+        );
+
+        let generic_past = generic.execute_frame(command(&[b"GETEX", b"k", b"EXAT", b"1"]), 2_000);
+        let fast_past = fast
+            .execute_plain_getex_absexpire_borrowed(true, b"k", b"1", 2_000)
+            .expect("past positive EXAT should use fast path");
+        assert_eq!(fast_past, generic_past);
+        assert_eq!(
+            fast.execute_frame(command(&[b"EXISTS", b"k"]), 2_001),
+            generic.execute_frame(command(&[b"EXISTS", b"k"]), 2_001)
+        );
     }
 
     #[test]
