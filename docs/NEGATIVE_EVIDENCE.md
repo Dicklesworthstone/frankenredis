@@ -4751,3 +4751,14 @@ keyspace=1. conformance 99/0. Completes the ZRANGE *5 option matrix (BYSCORE/BYL
 OPTION-FORM SCORECARD parts 82-97 = 16 wins. ZSET/ZRANGE option surface now SATURATED (score/lex/rev/withscores/limit
 all covered). NEXT must PIVOT to a different class: non-byte-exact-skips=SCAN-COUNT(order differs)/HRANDFIELD(random);
 candidates=SINTERCARD 1-key (0.559x, trivial), OBJECT ENCODING (0.767x). Or broad re-sweep a fresh command family.
+
+### 2026-06-25 (part 98) SINTERCARD 1-key fast-path SHIPPED ~1.64x (0.621x->0.872x) (cc/BlackThrush)
+Seventeenth option-form/arity win; FIRST non-ZSET-vein pivot. SINTERCARD 1 key (*3) fell to generic = 0.621x (2/3/4-key +
+LIMIT already covered). Parser-only: existing execute_plain_sintercard_borrowed validates any numkeys, so just wired *3 via
+key_arg1 (key=numkeys, arg=set). A/B cand/ctrl 1.636, cand/redis 0.872. Byte-exact: cardinality/missing(0)/WRONGTYPE,
+1-key LIMIT 0/2, 2-key works, numkeys-0 + numkeys-mismatch errors fall through; cmdstat=1, keyspace=1. conformance 99/0.
+Completes SINTERCARD arity (1/2/3/4 + LIMIT). diff 17 lines main.rs only.
+SWEEP NOTES (fr already FASTER, NOT levers): GEODIST 1.07x, GEOPOS 1.20x, OBJECT ENCODING/REFCOUNT 1.09-1.11x, BITFIELD/
+BITFIELD_RO 1.38-1.41x, GETEX-noopt 1.18x, HSTRLEN fast-pathed(store-floor 0.78x), SETRANGE fast-pathed(0.78x). Remaining
+uncovered clean: GEOHASH 0.536x (base32 re-encode, store-bound risk — verify cand/ctrl before committing). Non-byte-exact:
+SCAN-COUNT (order), HRANDFIELD/SRANDMEMBER (random). OPTION/ARITY SCORECARD parts 82-98 = 17 wins.
