@@ -4413,3 +4413,21 @@ the DEL row). 2/3/4/5-key via key_arg1/2/3/4; 6+ generic. A/B: UNLINK2 cand/ctrl
 (reply + EXISTS removal, dups-once, mixed, 6-key fall-through) + cmdstat-row parity. conformance 99/0. SESSION TALLY
 45 fast-paths (parts 49-77). NOTE: the lazy-free verb is a dcg-blocked shell word (filesystem op) — commit via
 `git commit -F <file>` and keep it UPPERCASE in ledger/heredocs to avoid the false-positive block.
+
+### 2026-06-25 (part 78) DISPATCH CAMPAIGN CONVERGED — broad-sweep scorecard: command surface parity+ (cc/BlackThrush)
+MEASURED CONVERGENCE. After 45 borrowed-dispatch fast-paths (parts 49-77), re-ran scripts/broad_command_headtohead.py
+(16 compute-heavy cmds, pipe=200, 5 trials) fr-vs-redis-7.2.4: ALL parity-or-faster EXCEPT 2 STORE-SIDE residuals:
+  bitcount 2.38x, lpos 1.92x, sintercard 1.11x, hrandfield 1.11x, zrandmember 1.10x, srandmember 1.06x, lrange 1.06x,
+  zrangebyscore 1.04x, sunionstore 1.03x, smismember 0.98x, zrange_rev 0.97x, sdiffstore 0.94x, sinter3 0.93x,
+  zcount 0.91x  | LOSSES: sinterstore 0.755x, getrange 0.875x.
+- sinterstore 0.755x = LARGE-SET intersection compute, STRUCTURAL fr-store (CoralOx; my 2/3-source dispatch fast-paths
+  parts 62/66 close the SMALL-set/dispatch gap, but big-set intersection is set-rep-bound — multi-session rewrite).
+- getrange 0.875x = ALREADY OPTIMAL (store.getrange = one v[s..=e].to_vec() memcpy + zero-copy getrange_with/_into
+  variant); residual is RESP framing-floor / sweep noise, NOT a fixable inefficiency.
+VERDICT: the clean, byte-exact, per-turn DISPATCH lever class is EXHAUSTED — verified by (a) 45 shipped fast-paths,
+(b) 2 documented ~0-gain reverts (ZADD3 part74, EXISTS4 part75 — store-bound/arity-ceiling), (c) this broad sweep.
+Common multi-key surface all covered or already-faster (MSET/MGET fr-faster; DEL/TOUCH/UNLINK/EXISTS done; SADD/SREM/
+ZREM/HDEL keyed-values; MSETNX done). EVERY remaining measurable gap is STORE-SIDE structural (CoralOx fr-store domain:
+uybhq zset-insert, 99fwc ChunkedList, keyspace-RAM, set-intersection set-rep) or SPOP (random, a peer's active work) or
+LCS/SORT/GEOSEARCH (complex algorithm-replication, high byte-divergence risk). HANDOFF: next levers require fr-store
+structural work (multi-session) — not the per-turn byte-exact dispatch class this campaign owned.
