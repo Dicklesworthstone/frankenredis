@@ -17255,6 +17255,67 @@ impl Runtime {
         packet_id
     }
 
+    /// (BlackThrush) Borrowed READ fast path for the modern unified
+    /// `ZRANGE key min max BYSCORE` (no REV/LIMIT/WITHSCORES) — same ascending
+    /// score-range semantics as ZRANGEBYSCORE but recorded under the `zrange`
+    /// command name. Reuses the shared guard→walk→emit core; non-float bounds defer
+    /// to the generic. BYLEX / REV / LIMIT / WITHSCORES shapes never reach here
+    /// (dispatch matches a literal BYSCORE token only).
+    pub fn execute_plain_zrange_byscore_borrowed(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrange",
+            b"ZRANGE".len() + key.len() + min_arg.len() + max_arg.len() + b"BYSCORE".len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let reply = self.execute_plain_zrangebyscore_core(key, min, max, false, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrange",
+            "ZRANGE",
+            || {
+                vec![
+                    b"ZRANGE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                    b"BYSCORE".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
     // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
     // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
