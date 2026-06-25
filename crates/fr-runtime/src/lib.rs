@@ -17070,6 +17070,81 @@ impl Runtime {
         self.execute_plain_scan0_borrowed(b'Z', "zscan", "ZSCAN", key, cursor_arg, now_ms)
     }
 
+    /// (frankenredis-lmpop1fast) Borrowed WRITE fast path for the common 1-key,
+    /// no-COUNT form `LMPOP 1 key LEFT|RIGHT` (count defaults to 1 in the *4 form).
+    /// Mirrors fr-command::lmpop EXACTLY for that shape: llen_no_stat probe (the
+    /// no-stat length that doesn't bump keyspace hits/misses, like upstream
+    /// lookupKeyWrite), then on a non-empty list one lpop/rpop → `[key, [element]]`;
+    /// empty/missing → nil array `Array(None)`; WRONGTYPE error. Fires only when
+    /// numkeys==1 and the direction is LEFT/RIGHT; every other numkeys / COUNT /
+    /// bad-direction form falls through to the generic handler.
+    pub fn execute_plain_lmpop1_borrowed(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len() + numkeys_arg.len() + key.len() + dir_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let reply = match self.server.store.llen_no_stat(key, now_ms) {
+            Ok(n) if n > 0 => {
+                let val = if left {
+                    self.server.store.lpop(key, now_ms)
+                } else {
+                    self.server.store.rpop(key, now_ms)
+                };
+                match val {
+                    Ok(Some(v)) => RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(key.to_vec())),
+                        RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
+                    ])),
+                    Ok(None) => RespFrame::Array(None),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
+            Ok(_) => RespFrame::Array(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || vec![b"LMPOP".to_vec(), numkeys_arg.to_vec(), key.to_vec(), dir_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
