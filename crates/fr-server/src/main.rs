@@ -2899,6 +2899,31 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$3\r\n",
+                    b"SET",
+                ) {
+                    // SET key value KEEPTTL: a=value, b=option token. Only KEEPTTL is
+                    // fast-pathed (case-insensitive); other *4 options fall through.
+                    let default_write_allowed = packet.b.eq_ignore_ascii_case(b"KEEPTTL")
+                        && cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if packet.b.eq_ignore_ascii_case(b"KEEPTTL")
+                        && let Some(response) = runtime.execute_plain_set_keepttl_borrowed(
+                            packet.key,
+                            packet.a,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {

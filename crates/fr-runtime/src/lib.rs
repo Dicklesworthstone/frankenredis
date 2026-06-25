@@ -263,8 +263,12 @@ fn set_command_keys(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     .then(|| vec![argv[1].clone()])
 }
 
-fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
+fn plain_set_owned_argv(key: &[u8], value: &[u8], keepttl: bool) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"SET".to_vec(), key.to_vec(), value.to_vec()];
+    if keepttl {
+        argv.push(b"KEEPTTL".to_vec());
+    }
+    argv
 }
 
 fn slowlog_arg_from_prefix(prefix: &[u8], full_len: usize) -> Vec<u8> {
@@ -7399,7 +7403,58 @@ impl Runtime {
         self.server.store.set_plain_borrowed(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
-        self.record_plain_set_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id);
+        self.record_plain_set_borrowed_metrics(key, value, false, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Borrowed WRITE fast path for `SET key value KEEPTTL` — the one
+    /// difference from plain SET is that any existing TTL is preserved instead of
+    /// cleared. Mirrors fr_command's `ExpiryMode::KeepTtl` arm exactly: read the
+    /// current absolute expiry (get_expires_at_ms — a write-path read, no
+    /// keyspace_hits) and re-apply it via set_with_abs_expiry. The parser only
+    /// matches *4 with a literal KEEPTTL token; KEEPTTL GET / NX KEEPTTL / any other
+    /// shape is *5+ and falls through to the generic. Gated identically to plain SET.
+    pub fn execute_plain_set_keepttl_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"KEEPTTL".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let existing_expiry = self.server.store.get_expires_at_ms(key, now_ms);
+        self.server
+            .store
+            .set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_set_borrowed_metrics(key, value, true, elapsed_us, now_ms, packet_id);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -22365,6 +22420,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         value: &[u8],
+        keepttl: bool,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -22373,14 +22429,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -22396,7 +22452,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value, keepttl));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
