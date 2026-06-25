@@ -4732,3 +4732,12 @@ A/B cand/ctrl 1.584, cand/redis 0.916. Byte-exact RESP2 AND RESP3 (desc full/sub
 +LIMIT/no-WS fall-through), cmdstat=1, keyspace=1. conformance 99/0. Verified diff (163).
 OPTION-FORM SCORECARD parts 82-95 = 14 wins. The score-range WITHSCORES surface (zrangebyscore + zrevrangebyscore)
 COMPLETE. NEXT: ZRANGE ..BYSCORE WITHSCORES (*6, cmdstat=zrange, mirror _into), ZRANGE ..REV (*5 reverse-index).
+
+### 2026-06-25 (part 96) ZRANGE ..BYSCORE WITHSCORES fast-path SHIPPED ~1.71x (0.572x->0.988x) (cc/BlackThrush)
+Fifteenth option-form win. Unified ZRANGE key min max BYSCORE WITHSCORES (*6) = 0.572x. execute_plain_zrange_byscore_
+withscores_borrowed_into mirrors part-94 but cmdstat="zrange". *6 key_arg4 gated c==BYSCORE && d==WITHSCORES (exact
+order only). A/B cand/ctrl 1.708, cand/redis 0.988. Byte-exact RESP2 AND RESP3 (full/subset/float/-inf/empty, WRONGTYPE,
+bad-score, reversed-order + BYSCORE-only + REV-*7 fall-through), cmdstat_zrange=1, keyspace=1. conformance 99/0. diff 168.
+OPTION-FORM SCORECARD parts 82-96 = 15 wins. NEXT: ZRANGE ..REV (*5 reverse-index -> zrevrange), ZRANGEBYLEX WITHSCORES
+(lex sets DO have scores via WITHSCORES? NO - ZRANGEBYLEX has no WITHSCORES option, lex requires equal scores; skip).
+ZRANGE ..BYLEX has no WITHSCORES. Remaining: ZRANGE REV index, and the LIMIT+WITHSCORES combos (*8/*9, lower value).
