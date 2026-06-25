@@ -16706,6 +16706,84 @@ impl Runtime {
         Some(reply)
     }
 
+    fn can_execute_plain_key_arg1_write_borrowed(
+        &mut self,
+        name_len: usize,
+        key: &[u8],
+        arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < name_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-lrpopcountfast) Borrowed WRITE fast path for the COUNT form
+    /// `LPOP|RPOP key count`. Mirrors fr-command::lpop/rpop EXACTLY: the count is
+    /// `parse_list_pop_count_arg` (i64 ≥ 0, else "value is out of range, must be
+    /// positive") — replicated here as parse_i64_arg + non-negative filter, deferring
+    /// any reject to generic for the exact wording — then store.{l,r}pop_count which
+    /// owns type-check, the head/tail removal, dirty, and empty-list autodelete:
+    /// `None` (missing key) → nil array `Array(None)`, `Some(values)` → bulk array,
+    /// WRONGTYPE error. `is_left` selects LPOP (true) vs RPOP (false).
+    pub fn execute_plain_list_pop_count_borrowed(
+        &mut self,
+        is_left: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let name_lower = if is_left { "lpop" } else { "rpop" };
+        let name_upper = if is_left { "LPOP" } else { "RPOP" };
+        if !self.can_execute_plain_key_arg1_write_borrowed(name_upper.len(), key, count_arg, now_ms) {
+            return None;
+        }
+        // parse_list_pop_count_arg accepts only count >= 0; defer non-integer /
+        // negative / overflow to generic for the exact error reply.
+        let count = fr_command::parse_i64_arg(count_arg)
+            .ok()
+            .filter(|c| *c >= 0)
+            .and_then(|c| usize::try_from(c).ok())?;
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lower,
+            name_upper.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let result = if is_left {
+            self.server.store.lpop_count(key, count, now_ms)
+        } else {
+            self.server.store.rpop_count(key, count, now_ms)
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = match result {
+            Ok(None) => RespFrame::Array(None),
+            Ok(Some(values)) => RespFrame::Array(Some(
+                values
+                    .into_iter()
+                    .map(|v| RespFrame::BulkString(Some(v)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lower,
+            name_upper,
+            || vec![name_upper.as_bytes().to_vec(), key.to_vec(), count_arg.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
