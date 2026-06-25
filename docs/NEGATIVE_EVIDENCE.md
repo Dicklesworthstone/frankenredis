@@ -4103,3 +4103,15 @@ vs CONTROL (fr generic) for any RESP3-aware fast-path, not just vs redis. All ot
 session.resp_protocol_version (9653/9813/11697/19221/20507). conformance 99/0. SESSION TALLY 21 fast-paths.
 Remaining uncovered+slow: SPOP 0.43x (mutating/random → structural verify only). The byte-exact dispatch vein is now
 very deep — 21 commands the "exhausted" claim missed.
+
+### 2026-06-24 (part 62) SINTERSTORE/SUNIONSTORE/SDIFFSTORE 2-source fast-path SHIPPED — ~1.39-1.52x (→parity vs redis) (cc/BlackThrush)
+The 2-source forms {SINTER,SUNION,SDIFF}STORE dest src1 src2 (*4) had no borrowed DISPATCH fast-path (the store-level
+direct build a3310a98d closed most of the gap to ~0.90x; this removes the residual per-command dispatch overhead).
+execute_plain_setstore2_borrowed(which): record_source_key_lookups([src1,src2]) then store.{sinter,sunion,sdiff}store
+(dest,[src1,src2]) → Integer(card). A/B: SINTERSTORE cand/ctrl 1.481 cand/redis 1.004; SUNIONSTORE 1.389; SDIFFSTORE
+1.518 cand/redis 0.949. Byte-exact incl counts, dest-overwrite, missing-source→0+dest-delete, WRONGTYPE both sources,
+dest-string overwrite, 3/1-source fall-through. conformance 99/0. SESSION TALLY 22 fast-paths.
+*** HOST CONSTRAINT NOTED ***: machine load hit ~11 (peer agents saturating the shared host) — vs-redis throughput
+benches timed out repeatedly and are noisy; cand/ctrl (both fr, equally slowed) is LOAD-INVARIANT and the reliable win
+metric. Use small iters + socket timeouts + cand-vs-control under contention. Remaining uncovered: SPOP 0.43x (random),
+ZRANGESTORE already 2.3x faster, ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE (zset *STORE, next — same recipe).
