@@ -18246,6 +18246,46 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-unlinkfast) Borrowed WRITE fast path for multi-key `UNLINK key
+    /// [key ...]`. Behaviorally identical to DEL in plain mode — both call store.del
+    /// (upstream UNLINK only differs by lazy-freeing, which fr doesn't model
+    /// separately, and by firing the "unlink" event vs "del", which the WRITE gate
+    /// keeps inactive). Differs from execute_plain_del_borrowed ONLY in the command
+    /// name recorded for cmdstat/argv ("unlink"), so cmdstat_unlink is correct.
+    pub fn execute_plain_unlink_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < keys.len() + 1
+            || self.policy.gate.max_bulk_len < b"UNLINK".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"UNLINK".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_zremrange_write_preamble("unlink", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let count = self.server.store.del(&keys_owned, now_ms);
+        let _ = self.server.store.take_last_del_removed();
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX));
+        self.record_plain_zremrange_borrowed_metrics(
+            "unlink",
+            "UNLINK",
+            || {
+                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                argv.push(b"UNLINK".to_vec());
+                argv.extend(keys_owned.iter().cloned());
+                argv
+            },
+            elapsed_us, now_ms, packet_id, false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(
         &mut self,
         key: &[u8],
