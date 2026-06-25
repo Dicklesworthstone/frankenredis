@@ -4067,3 +4067,16 @@ summed-score sort, tie-lex, set source (member score 1.0), inf+(-inf)=nan→0, m
 WITHSCORES/WEIGHTS fall-through, cmdstat+keyspace. conformance 99/0. SESSION TALLY 16 fast-paths. ZUNION already beats
 redis; ZSCAN 0.86x (covered-ish); residual uncovered: SSCAN 0.58x/HSCAN 0.69x (scan family — cursor+MATCH+COUNT,
 single store method exists so tractable next), SPOP 0.43x (mutating/random).
+
+### 2026-06-24 (part 59) SSCAN/HSCAN/ZSCAN cursor-0 fast-path SHIPPED — ~1.35-1.53x (0.58-0.86x→~0.94-1.02x vs redis) (cc/BlackThrush)
+The cursor-0 no-option forms {S,H,Z}SCAN key 0 were 0.58-0.86x. execute_plain_{s,h,z}scan0_borrowed restricts to the
+LITERAL "0" cursor (so cursor=0 unambiguously, no private parse_scan_cursor needed) with default count=10/pattern None
+== the generic no-option parse, so store.{s,h,z}scan returns the EXACT same (next_cursor, items) for any size/encoding.
+Mirrors key_type guard (None→empty ["0",[]], wrong-type→WRONGTYPE, type→scan); SSCAN members, HSCAN flat field/value,
+ZSCAN flat member/redis_score_to_string. MATCH/COUNT/NOVALUES/non-0 cursor → generic. A/B (best-of-6): SSCAN cand/ctrl
+1.534 cand/redis 0.940; HSCAN 1.417/1.021; ZSCAN 1.350/0.966. CRITICAL: byte-IDENTICAL to fr GENERIC on ALL sizes incl
+large hashtable sets — the large-collection order differs from redis by fr's PRE-EXISTING intentional sorted-index SCAN
+design (encoded in core_scan.json, NOT a regression; verified candidate==control on 200-elem sets). conformance 99/0
+incl core_scan_conformance + core_scan_live. SESSION TALLY 19 fast-paths (16+SSCAN/HSCAN/ZSCAN). Remaining uncovered+slow:
+SPOP 0.43x (mutating/random — needs structural-not-byte-exact verify). LESSON: when a command has fr-specific semantics
+(SCAN order), bench candidate-vs-CONTROL not just vs redis — the "mismatch" vs redis may be intentional pre-existing.
