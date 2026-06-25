@@ -17384,6 +17384,80 @@ impl Runtime {
         self.execute_plain_zstore2_borrowed(b'I', "zinterstore", "ZINTERSTORE", dest, nk, k1, k2, now_ms)
     }
 
+    /// (frankenredis-zdiffstore2fast) Borrowed WRITE fast path for `ZDIFFSTORE dest
+    /// 2 k1 k2`. Mirrors fr-command::zdiffstore byte-for-byte for the *5 form:
+    /// record_source_key_lookups([k1,k2]) → ensure_zset_or_set_source on BOTH keys
+    /// (WRONGTYPE) → members of k1 absent from k2 → store_sorted_set_from_pairs(dest)
+    /// → Integer(count). (ZDIFFSTORE does NOT sort the result before storing — the
+    /// sorted-set build orders by score; the reply is just the count.) Fires only
+    /// when numkeys==2; other numkeys forms fall through to generic.
+    pub fn execute_plain_zdiffstore2_borrowed(
+        &mut self,
+        dest: &[u8],
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"ZDIFFSTORE".len()
+            || dest.len() > self.policy.gate.max_bulk_len
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zdiffstore",
+            b"ZDIFFSTORE".len() + dest.len() + numkeys_arg.len() + k1.len() + k2.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let keys = [k1, k2];
+        let reply = 'reply: {
+            fr_command::record_source_key_lookups(&mut self.server.store, &keys, now_ms);
+            for &k in &keys {
+                if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
+                    break 'reply CommandError::Store(err).to_resp();
+                }
+            }
+            let first = match self.server.store.zget_members_with_scores_no_stats(k1) {
+                Ok(members) => members,
+                Err(err) => break 'reply CommandError::Store(err).to_resp(),
+            };
+            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (member, score) in first {
+                match self.server.store.zget_score_or_set_member_no_stats(k2, &member) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => result.push((member, score)),
+                    Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                }
+            }
+            let count = result.len();
+            self.server.store.store_sorted_set_from_pairs(dest, result, now_ms);
+            RespFrame::Integer(count as i64)
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zdiffstore",
+            "ZDIFFSTORE",
+            || vec![b"ZDIFFSTORE".to_vec(), dest.to_vec(), numkeys_arg.to_vec(), k1.to_vec(), k2.to_vec()],
+            elapsed_us, now_ms, packet_id, failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn can_execute_plain_renamenx_borrowed(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
