@@ -4056,3 +4056,14 @@ cmdstat+keyspace) is byte-exact. A/B (best-of-6): ZDIFF(empty) cand/ctrl 1.646 c
 (fr beats redis on larger results). conformance 99/0. SESSION TALLY 15 fast-paths. ZINTER (0.45x) is harder
 (WEIGHTS/AGGREGATE + score aggregation) — deferred. Pattern proven: a fr-command-resident algorithm CAN be fast-pathed
 if its sub-steps are pub store primitives and the differential is exhaustive.
+
+### 2026-06-24 (part 58) ZINTER 2-key READ fast-path SHIPPED — ~1.52-1.56x (0.47x→0.71-0.74x vs redis) (cc/BlackThrush)
+Mirror of the part-57 ZDIFF technique for ZINTER 2 k1 k2 (was 0.47x). execute_plain_zinter2_core replicates
+fr-command::zinter for the *4 form (default WEIGHTS=[1,1]/AGGREGATE=SUM/no WITHSCORES) via the SAME pub store
+primitives, inlining the tiny normalize_weighted_score_cmd/aggregate_scores_for_cmd nan→0 guards (weight 1.0 ⇒ s;
+SUM ⇒ a+b, nan→0). The aggregated score is computed even without WITHSCORES because it drives the sort order.
+A/B (best-of-6): ZINTER(2) cand/ctrl 1.556 cand/redis 0.712; ZINTER(disj) 1.517/0.743. Byte-exact RESP2+RESP3 incl
+summed-score sort, tie-lex, set source (member score 1.0), inf+(-inf)=nan→0, missing/WRONGTYPE, numkeys 0/3 +
+WITHSCORES/WEIGHTS fall-through, cmdstat+keyspace. conformance 99/0. SESSION TALLY 16 fast-paths. ZUNION already beats
+redis; ZSCAN 0.86x (covered-ish); residual uncovered: SSCAN 0.58x/HSCAN 0.69x (scan family — cursor+MATCH+COUNT,
+single store method exists so tractable next), SPOP 0.43x (mutating/random).
