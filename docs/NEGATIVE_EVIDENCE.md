@@ -4,6 +4,54 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-25 BlackThrush 1-value keyed-write direct integer reply rejected
+
+BOLD-VERIFY targeted the remaining 1-value keyed-write gap versus Redis 7.2.4
+after confirming no unlanded measured worktree win was still missing from
+`main`. The tested lever was a narrow `_into` sibling for
+`execute_plain_keyed_values_write_borrowed`, used only by the
+`parse_borrowed_plain_keyed_values1_packet` server branch. The candidate wrote
+the successful integer reply directly into `conn.write_buf` and returned
+`FastEncodedReply`, while preserving the existing borrowed write gate, reply
+suppression, lazy-expire propagation, slowlog/latency/threat metrics, and
+errorstats. The source hunk is rejected and not present in this commit.
+
+Focused gates used `AGENT_NAME=BlackThrush` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. RCH
+`cargo check -p fr-runtime --all-targets` and RCH
+`cargo check -p fr-server --all-targets` passed on `vmi1227854` after the
+scratch worktree used the existing `legacy_redis_code` oracle path. RCH `exec`
+does not expose a worker pin; an attempted bench selected `hz2` and is
+discarded because that worker lacks
+`/dp/frankenredis/legacy_redis_code/redis/src/redis-server`. The comparable
+bench pair below was run directly on the already-synced `vmi1227854` paths with
+the same Redis 7.2.4 binary:
+
+`REDIS_SERVER_BIN=/dp/frankenredis/legacy_redis_code/redis/src/redis-server
+cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis --
+"(LPUSH_1v|RPUSH_1v|SADD_1v|PFADD_1v|HDEL_1v|SREM_1v|keyed_remove_vs_redis/(HDEL|SREM))"
+--noplot`.
+
+Same-worker `vmi1227854` evidence:
+
+| workload | control Redis median | control FR median | control fr/Redis | candidate Redis median | candidate FR median | candidate fr/Redis | direct candidate/control | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `LPUSH_1v` | `41.886 us` | `72.204 us` | `0.580x` | `44.948 us` | `73.172 us` | `0.614x` | `0.987x` | reject; direct regression |
+| `RPUSH_1v` | `39.502 us` | `71.727 us` | `0.551x` | `41.382 us` | `79.082 us` | `0.523x` | `0.907x` | reject; direct regression |
+| `SADD_1v` | `34.441 us` | `76.968 us` | `0.448x` | `29.629 us` | `73.328 us` | `0.404x` | `1.050x` | reject; Redis ratio worsened |
+| `PFADD_1v` | `32.457 us` | `129.09 us` | `0.251x` | `35.380 us` | `132.54 us` | `0.267x` | `0.974x` | reject; direct regression |
+| `HDEL_1v` | `44.622 us` | `81.064 us` | `0.550x` | `42.958 us` | `80.621 us` | `0.533x` | `1.006x` | reject; noise-scale |
+| `SREM_1v` | `41.793 us` | `79.717 us` | `0.524x` | `41.195 us` | `78.164 us` | `0.527x` | `1.020x` | reject; noise-scale |
+| `keyed_remove/HDEL` | `40.726 us` | `81.055 us` | `0.502x` | `46.954 us` | `85.629 us` | `0.548x` | `0.947x` | reject; direct regression |
+| `keyed_remove/SREM` | `33.924 us` | `73.514 us` | `0.461x` | `41.329 us` | `81.517 us` | `0.507x` | `0.902x` | reject; direct regression |
+
+Scorecard: **0 credible wins / 5 direct regressions / 3 noise-scale cells**.
+Decision: **REJECT / source reverted**. Direct reply encoding is too shallow to
+move the Redis-relative gap and can perturb branch/code layout enough to lose on
+adjacent cells. Next credible route is deeper than the response envelope:
+profile store/container mutation for SADD/SREM/HDEL or the PFADD HLL
+representation itself before touching another server reply micro-path.
+
 ## 2026-06-24 cod-b `frankenredis-uhthd` PFADD decoded-register cache rejected
 
 BOLD-VERIFY targeted the ledgered PFADD structural loss against Redis 7.2.4:
