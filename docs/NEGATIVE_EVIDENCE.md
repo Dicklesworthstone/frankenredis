@@ -4978,3 +4978,14 @@ malformed/neg-timeout/arity errors + blocking preserved. cmdstat_wait. conforman
 with possible blocking, TEST the blocking arg (WAIT N 0) — it'll hang the differential if you broke it; only fast-path the
 provably-immediate sub-case. Special-command pubsub/sync sweep (PUBLISH/SPUBLISH/WAIT) now DONE. NEXT: XINFO STREAM 0.507x
 (complex reply), PUBSUB NUMSUB/NUMPAT introspection reads. EVAL=Lua structural skip.
+
+### 2026-06-25 (part 111) PUBSUB NUMPAT fast-path ~2.32x (0.34x->0.78x) — uncovered introspection (cc/BlackThrush)
+Broad sweep found PUBSUB entirely uncovered: NUMPAT 0.308x, NUMSUB 0.438x, CHANNELS 0.386x. Shipped NUMPAT: pure global
+read = sum of pattern subscriber-set sizes. execute_plain_pubsub_numpat_borrowed intercepts *2 PUBSUB, claims ONLY NUMPAT,
+defers all else; plain read gate; container cmdstat pubsub|numpat. Reuses STRLEN *2 parser shape. A/B cand/ctrl 2.315
+(->cand/redis 0.781, up from 0.337x; redis NUMPAT very cheap so trails ratio). Byte-exact (0/2 pats, lowercase, all defers
+incl WrongSubcommandArity/unknown, cmdstat). conformance 99/0. NOTE: container-cmd cmdstat is per-subcommand (pubsub|numpat)
+— pass that as name_lower. NEXT: PUBSUB NUMSUB (variadic *3+, RESP2 flat-array vs RESP3 map), PUBSUB CHANNELS (glob+sort),
+COMMAND COUNT 0.573x, XSETID 0.470x (stream write), OBJECT REFCOUNT/IDLETIME 0.67x. SMISMEMBER already covered (0.53x
+store/arity-bound, not dispatch). ENV NOTE: shell `ls` is aliased to long-format — use explicit /tmp paths not $(ls -t);
+background servers DON'T persist across separate Bash calls — launch+bench in ONE command.
