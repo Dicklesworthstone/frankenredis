@@ -5158,3 +5158,51 @@ the 4 hot-write structural residuals (LPUSH/RPUSH/SADD/ZADD) are now being worke
 micro-lever (save the to_vec on update-existing; mimalloc-uncertain per [[feedback_mimalloc_defeats_buffer_reuse_levers]])
 belongs in CoralOx's insert_result/PackedZSet pass, not a colliding per-turn edit. Committed docs-only; no pull-rebase
 needed (origin unchanged at my base). My domain stays exhausted; the structural domain is actively owned. No-collide hold.
+
+### 2026-06-26 (part 124) LPUSH/RPUSH list-batch push rejected: no reliable win, RPUSH regression (codex/BlackThrush)
+Tried a surgical fr-store list lever: batch LPUSH/RPUSH values into `ListValue` so `Arc::make_mut`/listpack front splice
+would run once per command instead of once per element when the command arity is 16. This was aimed at the part-116
+residuals (LPUSH 0.592x, RPUSH 0.568x vs Redis 7.2.4) without changing the 99fwc structural list representation.
+
+Evidence:
+- Build/proof before bench: `cargo check -p fr-store --all-targets`, `cargo test -p fr-store batch`, and
+  `cargo clippy -p fr-store --all-targets -- -D warnings` all passed via `rch exec` with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`.
+- Required bench path was attempted with `rch exec -- cargo bench --profile release -p fr-bench --bench
+  keyed_write_vs_redis -- PUSH_16v --noplot`, but the remote worker lacked the untracked Redis oracle binary and failed
+  before measurement: `REDIS_SERVER_BIN not found: /dp/frankenredis/legacy_redis_code/redis/src/redis-server`.
+- Local paired fallback used the same warm target dir and pinned binaries under
+  `artifacts/optimization/list_batch_push_20260626T061030Z/`.
+
+Control (`origin/main` frankenredis-control):
+- LPUSH_16v: Redis 7.2.4 median `154.53 us`, FrankenRedis median `211.85 us`, ratio `0.729x`.
+- RPUSH_16v: Redis 7.2.4 median `121.35 us`, FrankenRedis median `200.16 us`, ratio `0.606x`.
+
+Candidate (list-batch frankenredis-candidate):
+- LPUSH_16v: Redis 7.2.4 median `177.10 us`, FrankenRedis median `207.33 us`, ratio `0.854x`; Criterion reports
+  `+0.6087%` FR time, `p=0.87`, no performance change versus the prior run.
+- RPUSH_16v: Redis 7.2.4 median `129.12 us`, FrankenRedis median `216.24 us`, ratio `0.597x`; Criterion reports
+  `+11.721%` FR time, `p=0.01`, significant regression.
+
+Decision: REJECTED and reverted the list-batch code. The only apparent LPUSH improvement is below significance and is
+contaminated by Redis-side run variance; RPUSH regresses. This confirms the remaining list gap is structural (99fwc packed
+listpack-node/ChunkedList work), not a safe per-command batching patch. Do not retry this batch-push family without a new
+profile showing `Arc::make_mut` or listpack splice count still dominates after the structural list rewrite.
+
+### 2026-06-26 (part 124) NEW UNCOVERED LEVER (refutes "exhausted"): ZADD option-forms GT/LT/CH/NX/XX (cc/BlackThrush)
+Fresh sweep (existing clean binary /tmp/fr_gx_960044 = committed code, NO build needed so NO CoralOx-WIP collision) found
+the option-form vein is NOT exhausted — measured vs redis-7.2.4: ZADD GT 0.528x <<<, SINTERCARD-1key+LIMIT 0.555x (re-verify;
+shipped 4766beb4b should be ~1.10x — possible regression OR single-set path), LPOS RANK-neg 0.638x, BITFIELD INCRBY 0.717x,
+LCS/LCS-LEN 0.50-0.55x (complex DP, likely store-bound), GEOSEARCH 0.682x, COMMAND DOCS 0.495x.
+TOP CLEAN LEVER = ZADD with flags. ROOT: execute_plain_zadd_borrowed parses pairs via parse_score_f64_arg, which FAILS on
+a flag token ("GT") => the fast-path bails (.ok()?) => ZADD GT/LT/CH/NX/XX all fall to generic = 0.528x. Exactly the
+EXPIRE-NX/XX/GT/LT option-form pattern (16 wins earlier this session).
+IMPLEMENTATION (NON-COLLIDING — fr-runtime + fr-server ONLY, CALLS existing store.zadd_with_options @ lib.rs:13587 which
+already does the GT/LT/NX/XX/CH logic via the flags struct @ lib.rs:647-651; NO fr-store edit so no clash with CoralOx's
+live packed_set/lib WIP): new parser (leading-flags-then-pairs, mirror fr-command zadd @ 5366) + execute that parses
+NX/XX/GT/LT/CH, DEFERS INCR + flag-conflicts (NX+XX, GT/LT/NX — exact wordings) + malformed/odd-pairs to generic, builds
+the flags struct, calls zadd_with_options, returns Integer(count). Byte-exact gates: conflict wordings, CH-vs-noCH count,
+GT/LT semantics (update-only-if-greater/less), member-named-"GT"-after-score, arity-before-conflict order (zaddorder).
+DEFERRED THIS TURN: intricate flag byte-exactness needs full budget + a clean build; CoralOx WIP in fr-store taints a
+local build (build in a worktree from origin/main, or after their WIP lands). This is the next clean ship — option-form
+vein REOPENED. Correction: my parts 116-122 "dispatch saturated" missed the ZADD/LPOS/BITFIELD OPTION sub-forms.
