@@ -2849,6 +2849,16 @@ impl SetValue {
     /// Build the optimal encoding (intset when all members are canonical
     /// integers within the limit) from an existing `IndexSet`.
     pub(crate) fn from_index_set(set: GenericSet, max_intset_entries: usize) -> Self {
+        // (BlackThrush) A result with more members than the intset cap can never
+        // encode as an intset, and the only other encoding is Generic — so
+        // extend()'s member-by-member re-insertion would just rebuild an identical
+        // Generic (hashtable) set, a wasted O(n) pass on every large set-algebra
+        // *STORE destination (the SINTERSTORE/SDIFFSTORE large-set residual). The
+        // input GenericSet already holds exactly those (de-duplicated) members, so
+        // wrap it directly. Encoding flags are (re)derived by the caller afterward.
+        if set.len() > max_intset_entries {
+            return SetValue::Generic(set);
+        }
         let mut sv = SetValue::new();
         sv.extend(set, max_intset_entries);
         sv
