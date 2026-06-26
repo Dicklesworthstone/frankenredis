@@ -21447,39 +21447,52 @@ impl Runtime {
         Some(reply)
     }
 
-    /// (BlackThrush) Borrowed fast path for `PUBSUB NUMSUB ch1 ch2 ...` (*3+). Pure
-    /// global read: emits the flat array [channel, subscriber-count, ...] in ARGUMENT
-    /// order (no sort — byte-exact with redis, unlike CHANNELS), identical to
-    /// handle_pubsub_command. Container cmdstat row `pubsub|numsub`.
+    /// (BlackThrush) Borrowed fast path for `PUBSUB NUMSUB|SHARDNUMSUB ch1 ch2 ...`
+    /// (*3+). Pure global read: emits the flat array [channel, subscriber-count, ...]
+    /// in ARGUMENT order (no sort — byte-exact with redis, unlike CHANNELS), identical
+    /// to handle_pubsub_command. NUMSUB counts regular channel subs, SHARDNUMSUB counts
+    /// shard channel subs. Any other variadic subcommand defers. Container cmdstat row
+    /// `pubsub|numsub` / `pubsub|shardnumsub`.
     pub fn execute_plain_pubsub_numsub_borrowed(
         &mut self,
         sub: &[u8],
         channels: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let is_numsub = sub.eq_ignore_ascii_case(b"NUMSUB");
+        let is_shardnumsub = sub.eq_ignore_ascii_case(b"SHARDNUMSUB");
+        if !is_numsub && !is_shardnumsub {
+            return None;
+        }
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
+        let name: &'static str = if is_numsub {
+            "pubsub|numsub"
+        } else {
+            "pubsub|shardnumsub"
+        };
         let mut argv_len_sum = b"PUBSUB".len() + sub.len();
         for channel in channels {
             argv_len_sum += channel.len();
         }
-        let packet_id = self.plain_read_borrowed_preamble("pubsub|numsub", argv_len_sum, now_ms);
+        let packet_id = self.plain_read_borrowed_preamble(name, argv_len_sum, now_ms);
         let st = self.chained_command_start();
         let mut result = Vec::with_capacity(channels.len().saturating_mul(2));
         for channel in channels {
             result.push(RespFrame::BulkString(Some(channel.to_vec())));
-            let n = self
-                .server
-                .pubsub_channel_subs
-                .get(*channel)
-                .map_or(0, std::collections::HashSet::len);
+            let map = if is_numsub {
+                &self.server.pubsub_channel_subs
+            } else {
+                &self.server.pubsub_shard_subs
+            };
+            let n = map.get(*channel).map_or(0, std::collections::HashSet::len);
             result.push(RespFrame::Integer(i64::try_from(n).unwrap_or(i64::MAX)));
         }
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Array(Some(result));
         self.record_plain_zremrange_borrowed_metrics(
-            "pubsub|numsub",
+            name,
             "PUBSUB",
             || {
                 let mut argv = vec![b"PUBSUB".to_vec(), sub.to_vec()];

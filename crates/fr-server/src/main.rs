@@ -9338,10 +9338,10 @@ struct BorrowedPlainPubsubNumsubPacket<'a> {
     channels: Vec<&'a [u8]>,
 }
 
-// (BlackThrush) Variadic byte-prefix fast path for `PUBSUB NUMSUB ch1 ch2 ...`
-// (the *3+ form; the *2 no-channel form is handled by the plain pubsub packet and
-// defers). Mirrors the GEOHASH variadic header parse: *N, then $6 PUBSUB, then the
-// $6 NUMSUB subcommand token, then the count-2 channel args.
+// (BlackThrush) Variadic byte-prefix fast path for `PUBSUB NUMSUB|SHARDNUMSUB ch...`
+// (the *3+ form). Mirrors the GEOHASH variadic header parse: *N, then $6 PUBSUB, then
+// the subcommand token (any length), then the count-2 channel args. The execute claims
+// NUMSUB + SHARDNUMSUB and defers other subcommands.
 fn parse_borrowed_plain_pubsub_numsub_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9382,22 +9382,11 @@ fn parse_borrowed_plain_pubsub_numsub_packet<'a>(
         return None;
     }
     idx += 2;
-    if input.get(idx..idx + 4)? != b"$6\r\n" {
-        return None;
-    }
-    idx += 4;
-    let sub = input.get(idx..idx + 6)?;
-    if !sub.eq_ignore_ascii_case(b"NUMSUB") {
-        return None;
-    }
-    idx += 6;
-    if input.get(idx..idx + 2)? != b"\r\n" {
-        return None;
-    }
-    idx += 2;
+    // Subcommand token of any length (NUMSUB=6 / SHARDNUMSUB=11). The execute
+    // claims NUMSUB + SHARDNUMSUB and defers any other variadic subcommand.
+    let (sub, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
     let channel_count = count - 2;
     let mut channels = Vec::with_capacity(channel_count);
-    let mut cursor = idx;
     for _ in 0..channel_count {
         let (channel, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
         channels.push(channel);
