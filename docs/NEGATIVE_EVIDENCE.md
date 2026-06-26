@@ -5277,3 +5277,16 @@ CoralOx structural, no dispatch lever. TECHNIQUE (cheap, no build, no collision)
 lever, compare the PLAIN form (already fast-pathed) vs the OPTION form on the SAME tiny input — if BOTH are slow, it's
 store-bound (skip); only if plain is FAST and option is SLOW is it a dispatch win (build it). Part-124 "vein reopened" is
 CORRECTED: forms uncovered/slow but no dispatch win. My domain stays exhausted; structural = CoralOx (active fr-store WIP).
+
+### 2026-06-26 (part 127) INDEPENDENT RE-MEASURE + correction: CoralOx landed HLL not inserts; hot-write residuals PERSIST (cc/BlackThrush)
+The fr-store uncommitted WIP I saw in parts 123-125 LANDED as `57bcb6602 perf(fr-store): reuse HLL register cache for
+duplicate PFADD` — HLL/PFADD, NOT the zset/set structural-insert area I assumed. CORRECTS parts 123-125: CoralOx was on
+HLL (packed_set.rs HLL registers), the uybhq/99fwc structural-insert work is STILL OPEN, not in progress.
+Built fresh from the now-clean tree (no WIP) + redis-benchmark -c50 -P16 -n200000, slaves=0: SADD 0.495, ZADD 0.565,
+LPUSH 0.581, RPUSH 0.543 (vs part-116: 0.549/0.539/0.592/0.568 — UNCHANGED within noise); GET 0.976, SET 1.102 (clean
+run confirmed). So the 4 hot-write residuals are STILL the FullSortedSet dual-structure (uybhq) + ChunkedList per-element
+alloc (99fwc) + set-insert — genuinely structural, multi-day, UNADDRESSED. My domain (dispatch/option/_into) stays
+exhausted (parts 115-126: dispatch saturated, GET fully optimized, double-lookup intentional, option-forms store-bound,
+ZADD-flags zero-gain, LPOS store-bound). The structural lever is the only remaining gain and it's a data-structure rewrite,
+not a per-turn edit. INDEPENDENT-VERIFY value: confirmed the gaps with a clean post-landing build + corrected the WIP
+mis-read. Next genuine win requires the uybhq/99fwc structural rewrite (multi-session) by whoever owns fr-store.
