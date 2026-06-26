@@ -5392,3 +5392,18 @@ where the alloc is sub-noise of expensive surrounding work (insert_consumer on >
 ~1.0-1.05x. The biggest gap (SADD/ZADD/LPUSH 0.5x) remains the data-structure DESIGN (uybhq/99fwc, multi-day), not allocs.
 LESSON (compounding part-131): bench the EXACT path that calls your fn; an alloc-reduction only wins if the alloc is a
 meaningful fraction of that path's total cost.
+
+### 2026-06-26 (part 133) stream surgical alloc-vein MINED (XACK already optimal); biggest gap = structural data-structure (cc/BlackThrush)
+Continued the fr-store surgical dig on the biggest gap. XACK: already alloc-optimal — body is get_mut(key)+get_mut(group)+
+pending.remove(id) (all borrowed, no to_vec), and invalidate_stream_pel_summary ALREADY has the is_empty() fast-path
+(skips the (key.to_vec(),group.to_vec()) tuple-key remove on the common empty-cache case — same pattern as the pubsub
+empty-map fast-path). So no XACK lever. STREAM SURGICAL ALLOC-VEIN STATUS: XADD side-maps (part 129, shipped 1.03x),
+consumer seen/active-time (part 130, shipped 1.05x), insert_consumer (part 131/132, ~0-gain sub-noise), XACK (already
+optimal) — MINED. The mimalloc ceiling (~1.05x, part 132) means remaining alloc-reductions are sub-noise.
+THE BIGGEST MEASURED GAP REMAINS STRUCTURAL: SADD 0.495 / ZADD 0.565 / LPUSH 0.581 / RPUSH 0.543 (part 116/127) = the
+data-structure DESIGN where the alloc IS a meaningful fraction (so a fix WOULD beat the mimalloc ceiling) but it is a
+multi-day rewrite, NOT a per-turn surgical edit: LPUSH/RPUSH = ChunkedList per-element Vec<u8> -> small-string-inline
+(listpack-node, 99fwc; VecDeque variant already MEASURED slower); ZADD = FullSortedSet IndexMap-dict + ordered dual
+structure (uybhq); SADD = SetValue insert. These are the genuine remaining levers and they are structural fr-store work.
+BLOCKER: no per-turn surgical fr-store win remains; the next real gain needs the 99fwc/uybhq data-structure rewrite
+(multi-session). Peers hold the dispatch chain; fr-store surgical surface exhausted this session (2 shipped + vein mined).
