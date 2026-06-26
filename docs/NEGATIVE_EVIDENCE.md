@@ -5056,3 +5056,19 @@ I own is EXHAUSTED. The 5 remaining hot residuals are ALL store-side structural:
 uybhq zset, 99fwc list, set-insert) + the GET double-lookup (CobaltCove core, high blast radius - all reads). Precise
 handoff with quantified ratios. No safe per-turn lever remains in my domain; next real gains require fr-store structural
 work or the core read-path single-lookup collapse - both cross-domain/multi-session.
+
+### 2026-06-26 (part 117) VERIFY: hot-write residuals are IRREDUCIBLY structural — alloc paths already optimal (cc/BlackThrush)
+Followed part-116 to rule out a surgical alloc-lever in the hot writes (SADD/ZADD 0.55/0.54x). RESULT: alloc paths already
+optimal, gaps are PURELY the data-structure overhead.
+- SADD: store.sadd<M: AsRef<[u8]>> takes BORROWED members; the ohsk5 fast-path passes borrowed values straight through;
+  the store uses SetValue::insert_borrowed (check-then-alloc — allocates ONLY for a genuinely new member). So zero wasted
+  alloc on duplicate/re-add. The 0.549x is the get_mut lookup + insert_borrowed contains-check + SetValue handling =
+  structural set-insert (CoralOx).
+- ZADD: fast-path does one member.to_vec() then zadd_plain_owned, which already bumps an existing member's score IN PLACE
+  via get_mut (ug50u, no dict re-clone). The upfront to_vec is a SMALL alloc, marginal vs the FullSortedSet dual-structure
+  (IndexMap dict + ordered index) update that dominates 0.539x. A zadd_plain_borrowed mirror of insert_borrowed would save
+  only the small to_vec — not worth an fr-store addition for a sub-noise gain; the dual-structure is the real cost (uybhq).
+CONCLUSION (triple-verified across dispatch / fast-path / store-alloc layers): the 4 hot-write residuals + GET are NOT
+reducible by any per-turn change in my domain. SADD/LPUSH/RPUSH/ZADD = CoralOx fr-store data-structure design (uybhq dual
+zset, 99fwc ChunkedList, set-insert); GET = CobaltCove core double-lookup. The clean per-turn lever class is DEFINITIVELY
+exhausted (30 wins parts 82-114). No safe non-dup lever remains; further gains require the owning agents' structural work.
