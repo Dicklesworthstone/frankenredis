@@ -5434,3 +5434,16 @@ runs), not a regression. CONCLUSION: with the surgical surface exhausted (parts 
 structural rewrite (99fwc/uybhq) multi-day, the per-turn lever space is closed; the wins are verified-holding. Next gain
 requires the multi-session data-structure rewrite. (dispatch spot-check bench had a reply-marker bug — wins are
 conformance-green at commit time, not re-needed.)
+
+### 2026-06-26 (part 136) MEASURED WIN: INCRBY/DECRBY dispatch-hoist ~1.78x (0.54x->1.10x, BEATS redis) — NEW lever class (cc/BlackThrush)
+Proper-load sweep (-c50 -P16) found INCRBY 0.537x while INCR 0.95x — IDENTICAL execute (both execute_plain_incr*_borrowed
+nearly byte-identical) + IDENTICAL store (both incrby_existing_or_insert). ROOT: dispatch CASCADE POSITION — INCR's parser
+check is at main.rs:3417 (early) but INCRBY/DECRBY at 6755 (late), so an INCRBY packet runs through ~hundreds of failed
+parser strip_prefix checks (~1us/call) before reaching its branch. Hoisted the INCRBY+DECRBY dispatch branches to right
+after INCR (before DECR). A/B (python pipelined, cand=hoist vs ctrl=committed): INCRBY cand/ctrl 1.576/1.954/1.821 mean
+1.784, DECRBY mean 1.774 — BOTH now cand/redis 1.095/1.246 (BEAT redis, up from 0.537x). INCR unchanged 0.969 (already
+early — proves the cause is purely position, not execute/store). Byte-exact: INCRBY/DECRBY/INCR/DECR +/- deltas
+cand==ctrl==redis. NEW LEVER CLASS: dispatch cascade ordering — a fast-pathed-but-LATE command pays the full early-parser
+gauntlet. The parser is specific (*3 $6 INCRBY) so hoisting can't intercept others = safe. (Late INCRBY/DECRBY branches
+now dead for those cmds — caught early; harmless redundancy, cleanup follow-up.) NEXT: grep for other hot commands
+dispatched late (high line number) that could be hoisted — this is a fresh productive vein on the CLEAN tree.
