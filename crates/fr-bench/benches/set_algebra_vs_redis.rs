@@ -16,10 +16,12 @@ const SMALL_INTSET_MEMBERS: usize = 512;
 const MEDIUM_GENERIC_MEMBERS: usize = 2048;
 const LARGE_GENERIC_MEMBERS: usize = 4096;
 const SINTERCARD_LIMIT: &str = "16";
-const OPS: [(&str, &str, &str); 3] = [
-    ("SINTERSTORE", "small", "large"),
-    ("SDIFFSTORE", "small", "large_miss"),
-    ("SUNIONSTORE", "small", "large_miss"),
+const OPS: [(&str, &str, &str, &str); 5] = [
+    ("SINTERSTORE_SMALL", "SINTERSTORE", "small", "large"),
+    ("SDIFFSTORE_SMALL", "SDIFFSTORE", "small", "large_miss"),
+    ("SUNIONSTORE_SMALL", "SUNIONSTORE", "small", "large_miss"),
+    ("SINTERSTORE_LARGE", "SINTERSTORE", "large", "medium"),
+    ("SDIFFSTORE_LARGE", "SDIFFSTORE", "large", "medium"),
 ];
 
 #[derive(Clone, Copy)]
@@ -153,10 +155,10 @@ fn set_algebra_vs_redis(c: &mut Criterion) {
     let mut group = c.benchmark_group("set_algebra_vs_redis");
     group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
 
-    for (op, lhs, rhs) in OPS {
+    for (label, op, lhs, rhs) in OPS {
         let packet = set_algebra_packet(op, lhs, rhs, COMMANDS_PER_ITER);
         for engine in engines {
-            let id = BenchmarkId::new(op, engine.name);
+            let id = BenchmarkId::new(label, engine.name);
             group.bench_with_input(id, &engine, |b, engine| {
                 let mut client = Client::connect(engine.port);
                 b.iter_custom(|iters| {
