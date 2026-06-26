@@ -35,5 +35,9 @@ name = "bitfield_vs_redis"
 harness = false
 
 [[bench]]
+name = "geo_vs_redis"
+harness = false
+
+[[bench]]
 name = "restore_quicklist_vs_redis"
 harness = false

@@ -3715,11 +3715,18 @@ fn process_buffered_frames(
                     // arg=the set. execute validates numkeys and the no-LIMIT shape.
                     let tail = [packet.key, packet.arg];
                     if let Some(response) = runtime.execute_plain_sintercard_borrowed(&tail, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =
@@ -3891,18 +3898,51 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*3\r\n$7\r\n",
+                    b"GEOHASH",
+                ) {
+                    // GEOHASH key member (single member): keep the exact parser route.
+                    if let Some(response) = runtime.execute_plain_geohash_borrowed(
+                        packet.key,
+                        std::slice::from_ref(&packet.arg),
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_geohash_packet(unparsed, &parser_config)
                 {
-                    // GEOHASH key member [member ...] (variadic).
+                    // GEOHASH key member member [member ...] (multi-member).
                     if let Some(response) =
                         runtime.execute_plain_geohash_borrowed(packet.key, &packet.members, ts)
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =
@@ -4802,26 +4842,39 @@ fn process_buffered_frames(
                     if packet.c.eq_ignore_ascii_case(b"BYSCORE")
                         && packet.d.eq_ignore_ascii_case(b"WITHSCORES")
                     {
-                        let client_resp3 =
-                            runtime.client_session().resp_protocol_version() == 3;
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         if runtime
                             .execute_plain_zrange_byscore_withscores_borrowed_into(
-                                packet.key, packet.a, packet.b, ts, client_resp3,
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                client_resp3,
                                 &mut conn.write_buf,
                             )
                             .is_some()
                         {
-                            Ok(BorrowedMultibulkAction::FastEncodedReply { consumed: packet.consumed })
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
                         } else {
                             parse_borrowed_multibulk_action(
-                                unparsed, parser_config, runtime, ts,
-                                &mut conn.write_buf, &mut argv_scratch,
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
                             )
                         }
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -4833,20 +4886,31 @@ fn process_buffered_frames(
                     // ZRANGE key min max BYSCORE|BYLEX: a=min, b=max, c=option
                     // token. Only the no-REV/LIMIT/WITHSCORES BYSCORE/BYLEX forms.
                     let fast = if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
-                        runtime.execute_plain_zrange_byscore_borrowed(packet.key, packet.a, packet.b, ts)
+                        runtime.execute_plain_zrange_byscore_borrowed(
+                            packet.key, packet.a, packet.b, ts,
+                        )
                     } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
-                        runtime.execute_plain_zrange_bylex_borrowed(packet.key, packet.a, packet.b, ts)
+                        runtime
+                            .execute_plain_zrange_bylex_borrowed(packet.key, packet.a, packet.b, ts)
                     } else if packet.c.eq_ignore_ascii_case(b"REV") {
-                        runtime.execute_plain_zrange_rev_borrowed(packet.key, packet.a, packet.b, ts)
+                        runtime
+                            .execute_plain_zrange_rev_borrowed(packet.key, packet.a, packet.b, ts)
                     } else {
                         None
                     };
                     if let Some(response) = fast {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =
@@ -5977,11 +6041,18 @@ fn process_buffered_frames(
                             packet.key, packet.a, packet.b, packet.d, packet.e, ts,
                         )
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
@@ -5992,26 +6063,39 @@ fn process_buffered_frames(
                 ) {
                     // ZRANGEBYSCORE key min max WITHSCORES: a=min, b=max, c=token.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
-                        let client_resp3 =
-                            runtime.client_session().resp_protocol_version() == 3;
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         if runtime
                             .execute_plain_zrangebyscore_withscores_borrowed_into(
-                                packet.key, packet.a, packet.b, ts, client_resp3,
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                client_resp3,
                                 &mut conn.write_buf,
                             )
                             .is_some()
                         {
-                            Ok(BorrowedMultibulkAction::FastEncodedReply { consumed: packet.consumed })
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
                         } else {
                             parse_borrowed_multibulk_action(
-                                unparsed, parser_config, runtime, ts,
-                                &mut conn.write_buf, &mut argv_scratch,
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
                             )
                         }
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -6045,26 +6129,39 @@ fn process_buffered_frames(
                 ) {
                     // ZREVRANGEBYSCORE key max min WITHSCORES: a=max, b=min, c=token.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
-                        let client_resp3 =
-                            runtime.client_session().resp_protocol_version() == 3;
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         if runtime
                             .execute_plain_zrevrangebyscore_withscores_borrowed_into(
-                                packet.key, packet.a, packet.b, ts, client_resp3,
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                client_resp3,
                                 &mut conn.write_buf,
                             )
                             .is_some()
                         {
-                            Ok(BorrowedMultibulkAction::FastEncodedReply { consumed: packet.consumed })
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
                         } else {
                             parse_borrowed_multibulk_action(
-                                unparsed, parser_config, runtime, ts,
-                                &mut conn.write_buf, &mut argv_scratch,
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
                             )
                         }
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
@@ -6081,11 +6178,18 @@ fn process_buffered_frames(
                                 packet.key, packet.a, packet.b, packet.d, packet.e, ts,
                             )
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
@@ -6189,16 +6293,22 @@ fn process_buffered_frames(
                     // ZREVRANGEBYLEX key max min LIMIT offset count: a=max, b=min,
                     // c=LIMIT, d=offset, e=count.
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
-                        && let Some(response) = runtime
-                            .execute_plain_zrevrangebylex_limit_borrowed(
-                                packet.key, packet.a, packet.b, packet.d, packet.e, ts,
-                            )
+                        && let Some(response) = runtime.execute_plain_zrevrangebylex_limit_borrowed(
+                            packet.key, packet.a, packet.b, packet.d, packet.e, ts,
+                        )
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =
@@ -6234,11 +6344,18 @@ fn process_buffered_frames(
                             packet.key, packet.a, packet.b, packet.d, packet.e, ts,
                         )
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
                     } else {
                         parse_borrowed_multibulk_action(
-                            unparsed, parser_config, runtime, ts,
-                            &mut conn.write_buf, &mut argv_scratch,
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
                         )
                     }
                 } else if let Some(packet) =
@@ -9722,8 +9839,9 @@ struct BorrowedPlainGeohashPacket<'a> {
     members: Vec<&'a [u8]>,
 }
 
-/// `GEOHASH key member [member ...]` fast-path packet (variable-arity multibulk,
-/// mirror of the GEOPOS packet parser with the $7\r\nGEOHASH command token).
+/// `GEOHASH key member member [member ...]` fast-path packet (variable-arity
+/// multibulk, mirror of the GEOPOS packet parser with the $7\r\nGEOHASH command
+/// token). The single-member shape stays on the exact key+arg parser.
 fn parse_borrowed_plain_geohash_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -9745,7 +9863,7 @@ fn parse_borrowed_plain_geohash_packet<'a>(
         idx += 1;
         digits += 1;
     }
-    if digits == 0 || count < 3 || config.max_array_len < count {
+    if digits == 0 || count < 4 || config.max_array_len < count {
         return None;
     }
     if input.get(idx..idx + 2)? != b"\r\n" {
@@ -18999,6 +19117,76 @@ mod tests {
             )
             .is_none(),
             "array-limit errors stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_geohash_packet_parser_accepts_multi_member() {
+        let input = b"*5\r\n$7\r\nGEOHASH\r\n$3\r\ngeo\r\n$7\r\nPalermo\r\n$7\r\nCatania\r\n$12\r\nSanFrancisco\r\n";
+        let parsed = crate::parse_borrowed_plain_geohash_packet(input, &ParserConfig::default())
+            .expect("canonical multi-member GEOHASH packet should parse");
+
+        assert_eq!(parsed.key, b"geo");
+        assert_eq!(
+            parsed.members,
+            vec![b"Palermo".as_slice(), b"Catania", b"SanFrancisco"]
+        );
+        assert_eq!(parsed.consumed, input.len());
+    }
+
+    #[test]
+    fn borrowed_plain_geohash_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*x\r\n$7\r\nGEOHASH\r\n$3\r\ngeo\r\n$7\r\nPalermo\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "malformed multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*3\r\n$7\r\nGEOHASH\r\n$3\r\ngeo\r\n$7\r\nPalermo\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "single-member GEOHASH stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*2\r\n$7\r\nGEOHASH\r\n$3\r\ngeo\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "missing-member GEOHASH stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*3\r\n$7\r\nGEOPOS\r\n$3\r\ngeo\r\n$7\r\nPalermo\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "other GEO commands stay on their own parsers"
+        );
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*4\r\n$7\r\nGEOHASH\r\n$3\r\ngeo\r\n$7\r\nPalermo\r\n$7\r\nCatania\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_geohash_packet(
+                b"*4\r\n$7\r\nGEOHASH\r\n$4\r\ngeo\r\n$7\r\nPalermo\r\n$7\r\nCatania\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
         );
     }
 
