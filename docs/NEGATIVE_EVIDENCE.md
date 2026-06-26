@@ -4773,3 +4773,14 @@ string sqc8b49rny0, missing-member/key -> nil, WRONGTYPE, 2-member fall-through)
 conformance 99/0. 3 files (fr-command +pub only).
 SCORECARD parts 82-99 = 18 wins. NOTE: generic multi-member GEOHASH over-counts keyspace_hits (N not 1) — latent bug for
 a peer to fix (mirror the geopos fix). Clean dispatch vein now VERY thin: most reads fast-pathed-or-faster.
+
+### 2026-06-25 (part 100) GEOHASH multi-member (variadic) fast-path ~1.75x + keyspace fix (cc/BlackThrush)
+Nineteenth win. Extended part-99 single-member GEOHASH to the variadic form via a dedicated multibulk parser (mirror of
+parse_borrowed_plain_geopos_packet, $7 GEOHASH token), replacing the *3-only key_arg1 dispatch. The already-variadic
+execute serves it with 1 keyspace lookup -> multi-member GEOHASH now keyspace_hits=1 like redis, FIXING the generic
+per-member-zscore over-count (part-99 flagged bug) for all fast-pathed arities. A/B (vs generic control) cand/ctrl 1.748,
+cand/redis 0.860. Byte-exact: 1/2/3 members, missing-member(nil)/all-missing/WRONGTYPE/missing-key; 2-member keyspace_hits=1.
+conformance 99/0. main.rs-only (68 lines). GEOHASH surface now COMPLETE (single+multi).
+SCORECARD parts 82-100 = 19 wins. The clean dispatch/option/arity vein is now essentially EXHAUSTED — broad sweeps show
+most hot reads fast-pathed-or-faster. Next levers likely require store-side re-profiling (perf-stat instructions) or a
+genuinely different class.
