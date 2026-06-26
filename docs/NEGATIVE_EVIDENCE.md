@@ -5206,3 +5206,54 @@ GT/LT semantics (update-only-if-greater/less), member-named-"GT"-after-score, ar
 DEFERRED THIS TURN: intricate flag byte-exactness needs full budget + a clean build; CoralOx WIP in fr-store taints a
 local build (build in a worktree from origin/main, or after their WIP lands). This is the next clean ship — option-form
 vein REOPENED. Correction: my parts 116-122 "dispatch saturated" missed the ZADD/LPOS/BITFIELD OPTION sub-forms.
+
+### 2026-06-26 (part 125) PFADD existing-key register-cache hit kept: duplicate 16-element PFADD +7.7%, still 0.468x vs Redis 7.2.4 (codex/BlackThrush)
+Land scan first: the only off-main bench worktree not on main was
+`/data/projects/.worktrees/frankenredis-cod-a-control-20260620` at `a4b709e`, and it contained ZADD guard LOSS evidence
+only (`a4b709e`, `dbe7735`), not a measured code win. Dug a new lever in the HyperLogLog residual instead.
+
+Lever: existing-key `PFADD` now reuses the `hll_register_cache` when the key modification count matches. For duplicate
+batches, the command validates only the HLL header, compares incoming element registers against cached registers, and
+returns `:0` without reparsing the sparse HLL or cloning the register array. If any incoming element raises a register, it
+clones the cached register array once and proceeds through the normal encode/dirty path. Stale caches still fall back to
+full decode; a focused test mutates the string with `SETRANGE` and verifies stale cache is not trusted.
+
+Evidence vs Redis 7.2.4:
+- Initial RCH remote baseline (`ovh-a`, `PFADD_16v`): Redis median `762.73 Kelem/s`, FrankenRedis median
+  `361.40 Kelem/s`, ratio `0.474x`.
+- Initial candidate through `rch exec` fell back local: Redis median `557.07 Kelem/s`, FrankenRedis median
+  `280.66 Kelem/s`, ratio `0.504x`. Not used as keep proof because it was cross-machine.
+- Required remote control build in a clean worktree was attempted through `rch exec`, but RCH did not transfer the
+  untracked `legacy_redis_code` oracle metadata/symlink needed by the build script. Used same-machine local paired
+  control/candidate after the required RCH attempts.
+- Local control (`origin/main`, same target dir): Redis median `526.64 Kelem/s`, FrankenRedis median `237.23 Kelem/s`,
+  ratio `0.450x`.
+- Local candidate: Redis median `546.04 Kelem/s`, FrankenRedis median `255.39 Kelem/s`, ratio `0.468x`.
+- Candidate/control FrankenRedis throughput ratio: `255.39 / 237.23 = 1.077x` (+7.7%). Criterion reported
+  `+24.415%`, `p=0.01`, "Performance has improved."
+
+Validation:
+- `cargo +nightly-2026-06-09 fmt --check -p fr-store`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo +nightly-2026-06-09 test -p fr-store pfadd_existing_key_register_cache_serves_duplicate_batch -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo +nightly-2026-06-09 check -p fr-store --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo +nightly-2026-06-09 clippy -p fr-store --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo +nightly-2026-06-09 check -p fr-server --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo +nightly-2026-06-09 test -p fr-conformance -- --nocapture`
+
+Note: Agent Mail reservation failed before the edit because the Agent Mail DB returned `database disk image is malformed`;
+the edit stayed narrow to `crates/fr-store/src/lib.rs` plus this ledger.
+
+### 2026-06-26 (part 125) MEASURED REJECT: ZADD-flags fast-path byte-exact but ZERO-GAIN (store-bound) — REVERTED (cc/BlackThrush)
+BUILT + measured the part-124 ZADD GT/LT/CH/NX/XX option-form lever (extended execute_plain_zadd_borrowed: leading-flag
+scan, DEFER INCR+conflicts+odd-tail to generic, call store.zadd_with_options for flagged / zadd_plain_owned for plain).
+BYTE-EXACT: 21 cases all cand==ctrl==redis — GT/LT/CH/NX/XX semantics, GT+CH combined, multi-pair, member-named-"GT"-
+after-score, lowercase, NX+XX / GT+LT / GT+NX conflict wordings (deferred), INCR (deferred), odd-tail/flags-only syntax
+error; cmdstat_zadd correct. BUT A/B ZADD GT CH cand/ctrl 3 trials = 0.983/1.029/0.963 = ~1.0x NOISE => ZERO-GAIN.
+ROOT: ZADD is STORE-bound (zadd_with_options FullSortedSet dual-structure update dominates; my fast-path still does the
+member to_vec + identical store call), so the borrowed-dispatch saving is sub-noise. CONTRAST: EXPIRE/COPY/SET option-forms
+WON big because those are DISPATCH-bound. REVERTED per zero-gain. CORRECTS part 124: ZADD-flags ARE uncovered (right) but
+do NOT win (wrong — assumed dispatch-bound like EXPIRE). LESSON: option-form fast-paths only pay off for DISPATCH-bound
+commands; for STORE-bound commands (ZADD/SADD/insert-class) the dispatch saving is noise — measure before assuming the
+EXPIRE-pattern transfers. The remaining LPOS-RANK-neg/BITFIELD/GEOSEARCH option-forms are likely similarly store/compute-
+bound; verify dispatch-vs-store binding (perf-stat instr, or A/B) before building. commit-safety: CoralOx WIP did NOT touch
+zadd_with_options/ZaddOptions (my change was origin-compatible) — moot now. CoralOx fr-store WIP left untouched.
