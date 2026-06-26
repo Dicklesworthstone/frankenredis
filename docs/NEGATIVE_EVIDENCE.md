@@ -4966,3 +4966,15 @@ NO pattern-match loop so cheaper than PUBLISH) under the same plain-write-gate n
 frame to SSUBSCRIBE client, cmdstat_spublish. conformance 99/0. PUBLISH+SPUBLISH special-command pubsub class DONE. NEXT:
 WAIT0 0.525x (special-cmd, replica-count=connected count, immediate when numreplicas<=current), XINFO STREAM 0.507x
 (complex multi-field reply), PUBSUB NUMSUB/NUMPAT/CHANNELS (introspection reads). EVAL=Lua structural skip.
+
+### 2026-06-25 (part 110) WAIT 0 timeout fast-path ~1.86x (immediate-only; blocking preserved) (cc/BlackThrush)
+WAIT (RuntimeSpecialCommand) uncovered = 0.525x. execute_plain_wait_borrowed fast-paths ONLY the immediate case: plain
+write gate (no replicas ever) => numreplicas<=0 returns Integer(0) at once. CRITICAL CATCH (caught by a WAIT 1 0 test
+HANGING the differential): fr WAIT DOES block (blocking wraps handle_wait_command) — numreplicas>0 must block until
+timeout/acks. First impl returned 0 for ALL num => broke blocking; fixed with `if num>0 { return None }` defer. Verified
+control blocks WAIT 1 100 = 101ms and cand defers => blocks 101ms identical. A/B WAIT 0 0 cand/ctrl 1.862 (->cand/redis
+0.759, up from ctrl 0.408x; redis WAIT is very cheap so still trails the ratio — does NOT beat redis). Byte-exact incl
+malformed/neg-timeout/arity errors + blocking preserved. cmdstat_wait. conformance 99/0. LESSON: for a special command
+with possible blocking, TEST the blocking arg (WAIT N 0) — it'll hang the differential if you broke it; only fast-path the
+provably-immediate sub-case. Special-command pubsub/sync sweep (PUBLISH/SPUBLISH/WAIT) now DONE. NEXT: XINFO STREAM 0.507x
+(complex reply), PUBSUB NUMSUB/NUMPAT introspection reads. EVAL=Lua structural skip.
