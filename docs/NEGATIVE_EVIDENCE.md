@@ -5088,3 +5088,17 @@ CORE lever (high blast radius: GET/MGET/GETEX-no-opts/any get_string_bytes calle
 template (single-purpose getter, byte-exact). NOT attempted: CobaltCove-flagged + core-risk. CONCLUSION: no safe non-dup
 per-turn lever remains in my domain; the campaign is complete here. Remaining gains = CoralOx fr-store structural (uybhq/
 99fwc/set-insert) + this GET collapse (CobaltCove) — both cross-domain.
+
+### 2026-06-26 (part 119) CORRECTION to part 118: GET is ALREADY single-lookup (no double-lookup lever for the benchmark) (cc/BlackThrush)
+RETRACT the part-118 GET double-lookup handoff — it was based on a misread of get_sort_weight, NOT the GET path. The
+actual Store::get -> get_string_bytes HAS the collapse already: tag `frankenredis-get-single-lookup` — when
+count_expiring_keys()==0 && !lfu_tracking_enabled() (the default LRU, no-TTL config = exactly the redis-benchmark GET
+case), it does ONE entries.get_mut() that serves BOTH keyspace hit/miss accounting AND the value fetch (records
+stat_keyspace_hits/misses inline, touch_access with rand_sample=0). So the proper-load GET 0.866x (part 116, measured with
+NO TTL keys) is NOT a double-lookup — it is inherent per-op overhead (single get_mut + touch_access + Cow::into_owned
+value clone + BulkString framing). The residual double-lookup (record_keyspace_lookup + get_mut) only fires on the GATED
+slow path: when the DB has ANY expiring key OR LFU is on — a real-workload case the benchmark doesn't hit, and collapsing
+THAT needs inline lazy-expiry under the get_mut borrow (genuinely CobaltCove core). Small-value GET is near-optimal; the
+known large-value GET gap is qesp3 (>=256KB 2-copy framing plateau, structural). NET: no GET lever for the hot small-value
+path. LESSON: read the ACTUAL command path (get_string_bytes), not a sibling (get_sort_weight), before characterizing a
+lever — I almost handed off an already-done optimization.
