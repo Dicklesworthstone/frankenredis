@@ -15604,16 +15604,15 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // key_type records the keyspace hit/miss (lookupKeyRead), exactly as the
-        // generic getex does its lookupKeyReadOrReply/checkType before the read.
-        let reply = match self.server.store.key_type(key, now_ms) {
-            None => RespFrame::BulkString(None),
-            Some("string") => match self.server.store.getex(key, None, now_ms) {
-                Ok(Some(v)) => RespFrame::BulkString(Some(v)),
-                Ok(None) => RespFrame::BulkString(None),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
-            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        // (BlackThrush) GETEX with NO options is a pure read identical to GET (no TTL
+        // mutation, no propagation), so use the single-lookup Store::get path instead
+        // of key_type()+getex() — the prior form did TWO keyspace lookups (type-check
+        // then fetch). Store::get does one lookupKeyRead: records the same single
+        // hit/miss, bumps LRU/LFU once, returns the value, surfaces WRONGTYPE for a
+        // non-string — byte-identical reply + accounting, one fewer hash probe.
+        let reply = match self.server.store.get(key, now_ms) {
+            Ok(value) => RespFrame::BulkString(value),
+            Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
