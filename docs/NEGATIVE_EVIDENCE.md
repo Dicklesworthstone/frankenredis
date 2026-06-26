@@ -5102,3 +5102,19 @@ THAT needs inline lazy-expiry under the get_mut borrow (genuinely CobaltCove cor
 known large-value GET gap is qesp3 (>=256KB 2-copy framing plateau, structural). NET: no GET lever for the hot small-value
 path. LESSON: read the ACTUAL command path (get_string_bytes), not a sibling (get_sort_weight), before characterizing a
 lever — I almost handed off an already-done optimization.
+
+### 2026-06-26 (part 120) GET thread CLOSED: fully optimized (zero-copy _into + single-lookup both shipped); qesp3 STALE (cc/BlackThrush)
+Probed the last GET candidate (large-value 2-copy framing, the qesp3 0.6x note). FINDINGS:
+1. GET ALREADY has the zero-copy path: execute_plain_get_borrowed_into (lib.rs:10115, dispatched main.rs:2719/8228)
+   writes the borrowed value straight to the write buffer — no into_owned clone, no RespFrame alloc.
+2. MEASURED large-value GET fr-vs-redis-7.2.4 (single-conn, pipelined): 256KB=1.029x, 64KB=0.934x, 4KB=1.158x —
+   PARITY-OR-FASTER. The qesp3 ">=256KB GET 0.6x 2-copy plateau" note is STALE/closed (the _into path fixed it).
+3. Combined with part 119 (single-lookup already shipped via frankenredis-get-single-lookup): GET is FULLY optimized on
+   both axes (one hash probe + one value copy). The part-116 GET 0.866x (redis-benchmark -c50 -P16, 3-byte value) is
+   inherent per-op overhead (dispatch + get_mut + touch_access + small framing), NOT a fixable lever.
+GET is DEFINITIVELY not a lever (closed after 2 corrections — parts 119 single-lookup, 120 zero-copy). The ONLY remaining
+hot residuals are the 4 collection insert/update structural paths (SADD/LPUSH/RPUSH/ZADD = CoralOx fr-store: uybhq dual
+zset, 99fwc ChunkedList, set-insert). Those need the owning agent's multi-session data-structure work. The clean per-turn
+lever class in my domain is exhausted AND every "remaining lever" candidate (double-lookup, GET single-lookup, GET
+zero-copy, alloc, qesp3 large-GET) has now been verified ALREADY-DONE or intentional-by-design. STALE-NOTE FIX: update
+[[project_large_value_framing_gap]] — large GET no longer 0.6x.
