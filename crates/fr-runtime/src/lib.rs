@@ -21447,6 +21447,55 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlackThrush) Borrowed fast path for `PUBSUB NUMSUB ch1 ch2 ...` (*3+). Pure
+    /// global read: emits the flat array [channel, subscriber-count, ...] in ARGUMENT
+    /// order (no sort — byte-exact with redis, unlike CHANNELS), identical to
+    /// handle_pubsub_command. Container cmdstat row `pubsub|numsub`.
+    pub fn execute_plain_pubsub_numsub_borrowed(
+        &mut self,
+        sub: &[u8],
+        channels: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let mut argv_len_sum = b"PUBSUB".len() + sub.len();
+        for channel in channels {
+            argv_len_sum += channel.len();
+        }
+        let packet_id = self.plain_read_borrowed_preamble("pubsub|numsub", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let mut result = Vec::with_capacity(channels.len().saturating_mul(2));
+        for channel in channels {
+            result.push(RespFrame::BulkString(Some(channel.to_vec())));
+            let n = self
+                .server
+                .pubsub_channel_subs
+                .get(*channel)
+                .map_or(0, std::collections::HashSet::len);
+            result.push(RespFrame::Integer(i64::try_from(n).unwrap_or(i64::MAX)));
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Array(Some(result));
+        self.record_plain_zremrange_borrowed_metrics(
+            "pubsub|numsub",
+            "PUBSUB",
+            || {
+                let mut argv = vec![b"PUBSUB".to_vec(), sub.to_vec()];
+                for channel in channels {
+                    argv.push(channel.to_vec());
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        Some(reply)
+    }
+
     pub fn execute_plain_publish_borrowed(
         &mut self,
         channel: &[u8],

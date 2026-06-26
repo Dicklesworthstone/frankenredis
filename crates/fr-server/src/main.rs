@@ -4644,6 +4644,22 @@ fn process_buffered_frames(
                             &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_pubsub_numsub_packet(unparsed, &parser_config)
+                {
+                    // PUBSUB NUMSUB ch... (*3+) — flat [channel, count] in arg order.
+                    if let Some(response) = runtime.execute_plain_pubsub_numsub_borrowed(
+                        packet.sub,
+                        &packet.channels,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
                     &parser_config,
@@ -9314,6 +9330,84 @@ struct BorrowedPlainStrlenPacket<'a> {
 struct BorrowedPlainPubsubPacket<'a> {
     consumed: usize,
     sub: &'a [u8],
+}
+
+struct BorrowedPlainPubsubNumsubPacket<'a> {
+    consumed: usize,
+    sub: &'a [u8],
+    channels: Vec<&'a [u8]>,
+}
+
+// (BlackThrush) Variadic byte-prefix fast path for `PUBSUB NUMSUB ch1 ch2 ...`
+// (the *3+ form; the *2 no-channel form is handled by the plain pubsub packet and
+// defers). Mirrors the GEOHASH variadic header parse: *N, then $6 PUBSUB, then the
+// $6 NUMSUB subcommand token, then the count-2 channel args.
+fn parse_borrowed_plain_pubsub_numsub_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainPubsubNumsubPacket<'a>> {
+    if config.max_bulk_len < b"PUBSUB".len() || *input.first()? != b'*' {
+        return None;
+    }
+    let mut idx = 1;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0 || count < 3 || config.max_array_len < count {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    if input.get(idx..idx + 4)? != b"$6\r\n" {
+        return None;
+    }
+    idx += 4;
+    if !input.get(idx..idx + 6)?.eq_ignore_ascii_case(b"PUBSUB") {
+        return None;
+    }
+    idx += 6;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    if input.get(idx..idx + 4)? != b"$6\r\n" {
+        return None;
+    }
+    idx += 4;
+    let sub = input.get(idx..idx + 6)?;
+    if !sub.eq_ignore_ascii_case(b"NUMSUB") {
+        return None;
+    }
+    idx += 6;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let channel_count = count - 2;
+    let mut channels = Vec::with_capacity(channel_count);
+    let mut cursor = idx;
+    for _ in 0..channel_count {
+        let (channel, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        channels.push(channel);
+        cursor = next;
+    }
+    Some(BorrowedPlainPubsubNumsubPacket {
+        consumed: cursor,
+        sub,
+        channels,
+    })
 }
 
 // (BlackThrush) Byte-prefix fast path for the *2 form `PUBSUB <subcommand>` (i.e.
