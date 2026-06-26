@@ -5459,3 +5459,17 @@ APPEND 5259, HGET 5039 (already fr-faster, skip), BITFIELD, and the expensive-st
 may get PARTIAL wins (gauntlet is additive on top of store). The real structural fix = reorder the whole cascade by
 frequency OR hash-dispatch (big refactor); per-turn = hoist measured-slow cheap commands. Found via -c50 -P16 proper-load
 sweep. conformance pending. (late dead GETRANGE branch at 6970 = cleanup follow-up, same as INCRBY.)
+
+### 2026-06-26 (part 138) MAJOR WIN + CORRECTION: ZADD gap was DISPATCH-ORDERING not structural — hoist ~1.72x (0.59x->0.99x) (cc/BlackThrush)
+3rd dispatch-cascade-ordering win, and it CORRECTS parts 116-134. ZADD (the biggest hot-write gap, 0.515-0.594x) was
+dispatched at main.rs:7669 (zadd2 7647 + zadd 7669) — VERY late. I had spent many turns concluding ZADD/SADD/LPUSH were
+"structural multi-day data-structure" gaps (uybhq/99fwc). WRONG: hoisting the ZADD branches to early (after DECRBY) gives
+cand/ctrl 1.613/1.832/1.714 mean 1.720, cand/redis 0.991 (NEAR-PARITY, up from ctrl/redis 0.594x). Byte-exact: ZADD plain/
+update/multi-pair/ZADD-GT, ZSCORE, ZRANGE cand==ctrl==redis. So ZADD's gap was the LATE-DISPATCH GAUNTLET (~hundreds of
+parser strip_prefix checks at position 7669), NOT the FullSortedSet dual-structure. The store is fine; the dispatch
+position was the dominant cost. *** RETRACTS the parts 116-134 "hot-write structural / multi-day rewrite" conclusion ***
+for ZADD. STRONG IMPLICATION: SADD/LPUSH/RPUSH (also measured ~0.5x, also dispatched LATE via the ohsk5 n-value parsers)
+are very likely ALSO dispatch-ordering gaps, NOT structural — HOIST THEM NEXT for similar ~1.7x near-parity wins. The
+uybhq/99fwc "structural rewrite" beads may be largely unnecessary for throughput (the gap was cascade position). LESSON:
+a 0.5x "structural" gap on a fast-pathed command — CHECK ITS DISPATCH LINE NUMBER first (late = gauntlet, hoist it) before
+concluding structural. Session dispatch-ordering wins now 3 (INCRBY 1.78x, GETRANGE 1.69x, ZADD 1.72x). conformance pending.
