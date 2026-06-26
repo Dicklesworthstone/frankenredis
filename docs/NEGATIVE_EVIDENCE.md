@@ -4762,3 +4762,14 @@ SWEEP NOTES (fr already FASTER, NOT levers): GEODIST 1.07x, GEOPOS 1.20x, OBJECT
 BITFIELD_RO 1.38-1.41x, GETEX-noopt 1.18x, HSTRLEN fast-pathed(store-floor 0.78x), SETRANGE fast-pathed(0.78x). Remaining
 uncovered clean: GEOHASH 0.536x (base32 re-encode, store-bound risk — verify cand/ctrl before committing). Non-byte-exact:
 SCAN-COUNT (order), HRANDFIELD/SRANDMEMBER (random). OPTION/ARITY SCORECARD parts 82-98 = 17 wins.
+
+### 2026-06-25 (part 99) GEOHASH single-member fast-path SHIPPED ~2.07x (0.536x->0.956x) (cc/BlackThrush)
+Eighteenth win; LARGEST cand/ctrl of the campaign (2.071x). GEOHASH key member (*3) = 0.536x; lone uncovered GEO read
+(GEODIST/GEOPOS already fast+faster). base32 encode is cheap -> gap was pure dispatch. execute_plain_geohash_borrowed
+mirrors GEOPOS (record_source_key_lookups + no-stat zmscore, 1 keyspace hit) + emits 11-char base32 via
+fr_command::geo_hash_string_from_score (made pub). FIXES the generic GEOHASH per-member-zscore keyspace over-count for the
+fast-pathed form. *3 key_arg1; 2+-member stays generic. A/B cand/ctrl 2.071, cand/redis 0.956. Byte-exact (geohash
+string sqc8b49rny0, missing-member/key -> nil, WRONGTYPE, 2-member fall-through), cmdstat=1, keyspace_hits=1/misses=0.
+conformance 99/0. 3 files (fr-command +pub only).
+SCORECARD parts 82-99 = 18 wins. NOTE: generic multi-member GEOHASH over-counts keyspace_hits (N not 1) — latent bug for
+a peer to fix (mirror the geopos fix). Clean dispatch vein now VERY thin: most reads fast-pathed-or-faster.
