@@ -4599,6 +4599,23 @@ fn process_buffered_frames(
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
                     &parser_config,
+                    b"*3\r\n$8\r\n",
+                    b"SPUBLISH",
+                ) {
+                    // SPUBLISH channel message: key=channel, arg=message.
+                    if let Some(response) =
+                        runtime.execute_plain_spublish_borrowed(packet.key, packet.arg, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                    unparsed,
+                    &parser_config,
                     b"*3\r\n$7\r\n",
                     b"PUBLISH",
                 ) {

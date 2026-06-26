@@ -21308,6 +21308,44 @@ impl Runtime {
     /// (capture_replication_only_record) is a provable no-op, so the fast path just
     /// delivers to local subscribers via pubsub_publish and returns the receiver
     /// count. Identical local delivery + count as handle_publish_command.
+    /// (BlackThrush) Borrowed fast path for `SPUBLISH channel message` — the shard
+    /// sibling of execute_plain_publish_borrowed. Same plain-write-gate no-op-repl
+    /// basis; delivers to shard subscribers via pubsub_spublish and returns the count.
+    pub fn execute_plain_spublish_borrowed(
+        &mut self,
+        channel: &[u8],
+        message: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_bulk_len < b"SPUBLISH".len()
+            || channel.len() > self.policy.gate.max_bulk_len
+            || message.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"SPUBLISH".len() + channel.len() + message.len();
+        let packet_id = self.plain_zremrange_write_preamble("spublish", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let receivers = self.pubsub_spublish(channel, message);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::try_from(receivers).unwrap_or(i64::MAX));
+        self.record_plain_zremrange_borrowed_metrics(
+            "spublish",
+            "SPUBLISH",
+            || vec![b"SPUBLISH".to_vec(), channel.to_vec(), message.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     pub fn execute_plain_publish_borrowed(
         &mut self,
         channel: &[u8],
