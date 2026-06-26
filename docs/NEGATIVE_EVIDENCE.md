@@ -5118,3 +5118,20 @@ zset, 99fwc ChunkedList, set-insert). Those need the owning agent's multi-sessio
 lever class in my domain is exhausted AND every "remaining lever" candidate (double-lookup, GET single-lookup, GET
 zero-copy, alloc, qesp3 large-GET) has now been verified ALREADY-DONE or intentional-by-design. STALE-NOTE FIX: update
 [[project_large_value_framing_gap]] — large GET no longer 0.6x.
+
+### 2026-06-26 (part 121) SADD store-path verified efficient (no surgical lever) — CAMPAIGN CLOSE (cc/BlackThrush)
+Final candidate: store.sadd per-call overhead. VERIFIED no redundant work — set_fits_intset is O(1)
+(set.is_intset() flag + len check, NOT a scan); set_fits_listpack's iter-scan only runs in the post-insert encoding
+refresh GATED on added>0 (skipped for add-existing). So the SADD 0.549x is the inherent SetValue enum + insert_borrowed
+(int-parse + contains) floor vs redis intset/dict — structural, not surgical.
+CONSOLIDATED CLOSE — every candidate exhaustively verified across parts 78,101,115-121:
+  * dispatch surface SATURATED (hot + long-tail: SETRANGE/APPEND/SETBIT/GETSET/BITFIELD/GETDEL/COPY/... all fast-pathed)
+  * GET FULLY optimized: single-lookup (frankenredis-get-single-lookup) + zero-copy (_into); large-GET PARITY (qesp3 stale)
+  * key_type+op double-lookup = INTENTIONAL no-stat design (collapsing breaks keyspace stats)
+  * hot-write allocs OPTIMAL (SADD insert_borrowed allocs-only-for-new; ZADD ug50u in-place); store.sadd no per-call scan
+  * CHANNELS/SHARDCHANNELS/COMMAND-COUNT structurally redis-divergent (fr deterministic sort / different cmd count)
+  * ChunkedList VecDeque MEASURED slower; RESTORE-ZSET span-build NEUTRAL
+THE 4 REMAINING HOT RESIDUALS (LPUSH/RPUSH 0.57-0.59x, SADD 0.55x, ZADD 0.54x) are IRREDUCIBLY the data-structure design:
+99fwc ChunkedList (packed listpack-node rewrite), uybhq FullSortedSet (single-structure), set-insert — ALL multi-session
+fr-store work owned by CoralOx. NO safe non-dup per-turn lever remains in my (dispatch/option/pubsub/_into) domain.
+Session: 30 byte-exact wins (parts 82-114) + this exhaustive boundary proof. Campaign complete; clean handoff to CoralOx.
