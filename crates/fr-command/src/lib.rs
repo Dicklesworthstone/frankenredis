@@ -5329,7 +5329,7 @@ pub fn geo_distance_reply(distance: f64) -> RespFrame {
 }
 
 #[inline]
-pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+pub fn geo_hash_bytes_from_score(score: f64) -> Option<[u8; 11]> {
     let (longitude, latitude) = geo_decode_score(score)?;
     let bits = geo_encode(
         longitude,
@@ -5349,10 +5349,7 @@ pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
         // emitted an 11-character base32 string (10 chars cover the
         // first 50 bits, the 11th char would need bits 51-55). For
         // backward compatibility upstream hard-codes idx=0 for i==10
-        // so the trailing character is always '0'. fr previously
-        // computed `(bits << 3) & 0x1f`, which produces a non-zero
-        // index when bits 0-1 of the score happen to be set — making
-        // the last character drift away from vendored.
+        // so the trailing character is always '0'.
         let idx = if i == 10 {
             0
         } else {
@@ -5360,7 +5357,12 @@ pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
         };
         *slot = GEO_BASE32_ALPHABET[idx];
     }
-    Some(buf.to_vec())
+    Some(buf)
+}
+
+#[inline]
+pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+    geo_hash_bytes_from_score(score).map(Vec::from)
 }
 
 fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {

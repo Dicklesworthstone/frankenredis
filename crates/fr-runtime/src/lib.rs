@@ -17267,13 +17267,8 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(
-            b"ZRANGE".len(),
-            key,
-            min_arg,
-            max_arg,
-            now_ms,
-        ) {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms)
+        {
             return None;
         }
         let (min, max) = match (
@@ -21771,6 +21766,84 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_geohash_single_borrowed_into(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"GEOHASH".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("geohash");
+        self.session.last_argv_len_sum = b"GEOHASH".len() + key.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.zscore(key, member, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(score) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(1, false, out);
+                    match score.and_then(fr_command::geo_hash_bytes_from_score) {
+                        Some(hash) => encode_bulk_string_slice(Some(&hash), resp3, out),
+                        None => encode_bulk_string_slice(None, resp3, out),
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "geohash",
+            "GEOHASH",
+            || vec![b"GEOHASH".to_vec(), key.to_vec(), member.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     pub fn execute_plain_geopos_borrowed(
         &mut self,
         key: &[u8],
@@ -23424,8 +23497,13 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGEBYSCORE".len(), key, min_arg, max_arg, now_ms)
-            || self.policy.gate.max_array_len < 5
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGEBYSCORE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
             return None;
@@ -23557,8 +23635,13 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYSCORE".len(), key, max_arg, min_arg, now_ms)
-            || self.policy.gate.max_array_len < 5
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYSCORE".len(),
+            key,
+            max_arg,
+            min_arg,
+            now_ms,
+        ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
             return None;
@@ -39264,6 +39347,59 @@ mod tests {
                     out,
                     frame_wire_bytes(&generic_reply, resp3),
                     "resp3={resp3} key={key:?} members={members:?}"
+                );
+            }
+            assert_eq!(
+                direct.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+    }
+
+    #[test]
+    fn plain_geohash_single_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"GEOADD", b"geo", b"13.361389", b"38.115556", b"Palermo",]),
+                        2,
+                    ),
+                    RespFrame::Integer(1)
+                );
+                rt.execute_frame(command(&[b"SET", b"str", b"v"]), 2);
+            }
+
+            let cases: [(&[u8], &[u8]); 4] = [
+                (b"geo", b"Palermo"),
+                (b"geo", b"Catania"),
+                (b"missing", b"Palermo"),
+                (b"str", b"Palermo"),
+            ];
+            for (ts, (key, member)) in (3..).zip(cases) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_geohash_single_borrowed_into(key, member, ts, resp3, &mut out)
+                    .expect("single-member GEOHASH direct encoder should take borrowed fast path");
+                let generic_reply =
+                    generic.execute_frame(command(&[b"GEOHASH".as_slice(), key, member]), ts);
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} member={member:?}"
                 );
             }
             assert_eq!(

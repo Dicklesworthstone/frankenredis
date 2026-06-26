@@ -5314,6 +5314,29 @@ Measured vs Redis 7.2.4:
 Decision: no source lever and no revert needed; this lane is not a current gap. The stale SINTERCARD suspicion is closed by
 measurement. Continue routing to the measured structural hot-write gaps (set/zset/list storage), not SINTERCARD dispatch.
 
+### 2026-06-26 (part 129) GEOHASH single-member direct encoder kept: 0.562x -> 0.948x vs Redis 7.2.4 (codex/BlackThrush)
+Land-or-dig found no unlanded measured code win in the active worktrees, then re-opened the current `geo_vs_redis`
+single-member gap. Pre-change local BOLD-VERIFY bench, built with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, measured `GEOHASH_1` Redis 7.2.4 median
+`124.48 us` / `1.0283 Melem/s` and FrankenRedis median `221.68 us` / `577.42 Kelem/s`, or `0.562x` Redis throughput.
+
+Change: keep the existing parser shape but have the `*3 GEOHASH key member` route write the one-element reply directly into
+the connection write buffer. The fast path calls `Store::zscore` for exact single-member generic semantics and uses a new
+stack `[u8; 11]` geohash formatter, avoiding the `RespFrame::Array`, `Vec<Option<f64>>`, and heap hash buffer on the hot
+path. Multi-member `GEOHASH` still uses the existing variadic borrowed path.
+
+Post-change focused bench:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis rch exec -- cargo +nightly-2026-06-09 bench --profile release -p fr-bench --bench geo_vs_redis -- GEOHASH_1 --noplot`
+(RCH local fallback: no admissible workers). Redis median `130.35 us` / `981.94 Kelem/s`; FrankenRedis median
+`137.53 us` / `930.72 Kelem/s`; candidate ratio `0.948x` Redis throughput and `1.612x` vs the pre-change FrankenRedis
+baseline.
+
+Validation: focused runtime RESP2/RESP3 wire-byte parity test
+`plain_geohash_single_borrowed_into_matches_generic_wire_resp2_and_resp3` passed; `cargo fmt --check -p fr-command -p
+fr-runtime -p fr-server` passed; `check`/`clippy -D warnings` passed for `fr-command`, `fr-runtime`, and `fr-server`
+(`fr-server` remote RCH check failed only because worker `vmi1264463` lacked `legacy_redis_code/redis/src/commands`, then
+the same per-crate check passed locally); `cargo +nightly-2026-06-09 test -p fr-conformance -- --nocapture` passed.
+
 ### 2026-06-26 (part 128) SINTERCARD regression-concern RESOLVED — no regression, my opt intact + dominant (cc/BlackThrush)
 Verified the part-124 "SINTERCARD 0.555x possible regression" flag (fresh clean binary, no collision): NO REGRESSION.
 SINTERCARD fr/redis = 1set 1.214x, 2set 1.974x, 3set 2.051x, 3+LIMIT 1.884x, SINTER-3 1.225x — all fr-FASTER, my
