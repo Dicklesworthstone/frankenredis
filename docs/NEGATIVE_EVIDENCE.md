@@ -5365,3 +5365,17 @@ reading continuously). Replaced with get_mut(consumer) (entry+or_default fallbac
 + or_default semantics. A/B repeated XREADGROUP pending-read (full-binary cand-vs-control, peer dispatch-WIP constant):
 4 trials cand/ctrl 1.061/1.095/1.003/1.045 = mean ~1.05x, ALL >=1.0. Byte-exact: XREADGROUP reply + XINFO CONSUMERS
 pending cand==ctrl==redis. Saves 4 allocs/call for the hot persistent-consumer path. conformance pending-verify.
+
+### 2026-06-26 (part 131) MEASURED REJECT: insert_consumer fast-return — no demonstrable win on benchable path, REVERTED (cc/BlackThrush)
+Tried extending the part-129/130 fr-store alloc-reduction vein: insert_consumer (called per XREADGROUP/XACK/XCLAIM) clones
+the consumer name into consumers+consumer_states and moves it into consumer_metadata even for an EXISTING consumer (all
+no-ops, ~2-3 wasted allocs). Added a contains()-fast-return for the existing case (byte-identical: XREADGROUP reply +
+XINFO #consumers cand==ctrl==redis). A/B on the XREADGROUP PENDING-read path: 4 trials cand/ctrl 0.975/0.905/0.950/0.840
+= ~0.92x, NO win. ROOT: the pending-read (XREADGROUP ... STREAMS st 0) apparently does NOT call insert_consumer (consumer
+already registered on the prior >-read), so the fix is INERT on this bench and 0.92x is load/noise; the path that DOES call
+it (XREADGROUP ... >) consumes entries, awkward to bench in budget. Provably-fewer-ops (can't truly regress) but
+NOT-DEMONSTRABLE here → REVERTED per "REVERT ~0-gain / no measured win". Distinct from parts 129/130 which WERE on the
+benchable path (XADD / consumer seen-time fired per pending-read, measured 1.03x/1.05x). LESSON: confirm the candidate fn
+is actually CALLED by your bench path before trusting the ratio — an inert change shows noise, not zero. Demonstrated-win
+vein (entry/clone on a per-pending-read-exercised present key) = parts 129+130 shipped; insert_consumer needs a >-read
+bench. CoralOx HLL landed; peers hold dispatch chain; fr-store reverted clean.
