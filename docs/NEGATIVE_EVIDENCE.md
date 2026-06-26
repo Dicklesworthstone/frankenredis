@@ -5135,3 +5135,13 @@ THE 4 REMAINING HOT RESIDUALS (LPUSH/RPUSH 0.57-0.59x, SADD 0.55x, ZADD 0.54x) a
 99fwc ChunkedList (packed listpack-node rewrite), uybhq FullSortedSet (single-structure), set-insert — ALL multi-session
 fr-store work owned by CoralOx. NO safe non-dup per-turn lever remains in my (dispatch/option/pubsub/_into) domain.
 Session: 30 byte-exact wins (parts 82-114) + this exhaustive boundary proof. Campaign complete; clean handoff to CoralOx.
+
+### 2026-06-26 (part 122) ZADD-borrowed lever assessed + DECLINED (last concrete candidate) (cc/BlackThrush)
+The ZADD fast-path does member.to_vec() upfront (wasted on the no-op/update-existing benchmark case), unlike SADD's
+insert_borrowed. Checked feasibility of a zadd_plain_borrowed mirror: insert_borrowed EXISTS for set (packed_set:303) and
+hash (614/918/1925) and SetValue (lib:2720) — but NOT for the zset (FullSortedSet/PackedZSet). So the lever needs a NEW
+fr-store FullSortedSet::insert_borrowed + zadd_plain_borrowed (CoralOx domain), for a MARGINAL gain: the saved to_vec is a
+tiny (few-byte) alloc, dwarfed by the dual-structure (IndexMap dict + ordered) update that dominates the 0.539x. DECLINED
+— fr-store addition not justified by a sub-noise gain; if pursued it's a CoralOx mirror of insert_borrowed. This was the
+LAST concrete per-turn candidate. The clean-lever space is definitively closed (parts 78,101,115-122); remaining = CoralOx
+multi-session data-structure work (99fwc/uybhq/set-insert). Handed off.
