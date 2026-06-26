@@ -5264,3 +5264,16 @@ uses `hll_register_cache` when the key modification count matches, exits duplica
 falls back to full decode on stale cache or missing cache. Ratio proof from part 125: local control `0.450x` vs Redis 7.2.4
 to candidate `0.468x` vs Redis 7.2.4; candidate/control FrankenRedis throughput `1.077x` (+7.7%), Criterion `+24.415%`,
 `p=0.01`. Conformance remains green via `rch exec -- cargo +nightly-2026-06-09 test -p fr-conformance -- --nocapture`.
+
+### 2026-06-26 (part 126) CHEAP BINDING-CHECK closes option-form re-opening: remaining gaps are STORE-bound not dispatch (cc/BlackThrush)
+Applied part-125's lesson WITHOUT building (cheap plain-vs-option binding check on existing committed binary, no collision):
+LPOS is ALREADY fast-pathed (execute_plain_lpos_rank_borrowed @ lib.rs:13254 covers RANK) AND plain LPOS itself is 0.563x
+== LPOS RANK 0.605x == RANK-neg 0.682x — ALL the same store-bound range. So LPOS's gap is the ChunkedList scan (99fwc
+structural, CoralOx), NOT dispatch — fast-pathing won't help (it's already fast-pathed + still 0.56x). This is a 2nd data
+point after part-125 ZADD: the part-124 option-form sweep found SLOW forms but they are STORE/COMPUTE-bound, not
+uncovered-dispatch. CONCLUSION: the DISPATCH-bound option-form vein is EXHAUSTED (EXPIRE/COPY/SET/SETEX done); the remaining
+slow forms (ZADD-flags zero-gain part125, LPOS store-bound, BITFIELD/GEOSEARCH compute-bound) are store/compute-bound =
+CoralOx structural, no dispatch lever. TECHNIQUE (cheap, no build, no collision): to test if an option-form is a dispatch
+lever, compare the PLAIN form (already fast-pathed) vs the OPTION form on the SAME tiny input — if BOTH are slow, it's
+store-bound (skip); only if plain is FAST and option is SLOW is it a dispatch win (build it). Part-124 "vein reopened" is
+CORRECTED: forms uncovered/slow but no dispatch win. My domain stays exhausted; structural = CoralOx (active fr-store WIP).
