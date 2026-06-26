@@ -4937,3 +4937,13 @@ XINFO STREAM 0.507x (complex reply), PUBLISH 0.490x (pubsub-state: fast-path the
 0.63x (verify), WAIT0 0.525x. EVAL 0.354x = Lua interpreter (STRUCTURAL, skip). The XRANGE record-emit + stream-id-parse
 pattern is now reusable for XREVRANGE. ENV: peers committing rapidly (caceabec4 etc.); .git/index intermittently locked
 (wait+retry); agent-mail corrupt.
+
+### 2026-06-26 (part 107) XREVRANGE fast-path ~1.4-1.7x (beats redis) — stream class continues (cc/BlackThrush)
+Reverse mirror of part-106 XRANGE. XREVRANGE uncovered = 0.537x. execute_plain_xrevrange_borrowed: wire end-then-start
+(end=upper via parse_stream_range_bound(_,false), start=lower via (_,true)), store.xrevrange, same emit + defers; reuses
+the now-pub stream helpers (no fr-command change). *4 key_arg2 / *6 key_arg4(COUNT). A/B full cand/ctrl 1.387 (redis
+1.153), COUNT cand/ctrl 1.674 (redis 1.198) — both beat redis. Byte-exact (desc/COUNT/range/exclusive/empty/missing,
+WRONGTYPE, COUNT<=0 edges, malformed/bad-opt defers), cmdstat+keyspace=1. conformance 99/0.
+STREAM/PUBSUB SCORECARD: XRANGE (106) + XREVRANGE (107) DONE. NEXT: XINFO STREAM 0.507x (complex multi-field reply),
+PUBLISH 0.490x (pubsub no-subscriber->0 fast-path), WAIT0 0.525x. EVAL=Lua structural skip. XADD (write, sidemap-alloc
+tcknm). Peer landed caceabec4 (PFADD sparse). The XRANGE/XREVRANGE id-parse+record-emit pattern reusable for any stream read.
