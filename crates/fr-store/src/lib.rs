@@ -15730,16 +15730,27 @@ impl Store {
                         &mut self.digest_mutations,
                     );
                     entry.touch_write(now_ms, lfu_tracking_enabled);
-                    // Track high watermark so IDs stay monotonic after XDEL
-                    let wm = self.stream_last_ids.entry(key.to_vec()).or_insert((0, 0));
+                    // Track high watermark so IDs stay monotonic after XDEL.
+                    // (BlackThrush tcknm) An existing stream is ALWAYS already keyed
+                    // in stream_last_ids / stream_entries_added (inserted together on
+                    // create, moved together on rename), so use get_mut — no wasted
+                    // key.to_vec() per XADD — falling back to entry only defensively.
+                    // Byte-identical &mut + mutation; the hot path drops 2 allocs/call.
+                    let wm = match self.stream_last_ids.get_mut(key) {
+                        Some(wm) => wm,
+                        None => self.stream_last_ids.entry(key.to_vec()).or_insert((0, 0)),
+                    };
                     if id > *wm {
                         *wm = id;
                     }
                     if inserted {
-                        let added = self
-                            .stream_entries_added
-                            .entry(key.to_vec())
-                            .or_insert(default_entries_added);
+                        let added = match self.stream_entries_added.get_mut(key) {
+                            Some(added) => added,
+                            None => self
+                                .stream_entries_added
+                                .entry(key.to_vec())
+                                .or_insert(default_entries_added),
+                        };
                         *added = added.saturating_add(1);
                     }
                     self.dirty = self.dirty.saturating_add(1);

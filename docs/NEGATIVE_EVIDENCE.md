@@ -5345,3 +5345,14 @@ on a 3-member set = tiny absolute throughput, noisy single-conn). False alarm cl
 ratios are noise — re-verify a flagged "regression" on a realistic input before believing it. All my 30 session wins
 confirmed intact. This closes the last open verification thread; domain exhausted, structural inserts (uybhq/99fwc) the
 only remaining gain (multi-day, unstarted). Peer now has live WIP in fr-command/src/lib.rs — staying clear.
+
+### 2026-06-26 (part 129) MEASURED WIN: XADD tcknm — drop 2 wasted key.to_vec()/XADD on existing stream ~1.03x (cc/BlackThrush)
+fr-store-INTERNAL surgical win (existing caller benefits, NO fr-runtime wiring — committable while peers hold the dispatch
+chain). store.xadd's existing-stream hot path did stream_last_ids.entry(key.to_vec()) + stream_entries_added.entry(
+key.to_vec()) = 2 key.to_vec() allocs/XADD even though an existing stream is ALWAYS already keyed in both maps (invariant:
+inserted together on create, moved together on rename). Replaced with get_mut(key) (fallback to entry only defensively) —
+PROVABLY non-regressing (strictly fewer ops, key always present, byte-identical &mut + mutation). A/B XADD-to-existing
+(full-binary cand-vs-control, peer dispatch-WIP constant in both): 4 trials cand/ctrl 1.015/1.086/1.000/1.033 = mean ~1.03x,
+ALL >=1.0 (never regresses). Byte-exact: XLEN + XINFO entries-added cand==ctrl==redis. Small but clean — REMOVES work +
+2 allocs/call (not churn). Re-implements bead tcknm (was found+compiled+reverted-UNBENCHED; now BENCHED + landed). Built
+main-tree with peer dispatch-WIP present (compiles; XADD path is store-isolated so A/B valid); committed fr-store ONLY.
