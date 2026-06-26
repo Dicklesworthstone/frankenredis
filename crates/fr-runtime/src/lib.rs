@@ -21311,6 +21311,67 @@ impl Runtime {
     /// (BlackThrush) Borrowed fast path for `SPUBLISH channel message` — the shard
     /// sibling of execute_plain_publish_borrowed. Same plain-write-gate no-op-repl
     /// basis; delivers to shard subscribers via pubsub_spublish and returns the count.
+    /// (BlackThrush) Borrowed fast path for `WAIT numreplicas timeout`. WAIT is a
+    /// non-blocking RuntimeSpecialCommand (handle_wait_command refreshes ack
+    /// snapshots, evaluates, returns the acked-replica count — it does not block).
+    /// Under the plain write gate (role = Primary, any_replica_ever_connected =
+    /// false) there are no replica ack offsets, so evaluate_wait is deterministically
+    /// 0. Validates both integer args, deferring malformed numreplicas (InvalidInteger)
+    /// and malformed/negative timeout (the canonical timeout errors) to the generic
+    /// path so the exact error + ordering is preserved; otherwise returns Integer(0).
+    pub fn execute_plain_wait_borrowed(
+        &mut self,
+        numreplicas_arg: &[u8],
+        timeout_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_bulk_len < b"WAIT".len()
+            || numreplicas_arg.len() > self.policy.gate.max_bulk_len
+            || timeout_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        // Defer malformed numreplicas (InvalidInteger). CRITICAL: WAIT with
+        // numreplicas > 0 BLOCKS until the timeout elapses or that many replicas ack —
+        // only numreplicas <= 0 (0 required; handle_wait clamps negatives to 0) returns
+        // immediately. Fast-path ONLY the immediate case; defer the blocking case to
+        // the generic so its wait semantics are preserved.
+        let num = parse_i64_arg(numreplicas_arg).ok()?;
+        if num > 0 {
+            return None;
+        }
+        // Defer malformed timeout (not-an-integer) and negative timeout (timeout is
+        // negative) so the generic surfaces the exact error.
+        let timeout = parse_i64_arg(timeout_arg).ok()?;
+        if timeout < 0 {
+            return None;
+        }
+        let argv_len_sum = b"WAIT".len() + numreplicas_arg.len() + timeout_arg.len();
+        let packet_id = self.plain_zremrange_write_preamble("wait", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(0);
+        self.record_plain_zremrange_borrowed_metrics(
+            "wait",
+            "WAIT",
+            || {
+                vec![
+                    b"WAIT".to_vec(),
+                    numreplicas_arg.to_vec(),
+                    timeout_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        Some(reply)
+    }
+
     pub fn execute_plain_spublish_borrowed(
         &mut self,
         channel: &[u8],
