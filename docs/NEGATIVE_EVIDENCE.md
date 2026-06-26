@@ -5473,3 +5473,17 @@ are very likely ALSO dispatch-ordering gaps, NOT structural — HOIST THEM NEXT 
 uybhq/99fwc "structural rewrite" beads may be largely unnecessary for throughput (the gap was cascade position). LESSON:
 a 0.5x "structural" gap on a fast-pathed command — CHECK ITS DISPATCH LINE NUMBER first (late = gauntlet, hoist it) before
 concluding structural. Session dispatch-ordering wins now 3 (INCRBY 1.78x, GETRANGE 1.69x, ZADD 1.72x). conformance pending.
+
+### 2026-06-26 (part 139) MASSIVE WIN: SADD/LPUSH/RPUSH dispatch-hoist 1.8-2.0x — ALL hot-write gaps were dispatch-ordering (cc/BlackThrush)
+4th dispatch-ordering commit, closes the hot-write gaps. The 1-value keyed_values parser (parse_borrowed_plain_keyed_values1
+= SADD/LPUSH/RPUSH key value, the redis-benchmark case) was at main.rs:7495 (the LATEST hot path — after all 18->1 keyed_
+values checks + ~hundreds of earlier parsers). Hoisted it to after DECRBY. A/B (python pipelined cand vs ctrl=committed-
+with-INCRBY/GETRANGE/ZADD-hoists): SADD cand/ctrl 1.980/2.048/1.985 mean 2.004 (cand/redis 0.934, up from 0.506x);
+LPUSH mean 1.833 (cand/redis 1.253 BEATS redis, up from 0.649x); RPUSH mean 1.816 (cand/redis 1.182 BEATS redis, up from
+0.607x). Byte-exact: SADD dup/new, LPUSH/RPUSH, SCARD/LLEN/SMEMBERS cand==ctrl==redis. *** FULLY CONFIRMS part-138: ALL the
+"structural hot-write" gaps (SADD/ZADD/LPUSH/RPUSH) were the LATE-DISPATCH GAUNTLET, NOT the uybhq FullSortedSet / 99fwc
+ChunkedList / SetValue structures. The parts 116-134 "structural multi-day rewrite needed" conclusion is RETRACTED — the
+data structures are fine; the dispatch cascade position was the entire gap. The uybhq/99fwc beads are UNNECESSARY for
+throughput. *** 4 dispatch-ordering wins: INCRBY 1.78x, GETRANGE 1.69x, ZADD 1.72x, SADD/LPUSH/RPUSH 1.8-2.0x — all from
+proper-load -c50-P16 sweep + hoisting late branches. NEXT: hoist keyed_values 2/3-value (multi-value SADD/LPUSH), GETSET
+4443, APPEND 5259, and ultimately reorder the whole cascade by frequency. conformance pending.
