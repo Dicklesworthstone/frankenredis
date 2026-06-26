@@ -5003,3 +5003,14 @@ command-layer validation max_deleted_id/top-item in xsetid_cmd not the store —
 fast-pathing an introspection/list command, check fr-vs-redis ORDER + whether fr uses a deterministic sort redis lacks.
 PUBSUB NUMPAT+NUMSUB done (byte-exact); CHANNELS/SHARDCHANNELS structurally non-exact. NEXT clean: OBJECT IDLETIME 0.674x
 (verify fr idle model == redis first), XINFO STREAM 0.507x (complex but deterministic).
+
+### 2026-06-25 (part 113) PUBSUB SHARDNUMSUB fast-path ~2.03x (byte-exact) — completes pubsub introspection (cc/BlackThrush)
+Generalized the part-112 variadic PUBSUB parser to extract any-length subcommand token; execute now claims NUMSUB +
+SHARDNUMSUB (latter counts pubsub_shard_subs). A/B cand/ctrl 2.025 (->cand/redis 0.833). Byte-exact (arg-order shard
+counts shx:2/none:0/shy:1, map-isolation: shard-sub channel = 2 via SHARDNUMSUB but 0 via NUMSUB, cmdstat
+pubsub|shardnumsub). conformance 99/0. BYTE-EXACT PUBSUB introspection set COMPLETE: NUMPAT+NUMSUB+SHARDNUMSUB. CHANNELS/
+SHARDCHANNELS structurally non-exact (fr sort). DATA-COMMAND SWEEP this turn: LPOS/GETEX/LREM/ZSCORE/GETRANGE all already
+fast-pathed; their residual gaps are STORE-BOUND not dispatch (GETEX/GET double-lookup key_type+getex = CobaltCove core
+domain; LPOS/LREM = fr-store scan). So the clean byte-exact DISPATCH vein is now thin: data covered, introspection mostly
+divergent, pubsub done. Next real levers = store-side (CobaltCove GET/GETEX single-lookup; fr-store scans) or accept the
+dispatch surface as saturated.
