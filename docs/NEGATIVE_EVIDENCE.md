@@ -4820,6 +4820,28 @@ function fr-store refactor here = high collision/revert risk in a per-turn conte
 My clean per-turn dispatch/option/arity class is DONE (20 wins parts 82-100). Next BlackThrush-ownable levers require
 either the tree to quiesce or a genuinely different non-fr-store class.
 
+### 2026-06-26 (part 104) STORE-SIDE WIN: direct large GenericSet wrap in SetValue::from_index_set
+BOLD-VERIFY took the part-102 double-build trace and tested the smallest safe store-side cut: when `from_index_set`
+receives a result larger than `set-max-intset-entries`, it can never return the intset encoding. The prior path still
+created an empty `SetValue` and reinserted every member into a fresh Generic set, so large all-int SINTERSTORE/SDIFFSTORE
+destinations paid a second full O(N) hash build after `sinter_value`/`sdiff_value` had already built the result. The kept
+lever returns `SetValue::Generic(set)` directly for `set.len() > max_intset_entries`; small/all-int collapse still uses
+the old path, and `set_value_entry` still refreshes encoding flags afterward.
+
+Focused gate: `rch exec -- cargo bench --profile release -p fr-bench --bench set_algebra_vs_redis -- LARGE` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`, vendored Redis 7.2.4, and the new large-result rows
+(`SINTERSTORE large medium`, `SDIFFSTORE large medium`, 16 pipelined commands/iter, `set-max-intset-entries=512`).
+RCH remote could compile but could not see the untracked Redis oracle, so the measured A/B used RCH local fallback with
+saved control/candidate binaries from the same checkout and target dir.
+
+| gate | control vs Redis 7.2.4 | candidate vs Redis 7.2.4 | candidate/control | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `SINTERSTORE_LARGE` | `0.711x` | `1.641x` | `2.12x` | win; red gap flips to faster than Redis |
+| `SDIFFSTORE_LARGE` | `0.782x` | `1.350x` | `1.79x` | win; red gap flips to faster than Redis |
+
+Scorecard: **2 wins / 0 losses / 0 neutral** vs Redis 7.2.4. This keeps the part-102 structural lever in its lowest-risk
+form: one store helper branch plus bench coverage for the actual >intset-cap result shape.
+
 ### 2026-06-26 (part 103) BOLD-VERIFY GEOHASH multi-member bench lane + exact single-member guard (codex/BlackThrush)
 No off-main measured win needed landing: `main` already carried the GEOHASH multi-member code/ledger (`1f2ddce19` /
 part 100). This turn added a dedicated Criterion lane (`geo_vs_redis`) so GEOHASH can be re-run directly against vendored
@@ -4860,3 +4882,22 @@ structural win this session — proves part-81's "structural dest-build" had a s
 LESSON: trace a "structural" residual to the EXACT wasted pass (here: GenericSet->SetValue extend rebuild) — often there's
 a conservative skip for the common case. ENV: agent-mail corrupt all session; concurrent peer git ops intermittently lock
 .git/index (wait+retry, never rm the lock); a peer (codex) is on GEOHASH bench + parser-split (part 103) — coordinate.
+
+### 2026-06-26 (part 105) SCORECARD: from_index_set win COMPLETED the *STORE family (all fr-faster) + RESTORE gap map (cc/BlackThrush)
+Verified the part-104 from_index_set skip-rebuild generalized. Large-input (2000-member, 1000-result) *STORE family vs
+Redis 7.2.4, clean build with the landed fix: SINTERSTORE 1.806x, SUNIONSTORE 4.090x, SDIFFSTORE 1.653x, ZUNIONSTORE
+1.642x, ZINTERSTORE 1.895x, ZDIFFSTORE 1.322x — ALL fr-FASTER. The set-algebra *STORE surface (was SINTERSTORE 0.755x
+in part 78) is now DONE; from_index_set was the capstone (the GenericSet->SetValue double-build was the residual).
+DUG the next store-side gap = RESTORE decode (DUMP-payload RESTORE..REPLACE, 2000-member collections):
+  RESTORE-SET 0.744x (decode + my from_index_set helps the >cap set build; residual = RDB hashtable-payload parse)
+  RESTORE-HASH 0.898x (near-parity; qxfmr bulk-load + ideww CompactFieldMap already shipped)
+  RESTORE-ZSET 0.358x <<< DOMINANT — STRUCTURAL: 2000-member skiplist zset builds the IndexMap+BTreeMap DUAL structure
+    (uybhq). NOT a surgical double-build: from_unique_pairs already bulk-builds; the cost is the two-structure insert
+    (hash dict + sorted tree). The RDB payload IS pre-sorted (skiplist order == zset_cmp) so the sort is already O(n);
+    the BTreeMap construction dominates. Real lever = single-structure / from-sorted-iter zset (CoralOx fr-store, uybhq,
+    multi-session). Memory: ZSET RESTORE span-build was tried + NEUTRAL ("sort dominates").
+  RESTORE-LIST 0.454x = ChunkedList per-element re-synthesis (99fwc, structural).
+BLOCKER for a NEW per-turn surgical win: the remaining measured gaps (RESTORE-ZSET dual-structure, RESTORE-LIST
+ChunkedList, keyspace-RAM) are all multi-session STRUCTURAL fr-store/fr-persist levers (CoralOx domain) — no clean
+surgical hoist like from_index_set remains. The hot steady-state surface (dispatch + *STORE) is now parity-or-faster.
+ENV: a peer (codex) committed e5f4ec73a (GEOHASH bench); agent-mail corrupt; .git/index intermittently locked.
