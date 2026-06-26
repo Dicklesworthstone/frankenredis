@@ -5014,3 +5014,13 @@ fast-pathed; their residual gaps are STORE-BOUND not dispatch (GETEX/GET double-
 domain; LPOS/LREM = fr-store scan). So the clean byte-exact DISPATCH vein is now thin: data covered, introspection mostly
 divergent, pubsub done. Next real levers = store-side (CobaltCove GET/GETEX single-lookup; fr-store scans) or accept the
 dispatch surface as saturated.
+
+### 2026-06-25 (part 114) GETEX no-option single-lookup (was double) ~1.20x (cc/BlackThrush)
+GETEX-no-opts fast-path did store.key_type()+store.getex() = TWO keyspace lookups. GETEX with no options is a pure read
+identical to GET, so collapsed to single store.get() (the GET fast-path's own path). A/B cand/ctrl 1.195 (->cand/redis
+0.897, up from 0.751x). Byte-exact vs control AND redis: value/nil/WRONGTYPE, keyspace_hits+misses identical (single
+record), TTL PRESERVED (verified PEXPIRE->GETEX->PTTL unchanged — GETEX never mutates TTL), cmdstat_getex; PERSIST+EX|PX
+paths untouched. conformance 99/0 incl LFU. PROVES: not all store-PATH gaps are CobaltCove-only — a double-lookup INSIDE
+my own borrowed fast-path is mine to collapse (the GENERIC GET double-lookup record_keyspace_lookup->get_mut IS still
+CobaltCove's). Look for the same key_type+op double-lookup pattern in other fast-paths (GETDEL/GETSET/etc.) before
+dismissing the data vein as store-bound.
