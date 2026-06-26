@@ -4923,3 +4923,17 @@ Validation: `cargo bench --release` was attempted and Cargo rejected `--release`
 --all-targets -- -D warnings` green, `cargo check -p fr-server --all-targets` green, `cargo fmt --check -p fr-store`
 green, and `rch exec -- cargo test -p fr-conformance -- --nocapture` green (lib 194/0, helper bins green, smoke 99/0,
 doc-tests green). Agent Mail reservation failed due malformed DB; edits were kept to `fr-store` plus this ledger entry.
+
+### 2026-06-26 (part 106) NEW CLASS: XRANGE fast-path ~1.5-1.7x (beats redis) — streams were UNCOVERED (bbb763cd3) (cc/BlackThrush)
+Stream sweep (XLEN/XRANGE/XREVRANGE/XINFO/PUBLISH/EVAL) found streams/pubsub/scripting are an ENTIRELY uncovered class
+(my whole campaign was string/set/zset/hash/list/geo). XLEN already covered (cardinality fast-path, 0.748x=store-floor).
+XRANGE fully uncovered: 0.944x full / 0.599x COUNT. Shipped execute_plain_xrange_borrowed: parse_stream_range_bound +
+optional positive COUNT + store.xrange + record emit (format_stream_id); made both fr-command helpers pub. DEFERS malformed
+bound + COUNT<=0 (key-type-dependent null/empty/wrongtype). *4 key_arg2, *6 key_arg4(COUNT). A/B full cand/ctrl 1.471
+(redis 1.074), COUNT cand/ctrl 1.723 (redis 1.066) — BOTH beat redis. Byte-exact RESP2 (stream records same in RESP3),
+cmdstat+keyspace=1. conformance 99/0.
+REMAINING STREAM/PUBSUB LEVERS (uncovered, NEXT): XREVRANGE 0.537x (mirror of XRANGE, reversed), XRANGE-2-COUNT combos,
+XINFO STREAM 0.507x (complex reply), PUBLISH 0.490x (pubsub-state: fast-path the no-subscriber->0 case), TYPE-on-stream
+0.63x (verify), WAIT0 0.525x. EVAL 0.354x = Lua interpreter (STRUCTURAL, skip). The XRANGE record-emit + stream-id-parse
+pattern is now reusable for XREVRANGE. ENV: peers committing rapidly (caceabec4 etc.); .git/index intermittently locked
+(wait+retry); agent-mail corrupt.
