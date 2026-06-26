@@ -21407,6 +21407,46 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlackThrush) Borrowed fast path for `PUBSUB NUMPAT` (the *2 form). NUMPAT is
+    /// a pure global read: the total pattern-subscription count
+    /// (sum of subscriber-set sizes over all patterns), identical to
+    /// handle_pubsub_command. Only NUMPAT is claimed; any other *2 subcommand
+    /// (CHANNELS/SHARDCHANNELS/unknown) defers to the generic. Container cmdstat row
+    /// is `pubsub|numpat`.
+    pub fn execute_plain_pubsub_numpat_borrowed(
+        &mut self,
+        sub: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !sub.eq_ignore_ascii_case(b"NUMPAT") {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"PUBSUB".len() + sub.len();
+        let packet_id = self.plain_read_borrowed_preamble("pubsub|numpat", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let numpat = self
+            .server
+            .pubsub_pattern_subs
+            .values()
+            .map(|clients| clients.len())
+            .sum::<usize>();
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::try_from(numpat).unwrap_or(i64::MAX));
+        self.record_plain_zremrange_borrowed_metrics(
+            "pubsub|numpat",
+            "PUBSUB",
+            || vec![b"PUBSUB".to_vec(), sub.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        Some(reply)
+    }
+
     pub fn execute_plain_publish_borrowed(
         &mut self,
         channel: &[u8],

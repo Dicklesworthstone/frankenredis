@@ -4630,6 +4630,20 @@ fn process_buffered_frames(
                             &mut conn.write_buf, &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_pubsub_packet(unparsed, &parser_config)
+                {
+                    // PUBSUB NUMPAT (*2) — execute claims only NUMPAT, defers else.
+                    if let Some(response) =
+                        runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed, parser_config, runtime, ts,
+                            &mut conn.write_buf, &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
                     &parser_config,
@@ -9295,6 +9309,34 @@ fn parse_borrowed_plain_decr_packet<'a>(
 struct BorrowedPlainStrlenPacket<'a> {
     consumed: usize,
     key: &'a [u8],
+}
+
+struct BorrowedPlainPubsubPacket<'a> {
+    consumed: usize,
+    sub: &'a [u8],
+}
+
+// (BlackThrush) Byte-prefix fast path for the *2 form `PUBSUB <subcommand>` (i.e.
+// NUMPAT — CHANNELS/SHARDCHANNELS also fit *2 but the execute only claims NUMPAT and
+// defers the rest). Mirrors the STRLEN single-arg packet.
+fn parse_borrowed_plain_pubsub_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainPubsubPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"PUBSUB".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"PUBSUB"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (sub, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainPubsubPacket { consumed, sub })
 }
 
 // (frankenredis-45wpc) Byte-prefix fast path for single-key STRLEN, mirroring the
