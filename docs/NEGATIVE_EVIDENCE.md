@@ -5024,3 +5024,19 @@ paths untouched. conformance 99/0 incl LFU. PROVES: not all store-PATH gaps are 
 my own borrowed fast-path is mine to collapse (the GENERIC GET double-lookup record_keyspace_lookup->get_mut IS still
 CobaltCove's). Look for the same key_type+op double-lookup pattern in other fast-paths (GETDEL/GETSET/etc.) before
 dismissing the data vein as store-bound.
+
+### 2026-06-26 (part 115) LEDGER REJECT: key_type+op double-lookup does NOT generalize (intentional no-stat design) (cc/BlackThrush)
+Chased the part-114 lead (collapse key_type()+op double-lookups in borrowed read fast-paths). RESULT: does NOT generalize.
+The op (store.lindex/getex/etc.) is DELIBERATELY NO-STAT — verified by the explicit comment in store.lindex: "NO-STAT
+drop_if_expired: both production callers ... already record the single keyspace hit/miss via the store.key_type precheck
+... so a counting lookup here double-bumped keyspace_hits for a present list." store.getex confirmed same (its only
+keyspace-ish call is drop_if_expired, NOT record_keyspace_lookup). So key_type RECORDS + does the type-check; the op is
+no-stat to AVOID double-counting. Collapsing (removing key_type, calling op alone) would lose the keyspace hit/miss
+recording => under-count. GETEX-no-opts (part 114) was the LONE clean collapse ONLY because store.get is a recording-fetch
+drop-in (GET/GETDEL are the only ops that record themselves; GETDEL fast-path already single-lookup). To collapse
+LINDEX/GETEX-EX|PX/etc. you'd have to ADD a recording-fetch variant per op in fr-store (risk double-count vs the generic
+which still uses key_type) — NOT a clean per-turn win for a ~1.1-1.2x gain. bitpos/bitcount DO self-record but are already
+fr-FASTER (part 78, 2.38x) so no lever. LESSON: a key_type+op pair in a fast-path is usually BY DESIGN (no-stat op);
+before collapsing, read the op body for a NO-STAT comment + confirm it calls record_keyspace_lookup (not just
+drop_if_expired). The clean dispatch + single-lookup veins are now EXHAUSTED; remaining = store-side structural (CoralOx)
++ generic GET double-lookup (CobaltCove core).
