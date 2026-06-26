@@ -4947,3 +4947,14 @@ WRONGTYPE, COUNT<=0 edges, malformed/bad-opt defers), cmdstat+keyspace=1. confor
 STREAM/PUBSUB SCORECARD: XRANGE (106) + XREVRANGE (107) DONE. NEXT: XINFO STREAM 0.507x (complex multi-field reply),
 PUBLISH 0.490x (pubsub no-subscriber->0 fast-path), WAIT0 0.525x. EVAL=Lua structural skip. XADD (write, sidemap-alloc
 tcknm). Peer landed caceabec4 (PFADD sparse). The XRANGE/XREVRANGE id-parse+record-emit pattern reusable for any stream read.
+
+### 2026-06-25 (part 108) PUBLISH fast-path ~1.92x (0.48x->0.92x near-parity) — special-command intercept (cc/BlackThrush)
+PUBLISH = RuntimeSpecialCommand (handle_publish_command, argv-materialized) = 0.481x. execute_plain_publish_borrowed
+intercepts *3 in process_buffered_frames before the special-command routing. KEY INSIGHT: the plain write gate checks
+any_replica_ever_connected=false, so PUBLISH's repl-only capture_replication_only_record is a PROVABLE no-op (same basis
+as byte-exact write fast-paths) -> the fast path = pubsub_publish (local delivery+count) + return count, nothing else.
+A/B cand/ctrl 1.920 (->cand/redis 0.924 near-parity, was 0.481x — nearly doubles fr throughput; does NOT beat redis but
+closes ~90% of the gap). Byte-exact: receiver counts (0/direct/pattern), actual 'message'+'pmessage' delivery frames to
+SUBSCRIBE/PSUBSCRIBE clients, cmdstat_publish, connected_slaves:0. conformance 99/0. PROVES special-commands (not just
+normal dispatch) are fast-pathable when their side effects are gate-provable no-ops. NEXT pubsub: SPUBLISH (shard, same
+pattern via pubsub_spublish), WAIT0 0.525x (special-cmd, replica-count). XINFO STREAM 0.507x complex. EVAL=Lua structural.
