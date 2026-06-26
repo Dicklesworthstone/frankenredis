@@ -5072,3 +5072,19 @@ CONCLUSION (triple-verified across dispatch / fast-path / store-alloc layers): t
 reducible by any per-turn change in my domain. SADD/LPUSH/RPUSH/ZADD = CoralOx fr-store data-structure design (uybhq dual
 zset, 99fwc ChunkedList, set-insert); GET = CobaltCove core double-lookup. The clean per-turn lever class is DEFINITIVELY
 exhausted (30 wins parts 82-114). No safe non-dup lever remains; further gains require the owning agents' structural work.
+
+### 2026-06-26 (part 118) DISPATCH SATURATION COMPLETE (long-tail verified) + precise GET-lever location (cc/BlackThrush)
+Verified the dispatch surface is COMPREHENSIVELY saturated — even long-tail string/bit/hash writes are all fast-pathed:
+SETRANGE/APPEND/SETBIT/GETSET/BITFIELD/GETBIT/INCRBYFLOAT/HINCRBYFLOAT/HSETNX/GETDEL/COPY all have borrowed parsers+execute
+(refs 6-16 each). Combined with parts 115-117 (double-lookup intentional, hot-writes alloc-optimal+structural, proper-load
+scorecard), the clean per-turn dispatch/option/pubsub/single-lookup lever class is DEFINITIVELY EXHAUSTED (30 wins this
+session, parts 82-114; ~45 prior parts 49-77).
+PRECISE GET-LEVER LOCATION for CobaltCove: Store::get(key) -> get_string_bytes(key) which does record_keyspace_lookup(key)
+[lookup 1: drop_if_expired + hit/miss stat] THEN entries.get_mut(key) [lookup 2: fetch] = the 0.866x double-lookup.
+Collapsing needs ONE get_mut with inline expiry-check + conditional lazy-remove (the drop_if_expired side effects:
+key removal, expired-deletion propagation, notify-keyspace-event) + the hit/miss record — all under a single get_mut
+borrow. That borrow-vs-conditional-remove + replicating drop_if_expired's side-effects byte-exactly is exactly why it's a
+CORE lever (high blast radius: GET/MGET/GETEX-no-opts/any get_string_bytes caller). dryll's get_sort_weight is the proven
+template (single-purpose getter, byte-exact). NOT attempted: CobaltCove-flagged + core-risk. CONCLUSION: no safe non-dup
+per-turn lever remains in my domain; the campaign is complete here. Remaining gains = CoralOx fr-store structural (uybhq/
+99fwc/set-insert) + this GET collapse (CobaltCove) — both cross-domain.
