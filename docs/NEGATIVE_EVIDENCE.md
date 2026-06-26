@@ -5447,3 +5447,15 @@ cand==ctrl==redis. NEW LEVER CLASS: dispatch cascade ordering — a fast-pathed-
 gauntlet. The parser is specific (*3 $6 INCRBY) so hoisting can't intercept others = safe. (Late INCRBY/DECRBY branches
 now dead for those cmds — caught early; harmless redundancy, cleanup follow-up.) NEXT: grep for other hot commands
 dispatched late (high line number) that could be hoisted — this is a fresh productive vein on the CLEAN tree.
+
+### 2026-06-26 (part 137) MEASURED WIN: GETRANGE dispatch-hoist ~1.69x (0.61x->1.02x, BEATS redis) — vein CONFIRMED (cc/BlackThrush)
+2nd dispatch-cascade-ordering win (after part-136 INCRBY 1.78x). GETRANGE was dispatched at main.rs:6970 (late) — cheap
+substring store but paid the full early-parser gauntlet. Hoisted its branch to after DECRBY (early, ~3475). A/B (python
+pipelined cand=hoist vs ctrl=committed-with-INCRBY-hoist): GETRANGE cand/ctrl 1.613/1.790/1.670 mean 1.691, cand/redis
+1.021 (BEATS redis, up from ctrl/redis 0.609x). Byte-exact: GETRANGE 0..4 / -3..-1 / 6..10 / nokey cand==ctrl==redis.
+CONFIRMS the dispatch-ordering vein: a fast-pathed-but-LATE command's gap is largely the gauntlet, not store — hoist it.
+PRODUCTIVE VEIN (2 wins ~1.7x): other CHEAP-store late commands to hoist next (dispatch line numbers): GETSET 4443,
+APPEND 5259, HGET 5039 (already fr-faster, skip), BITFIELD, and the expensive-store late ones (ZADD 7669, SADD/LPUSH)
+may get PARTIAL wins (gauntlet is additive on top of store). The real structural fix = reorder the whole cascade by
+frequency OR hash-dispatch (big refactor); per-turn = hoist measured-slow cheap commands. Found via -c50 -P16 proper-load
+sweep. conformance pending. (late dead GETRANGE branch at 6970 = cleanup follow-up, same as INCRBY.)
