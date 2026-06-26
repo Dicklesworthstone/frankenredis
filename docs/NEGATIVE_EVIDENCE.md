@@ -4800,3 +4800,22 @@ suspect a CONTAMINATED build (peer uncommitted WIP in shared tree) — rebuild f
 HANDOFF: remaining levers are STORE-SIDE structural (uybhq zset-insert, 99fwc ChunkedList, keyspace-RAM, sinterstore
 large-set, RESTORE-decode — CoralOx fr-store domain, multi-session) or hot-core re-profile (CobaltCove). Per-turn clean
 dispatch wins are done. agent-mail DB corrupt all session (reservations down). A peer is mid-refactor of the dispatch chain.
+
+### 2026-06-25 (part 102) LEDGER REJECT + PRECISE STORE-SIDE LEVER: SINTERSTORE dest GenericSet->SetValue DOUBLE-BUILD (cc/BlackThrush)
+Dug the part-78/81 "sinterstore 0.755x = structural dest-build" residual to its EXACT mechanism (clean dispatch vein
+already exhausted, part 101). TRACE: store.sinterstore -> sinter_value builds the result as a GenericSet (HashMap of
+member Vec<u8>) -> store_set_algebra_value -> set_value_entry -> SetValue::from_index_set(g) -> `sv.extend(set, max_intset)`
+which RE-INSERTS every member into a fresh SetValue (full O(N) REBUILD, NOT a cheap all-int scan). So a large string-set
+SINTERSTORE pays TWO O(N) builds: (1) build GenericSet `out`, (2) throw it away and rebuild as a hashtable SetValue. That
+is the 0.755x gap (redis builds the dest member-by-member ONCE). Confirms part-81's "gap is in the DATA STRUCTURE not the
+algorithm" with the precise culprit.
+CLEAN FIX (CoralOx fr-store, multi-function): make sinter_value/sdiff_value build the FINAL SetValue directly with inline
+int-detection during the member loop (track is_all_int + max_value as members are inserted), producing SetValue::Int when
+eligible else SetValue::Generic, and add a store_set_algebra path that takes the pre-encoded SetValue (skipping
+set_value_entry's from_index_set rebuild). Eliminates one of the two O(N) passes. Applies to sinterstore + sdiffstore
+(sunionstore already builds via sunion_value; verify it doesn't double-build too).
+NOT ATTEMPTED THIS TURN: fr-store is CoralOx's actively-iterated domain; a peer is mid-refactor of the dispatch chain
+(296-line uncommitted main.rs WIP); agent-mail corrupt (reservations down); git index intermittently locked. A multi-
+function fr-store refactor here = high collision/revert risk in a per-turn context. Handed off as a PRECISE lever.
+My clean per-turn dispatch/option/arity class is DONE (20 wins parts 82-100). Next BlackThrush-ownable levers require
+either the tree to quiesce or a genuinely different non-fr-store class.
