@@ -5040,3 +5040,19 @@ fr-FASTER (part 78, 2.38x) so no lever. LESSON: a key_type+op pair in a fast-pat
 before collapsing, read the op body for a NO-STAT comment + confirm it calls record_keyspace_lookup (not just
 drop_if_expired). The clean dispatch + single-lookup veins are now EXHAUSTED; remaining = store-side structural (CoralOx)
 + generic GET double-lookup (CobaltCove core).
+
+### 2026-06-26 (part 116) PROPER-LOAD SCORECARD: dispatch vein EXHAUSTED, residuals are store-side (cc/BlackThrush)
+Ran redis-benchmark -c50 -P16 -n200000 (the PROPER concurrent load; single-conn understates) fr-vs-redis-7.2.4 after this
+session's 30 wins. connected_slaves:0 confirmed (no stray replica). RESULTS (fr/redis, >1 = fr faster):
+  SET 1.238  INCR 1.153  HSET 1.195  LPOP 1.156  SPOP 1.109   <- fr FASTER (dispatch+store both good)
+  GET 0.866   <- generic Store::get double-lookup (record_keyspace_lookup -> get_mut = 2 hash probes); CobaltCove CORE
+  LPUSH 0.592  RPUSH 0.568   <- ChunkedList append per-element Vec alloc (99fwc); CoralOx fr-store
+  SADD 0.549   <- SetValue insert; CoralOx fr-store
+  ZADD 0.539   <- FullSortedSet dual-structure (IndexMap dict + ordered) update (uybhq); CoralOx fr-store
+VERIFIED these are NOT dispatch gaps: SADD/LPUSH/RPUSH covered by the ohsk5 n-value parsers; ZADD fast-path
+(execute_plain_zadd_borrowed) is clean (parse scores + one to_vec/member + store.zadd_plain_owned — no redundant work,
+zadd_plain_owned structurally bound per prior note). So the clean per-turn DISPATCH/OPTION/PUBSUB/SINGLE-LOOKUP lever class
+I own is EXHAUSTED. The 5 remaining hot residuals are ALL store-side structural: 4 collection insert/update paths (CoralOx:
+uybhq zset, 99fwc list, set-insert) + the GET double-lookup (CobaltCove core, high blast radius - all reads). Precise
+handoff with quantified ratios. No safe per-turn lever remains in my domain; next real gains require fr-store structural
+work or the core read-path single-lookup collapse - both cross-domain/multi-session.
