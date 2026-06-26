@@ -4958,3 +4958,11 @@ closes ~90% of the gap). Byte-exact: receiver counts (0/direct/pattern), actual 
 SUBSCRIBE/PSUBSCRIBE clients, cmdstat_publish, connected_slaves:0. conformance 99/0. PROVES special-commands (not just
 normal dispatch) are fast-pathable when their side effects are gate-provable no-ops. NEXT pubsub: SPUBLISH (shard, same
 pattern via pubsub_spublish), WAIT0 0.525x (special-cmd, replica-count). XINFO STREAM 0.507x complex. EVAL=Lua structural.
+
+### 2026-06-25 (part 109) SPUBLISH fast-path ~2.18x (BEATS redis 1.012x) — shard sibling of PUBLISH (cc/BlackThrush)
+Direct mirror of part-108 PUBLISH for the shard channel. execute_plain_spublish_borrowed = pubsub_spublish (shard subs,
+NO pattern-match loop so cheaper than PUBLISH) under the same plain-write-gate no-op-repl basis. *3 key_arg1. A/B cand/ctrl
+2.184 (->cand/redis 1.012, BEATS redis, up from ctrl ~0.46x). Byte-exact: counts (0/shard), actual 'smessage' delivery
+frame to SSUBSCRIBE client, cmdstat_spublish. conformance 99/0. PUBLISH+SPUBLISH special-command pubsub class DONE. NEXT:
+WAIT0 0.525x (special-cmd, replica-count=connected count, immediate when numreplicas<=current), XINFO STREAM 0.507x
+(complex multi-field reply), PUBSUB NUMSUB/NUMPAT/CHANNELS (introspection reads). EVAL=Lua structural skip.
