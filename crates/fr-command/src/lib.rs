@@ -7402,7 +7402,7 @@ fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
 }
 
 #[inline]
-fn format_stream_id(id: StreamId) -> Vec<u8> {
+pub fn format_stream_id(id: StreamId) -> Vec<u8> {
     format!("{}-{}", id.0, id.1).into_bytes()
 }
 
@@ -7484,7 +7484,7 @@ fn parse_partial_stream_id(arg: &[u8], is_start: bool) -> Result<StreamId, RespF
 // streamParseIntervalIDOrReply: accepts the `-`/`+` sentinels and the
 // `(N` exclusive prefix (Redis 6.2+). XREAD/XTRIM/XADD MINID/XGROUP do
 // NOT accept `(N` and must reject it upstream of this call.
-fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
+pub fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
     let invalid_id = || {
         RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
     };

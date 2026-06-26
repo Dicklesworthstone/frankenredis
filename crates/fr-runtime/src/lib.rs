@@ -21294,6 +21294,99 @@ impl Runtime {
     /// fr_command::geo_hash_string_from_score (nil for a missing member). This also
     /// records exactly ONE keyspace hit like redis (the generic GEOHASH path uses a
     /// per-member zscore that over-counts for multi-member — fixed here).
+    /// (BlackThrush) Borrowed READ fast path for `XRANGE key start end [COUNT n]`.
+    /// Streams were an entirely uncovered class. Parses the start/end range bounds
+    /// and optional positive COUNT, then store.xrange + the same record emit as the
+    /// generic (array of [id, [field, value ...]]). Defers to the generic on a
+    /// malformed range bound (canonical error) and on COUNT <= 0 (the key-type-
+    /// dependent null/empty/wrongtype reply), so only the clean common shape is
+    /// fast-pathed.
+    pub fn execute_plain_xrange_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        end_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_bulk_len < b"XRANGE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || start_arg.len() > self.policy.gate.max_bulk_len
+            || end_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let start = fr_command::parse_stream_range_bound(start_arg, true).ok()?;
+        let end = fr_command::parse_stream_range_bound(end_arg, false).ok()?;
+        let count = match count_arg {
+            None => None,
+            Some(c) => {
+                let n = parse_i64_arg(c).ok()?;
+                if n <= 0 {
+                    return None;
+                }
+                Some(usize::try_from(n).unwrap_or(usize::MAX))
+            }
+        };
+        let argv_len_sum = b"XRANGE".len()
+            + key.len()
+            + start_arg.len()
+            + end_arg.len()
+            + count_arg.map_or(0, |c| b"COUNT".len() + c.len());
+        let packet_id = self.plain_read_borrowed_preamble("xrange", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let reply = match self.server.store.xrange(key, start, end, count, now_ms) {
+            Ok(records) => {
+                let out = records
+                    .into_iter()
+                    .map(|(id, fields)| {
+                        let mut field_frames = Vec::with_capacity(fields.len().saturating_mul(2));
+                        for (field, value) in fields {
+                            field_frames.push(RespFrame::BulkString(Some(field)));
+                            field_frames.push(RespFrame::BulkString(Some(value)));
+                        }
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
+                            RespFrame::Array(Some(field_frames)),
+                        ]))
+                    })
+                    .collect();
+                RespFrame::Array(Some(out))
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "xrange",
+            "XRANGE",
+            || {
+                let mut argv = vec![
+                    b"XRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    end_arg.to_vec(),
+                ];
+                if let Some(c) = count_arg {
+                    argv.push(b"COUNT".to_vec());
+                    argv.push(c.to_vec());
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     pub fn execute_plain_geohash_borrowed(
         &mut self,
         key: &[u8],
