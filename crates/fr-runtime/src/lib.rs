@@ -21301,6 +21301,48 @@ impl Runtime {
     /// malformed range bound (canonical error) and on COUNT <= 0 (the key-type-
     /// dependent null/empty/wrongtype reply), so only the clean common shape is
     /// fast-pathed.
+    /// (BlackThrush) Borrowed fast path for `PUBLISH channel message`. PUBLISH is
+    /// a RuntimeSpecialCommand normally; this intercepts the *3 form before the
+    /// generic special-command routing. Under the plain write gate (no replicas EVER
+    /// connected, no monitors/AOF/etc.) the replica-only propagation
+    /// (capture_replication_only_record) is a provable no-op, so the fast path just
+    /// delivers to local subscribers via pubsub_publish and returns the receiver
+    /// count. Identical local delivery + count as handle_publish_command.
+    pub fn execute_plain_publish_borrowed(
+        &mut self,
+        channel: &[u8],
+        message: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_bulk_len < b"PUBLISH".len()
+            || channel.len() > self.policy.gate.max_bulk_len
+            || message.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let argv_len_sum = b"PUBLISH".len() + channel.len() + message.len();
+        let packet_id = self.plain_zremrange_write_preamble("publish", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        let receivers = self.pubsub_publish(channel, message);
+        let elapsed_us = self.finish_chained_command(st);
+        let reply = RespFrame::Integer(i64::try_from(receivers).unwrap_or(i64::MAX));
+        self.record_plain_zremrange_borrowed_metrics(
+            "publish",
+            "PUBLISH",
+            || vec![b"PUBLISH".to_vec(), channel.to_vec(), message.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(reply)
+    }
+
     pub fn execute_plain_xrange_borrowed(
         &mut self,
         key: &[u8],
