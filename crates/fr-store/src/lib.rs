@@ -517,17 +517,29 @@ impl StreamGroup {
     }
 
     fn set_consumer_seen_time(&mut self, consumer: &[u8], now_ms: u64) {
-        let metadata = self.consumer_metadata.entry(consumer.to_vec()).or_default();
+        let metadata = match self.consumer_metadata.get_mut(consumer) {
+            Some(metadata) => metadata,
+            None => self.consumer_metadata.entry(consumer.to_vec()).or_default(),
+        };
         metadata.seen_time_ms = now_ms;
-        let state = self.consumer_states.entry(consumer.to_vec()).or_default();
+        let state = match self.consumer_states.get_mut(consumer) {
+            Some(state) => state,
+            None => self.consumer_states.entry(consumer.to_vec()).or_default(),
+        };
         state.metadata.seen_time_ms = now_ms;
         state.metadata.active_time_ms = metadata.active_time_ms;
     }
 
     fn set_consumer_active_time(&mut self, consumer: &[u8], now_ms: u64) {
-        let metadata = self.consumer_metadata.entry(consumer.to_vec()).or_default();
+        let metadata = match self.consumer_metadata.get_mut(consumer) {
+            Some(metadata) => metadata,
+            None => self.consumer_metadata.entry(consumer.to_vec()).or_default(),
+        };
         metadata.active_time_ms = Some(now_ms);
-        let state = self.consumer_states.entry(consumer.to_vec()).or_default();
+        let state = match self.consumer_states.get_mut(consumer) {
+            Some(state) => state,
+            None => self.consumer_states.entry(consumer.to_vec()).or_default(),
+        };
         state.metadata.seen_time_ms = metadata.seen_time_ms;
         state.metadata.active_time_ms = Some(now_ms);
     }

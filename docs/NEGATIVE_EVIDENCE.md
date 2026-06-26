@@ -5356,3 +5356,12 @@ PROVABLY non-regressing (strictly fewer ops, key always present, byte-identical 
 ALL >=1.0 (never regresses). Byte-exact: XLEN + XINFO entries-added cand==ctrl==redis. Small but clean — REMOVES work +
 2 allocs/call (not churn). Re-implements bead tcknm (was found+compiled+reverted-UNBENCHED; now BENCHED + landed). Built
 main-tree with peer dispatch-WIP present (compiles; XADD path is store-isolated so A/B valid); committed fr-store ONLY.
+
+### 2026-06-26 (part 130) MEASURED WIN: consumer seen/active-time get_mut — drop 4 key.to_vec()/XREADGROUP ~1.05x (cc/BlackThrush)
+Same tcknm-style fr-store-INTERNAL pattern as part-129 (peer-untouched fr-store, no fr-runtime wiring). set_consumer_seen_time
++ set_consumer_active_time (fired on every XREADGROUP) did 4x consumer_metadata/consumer_states.entry(consumer.to_vec())
+.or_default() — wasted to_vec for a persistent consumer (present-after-first; the common case of a long-lived consumer
+reading continuously). Replaced with get_mut(consumer) (entry+or_default fallback only on first-seen). Byte-identical &mut
++ or_default semantics. A/B repeated XREADGROUP pending-read (full-binary cand-vs-control, peer dispatch-WIP constant):
+4 trials cand/ctrl 1.061/1.095/1.003/1.045 = mean ~1.05x, ALL >=1.0. Byte-exact: XREADGROUP reply + XINFO CONSUMERS
+pending cand==ctrl==redis. Saves 4 allocs/call for the hot persistent-consumer path. conformance pending-verify.
