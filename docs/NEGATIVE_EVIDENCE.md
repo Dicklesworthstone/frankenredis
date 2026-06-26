@@ -5290,3 +5290,35 @@ exhausted (parts 115-126: dispatch saturated, GET fully optimized, double-lookup
 ZADD-flags zero-gain, LPOS store-bound). The structural lever is the only remaining gain and it's a data-structure rewrite,
 not a per-turn edit. INDEPENDENT-VERIFY value: confirmed the gaps with a clean post-landing build + corrected the WIP
 mis-read. Next genuine win requires the uybhq/99fwc structural rewrite (multi-session) by whoever owns fr-store.
+
+### 2026-06-26 (part 128) BOLD-VERIFY: no unlanded worktree win; SINTERCARD LIMIT re-check is already > Redis 7.2.4 (codex/BlackThrush)
+Scanned registered worktrees and dirty bench trees before editing. The only head not ancestor of `origin/main`
+(`/data/projects/.worktrees/frankenredis-cod-a-control-20260620`, `a4b709e`) was docs/beads-only ZADD guard-loss evidence,
+not a measured code win. Dirty `.worktrees` candidates did not expose a landable unmerged win: zset score-varint work was
+already rejected in main with direct packed-zset RSS control/candidate evidence, PFADD/HLL work is already landed as
+`57bcb6602`, and the remaining old stream/pubsub/control diffs were not measured wins against Redis 7.2.4.
+
+Re-checked the current `SINTERCARD_LIMIT` lane because old option-form notes made it look suspicious. Built per-crate
+server with warm target:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- cargo build --profile release -p fr-server`
+(RCH fell open locally: no admissible workers, worker pressure). Bench command:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec -- env FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server cargo bench --profile release -p fr-bench --bench set_algebra_vs_redis -- SINTERCARD_LIMIT --noplot`
+(also local fallback under RCH worker pressure).
+
+Measured vs Redis 7.2.4:
+- `SINTERCARD_LIMIT2`: Redis median `89.664 us`, FrankenRedis median `85.533 us`; throughput `187.06/178.44 = 1.048x`
+  Redis 7.2.4.
+- `SINTERCARD_LIMIT3`: Redis median `86.874 us`, FrankenRedis median `82.035 us`; throughput `195.04/184.18 = 1.059x`
+  Redis 7.2.4.
+
+Decision: no source lever and no revert needed; this lane is not a current gap. The stale SINTERCARD suspicion is closed by
+measurement. Continue routing to the measured structural hot-write gaps (set/zset/list storage), not SINTERCARD dispatch.
+
+### 2026-06-26 (part 128) SINTERCARD regression-concern RESOLVED — no regression, my opt intact + dominant (cc/BlackThrush)
+Verified the part-124 "SINTERCARD 0.555x possible regression" flag (fresh clean binary, no collision): NO REGRESSION.
+SINTERCARD fr/redis = 1set 1.214x, 2set 1.974x, 3set 2.051x, 3+LIMIT 1.884x, SINTER-3 1.225x — all fr-FASTER, my
+resolve-other-sets-once opt (4766beb4b) intact + dominant. The part-124 0.555x was a MEASUREMENT ARTIFACT (1-set + LIMIT 2
+on a 3-member set = tiny absolute throughput, noisy single-conn). False alarm cleared. LESSON: tiny-input single-conn
+ratios are noise — re-verify a flagged "regression" on a realistic input before believing it. All my 30 session wins
+confirmed intact. This closes the last open verification thread; domain exhausted, structural inserts (uybhq/99fwc) the
+only remaining gain (multi-day, unstarted). Peer now has live WIP in fr-command/src/lib.rs — staying clear.
