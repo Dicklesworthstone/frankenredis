@@ -4989,3 +4989,17 @@ incl WrongSubcommandArity/unknown, cmdstat). conformance 99/0. NOTE: container-c
 COMMAND COUNT 0.573x, XSETID 0.470x (stream write), OBJECT REFCOUNT/IDLETIME 0.67x. SMISMEMBER already covered (0.53x
 store/arity-bound, not dispatch). ENV NOTE: shell `ls` is aliased to long-format — use explicit /tmp paths not $(ls -t);
 background servers DON'T persist across separate Bash calls — launch+bench in ONE command.
+
+### 2026-06-25 (part 112) PUBSUB NUMSUB fast-path ~1.71x (byte-exact) + CHANNELS REJECT (sort divergence) (cc/BlackThrush)
+PUBSUB NUMSUB (uncovered 0.438x): variadic *3+ parser (modeled GEOHASH: *N/$6 PUBSUB/$6 NUMSUB/count-2 channels) emits flat
+[channel, count] in ARG ORDER under plain read gate; cmdstat pubsub|numsub. A/B cand/ctrl 1.714 (->cand/redis 0.726, up
+from 0.424x). Byte-exact (1/3/dup channels, lowercase, live counts zeta:2/none:0/mid:1, arg-order, *2-empty->*0, cmdstat).
+conformance 99/0.
+REJECT — PUBSUB CHANNELS: implemented + measured FASTER (cand/ctrl ~2x) but REVERTED. fr SORTS the channel list
+(channels.sort() — deterministic, conformance-required like SCAN) while redis emits raw dict/hash order (e.g. redis
+`zeta mid alpha` vs fr `alpha mid zeta`). Pre-existing fr design divergence => CHANNELS CANNOT be byte-exact vs redis;
+matching control would still mismatch redis. Same class: COMMAND COUNT (fr cmd-count != redis), XSETID (stateful
+command-layer validation max_deleted_id/top-item in xsetid_cmd not the store — can't cleanly fast-path). LESSON: before
+fast-pathing an introspection/list command, check fr-vs-redis ORDER + whether fr uses a deterministic sort redis lacks.
+PUBSUB NUMPAT+NUMSUB done (byte-exact); CHANNELS/SHARDCHANNELS structurally non-exact. NEXT clean: OBJECT IDLETIME 0.674x
+(verify fr idle model == redis first), XINFO STREAM 0.507x (complex but deterministic).
