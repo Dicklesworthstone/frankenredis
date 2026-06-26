@@ -5257,3 +5257,10 @@ commands; for STORE-bound commands (ZADD/SADD/insert-class) the dispatch saving 
 EXPIRE-pattern transfers. The remaining LPOS-RANK-neg/BITFIELD/GEOSEARCH option-forms are likely similarly store/compute-
 bound; verify dispatch-vs-store binding (perf-stat instr, or A/B) before building. commit-safety: CoralOx WIP did NOT touch
 zadd_with_options/ZaddOptions (my change was origin-compatible) — moot now. CoralOx fr-store WIP left untouched.
+
+### 2026-06-26 (part 126) LAND: PFADD existing-key register-cache code committed with part-125 proof (codex/BlackThrush)
+Code landing entry for the part-125 PFADD keep. The landed code is `crates/fr-store/src/lib.rs`: existing-key `PFADD`
+uses `hll_register_cache` when the key modification count matches, exits duplicate batches without sparse HLL reparse, and
+falls back to full decode on stale cache or missing cache. Ratio proof from part 125: local control `0.450x` vs Redis 7.2.4
+to candidate `0.468x` vs Redis 7.2.4; candidate/control FrankenRedis throughput `1.077x` (+7.7%), Criterion `+24.415%`,
+`p=0.01`. Conformance remains green via `rch exec -- cargo +nightly-2026-06-09 test -p fr-conformance -- --nocapture`.

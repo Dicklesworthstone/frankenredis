@@ -17402,16 +17402,49 @@ impl Store {
                 .saturating_add(1_u64.saturating_add(register_updates));
             return Ok(true);
         }
+        let mut cached_register_updates = None;
         let (mut registers, encoding, existed) = match self.entries.get(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
+                let modification_count = entry.modification_count;
                 // PFADD mirrors hllSparseSet, which only walks to each element's
                 // target register and tolerates ANY trailing opcode garbage (VAL
                 // or XZERO) past a complete register set (returns :1, not an
                 // error). (frankenredis-yiu5p)
-                let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Add)?;
+                let (encoding, registers) = if let Some(cache) = self
+                    .hll_register_cache
+                    .get(key)
+                    .filter(|cache| cache.modification_count == modification_count)
+                {
+                    let encoding = hll_parse_encoding(data.as_ref())?;
+                    let mut registers = None;
+                    let mut register_updates = 0_u64;
+                    for element in elements {
+                        let hash = hll_hash(element);
+                        let index = (hash as usize) & (HLL_REGISTERS - 1);
+                        let count = hll_rho(hash >> HLL_P);
+                        let current = registers
+                            .as_ref()
+                            .map_or(cache.registers[index], |registers: &Vec<u8>| {
+                                registers[index]
+                            });
+                        if count > current {
+                            let registers = registers
+                                .get_or_insert_with(|| cache.registers.as_slice().to_vec());
+                            registers[index] = count;
+                            register_updates += 1;
+                        }
+                    }
+                    let Some(registers) = registers else {
+                        return Ok(false);
+                    };
+                    cached_register_updates = Some(register_updates);
+                    (encoding, registers)
+                } else {
+                    hll_parse(data.as_ref(), HllDecode::Add)?
+                };
                 (registers, encoding, true)
             }
             None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
@@ -17422,15 +17455,17 @@ impl Store {
         // for creating the key, and does `server.dirty += updated`. fr only
         // bumped dirty by 1, so rdb_changes_since_last_save / the auto-save
         // threshold diverged for multi-element PFADD.
-        let mut register_updates: u64 = 0;
-        for element in elements {
-            let hash = hll_hash(element);
-            let index = (hash as usize) & (HLL_REGISTERS - 1);
-            let w = hash >> HLL_P;
-            let count = hll_rho(w);
-            if count > registers[index] {
-                registers[index] = count;
-                register_updates += 1;
+        let mut register_updates = cached_register_updates.unwrap_or(0);
+        if cached_register_updates.is_none() {
+            for element in elements {
+                let hash = hll_hash(element);
+                let index = (hash as usize) & (HLL_REGISTERS - 1);
+                let w = hash >> HLL_P;
+                let count = hll_rho(w);
+                if count > registers[index] {
+                    registers[index] = count;
+                    register_updates += 1;
+                }
             }
         }
 
@@ -41130,6 +41165,56 @@ mod tests {
         assert_eq!(store.get(b"hll", 0).unwrap().unwrap(), direct);
         assert_eq!(store.dirty, 1 + expected_updates);
         assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
+    }
+
+    #[test]
+    fn pfadd_existing_key_register_cache_serves_duplicate_batch() {
+        let elements: Vec<Vec<u8>> = (0..16).map(|i| format!("elem{i}").into_bytes()).collect();
+        let mut store = Store::new();
+        assert!(store.pfadd(b"hll", &elements, 0).unwrap());
+        assert!(
+            !store.hll_register_cache.contains_key(b"hll".as_slice()),
+            "direct missing-key sparse create does not need a register cache"
+        );
+
+        let after_create_dirty = store.dirty;
+        assert!(!store.pfadd(b"hll", &elements, 1).unwrap());
+        assert_eq!(store.dirty, after_create_dirty);
+        let cached_modification_count = store
+            .hll_register_cache
+            .get(b"hll".as_slice())
+            .expect("first duplicate PFADD decodes once and populates register cache")
+            .modification_count;
+
+        assert!(!store.pfadd(b"hll", &elements, 2).unwrap());
+        assert_eq!(
+            store
+                .hll_register_cache
+                .get(b"hll".as_slice())
+                .expect("duplicate PFADD keeps cache")
+                .modification_count,
+            cached_modification_count
+        );
+        assert_eq!(store.dirty, after_create_dirty);
+
+        let hll_len = store
+            .get(b"hll", 3)
+            .expect("get succeeds")
+            .expect("HLL exists")
+            .len();
+        assert_eq!(store.setrange(b"hll", 0, b"Z", 4).unwrap(), hll_len);
+        assert_ne!(
+            store
+                .entries
+                .get(b"hll".as_slice())
+                .expect("mutated key remains present")
+                .modification_count,
+            cached_modification_count
+        );
+        assert_eq!(
+            store.pfadd(b"hll", &elements, 5),
+            Err(StoreError::InvalidHllValue)
+        );
     }
 
     #[test]
