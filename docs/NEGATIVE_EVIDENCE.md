@@ -5145,3 +5145,16 @@ tiny (few-byte) alloc, dwarfed by the dual-structure (IndexMap dict + ordered) u
 — fr-store addition not justified by a sub-noise gain; if pursued it's a CoralOx mirror of insert_borrowed. This was the
 LAST concrete per-turn candidate. The clean-lever space is definitively closed (parts 78,101,115-122); remaining = CoralOx
 multi-session data-structure work (99fwc/uybhq/set-insert). Handed off.
+
+### 2026-06-26 (part 123) BLOCKER: CoralOx has LIVE fr-store WIP on the zset/set structures (structural work IN PROGRESS) (cc/BlackThrush)
+Went to build+measure the ZADD-borrowed lever (insert_result, lib.rs:1048, wastes member.to_vec() on update-existing —
+the dict.get_full_mut lookup uses member.as_slice() then drops the Vec; a clean borrowed mirror would save it on the
+benchmark's update-existing case). BLOCKED: `git status` shows UNCOMMITTED WIP in crates/fr-store/src/lib.rs AND
+crates/fr-store/src/packed_set.rs that I did NOT author — CoralOx is ACTIVELY editing the exact FullSortedSet/PackedZSet
+structure files (the uybhq dual-zset + set-insert structural area I handed off in parts 116-122). Editing them now = direct
+collision with their live uncommitted WIP (shared-tree race: a peer's `commit -a` would sweep my edits, or mine theirs).
+CORRECT ACTION: stay clear — left their WIP untouched (no stash, no edit, no clobber). This CONFIRMS the handoff landed:
+the 4 hot-write structural residuals (LPUSH/RPUSH/SADD/ZADD) are now being worked by their rightful owner. The ZADD-borrowed
+micro-lever (save the to_vec on update-existing; mimalloc-uncertain per [[feedback_mimalloc_defeats_buffer_reuse_levers]])
+belongs in CoralOx's insert_result/PackedZSet pass, not a colliding per-turn edit. Committed docs-only; no pull-rebase
+needed (origin unchanged at my base). My domain stays exhausted; the structural domain is actively owned. No-collide hold.
