@@ -4901,3 +4901,25 @@ BLOCKER for a NEW per-turn surgical win: the remaining measured gaps (RESTORE-ZS
 ChunkedList, keyspace-RAM) are all multi-session STRUCTURAL fr-store/fr-persist levers (CoralOx domain) — no clean
 surgical hoist like from_index_set remains. The hot steady-state surface (dispatch + *STORE) is now parity-or-faster.
 ENV: a peer (codex) committed e5f4ec73a (GEOHASH bench); agent-mail corrupt; .git/index intermittently locked.
+
+### 2026-06-26 (part 106) PFADD missing-key sparse-create direct encoder — +12.9%, still 0.509x vs Redis (codex/BlackThrush)
+BOLD-VERIFY dug the largest fresh keyed-write gap in the existing Redis 7.2.4 bench lane: `PFADD_16v`. Baseline row from
+`rch exec -- cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot`:
+Redis `502.09 Kelem/s`, FrankenRedis `222.93 Kelem/s`, fr/Redis `0.444x`. The gap is in missing-key sparse HLL creation:
+old `Store::pfadd` allocated a 16,384-register zero vector and then scanned it to encode a tiny sparse `HYLL` payload.
+
+Kept lever: for missing-key PFADD batches up to 64 elements, directly hash/dedup target registers and emit the same Redis
+sparse HLL opcode payload; fall back to the old full-register path for existing keys, large batches, high rho values, or
+payloads that exceed `hll_sparse_max_bytes`. The new unit proof compares the direct payload byte-for-byte with the old
+`hll_encode(registers, Sparse)` output and checks dirty-count parity.
+
+Candidate row: Redis `491.16 Kelem/s`, FrankenRedis `249.94 Kelem/s`, fr/Redis `0.509x`; candidate/control
+`1.121x` by median throughput and Criterion reports `+12.894%` throughput, `p = 0.00`. This is a real store-side win but
+does not close the Redis gap; remaining PFADD cost is HLL hashing plus command/runtime overhead, not sparse creation alone.
+
+Validation: `cargo bench --release` was attempted and Cargo rejected `--release`; release-equivalent
+`--profile release` was used under `rch exec` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+`fr-store` focused PFADD sparse-create test green, `cargo check -p fr-store --all-targets` green, `cargo clippy -p fr-store
+--all-targets -- -D warnings` green, `cargo check -p fr-server --all-targets` green, `cargo fmt --check -p fr-store`
+green, and `rch exec -- cargo test -p fr-conformance -- --nocapture` green (lib 194/0, helper bins green, smoke 99/0,
+doc-tests green). Agent Mail reservation failed due malformed DB; edits were kept to `fr-store` plus this ledger entry.

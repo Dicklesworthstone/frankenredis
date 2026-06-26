@@ -17386,6 +17386,22 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        if !self.entries.contains_key(key)
+            && let Some((data, register_updates)) =
+                hll_encode_sparse_create_from_pfadd(elements, self.hll_sparse_max_bytes)
+        {
+            let mut entry = Entry::new(Value::String(data.into()), now_ms);
+            // Upstream hyperloglog.c builds the HLL through createHLLObject /
+            // createObject(OBJ_STRING,...), so even tiny sparse HLL payloads
+            // report raw object encoding rather than embstr.
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            self.internal_entries_insert(key.to_vec(), entry);
+            self.dirty = self
+                .dirty
+                .saturating_add(1_u64.saturating_add(register_updates));
+            return Ok(true);
+        }
         let (mut registers, encoding, existed) = match self.entries.get(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
@@ -25302,6 +25318,7 @@ const HLL_SPARSE_VAL_MAX_LEN: usize = 4;
 const HLL_SPARSE_ZERO_MAX_LEN: usize = 64;
 const HLL_SPARSE_XZERO_MAX_LEN: usize = 16_384;
 const HLL_REDIS_SPARSE_MAX_BYTES: usize = 3_000;
+const HLL_DIRECT_SPARSE_PFADD_MAX_ELEMENTS: usize = 64;
 
 fn hll_register_cache(registers: Vec<u8>, modification_count: u64) -> HllRegisterCache {
     let registers = registers
@@ -25320,6 +25337,106 @@ fn hll_merge_registers(merged: &mut [u8], registers: &[u8]) {
             *dst = src;
         }
     }
+}
+
+fn hll_encode_sparse_create_from_pfadd(
+    elements: &[Vec<u8>],
+    max_sparse_bytes: usize,
+) -> Option<(Vec<u8>, u64)> {
+    if elements.len() > HLL_DIRECT_SPARSE_PFADD_MAX_ELEMENTS {
+        return None;
+    }
+
+    let mut updates: Vec<(usize, u8)> = Vec::with_capacity(elements.len());
+    let mut register_updates = 0_u64;
+    for element in elements {
+        let hash = hll_hash(element);
+        let index = (hash as usize) & (HLL_REGISTERS - 1);
+        let count = hll_rho(hash >> HLL_P);
+        if count > HLL_SPARSE_VAL_MAX_VALUE {
+            return None;
+        }
+
+        if let Some((_, current)) = updates
+            .iter_mut()
+            .find(|(existing_index, _)| *existing_index == index)
+        {
+            if count > *current {
+                *current = count;
+                register_updates = register_updates.saturating_add(1);
+            }
+        } else {
+            updates.push((index, count));
+            register_updates = register_updates.saturating_add(1);
+        }
+    }
+    updates.sort_unstable_by_key(|&(index, _)| index);
+
+    let mut data = Vec::with_capacity(HLL_REDIS_HEADER_SIZE + updates.len().saturating_mul(3) + 2);
+    data.extend_from_slice(HLL_REDIS_MAGIC);
+    data.push(HLL_REDIS_SPARSE_ENCODING);
+    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+
+    let mut cursor = 0usize;
+    let mut update_index = 0usize;
+    while update_index < updates.len() {
+        let (register_index, value) = updates[update_index];
+        if register_index > cursor {
+            hll_sparse_push_zero_run(&mut data, register_index - cursor)?;
+            cursor = register_index;
+        }
+
+        let mut run_len = 1usize;
+        while update_index + run_len < updates.len()
+            && updates[update_index + run_len].0 == register_index + run_len
+            && updates[update_index + run_len].1 == value
+        {
+            run_len += 1;
+        }
+        hll_sparse_push_val_run(&mut data, value, run_len)?;
+        cursor += run_len;
+        update_index += run_len;
+    }
+
+    if cursor < HLL_REGISTERS {
+        hll_sparse_push_zero_run(&mut data, HLL_REGISTERS - cursor)?;
+    }
+    if data.len() > max_sparse_bytes {
+        return None;
+    }
+    Some((data, register_updates))
+}
+
+fn hll_sparse_push_zero_run(payload: &mut Vec<u8>, mut len: usize) -> Option<()> {
+    while len > 0 {
+        let chunk = if len > HLL_SPARSE_ZERO_MAX_LEN {
+            len.min(HLL_SPARSE_XZERO_MAX_LEN)
+        } else {
+            len
+        };
+        if chunk > HLL_SPARSE_ZERO_MAX_LEN {
+            let adjusted = chunk.checked_sub(1)?;
+            payload.push(HLL_SPARSE_XZERO_BIT | ((adjusted >> 8) as u8 & 0x3f));
+            payload.push(adjusted as u8);
+        } else {
+            payload.push((chunk.checked_sub(1)?) as u8);
+        }
+        len -= chunk;
+    }
+    Some(())
+}
+
+fn hll_sparse_push_val_run(payload: &mut Vec<u8>, value: u8, mut len: usize) -> Option<()> {
+    if !(1..=HLL_SPARSE_VAL_MAX_VALUE).contains(&value) {
+        return None;
+    }
+    while len > 0 {
+        let chunk = len.min(HLL_SPARSE_VAL_MAX_LEN);
+        payload.push(HLL_SPARSE_VAL_BIT | ((value - 1) << 2) | ((chunk - 1) as u8));
+        len -= chunk;
+    }
+    Some(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26565,27 +26682,29 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::HllEncoding;
     use super::{
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_P,
         HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
-        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, HashFieldMap, HashFieldTtl,
-        HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, LFU_INIT_VAL, LatencySample,
-        MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
-        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH,
-        RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST,
-        RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
-        RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING,
-        RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
-        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue,
-        Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
-        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
-        ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
+        HLL_REDIS_SPARSE_ENCODING, HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT,
+        HashFieldMap, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit,
+        LFU_INIT_VAL, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED,
+        NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION,
+        RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST,
+        RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
+        RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
+        RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES,
+        REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue, Store, StoreError,
+        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
+        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
+        decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
         encode_hash_listpack_dump, encode_intset, encode_length, encode_listpack_strings,
         encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
-        estimate_set_memory_usage_bytes, hll_sparse_decode, integer_decimal_bytes,
-        lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size, redis_score_to_string,
-        set_int_to_bytes, ziplist_integer_bytes,
+        estimate_set_memory_usage_bytes, hll_encode, hll_encode_sparse_create_from_pfadd, hll_hash,
+        hll_rho, hll_sparse_decode, integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes,
+        redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40982,6 +41101,35 @@ mod tests {
             &[HLL_SPARSE_XZERO_BIT | 0x3f, 0xff]
         );
         assert_eq!(store.strlen(b"hll", 0).unwrap(), HLL_REDIS_HEADER_SIZE + 2);
+    }
+
+    #[test]
+    fn pfadd_missing_small_hll_direct_sparse_create_matches_register_encoder() {
+        let elements: Vec<Vec<u8>> = (0..16).map(|i| format!("elem{i}").into_bytes()).collect();
+        let (direct, updates) =
+            hll_encode_sparse_create_from_pfadd(&elements, HLL_REDIS_SPARSE_MAX_BYTES)
+                .expect("small missing-key PFADD should use direct sparse encoder");
+
+        let mut registers = vec![0u8; HLL_REGISTERS];
+        let mut expected_updates = 0_u64;
+        for element in &elements {
+            let hash = hll_hash(element);
+            let index = (hash as usize) & (HLL_REGISTERS - 1);
+            let count = hll_rho(hash >> HLL_P);
+            if count > registers[index] {
+                registers[index] = count;
+                expected_updates += 1;
+            }
+        }
+
+        assert_eq!(updates, expected_updates);
+        assert_eq!(direct, hll_encode(&registers, HllEncoding::Sparse));
+
+        let mut store = Store::new();
+        assert!(store.pfadd(b"hll", &elements, 0).unwrap());
+        assert_eq!(store.get(b"hll", 0).unwrap().unwrap(), direct);
+        assert_eq!(store.dirty, 1 + expected_updates);
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
     }
 
     #[test]
