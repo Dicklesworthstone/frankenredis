@@ -5379,3 +5379,16 @@ benchable path (XADD / consumer seen-time fired per pending-read, measured 1.03x
 is actually CALLED by your bench path before trusting the ratio — an inert change shows noise, not zero. Demonstrated-win
 vein (entry/clone on a per-pending-read-exercised present key) = parts 129+130 shipped; insert_consumer needs a >-read
 bench. CoralOx HLL landed; peers hold dispatch chain; fr-store reverted clean.
+
+### 2026-06-26 (part 132) insert_consumer CONFIRMED ~0-gain on the correct (>-read) bench — CORRECTS part 131 (cc/BlackThrush)
+Re-benched the part-131 insert_consumer fast-return on the path that ACTUALLY calls it: XREADGROUP ... > (new-entry
+delivery). Caller 16305 confirms `let consumer_created = group_state.insert_consumer(consumer.clone())` fires on EVERY
+>-read. Preloaded 40k entries, timed 30k >-reads cand-vs-control: cand/ctrl 0.991x = ~0-gain (cand/redis 1.084x). So the
+fix IS exercised but is SUB-NOISE of the delivery cost (BTreeMap read + PEL update dominate; the 2-3 saved clones are
+mimalloc-cheap, offset by the contains() check). CORRECTS part-131 "inert/untested" -> "tested on the right path, genuinely
+~0-gain". Stays REVERTED. VEIN CHARACTERIZATION: the entry/clone alloc-reduction vein yields only SMALL wins where the
+saved alloc is a real fraction of a CHEAP op (XADD side-map 1.03x, consumer seen-time 1.05x — both shipped) and ~0-gain
+where the alloc is sub-noise of expensive surrounding work (insert_consumer on >-read). mimalloc caps alloc-reduction at
+~1.0-1.05x. The biggest gap (SADD/ZADD/LPUSH 0.5x) remains the data-structure DESIGN (uybhq/99fwc, multi-day), not allocs.
+LESSON (compounding part-131): bench the EXACT path that calls your fn; an alloc-reduction only wins if the alloc is a
+meaningful fraction of that path's total cost.
