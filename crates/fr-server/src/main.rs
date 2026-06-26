@@ -3891,15 +3891,12 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*3\r\n$7\r\n",
-                    b"GEOHASH",
-                ) {
-                    // GEOHASH key member (single member): key + member.
+                } else if let Some(packet) =
+                    parse_borrowed_plain_geohash_packet(unparsed, &parser_config)
+                {
+                    // GEOHASH key member [member ...] (variadic).
                     if let Some(response) =
-                        runtime.execute_plain_geohash_borrowed(packet.key, &[packet.arg], ts)
+                        runtime.execute_plain_geohash_borrowed(packet.key, &packet.members, ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply { consumed: packet.consumed, response })
                     } else {
@@ -9713,6 +9710,69 @@ fn parse_borrowed_plain_geopos_packet<'a>(
         cursor = next;
     }
     Some(BorrowedPlainGeoposPacket {
+        consumed: cursor,
+        key,
+        members,
+    })
+}
+
+struct BorrowedPlainGeohashPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    members: Vec<&'a [u8]>,
+}
+
+/// `GEOHASH key member [member ...]` fast-path packet (variable-arity multibulk,
+/// mirror of the GEOPOS packet parser with the $7\r\nGEOHASH command token).
+fn parse_borrowed_plain_geohash_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGeohashPacket<'a>> {
+    if config.max_bulk_len < b"GEOHASH".len() || *input.first()? != b'*' {
+        return None;
+    }
+    let mut idx = 1;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0 || count < 3 || config.max_array_len < count {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    if input.get(idx..idx + 4)? != b"$7\r\n" {
+        return None;
+    }
+    idx += 4;
+    if !input.get(idx..idx + 7)?.eq_ignore_ascii_case(b"GEOHASH") {
+        return None;
+    }
+    idx += 7;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
+    let member_count = count - 2;
+    let mut members = Vec::with_capacity(member_count);
+    for _ in 0..member_count {
+        let (member, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        members.push(member);
+        cursor = next;
+    }
+    Some(BorrowedPlainGeohashPacket {
         consumed: cursor,
         key,
         members,
