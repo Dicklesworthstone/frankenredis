@@ -4784,3 +4784,19 @@ conformance 99/0. main.rs-only (68 lines). GEOHASH surface now COMPLETE (single+
 SCORECARD parts 82-100 = 19 wins. The clean dispatch/option/arity vein is now essentially EXHAUSTED — broad sweeps show
 most hot reads fast-pathed-or-faster. Next levers likely require store-side re-profiling (perf-stat instructions) or a
 genuinely different class.
+
+### 2026-06-25 (part 101) LEDGER REJECT: clean dispatch/option/arity vein CONFIRMED EXHAUSTED (cc/BlackThrush)
+Final dig: swept simple high-frequency reads (TTL/PTTL/EXPIRETIME/PEXPIRETIME/STRLEN/LLEN/SCARD/HLEN/ZCARD/EXISTS/ZSCORE/
+HGET/TYPE/PERSIST). FIRST pass showed uniform 0.38-0.89x "gaps" — but this was a CONTAMINATED build: a peer's large
+UNCOMMITTED dispatch refactor (296 lines in process_buffered_frames) was in the shared working tree and my binary built
+from it (their WIP broke fast-path routing -> everything fell to generic). Rebuilt from CLEAN origin/main HEAD: ALL these
+commands are fast-pathed (EXPIRETIME/PEXPIRETIME = PlainKeyMetaCmd::Expiretime/Pexpiretime; the rest via keymeta/borrowed
+paths). NO uncovered straggler. => the clean byte-exact dispatch/option/arity lever class is EXHAUSTED.
+CAMPAIGN TALLY this session: 20 dispatch/option fast-paths (parts 82-100) — COPY REPLACE, EXPIRE NX/XX/GT/LT, SET KEEPTTL,
+GETEX EX/PX(+abs by peer), SET GET, SINTERCARD LIMIT+1key, ZRANGEBYSCORE/ZRANGEBYLEX/ZREVRANGEBYSCORE/ZREVRANGEBYLEX LIMIT,
+ZRANGE BYSCORE/BYLEX/REV, ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZRANGE-BYSCORE WITHSCORES, GEOHASH single+multi — all byte-exact,
+conformance 99/0 throughout. LESSON: when a broad sweep shows UNIFORM regressions across known-fast-pathed commands,
+suspect a CONTAMINATED build (peer uncommitted WIP in shared tree) — rebuild from clean origin/main before trusting.
+HANDOFF: remaining levers are STORE-SIDE structural (uybhq zset-insert, 99fwc ChunkedList, keyspace-RAM, sinterstore
+large-set, RESTORE-decode — CoralOx fr-store domain, multi-session) or hot-core re-profile (CobaltCove). Per-turn clean
+dispatch wins are done. agent-mail DB corrupt all session (reservations down). A peer is mid-refactor of the dispatch chain.
