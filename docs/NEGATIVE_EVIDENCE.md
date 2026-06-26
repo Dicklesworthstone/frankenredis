@@ -4819,3 +4819,44 @@ NOT ATTEMPTED THIS TURN: fr-store is CoralOx's actively-iterated domain; a peer 
 function fr-store refactor here = high collision/revert risk in a per-turn context. Handed off as a PRECISE lever.
 My clean per-turn dispatch/option/arity class is DONE (20 wins parts 82-100). Next BlackThrush-ownable levers require
 either the tree to quiesce or a genuinely different non-fr-store class.
+
+### 2026-06-26 (part 103) BOLD-VERIFY GEOHASH multi-member bench lane + exact single-member guard (codex/BlackThrush)
+No off-main measured win needed landing: `main` already carried the GEOHASH multi-member code/ledger (`1f2ddce19` /
+part 100). This turn added a dedicated Criterion lane (`geo_vs_redis`) so GEOHASH can be re-run directly against vendored
+Redis 7.2.4, and split dispatch so `GEOHASH key member` stays on the exact key+arg parser while only 2+ member packets use
+the variadic parser. Parser tests cover multi-member accept plus malformed/single-member/limited-input fallthrough.
+
+Fresh BOLD-VERIFY bench shape: release `fr-server`, 128-command pipelined packet, preloaded `GEOADD geo Palermo Catania
+SanFrancisco London`, timed `GEOHASH geo <members...>`.
+
+Control from clean `079a028e6` (before multi-member fast path, same `geo_vs_redis` harness):
+`GEOHASH_1` Redis `1.0271 Melem/s`, FrankenRedis `945.60 Kelem/s`, fr/Redis `0.921x`;
+`GEOHASH_4` Redis `534.88 Kelem/s`, FrankenRedis `260.51 Kelem/s`, fr/Redis `0.487x`.
+
+Final candidate after exact-single guard split:
+`GEOHASH_1` Redis `999.32 Kelem/s`, FrankenRedis `892.97 Kelem/s`, fr/Redis `0.893x` (single-member guard still same
+class/no new win claimed);
+`GEOHASH_4` Redis `521.27 Kelem/s`, FrankenRedis `495.05 Kelem/s`, fr/Redis `0.950x`, direct FrankenRedis throughput
+`1.90x` vs the clean control row (`495.05 / 260.51`). Earlier same-code candidate under lower load reached `1.007x`
+and `1.068x`; the final run is the ledgered conservative ratio.
+
+`rch exec -- cargo bench --release ...` was attempted and Cargo rejected the invalid `--release` bench flag; release-profile
+equivalent used `cargo +nightly-2026-06-09 bench --profile release -p fr-bench --bench geo_vs_redis -- GEOHASH --noplot`.
+RCH workers repeatedly missed `legacy_redis_code/redis/src/commands`, so release rebuilds/checks fell back locally after
+the required `rch exec` attempts. Validation: `cargo check -p fr-server --all-targets`, `cargo check -p fr-bench --benches`,
+focused `borrowed_plain_geohash_packet_parser*` tests (2/0), `cargo clippy -p fr-server --all-targets -- -D warnings`,
+`cargo clippy -p fr-bench --benches -- -D warnings`, `cargo fmt --check -p fr-server -p fr-bench`, and
+`rch exec -- cargo test -p fr-conformance -- --nocapture` green (fr-conformance lib 194/0, helper bins green, smoke 99/0,
+doc-tests green).
+
+### 2026-06-26 (part 104) STORE-SIDE WIN: from_index_set skip-rebuild — SINTERSTORE ~1.91x (35e7f3ee1) (cc/BlackThrush)
+LANDED the precise lever identified in part 102. SetValue::from_index_set (set_value_entry for every set-algebra *STORE
+dest + bulk SADD) did `SetValue::new(); extend(set)` = a 2nd full O(n) re-insert of the already-built GenericSet. For a
+result > set_max_intset_entries (can only be Generic/hashtable), the rebuild is identical -> added a one-line early return
+wrapping the input GenericSet directly. A/B (cand vs same-tree control, 2-key SINTERSTORE sets=2000 result=1000): cand/ctrl
+1.914, cand/redis 1.862 (ctrl/redis 0.973 -> now BEATS redis). Byte-exact vs redis: SMEMBERS, OBJECT ENCODING (hashtable),
+DEBUG DIGEST-VALUE, SCARD for SINTERSTORE + bulk SADD, string AND int member sets. conformance 99/0. FIRST store-side
+structural win this session — proves part-81's "structural dest-build" had a surgical fix after all (the double-build).
+LESSON: trace a "structural" residual to the EXACT wasted pass (here: GenericSet->SetValue extend rebuild) — often there's
+a conservative skip for the common case. ENV: agent-mail corrupt all session; concurrent peer git ops intermittently lock
+.git/index (wait+retry, never rm the lock); a peer (codex) is on GEOHASH bench + parser-split (part 103) — coordinate.
