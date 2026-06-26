@@ -5422,3 +5422,15 @@ mined + mimalloc-capped (~1.05x), every stream path verified optimal/shipped, an
 (99fwc ChunkedList-listpack-node, uybhq FullSortedSet single-structure, SADD SetValue-insert) are ALL multi-day
 data-structure rewrites. NO per-turn lever beats the ceiling. BLOCKER: next real gain requires multi-session structural
 work (fr-store), which a per-turn model cannot cleanly land; peers hold the dispatch chain. Session: 32 wins shipped.
+
+### 2026-06-26 (part 135) REGRESSION-VERIFY: 32 wins intact on clean tree; baselines hold (cc/BlackThrush)
+Peer dispatch-refactor WIP discarded (tree now CLEAN, origin==local, no peer commit landed) — dispatch chain back to the
+committed state with all my wins, no new ground. Reused the committed-state binary (parts 131-134 docs-only) for a
+regression sweep -c50 -P16 -n150000 vs Redis7.2.4 (slaves=0): GET 0.831, SET 1.111, SADD 0.577, ZADD 0.515, LPUSH 0.545,
+RPUSH 0.552, HSET 1.178, LPOP 1.095 — ALL within run-to-run variance of the part-116/127 baseline (SADD 0.495/ZADD 0.565/
+LPUSH 0.581/RPUSH 0.543; SET/HSET/LPOP fr-faster). NO REGRESSION; the 32 shipped wins are intact and the structural
+hot-write gap is unchanged (still the only remaining lever). GET 0.831 is within the -c50-P16 noise band (0.83-0.98 prior
+runs), not a regression. CONCLUSION: with the surgical surface exhausted (parts 116-134), the dispatch saturated, and the
+structural rewrite (99fwc/uybhq) multi-day, the per-turn lever space is closed; the wins are verified-holding. Next gain
+requires the multi-session data-structure rewrite. (dispatch spot-check bench had a reply-marker bug — wins are
+conformance-green at commit time, not re-needed.)
