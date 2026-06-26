@@ -5407,3 +5407,18 @@ multi-day rewrite, NOT a per-turn surgical edit: LPUSH/RPUSH = ChunkedList per-e
 structure (uybhq); SADD = SetValue insert. These are the genuine remaining levers and they are structural fr-store work.
 BLOCKER: no per-turn surgical fr-store win remains; the next real gain needs the 99fwc/uybhq data-structure rewrite
 (multi-session). Peers hold the dispatch chain; fr-store surgical surface exhausted this session (2 shipped + vein mined).
+
+### 2026-06-26 (part 134) ChunkedList 99fwc lever ASSESSED at code level — confirmed multi-day structural, not per-turn (cc/BlackThrush)
+Assessed the biggest-gap (LPUSH/RPUSH ~0.55x) lever at the code level instead of asserting. packed_set.rs:2558
+`struct ChunkedList { chunks: VecDeque<ListChunk> }`; store.lpush<M:AsRef<[u8]>> (lib.rs:10702) converts each element to
+an OWNED Vec<u8> for plain-chunk storage (push_back(elem: Vec<u8>) @ 2617). The per-element Vec<u8> alloc is INHERENT to
+the plain Vec<Vec<u8>> chunk representation — and unlike the mimalloc-capped side-map allocs, this alloc IS a meaningful
+fraction of LPUSH (the listpack benefit), so a fix WOULD beat the ceiling. The lever (99fwc): make push build PACKED
+Listpack chunks (infra exists per memory) instead of plain Vec<Vec<u8>>. SCOPE: touches push_back/front + chunk-fill/split
++ EVERY reader (get/iter/range/rev/remove/lset/linsert/lpos) + DUMP/RESTORE encode — multi-day, all-or-nothing (any
+partial wiring breaks list ops), NOT a per-turn surgical edit. VecDeque variant already MEASURED slower (don't re-attempt).
+CONCLUSION (code-verified across parts 116-134): the entire per-turn surgical fr-store surface is exhausted — alloc-vein
+mined + mimalloc-capped (~1.05x), every stream path verified optimal/shipped, and the 3 remaining biggest-gap levers
+(99fwc ChunkedList-listpack-node, uybhq FullSortedSet single-structure, SADD SetValue-insert) are ALL multi-day
+data-structure rewrites. NO per-turn lever beats the ceiling. BLOCKER: next real gain requires multi-session structural
+work (fr-store), which a per-turn model cannot cleanly land; peers hold the dispatch chain. Session: 32 wins shipped.
