@@ -21288,6 +21288,64 @@ impl Runtime {
     /// to generic `geopos`. WRONGTYPE surfaces via the same `zmscore` error; a
     /// missing key/member yields the same nil array. Read-only: no
     /// dirty/propagation. Returns None (fall back) on any disabling state. (cc)
+    /// (BlackThrush) Borrowed READ fast path for `GEOHASH key member [member ...]`.
+    /// Mirrors execute_plain_geopos_borrowed (one keyspace lookup + no-stat zmscore
+    /// for all members) but emits each member's 11-char base32 geohash via
+    /// fr_command::geo_hash_string_from_score (nil for a missing member). This also
+    /// records exactly ONE keyspace hit like redis (the generic GEOHASH path uses a
+    /// per-member zscore that over-counts for multi-member — fixed here).
+    pub fn execute_plain_geohash_borrowed(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "geohash",
+            b"GEOHASH".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let reply = match self.server.store.zmscore(key, members, now_ms) {
+            Ok(scores) => {
+                let frames = scores
+                    .into_iter()
+                    .map(|score| match score {
+                        Some(s) => RespFrame::BulkString(fr_command::geo_hash_string_from_score(s)),
+                        None => RespFrame::BulkString(None),
+                    })
+                    .collect();
+                RespFrame::Array(Some(frames))
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "geohash",
+            "GEOHASH",
+            || {
+                let mut argv = Vec::with_capacity(members.len() + 2);
+                argv.push(b"GEOHASH".to_vec());
+                argv.push(key.to_vec());
+                argv.extend(members.iter().map(|m| m.to_vec()));
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     pub fn execute_plain_geopos_borrowed(
         &mut self,
         key: &[u8],

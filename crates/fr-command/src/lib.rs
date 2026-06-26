@@ -5329,7 +5329,7 @@ pub fn geo_distance_reply(distance: f64) -> RespFrame {
 }
 
 #[inline]
-fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
     let (longitude, latitude) = geo_decode_score(score)?;
     let bits = geo_encode(
         longitude,
