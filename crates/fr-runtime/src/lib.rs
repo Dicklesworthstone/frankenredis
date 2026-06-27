@@ -9643,6 +9643,163 @@ impl Runtime {
         }
     }
 
+    pub fn execute_plain_hmset_borrowed(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hmset_borrowed_with_default_write_gate(
+            key,
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_hmset_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"HMSET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || pairs
+                .iter()
+                .any(|p| p.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hmset");
+        self.session.last_argv_len_sum =
+            b"HMSET".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut error: Option<RespFrame> = None;
+        for pair in pairs.chunks_exact(2) {
+            match self
+                .server
+                .store
+                .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    error = Some(CommandError::Store(err).to_resp());
+                    break;
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = error.unwrap_or_else(|| RespFrame::SimpleString("OK".to_string()));
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_hmset_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_hmset_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = |key: &[u8], pairs: &[&[u8]]| -> Vec<Vec<u8>> {
+            let mut a = Vec::with_capacity(pairs.len() + 2);
+            a.push(b"HMSET".to_vec());
+            a.push(key.to_vec());
+            a.extend(pairs.iter().map(|p| p.to_vec()));
+            a
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("hmset", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'HMSET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     /// Conservative borrowed runtime fast path for the PLAIN, flagless form of
     /// `ZADD key score member [score member ...]` (no NX/XX/GT/LT/CH/INCR). The
     /// caller guarantees `pairs` is a non-empty even-length score/member tail

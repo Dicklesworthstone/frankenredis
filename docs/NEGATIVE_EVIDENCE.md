@@ -5619,3 +5619,16 @@ ZADD-INCR 0.440 (needs INCR-flag handling not a hoist). REMAINING need NEW fast-
 plain_hmset_borrowed w/ +OK reply + hmset cmdstat + parser — moderate 2-crate work, deprecated cmd), SUBSTR 0.381 (=GETRANGE
 alias), ZMSCORE 0.482 (variadic). HOISTABLE VEIN NOW EXHAUSTED — every late command with an existing fast-path is hoisted.
 ULTIMATE = reorder whole cascade by frequency (retire ~26 dead late branches). conformance pending.
+
+### 2026-06-26 (part 146) WIN: HMSET NEW fast-path — 2.35x (0.43x->0.96x near-parity), byte-exact incl cmdstat (cc/BlackThrush)
+FIRST new-fast-path of the dispatch arc (not a hoist). HMSET was the biggest remaining gap (0.383-0.432x, NO fast-path).
+Added execute_plain_hmset_borrowed (+wrapper) + record_plain_hmset_borrowed_metrics in fr-runtime (isolated copies of the
+HSET versions — ZERO risk to HSET — but reply RespFrame::SimpleString("OK") instead of Integer(added), last_command_name/
+cmdstat/argv "hmset"/"HMSET") + parse_borrowed_plain_hmset_packet in fr-server (mirrors hset_multi, $5 HMSET, *4..*18 =
+1..8 pairs, reuses BorrowedPlainHsetMultiPacket) + early dispatch. A/B (cand vs ctrl=committed 1a67fe245): HMSET cand/ctrl
+2.433/2.331/2.286 mean 2.350, cand/redis 0.961 (near-parity, up from ctrl/redis 0.432x). BYTE-EXACT: +OK reply, HGET field
+values, field-update, 3-pair multi, HLEN, WRONGTYPE-on-string-key cand==ctrl==redis; AND cmdstat correctly records
+cmdstat_hmset (NOT cmdstat_hset) matching redis (verified via CONFIG RESETSTAT + INFO commandstats). Plain write gate
+(any_replica_ever_connected=false) makes propagation a no-op so HMSET-vs-HSET propagation difference is moot. 11 dispatch
+commits (10 hoists + 1 new-fp), ~27 commands closed. REMAINING new-fp: SUBSTR 0.381 (=GETRANGE alias), ZMSCORE 0.482.
+conformance pending.
