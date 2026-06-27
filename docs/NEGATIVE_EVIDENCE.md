@@ -4,6 +4,45 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlueFalcon: REJECTED fresh SADD direct CompactStrSet de-dup — 1.032x vs ORIG, ~0 Redis-ratio movement
+
+Dig target: the fresh-key large `SADD` follow-up named by the HSET bulk-path
+landing. The tested lever removed the temporary `HashSet<&[u8]>` + `unique`
+vector from `SetValue::try_bulk_unique_strings` for all-non-integer fresh sets:
+members were inserted once into the final `CompactStrSet` and only converted
+back to packed storage when the unique members still fit the existing packed
+encoding rule. A temporary per-crate Criterion row,
+`keyed_write_bulk_vs_redis/SADD_200v_fresh`, measured `DEL k` + `SADD k <200
+non-integer members>` x16 so the timed path was fresh-key bulk build rather
+than duplicate no-op SADD.
+
+Correctness while applied: `AGENT_NAME=BlueFalcon
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo test -p fr-store sadd -- --nocapture` passed (`6` focused unit tests plus
+the set metamorphic identity). Release `fr-server`/`fr-bench` build passed
+locally after the first `rch` build failed on the detached worktree's missing
+`.rchignore`-excluded `legacy_redis_code` path. The required literal
+`cargo bench --release -p fr-bench --bench keyed_write_vs_redis --
+SADD_200v_fresh --noplot` was attempted through `rch` on `ovh-a` and failed at
+Cargo argument parsing (`unexpected argument '--release'`); measured runs used
+the accepted `--profile release` equivalent.
+
+Same target dir, same local host fallback, Redis 7.2.4 oracle:
+
+| row | Redis 7.2.4 median | FrankenRedis median | FR/Redis | candidate/ORIG |
+|---|---:|---:|---:|---:|
+| ORIG/control `origin/main 8b77f3946` + temporary bench row | `42.850 Kelem/s` | `51.294 Kelem/s` | `1.197x` | baseline |
+| direct CompactStrSet de-dup candidate rerun | `44.110 Kelem/s` | `52.913 Kelem/s` | `1.200x` | `1.032x` |
+
+Decision: **REJECT / REVERTED**. The first candidate run looked better
+(`59.973 Kelem/s`), but the same-target rerun after rebuilding over the control
+binary was only `1.032x` and Criterion reported no change. Redis-relative ratio
+was effectively unchanged (`1.197x` -> `1.200x`). Source and the temporary bench
+row were reverted before commit; this is ledger-only negative evidence. Do not
+retry fresh-SADD duplicate-table removal without a profile showing the de-dup
+table dominates; the remaining large-set path is already at/above Redis on this
+fresh-key row.
+
 ## 2026-06-27 BlackThrush: REJECTED retain QUICKLIST_2 nodes through whole-RDB decode/load — 0.915x vs ORIG
 
 Dig target: RDB-load quicklist/listpack retained representation. The attempted
