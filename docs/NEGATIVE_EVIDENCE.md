@@ -4,6 +4,55 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver dig: hot-path scorecard refresh — parity-or-faster, stale write residuals refuted
+
+Land-or-dig found no unlanded measured source win (no local branch ahead of
+`origin/main`; the only dirty candidate was BlueFalcon's BITFIELD WIP, already
+rejected). Digging for a new lever on the "biggest measured gap" instead first
+re-measured whether the cited gaps still exist — and most do not.
+
+**Clean veins confirmed exhausted:**
+- Dispatch borrowed fast-paths: **68** commands now have a
+  `can_execute_plain_*_borrowed` path (incl. every command prior memory listed
+  as "remaining": GETEX, HINCRBY, INCRBYFLOAT, COPY, LREM, LPOS, SMOVE). Vein is
+  saturated.
+- XADD side-map allocs (bead `tcknm`): **already landed on `main`**, not
+  "reverted/unbenched" as memory claimed — `xadd` now does
+  `stream_last_ids.get_mut(key)` (borrow, 0 allocs) on the existing-stream hot
+  path (`crates/fr-store/src/lib.rs:15797`), only falling back to
+  `entry(key.to_vec())` defensively. Do not re-chase.
+- `perf record` of the live GET/SET hot path showed ~44% `mio::poll::Poll` /
+  ~41% `epoll_wait` of on-CPU samples — under realistic load the single-threaded
+  loop is event-loop/syscall-bound (load-confounded at host load ~47, but
+  consistent with command-level micro-opts having saturated).
+
+**Fresh hot-path scorecard** — interleaved best-of-4, `redis-benchmark -n 1.5M
+-P16 -c50`, candidate = current `main` binary, `connected_slaves:0` on both,
+host load ~47, fr/redis ratio (>1.0 = FrankenRedis faster):
+
+| cmd | fr/redis | | cmd | fr/redis |
+|---|---:|---|---|---:|
+| GET | `1.005` | | SADD | `1.017` |
+| SET | `0.988` | | HSET | `0.955` |
+| INCR | `0.983` | | RPUSH | `0.970` |
+| ZADD | `1.109` | | LPUSH | `0.932` |
+
+Every read and write is parity-or-faster **except LPUSH `0.932x`** (~7% behind,
+the lone residual, structurally bounded by `ChunkedList` Owned-chunk push —
+bead `99fwc`, multi-day fr-store core). Critically, memory's long-standing "hot
+WRITES residual: ZADD 1.33x / SADD 1.27x / LPUSH 1.22x" is **refuted** — ZADD is
+now `1.109x` (FR *faster*), SADD `1.017x` (FR faster). Those were
+single-conn / non-interleaved methodology artifacts (the same trap that produced
+a phantom 1.09x BITFIELD "win" last turn before interleaving flipped it to
+0.975x).
+
+Decision: **no new clean lever — surface is parity-or-faster and exhausted of
+quick wins.** The only sub-parity command is LPUSH, and its fix (`99fwc`
+packed-listpack push) is a multi-day fr-store-core structural change, not a
+per-turn lever. Future digs should stop re-chasing the (now-closed) hot-write
+ratios and target `99fwc` (LPUSH/list-DUMP) or the keyspace-RAM `uhthd` lever
+directly, both owned structural work.
+
 ## 2026-06-27 AmberRiver BITFIELD SET u8 aligned store fast-path rejected
 
 Land-or-dig found one unlanded, *unbenched* source candidate sitting dirty in
