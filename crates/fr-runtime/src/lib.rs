@@ -160,6 +160,21 @@ fn acl_rule_is_identity(rule: &[u8]) -> bool {
         || s.starts_with('#')
 }
 
+/// Re-label an ACL rule error so its reported modifier is the whole original
+/// selector argument (e.g. `(+get) (+set)`), not the single inner token that
+/// failed — mirroring upstream, which always reports the full `(...)` arg.
+/// The inner error's reason is preserved verbatim. (frankenredis-aclsel)
+fn relabel_acl_selector_error(err: &str, original_arg: &str, applied_rule: &[u8]) -> String {
+    let applied = String::from_utf8_lossy(applied_rule);
+    let expected = format!("ERR Error in ACL SETUSER modifier '{applied}': ");
+    match err.strip_prefix(&expected) {
+        Some(reason) => {
+            format!("ERR Error in ACL SETUSER modifier '{original_arg}': {reason}")
+        }
+        None => err.to_string(),
+    }
+}
+
 /// Parse a `%`-prefixed ACL key selector modifier into
 /// `(pattern_bytes, read, write)`.
 ///
@@ -274,6 +289,10 @@ fn plain_decr_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"DECR".to_vec(), key.to_vec()]
 }
 
+fn plain_append_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"APPEND".to_vec(), key.to_vec(), value.to_vec()]
+}
+
 fn plain_decrby_owned_argv(key: &[u8], delta: &[u8]) -> Vec<Vec<u8>> {
     vec![b"DECRBY".to_vec(), key.to_vec(), delta.to_vec()]
 }
@@ -284,6 +303,82 @@ fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
 
 fn plain_hget_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HGET".to_vec(), key.to_vec(), field.to_vec()]
+}
+
+/// The fixed-single-key, variadic-value WRITE commands that share one borrowed
+/// runtime fast path (`CMD key value [value ...]` -> Integer): SADD, LPUSH,
+/// RPUSH. (frankenredis-ev067)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlainKeyedValuesCmd {
+    Sadd,
+    Lpush,
+    Rpush,
+}
+
+impl PlainKeyedValuesCmd {
+    /// Upstream-casing token used for slowlog/threat argv reconstruction and the
+    /// `last_argv_len_sum` accounting (which counts the wire bytes of the verb).
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainKeyedValuesCmd::Sadd => "SADD",
+            PlainKeyedValuesCmd::Lpush => "LPUSH",
+            PlainKeyedValuesCmd::Rpush => "RPUSH",
+        }
+    }
+
+    /// Lowercase name used for `last_command_name` and the per-command latency
+    /// histogram bucket — matching what the generic dispatch records.
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainKeyedValuesCmd::Sadd => "sadd",
+            PlainKeyedValuesCmd::Lpush => "lpush",
+            PlainKeyedValuesCmd::Rpush => "rpush",
+        }
+    }
+}
+
+fn plain_keyed_values_owned_argv(
+    cmd: PlainKeyedValuesCmd,
+    key: &[u8],
+    values: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(values.len() + 2);
+    argv.push(cmd.name_upper().as_bytes().to_vec());
+    argv.push(key.to_vec());
+    argv.extend(values.iter().map(|v| v.to_vec()));
+    argv
+}
+
+/// The single-key, no-count WRITE-pop commands that share one borrowed runtime
+/// fast path (`CMD key` -> popped element as a bulk string, nil when the
+/// collection is absent/empty): LPOP, RPOP, SPOP. (frankenredis-ev067)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlainKeyedPopCmd {
+    Lpop,
+    Rpop,
+    Spop,
+}
+
+impl PlainKeyedPopCmd {
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainKeyedPopCmd::Lpop => "LPOP",
+            PlainKeyedPopCmd::Rpop => "RPOP",
+            PlainKeyedPopCmd::Spop => "SPOP",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainKeyedPopCmd::Lpop => "lpop",
+            PlainKeyedPopCmd::Rpop => "rpop",
+            PlainKeyedPopCmd::Spop => "spop",
+        }
+    }
+}
+
+fn plain_keyed_pop_owned_argv(cmd: PlainKeyedPopCmd, key: &[u8]) -> Vec<Vec<u8>> {
+    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
 fn plain_mget_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -559,22 +654,14 @@ fn parse_client_output_buffer_limit(
 /// (frankenredis-8who6), and any other site that needs to mirror
 /// `cmd->fullname` from server.c.
 fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
-    let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
-    let lower = command.to_ascii_lowercase();
-    const CONTAINERS: &[&str] = &[
-        "acl", "client", "cluster", "command", "config", "debug", "function", "latency", "memory",
-        "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
-    ];
-    if CONTAINERS.iter().any(|c| *c == lower)
-        && let Some(subcommand) = argv.get(1)
-    {
-        return format!(
-            "{}|{}",
-            lower,
-            String::from_utf8_lossy(subcommand).to_ascii_lowercase()
-        );
-    }
-    lower
+    // Delegate to the single source of truth in fr-command, whose
+    // container list mirrors upstream's *registered* subcommand
+    // parents. Crucially that list excludes DEBUG: redis dispatches
+    // DEBUG's subcommands inline (none are registered as separate
+    // table entries), so INFO commandstats/latencystats and the
+    // pub/sub-context error use the bare "debug" name, never
+    // "debug|sleep". (br-frankenredis-k6ei4)
+    fr_command::canonical_command_fullname(argv)
 }
 
 impl Runtime {
@@ -786,7 +873,11 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("active-defrag-threshold-upper", "100"),
     ("active-defrag-cycle-min", "1"),
     ("active-defrag-cycle-max", "25"),
-    ("active-expire-enabled", "yes"),
+    // NOTE: redis 7.2.4 has NO `active-expire-enabled` config — active
+    // expiry is toggled only via DEBUG SET-ACTIVE-EXPIRE (→
+    // store.active_expire_enabled). Exposing it here leaked an fr-only
+    // param into CONFIG GET */active-* and made CONFIG SET accept an
+    // unknown option. (frankenredis-cfgactexp)
     ("active-expire-effort", "1"),
     ("lfu-log-factor", "10"),
     ("lfu-decay-time", "1"),
@@ -1961,7 +2052,13 @@ impl AuthState {
                     }
                 }
                 if !closed {
-                    return Err("ERR Unmatched parenthesis in selector specification.".to_string());
+                    // Upstream acl.c reports the text from the unmatched '('
+                    // onward: "Unmatched parenthesis in acl selector starting
+                    // at '<text>'." (frankenredis-aclsel)
+                    return Err(format!(
+                        "ERR Unmatched parenthesis in acl selector starting at '{}'.",
+                        String::from_utf8_lossy(&acc)
+                    ));
                 }
                 out.push(acc);
             } else {
@@ -1985,16 +2082,25 @@ impl AuthState {
     ) -> Result<(), String> {
         let inner = token[1..token.len() - 1].trim();
         let inner_rules: Vec<&[u8]> = inner.split_whitespace().map(str::as_bytes).collect();
+        let mut selector = AclUser::new_restricted(acl_pubsub_default);
+        // Upstream acl.c::ACLSetSelector applies the inner rules left-to-right
+        // and fails on the FIRST invalid one, always reporting the ORIGINAL
+        // `(...)` arg as the modifier. Identity rules (on/off/passwords/reset/…)
+        // and nested selectors (`(`-leading tokens) are not permitted inside a
+        // selector and surface as a plain "Syntax error". (frankenredis-aclsel)
         for rule in &inner_rules {
-            if acl_rule_is_identity(rule) {
-                let bad = String::from_utf8_lossy(rule);
+            if rule.first() == Some(&b'(') || acl_rule_is_identity(rule) {
                 return Err(format!(
-                    "ERR Error in ACL SETUSER modifier '{bad}': Syntax error"
+                    "ERR Error in ACL SETUSER modifier '{token}': Syntax error"
                 ));
             }
+            Self::apply_acl_rules_to_user(
+                &mut selector,
+                std::slice::from_ref(rule),
+                acl_pubsub_default,
+            )
+            .map_err(|e| relabel_acl_selector_error(&e, token, rule))?;
         }
-        let mut selector = AclUser::new_restricted(acl_pubsub_default);
-        Self::apply_acl_rules_to_user(&mut selector, &inner_rules, acl_pubsub_default)?;
         user.selectors.push(selector);
         Ok(())
     }
@@ -2371,6 +2477,24 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Swapdb)
     } else {
         None
+    }
+}
+
+/// Mirror upstream `call()`'s MONITOR gate: a successfully-executed command is
+/// fed to MONITOR clients unless it carries `CMD_ADMIN` or `CMD_SKIP_MONITOR`.
+/// Used on the replication-replay path so a replica's MONITOR echoes the SELECT
+/// (and PUBLISH / MULTI / EXEC) commands the primary streams, while the
+/// replication-internal REPLCONF (admin) stays hidden. (frankenredis-3s0ra)
+fn command_should_feed_monitors(argv: &[Vec<u8>]) -> bool {
+    // Resolve the effective flags including container subcommands, matching how
+    // upstream call() tests the dispatched (sub)command's CMD_ADMIN /
+    // CMD_SKIP_MONITOR — e.g. CONFIG GET (admin) is hidden while ACL WHOAMI is
+    // shown, though both parents carry no flags. (frankenredis-e8f9q)
+    match fr_command::effective_command_flags(argv) {
+        Some(flags) => !flags
+            .split_whitespace()
+            .any(|f| f == "admin" || f == "skip_monitor"),
+        None => true,
     }
 }
 
@@ -2880,6 +3004,24 @@ pub struct ServerState {
     /// Flag set when REPLICAOF/SLAVEOF changes should force the event loop
     /// to reset replica sync state (drop primary connection and reconnect).
     replica_reconfigure_requested: bool,
+    /// Pending CONFIG SET port change for the standalone server event loop to
+    /// rebind the listening socket to. (frankenredis-zyx9q)
+    pending_port_change: Option<u16>,
+    /// Listen bind address, set by the standalone server at startup so the
+    /// CONFIG SET port handler can test-bind the new port (mirroring upstream
+    /// config.c::updatePort -> changeListener). Empty in library/test contexts
+    /// (no event loop), where CONFIG SET port validates + stores without any
+    /// socket side-effect. (frankenredis-zyx9q)
+    bind_addr: String,
+    /// Current listen bind address list (mirrors redis server.bindaddr[]). Set
+    /// by the standalone server at startup and updated by CONFIG SET bind; used
+    /// by the CONFIG SET port/bind handlers to test-bind every address.
+    /// (frankenredis-jd75g)
+    bind_addrs: Vec<String>,
+    /// Pending CONFIG SET bind change for the standalone server event loop to
+    /// rebind the listening sockets to (the new full address list).
+    /// (frankenredis-jd75g)
+    pending_bind_change: Option<Vec<String>>,
 }
 
 impl Default for ServerState {
@@ -2979,6 +3121,10 @@ impl Default for ServerState {
             pending_client_unblocks: Vec::new(),
             pending_client_kills: Vec::new(),
             replica_reconfigure_requested: false,
+            pending_port_change: None,
+            bind_addr: String::new(),
+            bind_addrs: Vec::new(),
+            pending_bind_change: None,
         }
     }
 }
@@ -3889,6 +4035,31 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
+    /// Record the listen bind address so the CONFIG SET port handler can
+    /// test-bind a new port the way upstream config.c::updatePort does. The
+    /// standalone server calls this at startup; library/test contexts leave it
+    /// empty (no event loop) and CONFIG SET port then only validates + stores.
+    /// (frankenredis-zyx9q)
+    pub fn set_bind_addr(&mut self, addr: String) {
+        self.server.bind_addr = addr.clone();
+        // (frankenredis-jd75g) The standalone server binds a single address at
+        // startup; seed the bind list so CONFIG SET port/bind can test-bind it.
+        self.server.bind_addrs = if addr.is_empty() { Vec::new() } else { vec![addr] };
+    }
+
+    /// Take a pending CONFIG SET port change for the standalone event loop to
+    /// rebind the listening socket to (None if no change is pending).
+    /// (frankenredis-zyx9q)
+    pub fn take_pending_port_change(&mut self) -> Option<u16> {
+        self.server.pending_port_change.take()
+    }
+
+    /// Take a pending CONFIG SET bind change (the new full address list) for the
+    /// standalone event loop to rebind the listening sockets to. (frankenredis-jd75g)
+    pub fn take_pending_bind_change(&mut self) -> Option<Vec<String>> {
+        self.server.pending_bind_change.take()
+    }
+
     #[must_use]
     pub fn server_port(&self) -> u16 {
         self.server.store.server_port
@@ -3902,6 +4073,46 @@ impl Runtime {
     #[must_use]
     pub fn sentinel_mode(&self) -> bool {
         self.server.store.sentinel_mode
+    }
+
+    /// (frankenredis-pkdgs) Advance the sentinel clock (tilt + previous_time)
+    /// at the start of a monitoring tick.
+    pub fn sentinel_begin_tick(&mut self, now_ms: u64) {
+        self.server.store.sentinel_begin_tick(now_ms);
+    }
+
+    /// (frankenredis-pkdgs) Announce this sentinel at `port` in hello messages.
+    pub fn set_sentinel_announce_port(&mut self, port: u16) {
+        self.server.store.set_sentinel_announce_port(port);
+    }
+
+    /// (frankenredis-pkdgs) Encoded `__sentinel__:hello` payload to publish for
+    /// `name` this tick, or None if not yet time.
+    pub fn sentinel_take_hello_to_publish(&mut self, name: &str, now_ms: u64) -> Option<String> {
+        self.server
+            .store
+            .sentinel_take_hello_to_publish(name, now_ms)
+    }
+
+    /// (frankenredis-pkdgs) Ingest a `__sentinel__:hello` payload received from a
+    /// monitored master's pub/sub channel so this sentinel discovers its peers.
+    pub fn sentinel_process_hello(&mut self, payload: &str, now_ms: u64) {
+        self.server.store.sentinel_process_hello(payload, now_ms);
+    }
+
+    /// (frankenredis-pkdgs) Monitored masters' (name, ip, port) for the
+    /// fr-server Sentinel monitoring tick.
+    #[must_use]
+    pub fn sentinel_monitor_targets(&self) -> Vec<(String, String, u16)> {
+        self.server.store.sentinel_monitor_targets()
+    }
+
+    /// (frankenredis-pkdgs) Fold one monitored master's PING/INFO probe outcome
+    /// into the sentinel state (`None` = probe failed -> mark disconnected).
+    pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
+        self.server
+            .store
+            .apply_sentinel_probe_result(name, now_ms, info);
     }
 
     /// Load and replay AOF records from the configured path, restoring store state.
@@ -6318,6 +6529,773 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_append_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"APPEND".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `APPEND key value`: mirrors
+    /// the generic `append` handler — a no-stat string-length read (WRONGTYPE on
+    /// a non-string key) + the checkStringLength proto-max-bulk-len guard +
+    /// `store.append`, returning the new length. APPEND is classified as a
+    /// write, so it counts one write regardless of outcome. Returns None (fall
+    /// back) on any disabling state. (frankenredis-q0qym)
+    pub fn execute_plain_append_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_append_borrowed(key, value, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("append");
+        self.session.last_argv_len_sum = b"APPEND".len() + key.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        // Mirror the generic `append` handler exactly: no-stat length read (which
+        // surfaces WRONGTYPE for a non-string key), then the checkStringLength
+        // guard, then the append. (frankenredis-ga4j1 string-length cap = 512MiB)
+        let reply = match self.server.store.string_len_no_stats(key, now_ms) {
+            Ok(current_len) => {
+                if current_len.saturating_add(value.len()) > 536_870_912 {
+                    RespFrame::Error(
+                        "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                    )
+                } else {
+                    match self.server.store.append(key, value, now_ms) {
+                        Ok(new_len) => {
+                            RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX))
+                        }
+                        Err(err) => CommandError::Store(err).to_resp(),
+                    }
+                }
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_append_borrowed_metrics(
+            key, value, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_append_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("append", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'APPEND' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// Conservative borrowed runtime fast path for the fixed-single-key variadic
+    /// WRITE commands SADD / LPUSH / RPUSH (`CMD key value [value ...]`). Mirrors
+    /// the generic handlers exactly — the store method's Integer reply, WRONGTYPE
+    /// on a key holding the wrong type — while skipping argv materialization, the
+    /// generic command dispatch (classify + command_table_index +
+    /// dispatch_with_client_context), and the post-`Ok` keyspace/tracking/AOF
+    /// bookkeeping block, all of which `plain_borrowed_default_key_write_allows`
+    /// guarantees is no-op in plain mode (db0 master, no aof/replica/notify/
+    /// tracking/monitor/blocked-client/transaction/script). These commands are
+    /// classified as writes, so each counts one write regardless of outcome.
+    /// Returns None (fall back to generic) on any disabling state.
+    /// (frankenredis-ev067 — the SADD/LPUSH/RPUSH analog of
+    /// [`Self::execute_plain_append_borrowed`].) KEEP IN SYNC with the q0qym
+    /// borrowed-write gate.
+    pub fn execute_plain_keyed_values_write_borrowed(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || values.iter().any(|v| v.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum =
+            cmd.name_upper().len() + key.len() + values.iter().map(|v| v.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        // Materialize the values once (the store methods take owned members, the
+        // same allocation the generic argv path performs); the command-name and
+        // key argv Vecs the generic path builds are still skipped.
+        let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
+        let start = Instant::now();
+        let store_result = match cmd {
+            PlainKeyedValuesCmd::Sadd => self
+                .server
+                .store
+                .sadd(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Lpush => self
+                .server
+                .store
+                .lpush(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Rpush => self
+                .server
+                .store
+                .rpush(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match store_result {
+            Ok(n) => RespFrame::Integer(n),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_keyed_values_borrowed_metrics(
+            cmd, key, values, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_keyed_values_borrowed_metrics(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server.store.record_command_histogram_with_kind(
+                cmd.name_lower(),
+                elapsed_us,
+                kind,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    /// Conservative borrowed runtime fast path for `HSET key field value [field
+    /// value ...]`. Mirrors the generic handler exactly — one `store.hset` per
+    /// field/value pair, the reply is the count of NEWLY created fields, and a
+    /// key holding the wrong type errors on the first pair (no mutation, since
+    /// the type is rechecked each call) just like the generic `?`-propagation.
+    /// `pairs` must be a non-empty even-length slice (the caller guarantees this;
+    /// odd/empty falls back to the generic WrongArity path). Skips argv
+    /// materialization + generic dispatch + the post-Ok bookkeeping block, all
+    /// no-op in plain mode. HSET is a write, counted once. (frankenredis-ev067)
+    pub fn execute_plain_hset_borrowed(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"HSET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hset");
+        self.session.last_argv_len_sum =
+            b"HSET".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let mut added = 0_usize;
+        let mut error: Option<RespFrame> = None;
+        for pair in pairs.chunks_exact(2) {
+            match self
+                .server
+                .store
+                .hset(key, pair[0].to_vec(), pair[1].to_vec(), now_ms)
+            {
+                Ok(true) => added += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    error = Some(CommandError::Store(err).to_resp());
+                    break;
+                }
+            }
+        }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = error
+            .unwrap_or_else(|| RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)));
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_hset_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_hset_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = |key: &[u8], pairs: &[&[u8]]| -> Vec<Vec<u8>> {
+            let mut a = Vec::with_capacity(pairs.len() + 2);
+            a.push(b"HSET".to_vec());
+            a.push(key.to_vec());
+            a.extend(pairs.iter().map(|p| p.to_vec()));
+            a
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("hset", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'HSET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    /// Conservative borrowed runtime fast path for the PLAIN, flagless form of
+    /// `ZADD key score member [score member ...]` (no NX/XX/GT/LT/CH/INCR). The
+    /// caller guarantees `pairs` is a non-empty even-length score/member tail
+    /// whose first token is not a flag keyword; any score that fails to parse
+    /// (with the exact upstream `string2d` semantics) makes this return None so
+    /// the generic handler emits the precise error. Mirrors the generic plain
+    /// branch: `store.zadd_with_options` with all-false options, reply is the
+    /// count of newly added members. Skips argv materialization + generic
+    /// dispatch + the post-Ok bookkeeping block (all no-op in plain mode).
+    /// (frankenredis-ev067)
+    pub fn execute_plain_zadd_borrowed(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZADD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        // Parse every score BEFORE any state change; bail to the generic path
+        // (which produces the exact error reply) on the first invalid score.
+        let mut members: Vec<(f64, Vec<u8>)> = Vec::with_capacity(pairs.len() / 2);
+        for pair in pairs.chunks_exact(2) {
+            let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
+            members.push((score, pair[1].to_vec()));
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zadd");
+        self.session.last_argv_len_sum =
+            b"ZADD".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let reply = match self.server.store.zadd_with_options(
+            key,
+            &members,
+            fr_store::ZaddOptions {
+                nx: false,
+                xx: false,
+                gt: false,
+                lt: false,
+                ch: false,
+            },
+            now_ms,
+        ) {
+            Ok((count, _changed)) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_zadd_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_zadd_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = |key: &[u8], pairs: &[&[u8]]| -> Vec<Vec<u8>> {
+            let mut a = Vec::with_capacity(pairs.len() + 2);
+            a.push(b"ZADD".to_vec());
+            a.push(key.to_vec());
+            a.extend(pairs.iter().map(|p| p.to_vec()));
+            a
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("zadd", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build(key, pairs));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ZADD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    /// Conservative borrowed runtime fast path for the no-count WRITE-pop
+    /// commands LPOP / RPOP / SPOP (`CMD key`). Mirrors the generic no-count
+    /// handlers exactly — the store pop method's bulk-string reply (nil when the
+    /// collection is absent or empty), WRONGTYPE on a mismatched key, and the
+    /// store method's own emptied-key deletion — while skipping argv
+    /// materialization + generic dispatch + the post-Ok bookkeeping block, all
+    /// no-op in plain mode. These are write commands, counted once. The COUNT
+    /// form (argc > 2) is handled by the caller falling back to the generic path.
+    /// (frankenredis-ev067 — the pop analog of the keyed-values fast path.)
+    pub fn execute_plain_keyed_pop_borrowed(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let store_result = match cmd {
+            PlainKeyedPopCmd::Lpop => self.server.store.lpop(key, now_ms),
+            PlainKeyedPopCmd::Rpop => self.server.store.rpop(key, now_ms),
+            PlainKeyedPopCmd::Spop => self.server.store.spop(key, now_ms),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match store_result {
+            Ok(value) => RespFrame::BulkString(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_keyed_pop_borrowed_metrics(cmd, key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_keyed_pop_borrowed_metrics(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_keyed_pop_owned_argv(cmd, key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_keyed_pop_owned_argv(cmd, key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind(cmd.name_lower(), elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_keyed_pop_owned_argv(cmd, key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::BulkString(None),
             });
         }
     }
@@ -8847,10 +9825,30 @@ impl Runtime {
             return reply;
         }
 
-        let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
-            argv.first()
-                .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok())
-        });
+        // (frankenredis-7tpx0) Full arity = parent arity AND, for container
+        // commands, the resolved subcommand's arity (e.g. CONFIG GET / OBJECT
+        // ENCODING). Upstream checks the resolved subcommand's arity
+        // (server.c:3787) before the CMD_PROTECTED and pub/sub-context gates, so
+        // a known subcommand with the wrong argc reaches dispatch for its own
+        // "wrong number of arguments for 'parent|sub'" error rather than a later
+        // gate's wording.
+        let command_arity_ok = set_command_arity_ok(argv)
+            .unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok());
+        // (frankenredis-7tpx0) Upstream runs the CMD_PROTECTED gate
+        // (server.c:3878 — DEBUG/MODULE enable check) BEFORE the pub/sub-context
+        // gate. DEBUG is protected (enable-debug-command defaults to "no"), so a
+        // subscribed client running DEBUG must get the protected/arity error, not
+        // the context error. MODULE is NOT protected by default, so it correctly
+        // falls through to the context gate. This hoists the DEBUG gate ahead of
+        // the context gate only for the subscribe case (the fr-server fast gate
+        // defers DEBUG here for the same reason).
+        if self.is_in_subscription_mode()
+            && matches!(special_command, Some(RuntimeSpecialCommand::Debug))
+            && let Some(reply) = self.handle_debug_command_gate(argv)
+        {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return reply;
+        }
         // Upstream server.c::processCommand:4067-4082 only enforces the
         // pubsub-mode allow-list when c->resp == 2. RESP3 subscribers can
         // freely interleave pubsub messages with any other command, since
@@ -8871,9 +9869,16 @@ impl Runtime {
         // standard +PONG simple-string reply since RESP3 supports
         // interleaved replies. (br-frankenredis-subpubping,
         // frankenredis-idok8)
+        // (frankenredis-7tpx0) Upstream networking.c::pingCommand rejects argc>2
+        // with "wrong number of arguments for 'ping'" (PING's table arity is -1,
+        // so the generic arity check passes argc=3 and the command-specific guard
+        // fires inside pingCommand). The subscribe-mode 2-element form must honor
+        // that bound: only argc<=2 takes the ["pong", msg] shape; argc>2 falls
+        // through to normal dispatch, which emits the arity error.
         if command_arity_ok
             && resp2
             && self.is_in_subscription_mode()
+            && argv.len() <= 2
             && argv
                 .first()
                 .is_some_and(|command| eq_ascii_token(command, b"PING"))
@@ -9098,6 +10103,21 @@ impl Runtime {
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
                     self.server
                         .record_command_histogram(argv, elapsed_us, &reply);
+                    // Upstream call() feeds MONITOR at the end of every executed
+                    // command except CMD_ADMIN / CMD_SKIP_MONITOR ones. This
+                    // special-command early-return path used to feed only under
+                    // replication replay (3s0ra), so a NORMAL client's SELECT /
+                    // SWAPDB / MULTI / EXEC / DISCARD / WATCH / UNWATCH / pub-sub
+                    // commands never appeared in MONITOR (redis shows them all).
+                    // Feed for every client now, keeping the CMD_ADMIN /
+                    // CMD_SKIP_MONITOR gate so SAVE / BGSAVE / DEBUG / CONFIG /
+                    // SLOWLOG / FAILOVER / REPLCONF (admin) stay hidden — exactly
+                    // upstream's exclusion set. The db shown is the post-command
+                    // selected_db, matching redis (SELECT mirrors its new db).
+                    // (frankenredis-e8f9q, frankenredis-3s0ra)
+                    if command_should_feed_monitors(argv) {
+                        self.feed_monitors(argv, now_ms, self.session.selected_db);
+                    }
                 }
                 return reply;
             }
@@ -9188,6 +10208,15 @@ impl Runtime {
 
         // Feed MONITOR clients before returning
         self.feed_monitors(argv, now_ms, self.session.selected_db);
+        // (frankenredis-ax9ox) For EVAL/EVALSHA, mirror the script's inner
+        // redis.call commands (with the `lua` address) AFTER the EVAL line, as
+        // upstream does.
+        if argv
+            .first()
+            .is_some_and(|cmd| Self::command_uses_script_propagation(cmd))
+        {
+            self.feed_script_monitor_commands(now_ms, self.session.selected_db);
+        }
 
         // Check if this was a MONITOR command — flag the client
         if argv
@@ -9199,8 +10228,32 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                let cmd_keys =
-                    set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv));
+                // (frankenredis-ev067) cmd_keys feeds ONLY four consumers: the
+                // blocked-client ready-set, client-tracking invalidation (write
+                // path), keyspace notifications, and client-tracking record (read
+                // path). When none of those are active — the overwhelmingly common
+                // case, and EVERY redis-benchmark collection-write run (SADD/HSET/
+                // LPUSH/ZADD) — deriving it via command_keys (a command-name
+                // re-scan through ~20 eq_ignore_ascii_case branches + two heap Vecs
+                // + per-key clones) on every command is pure waste, and is exactly
+                // what SET's fast path already skips (the SET-vs-SADD perf gap).
+                // Gate the derivation on its consumers; an empty Vec is a correct
+                // no-op for all of them — each early-outs on empty input or is
+                // itself gated (ready loop gated on blocked_client_ids; the
+                // tracking record/invalidate helpers return on empty; the notify
+                // block is gated on notify_keyspace_events). Profile-backed: the
+                // generic path spent ~4.5% self-time in command_key_indexes under
+                // SADD load that SET never paid.
+                let cmd_keys = if !self.server.blocked_client_ids.is_empty()
+                    || self.server.store.notify_keyspace_events != 0
+                    || !self.server.client_tracking_observed_keys.is_empty()
+                    || !self.server.client_tracking_bcast_clients.is_empty()
+                    || self.should_record_client_tracking_keys()
+                {
+                    set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv))
+                } else {
+                    Vec::new()
+                };
                 // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
                 // command triggered FIRST, before the command's own record, so a
                 // command that recreates the key (e.g. SET on an expired key)
@@ -10072,10 +11125,33 @@ impl Runtime {
 
     /// Feed a command to all monitor clients, formatted as Redis does.
     pub fn feed_monitors(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
-        use std::io::Write as _;
         if self.server.monitor_clients.is_empty() {
             return;
         }
+        // (frankenredis-ax9ox) Upstream feeds the real client peer address in
+        // the `[db addr]` prefix; fr had hardcoded `127.0.0.1:0` for every
+        // client. The session tracks the actual peer (CLIENT INFO already
+        // reports it); print it here, falling back to `127.0.0.1:0` only when
+        // there is no socket peer (e.g. the replication-replay session, which
+        // is the 3s0ra residual).
+        let addr = match self.session.peer_addr {
+            Some(addr) => std::borrow::Cow::Owned(addr.to_string()),
+            None => std::borrow::Cow::Borrowed("127.0.0.1:0"),
+        };
+        self.feed_monitors_with_addr(argv, now_ms, db, &addr);
+    }
+
+    /// (frankenredis-ax9ox) Feed MONITOR with the special `lua` address that
+    /// upstream uses for commands invoked from inside a script (`[db lua]`).
+    pub fn feed_monitors_lua(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
+        if self.server.monitor_clients.is_empty() {
+            return;
+        }
+        self.feed_monitors_with_addr(argv, now_ms, db, "lua");
+    }
+
+    fn feed_monitors_with_addr(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize, addr: &str) {
+        use std::io::Write as _;
         let secs = now_ms / 1000;
         let usecs = (now_ms % 1000) * 1000;
         // Build directly into a Vec<u8>. The buffer is consumed as
@@ -10083,21 +11159,32 @@ impl Runtime {
         // forced char-validation on every printable push and a
         // wasteful into_bytes re-walk. (frankenredis-588j1)
         let mut line: Vec<u8> = Vec::with_capacity(64);
-        let _ = write!(line, "+{secs}.{usecs:06} [{db} 127.0.0.1:0]");
+        let _ = write!(line, "+{secs}.{usecs:06} [{db} {addr}]");
         for arg in argv {
             line.push(b' ');
             line.push(b'"');
             for &b in arg.iter() {
-                if b == b'"' || b == b'\\' {
-                    line.push(b'\\');
-                    line.push(b);
-                } else if !(32..=126).contains(&b) {
-                    // (frankenredis-v1twi) write! into the running
-                    // buffer skips the per-byte format!() heap alloc
-                    // for non-printable bytes.
-                    let _ = write!(line, "\\x{b:02x}");
-                } else {
-                    line.push(b);
+                // (frankenredis-ax9ox) Match upstream sds.c::sdscatrepr: `"` and
+                // `\` are backslash-escaped, the C named escapes \n \r \t \a \b
+                // get their two-char form, other printables pass through, and
+                // anything else becomes \xNN. fr previously emitted \xNN for the
+                // named-escape bytes too (e.g. \x0a instead of \n).
+                match b {
+                    b'"' | b'\\' => {
+                        line.push(b'\\');
+                        line.push(b);
+                    }
+                    b'\n' => line.extend_from_slice(b"\\n"),
+                    b'\r' => line.extend_from_slice(b"\\r"),
+                    b'\t' => line.extend_from_slice(b"\\t"),
+                    0x07 => line.extend_from_slice(b"\\a"),
+                    0x08 => line.extend_from_slice(b"\\b"),
+                    0x20..=0x7e => line.push(b),
+                    // (frankenredis-v1twi) write! into the running buffer skips
+                    // the per-byte format!() heap alloc for non-printable bytes.
+                    _ => {
+                        let _ = write!(line, "\\x{b:02x}");
+                    }
                 }
             }
             line.push(b'"');
@@ -10105,6 +11192,24 @@ impl Runtime {
         line.extend_from_slice(b"\r\n");
         for &client_id in &self.server.monitor_clients {
             self.server.monitor_output.push((client_id, line.clone()));
+        }
+    }
+
+    /// (frankenredis-ax9ox) After mirroring an EVAL/EVALSHA command itself,
+    /// mirror the `redis.call` commands the script ran, each with the `lua`
+    /// address (upstream shows `[db lua] "cmd" ...`), gated by the same
+    /// admin/skip_monitor exclusion as normal commands.
+    fn feed_script_monitor_commands(&mut self, now_ms: u64, db: usize) {
+        if self.server.monitor_clients.is_empty() {
+            // Still drain so records never leak into a later command.
+            let _ = self.server.store.take_script_monitor_records();
+            return;
+        }
+        let records = self.server.store.take_script_monitor_records();
+        for argv in records {
+            if command_should_feed_monitors(&argv) {
+                self.feed_monitors_lua(&argv, now_ms, db);
+            }
         }
     }
 
@@ -10380,6 +11485,9 @@ impl Runtime {
         } else {
             -1
         };
+        // (frankenredis-ax9ox) Mirror whether MONITOR is active so nested
+        // script (redis.call) execution can gate recording inner commands.
+        let monitors_active = !self.server.monitor_clients.is_empty();
         let acl_generation = self.server.auth_state.dispatch_permissions_generation();
         let current_user = session.current_user_name();
         if self.dispatch_acl_snapshot_generation != acl_generation
@@ -10436,6 +11544,7 @@ impl Runtime {
         ctx.multi_count = multi_count;
         ctx.watch_count = session.transaction_state.watched_keys.len();
         ctx.is_pubsub = is_pubsub;
+        ctx.monitors_active = monitors_active;
         ctx.client_tracking.clone_from(&session.client_tracking);
         ctx.client_reply.clone_from(&session.client_reply);
         ctx.client_no_evict = session.client_no_evict;
@@ -12882,8 +13991,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'latency-tracking'".to_string(),
+                        return config_set_failed(
+                            "latency-tracking",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -12905,15 +14015,27 @@ impl Runtime {
                 };
                 let mut ps = Vec::new();
                 for part in val_str.split_whitespace() {
-                    let p = match part.parse::<f64>() {
-                        Ok(v) if (0.0..=100.0).contains(&v) => v,
-                        _ => {
-                            return RespFrame::Error(
-                                "ERR Invalid argument for CONFIG SET 'latency-tracking-info-percentiles'".to_string(),
+                    // (frankenredis-0fuq4) Mirror upstream config.c: a token that
+                    // doesn't parse as a double is an "Invalid ... parameters"
+                    // error, while an in-range-type but out-of-[0,100] value is
+                    // the "should sit between [0.0,100.0]" error — both wrapped by
+                    // config_set_failed, not the generic "Invalid argument".
+                    let v = match part.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return config_set_failed(
+                                "latency-tracking-info-percentiles",
+                                "Invalid latency-tracking-info-percentiles parameters",
                             );
                         }
                     };
-                    ps.push(p);
+                    if !(0.0..=100.0).contains(&v) {
+                        return config_set_failed(
+                            "latency-tracking-info-percentiles",
+                            "latency-tracking-info-percentiles parameters should sit between [0.0,100.0]",
+                        );
+                    }
+                    ps.push(v);
                 }
                 next_latency_percentiles = Some(ps);
                 static_override_updates.push((
@@ -12926,12 +14048,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'latency-monitor-threshold'"
-                                .to_string(),
+                        return config_set_failed(
+                            "latency-monitor-threshold",
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "latency-monitor-threshold",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_latency_monitor_threshold = Some(parsed);
                 static_override_updates
@@ -13009,24 +14136,13 @@ impl Runtime {
                 // and an INCLUSIVE [1, INT64_MAX] range. Vendored
                 // returns 'argument must be a memory value' for
                 // unparseable input and 'argument must be between 1
-                // and 9223372036854775807 inclusive' for 0 / negative.
-                // fr previously emitted the non-standard 'Invalid
-                // argument' wording AND silently accepted 0.
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // and 9223372036854775807 inclusive' for 0 / negative /
+                // over-cap (overflow saturates to ULLONG_MAX which is a
+                // RANGE error, not a parse error — frankenredis-vqmkt).
+                let parsed = match parse_memory_config_value("repl-backlog-size", &pair[1], 1) {
                     Ok(value) => value,
-                    Err(()) => {
-                        return config_set_failed(
-                            "repl-backlog-size",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed == 0 {
-                    return config_set_failed(
-                        "repl-backlog-size",
-                        "argument must be between 1 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_repl_backlog_size = Some(parsed);
                 static_override_updates.push(("repl-backlog-size".to_string(), parsed.to_string()));
                 continue;
@@ -13111,9 +14227,13 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument for CONFIG SET '{parameter}'"
-                        ));
+                        // (frankenredis-vqmkt) Upstream wraps the bool-parse
+                        // failure via config_set_failed with the canonical
+                        // "argument must be 'yes' or 'no'" detail.
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be 'yes' or 'no'",
+                        );
                     }
                 };
                 next_replica_serve_stale_data = Some(parsed);
@@ -13134,9 +14254,13 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument for CONFIG SET '{parameter}'"
-                        ));
+                        // (frankenredis-vqmkt) Upstream wraps the bool-parse
+                        // failure via config_set_failed with the canonical
+                        // "argument must be 'yes' or 'no'" detail.
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be 'yes' or 'no'",
+                        );
                     }
                 };
                 next_replica_read_only = Some(parsed);
@@ -13188,8 +14312,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-diskless-sync'".to_string(),
+                        return config_set_failed(
+                            "repl-diskless-sync",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -13205,15 +14330,25 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-diskless-sync-delay") {
+                // (frankenredis-0fuq4) Upstream INTEGER_CONFIG range is
+                // [0, INT_MAX]; out-of-range (incl. values above INT_MAX, which
+                // fr previously accepted via a bare `>= 0` check) surfaces the
+                // table-level bound message via config_set_failed, not the
+                // non-standard "Invalid argument" wording.
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
+                    Ok(value) if (0..=2_147_483_647).contains(&value) => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-diskless-sync-delay'"
-                                .to_string(),
+                        return config_set_failed(
+                            "repl-diskless-sync-delay",
+                            "argument must be between 0 and 2147483647 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "repl-diskless-sync-delay",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_repl_diskless_sync_delay = Some(parsed);
                 static_override_updates
@@ -13332,8 +14467,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'cluster-allow-pubsubshard-when-down'".to_string(),
+                        return config_set_failed(
+                            "cluster-allow-pubsubshard-when-down",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -13410,21 +14546,15 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
                 // Upstream config.c marks this as MEMORY_CONFIG with
                 // a 1MB lower bound. (br-frankenredis-cfgmemvalue)
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // Over-cap/overflow is a RANGE error. (frankenredis-vqmkt)
+                let parsed = match parse_memory_config_value(
+                    "client-query-buffer-limit",
+                    &pair[1],
+                    1024 * 1024,
+                ) {
                     Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(
-                            "client-query-buffer-limit",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed < 1024 * 1024 {
-                    return config_set_failed(
-                        "client-query-buffer-limit",
-                        "argument must be between 1048576 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_query_buffer_limit = Some(parsed);
                 static_override_updates
                     .push(("client-query-buffer-limit".to_string(), parsed.to_string()));
@@ -13433,21 +14563,15 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("proto-max-bulk-len") {
                 // Upstream config.c marks this as MEMORY_CONFIG with
                 // a 1MB lower bound. (br-frankenredis-cfgmemvalue)
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // Over-cap/overflow is a RANGE error. (frankenredis-vqmkt)
+                let parsed = match parse_memory_config_value(
+                    "proto-max-bulk-len",
+                    &pair[1],
+                    1024 * 1024,
+                ) {
                     Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(
-                            "proto-max-bulk-len",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed < 1024 * 1024 {
-                    return config_set_failed(
-                        "proto-max-bulk-len",
-                        "argument must be between 1048576 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_proto_max_bulk_len = Some(parsed);
                 static_override_updates
                     .push(("proto-max-bulk-len".to_string(), parsed.to_string()));
@@ -13467,31 +14591,101 @@ impl Runtime {
                     } else {
                         "active-defrag-ignore-bytes"
                     };
-                let parsed = match parse_memory_size_arg(&pair[1]) {
-                    Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(canonical, "argument must be a memory value");
-                    }
-                };
                 // (frankenredis-ap2eo) Upstream config.c declares
-                // active-defrag-ignore-bytes as INTEGER_CONFIG with
+                // active-defrag-ignore-bytes as MEMORY_CONFIG with an
                 // INCLUSIVE range [1, INT64_MAX] — a value of 0 means
                 // 'never trigger defrag', which Redis represents as
-                // active-defrag disabled, not as a 0 byte threshold.
-                // Vendored emits 'argument must be between 1 and
-                // 9223372036854775807 inclusive'. fr previously accepted
-                // 0 and silently stored it.
-                if canonical == "active-defrag-ignore-bytes" && parsed == 0 {
-                    return config_set_failed(
-                        canonical,
-                        "argument must be between 1 and 9223372036854775807 inclusive",
-                    );
-                }
+                // active-defrag disabled, not as a 0 byte threshold;
+                // stream-node-max-bytes / hll-sparse-max-bytes allow 0.
+                // Over-cap/overflow values are RANGE errors in every
+                // case. (frankenredis-vqmkt)
+                let min: u64 = if canonical == "active-defrag-ignore-bytes" {
+                    1
+                } else {
+                    0
+                };
+                let parsed = match parse_memory_config_value(canonical, &pair[1], min) {
+                    Ok(value) => value as usize,
+                    Err(resp) => return resp,
+                };
                 if canonical == "hll-sparse-max-bytes" {
                     next_hll_sparse_max_bytes = Some(parsed);
                 } else {
                     static_override_updates.push((canonical.to_string(), parsed.to_string()));
                 }
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("auto-aof-rewrite-min-size") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // auto-aof-rewrite-min-size as createOffTConfig with the
+                // MEMORY_CONFIG flag and an INCLUSIVE [0, INT64_MAX]
+                // range. fr previously fell through to the unvalidated
+                // store fallback, silently accepting garbage and
+                // negatives.
+                let parsed =
+                    match parse_memory_config_value("auto-aof-rewrite-min-size", &pair[1], 0) {
+                        Ok(value) => value,
+                        Err(resp) => return resp,
+                    };
+                static_override_updates
+                    .push(("auto-aof-rewrite-min-size".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("auto-aof-rewrite-percentage") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // auto-aof-rewrite-percentage as createIntConfig
+                // (INTEGER_CONFIG) with an INCLUSIVE [0, INT_MAX] range.
+                let parsed = match parse_int_config_value(
+                    "auto-aof-rewrite-percentage",
+                    &pair[1],
+                    0,
+                    i32::MAX as i64,
+                ) {
+                    Ok(value) => value,
+                    Err(resp) => return resp,
+                };
+                static_override_updates
+                    .push(("auto-aof-rewrite-percentage".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("active-defrag-threshold-lower")
+                || parameter.eq_ignore_ascii_case("active-defrag-threshold-upper")
+            {
+                // (frankenredis-vqmkt) Upstream config.c declares both
+                // active-defrag-threshold-lower/upper as createIntConfig
+                // (INTEGER_CONFIG) with an INCLUSIVE [0, 1000] range —
+                // these are fragmentation percentages.
+                let canonical = parameter.to_ascii_lowercase();
+                let parsed = match parse_int_config_value(&canonical, &pair[1], 0, 1000) {
+                    Ok(value) => value,
+                    Err(resp) => return resp,
+                };
+                static_override_updates.push((canonical, parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-announce-hostname") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // cluster-announce-hostname as createStringConfig with
+                // the isValidAnnouncedHostname validator: the hostname
+                // must be shorter than NET_HOST_STR_LEN (256) and contain
+                // only [A-Za-z0-9.-]. An empty string clears it.
+                let value_bytes = &pair[1];
+                if value_bytes.len() >= 256 {
+                    return config_set_failed(
+                        "cluster-announce-hostname",
+                        "Hostnames must be less than 256 characters",
+                    );
+                }
+                if value_bytes.iter().any(|&c| {
+                    !(c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
+                }) {
+                    return config_set_failed(
+                        "cluster-announce-hostname",
+                        "Hostnames may only contain alphanumeric characters, hyphens or dots",
+                    );
+                }
+                let value = String::from_utf8_lossy(value_bytes).to_string();
+                static_override_updates.push(("cluster-announce-hostname".to_string(), value));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-clients") {
@@ -13611,12 +14805,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'busy-reply-threshold'"
-                                .to_string(),
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_command_time_budget = Some(parsed);
                 continue;
@@ -13715,13 +14914,95 @@ impl Runtime {
                 ));
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("port") {
+                // (frankenredis-zyx9q) Upstream config.c declares port as
+                // createIntConfig(0, 65535, MODIFIABLE_CONFIG) with the
+                // updatePort apply hook: CONFIG SET rebinds the listening
+                // socket synchronously and returns
+                // "Unable to listen on this port. Check server logs." if the
+                // new port can't be bound. Existing client connections survive
+                // — only the listener moves. We int/range-validate, then (in a
+                // standalone server, i.e. bind_addr set) test-bind the new
+                // address to reproduce the bind-failure error path and hand the
+                // live rebind to the event loop via pending_port_change.
+                let parsed = match parse_int_config_value("port", &pair[1], 0, 65535) {
+                    Ok(value) => value as u16,
+                    Err(resp) => return resp,
+                };
+                if !self.server.bind_addr.is_empty() && parsed != self.server_port() {
+                    // Test-bind EVERY current bind address at the NEW port
+                    // (frankenredis-jd75g: the list may hold >1 after CONFIG SET
+                    // bind), reproducing changeListener's all-or-nothing bind.
+                    // Skipped when the port is unchanged (a no-op rebind would
+                    // self-conflict with the server's own held sockets).
+                    for addr in &self.server.bind_addrs {
+                        if std::net::TcpListener::bind((addr.as_str(), parsed)).is_err() {
+                            return config_set_failed(
+                                "port",
+                                "Unable to listen on this port. Check server logs.",
+                            );
+                        }
+                    }
+                    // Test-binds dropped here; the event loop performs the real
+                    // mio rebind (close-old-then-bind-new with rollback).
+                    self.server.pending_port_change = Some(parsed);
+                }
+                self.set_server_port(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("bind") {
+                // (frankenredis-jd75g) Upstream config.c declares bind as a
+                // MODIFIABLE_CONFIG | MULTI_ARG_CONFIG special config: the value
+                // is split on whitespace into up to CONFIG_BINDADDR_MAX (16)
+                // addresses (setConfigBindOption), then applyBind rebinds every
+                // listener — returning "Failed to bind to specified addresses."
+                // if any can't be bound, and keeping the old listeners. A single
+                // empty value means "bind nothing" (zero addresses). Existing
+                // client connections survive; only the listeners move.
+                let value = match std::str::from_utf8(&pair[1]) {
+                    Ok(v) => v,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                let addrs: Vec<String> =
+                    value.split_whitespace().map(|s| s.to_string()).collect();
+                if addrs.len() > 16 {
+                    return config_set_failed("bind", "Too many bind addresses specified.");
+                }
+                if !self.server.bind_addr.is_empty() {
+                    // Standalone server: test-bind each ADDED address at the
+                    // current port to reproduce applyBind's all-or-nothing error
+                    // path before signalling the event-loop rebind. Addresses
+                    // already in the live set are skipped — the server itself
+                    // currently holds them, so a test-bind would spuriously fail
+                    // with EADDRINUSE (the real rebind closes them first).
+                    let port = self.server_port();
+                    for addr in &addrs {
+                        if self.server.bind_addrs.iter().any(|cur| cur == addr) {
+                            continue;
+                        }
+                        if std::net::TcpListener::bind((addr.as_str(), port)).is_err() {
+                            return config_set_failed(
+                                "bind",
+                                "Failed to bind to specified addresses.",
+                            );
+                        }
+                    }
+                    self.server.pending_bind_change = Some(addrs.clone());
+                }
+                // bind_addr stays as the startup standalone-mode sentinel; the
+                // live address list lives in bind_addrs. CONFIG GET bind echoes
+                // the space-joined list (matching getConfigBindOption).
+                let joined = addrs.join(" ");
+                self.server.bind_addrs = addrs;
+                static_override_updates.push(("bind".to_string(), joined));
+                continue;
+            }
             if parameter.eq_ignore_ascii_case("appendfilename")
                 || parameter.eq_ignore_ascii_case("appenddirname")
                 || parameter.eq_ignore_ascii_case("always-show-logo")
                 || parameter.eq_ignore_ascii_case("aof_rewrite_cpulist")
                 || parameter.eq_ignore_ascii_case("bgsave_cpulist")
                 || parameter.eq_ignore_ascii_case("bio_cpulist")
-                || parameter.eq_ignore_ascii_case("bind")
                 || parameter.eq_ignore_ascii_case("cluster-config-file")
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("cluster-port")
@@ -13735,7 +15016,6 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("io-threads-do-reads")
                 || parameter.eq_ignore_ascii_case("logfile")
                 || parameter.eq_ignore_ascii_case("pidfile")
-                || parameter.eq_ignore_ascii_case("port")
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("replicaof")
                 || parameter.eq_ignore_ascii_case("set-proc-title")
@@ -14069,11 +15349,12 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries");
             if is_memory_threshold || is_integer_threshold {
                 let parsed = if is_memory_threshold {
-                    match parse_memory_size_arg(&pair[1]) {
+                    // Upstream marks these MEMORY_CONFIG with range
+                    // [0, LONG_MAX]; over-cap/overflow is a RANGE error,
+                    // not a parse error. (frankenredis-vqmkt)
+                    match parse_memory_config_value(parameter, &pair[1], 0) {
                         Ok(value) => value as usize,
-                        Err(()) => {
-                            return config_set_failed(parameter, "argument must be a memory value");
-                        }
+                        Err(resp) => return resp,
                     }
                 } else {
                     match parse_i64_arg(&pair[1]) {
@@ -14133,7 +15414,12 @@ impl Runtime {
                 // (br-frankenredis-cfgmemvalue)
                 if matches!(
                     canonical,
-                    "activerehashing"
+                    // (frankenredis-vqmkt) these bool configs previously fell
+                    // through to the unvalidated store fallback, accepting any
+                    // value; upstream requires 'yes'/'no'.
+                    "activedefrag"
+                        | "jemalloc-bg-thread"
+                        | "activerehashing"
                         | "aof-load-truncated"
                         | "aof-rewrite-incremental-fsync"
                         | "aof-timestamp-enabled"
@@ -14342,6 +15628,29 @@ impl Runtime {
                         if !valid {
                             return config_set_failed("save", "Invalid save parameters");
                         }
+                    }
+                }
+                if canonical == "oom-score-adj-values" {
+                    // (frankenredis-wdn01) Mirror upstream config.c::
+                    // setConfigOOMScoreAdjValuesOption: exactly CONFIG_OOM_COUNT
+                    // (3) space-separated integers, each fully parseable and in
+                    // [-2000, 2000]. fr previously stored any string unchecked.
+                    let s = String::from_utf8_lossy(value_bytes);
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if parts.len() != 3 {
+                        return config_set_failed(
+                            "oom-score-adj-values",
+                            "wrong number of arguments",
+                        );
+                    }
+                    if !parts
+                        .iter()
+                        .all(|p| p.parse::<i64>().is_ok_and(|v| (-2000..=2000).contains(&v)))
+                    {
+                        return config_set_failed(
+                            "oom-score-adj-values",
+                            "Invalid oom-score-adj-values, elements must be between -2000 and 2000.",
+                        );
                     }
                 }
                 let value = String::from_utf8_lossy(value_bytes).to_string();
@@ -17785,6 +19094,17 @@ replica_announced:1\r\n",
             self.server
                 .record_command_histogram_outcome(argv, elapsed_us, failed);
 
+            // (frankenredis-e8f9q) Upstream execCommand call()s each queued
+            // command, so MONITOR mirrors them between the MULTI and EXEC lines
+            // (a queued command run via this loop never reaches the normal
+            // post-dispatch feed). Feed here, after execution, gated like
+            // upstream by CMD_ADMIN / CMD_SKIP_MONITOR so a queued CONFIG / DEBUG
+            // stays hidden. DISCARDed queues never reach this loop, so a
+            // discarded command is correctly never mirrored.
+            if command_should_feed_monitors(argv) {
+                self.feed_monitors(argv, now_ms, self.session.selected_db);
+            }
+
             // (frankenredis-wzs7l) Emit any lazy-expiry deletions this queued
             // command triggered, inside the transaction and before the command's
             // own record. Each lazy eviction bumped `dirty`, so the command is
@@ -18190,6 +19510,59 @@ fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
         digits.parse().unwrap_or(u64::MAX)
     };
     Ok(val.wrapping_mul(mul))
+}
+
+/// Validate a CONFIG SET MEMORY_CONFIG value the way upstream
+/// config.c::numericConfigSet does: a memtoull-style parse (suffix
+/// aware, ULLONG_MAX-saturating on digit overflow — strtoull's errno is
+/// never checked) followed by an inclusive boundary check. Upstream's
+/// signed numeric types (LONG_LONG/OFF_T) cap at LLONG_MAX and the
+/// unsigned SIZE_T types cap at LONG_MAX; both equal i64::MAX on 64-bit,
+/// so any over-cap or overflow-saturated value is a RANGE error
+/// ("argument must be between {min} and 9223372036854775807 inclusive"),
+/// NOT the "argument must be a memory value" parse error. (frankenredis-vqmkt)
+fn parse_memory_config_value(canonical: &str, value: &[u8], min: u64) -> Result<u64, RespFrame> {
+    let parsed = match parse_memory_size_arg(value) {
+        Ok(value) => value,
+        Err(()) => {
+            return Err(config_set_failed(canonical, "argument must be a memory value"));
+        }
+    };
+    if parsed < min || parsed > i64::MAX as u64 {
+        return Err(config_set_failed(
+            canonical,
+            &format!("argument must be between {min} and 9223372036854775807 inclusive"),
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Validate a CONFIG SET INTEGER_CONFIG value the way upstream
+/// config.c::numericConfigSet does for non-MEMORY integer configs:
+/// string2ll parse (overflow is a parse failure, unlike memtoull) then
+/// an inclusive boundary check. (frankenredis-vqmkt)
+fn parse_int_config_value(
+    canonical: &str,
+    value: &[u8],
+    min: i64,
+    max: i64,
+) -> Result<i64, RespFrame> {
+    let parsed = match parse_i64_arg(value) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(config_set_failed(
+                canonical,
+                "argument couldn't be parsed into an integer",
+            ));
+        }
+    };
+    if parsed < min || parsed > max {
+        return Err(config_set_failed(
+            canonical,
+            &format!("argument must be between {min} and {max} inclusive"),
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Mirror the canonical Redis 7.2 ACL category names accepted by
@@ -19844,6 +21217,82 @@ mod tests {
         rt.execute_frame(command(&[b"MULTI"]), 3);
         assert!(rt.execute_plain_decr_borrowed(b"n", 4).is_none());
         assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4).is_none());
+    }
+
+    #[test]
+    fn plain_append_borrowed_fast_path_matches_generic_create_grow_wrongtype() {
+        // (frankenredis-q0qym) APPEND borrowed fast path == generic dispatch:
+        // creates on a missing key, grows an existing string (returning the new
+        // length), and surfaces the same WRONGTYPE error on a non-string key.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"Hello"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1); // wrong type
+        }
+        // grow existing -> "Hello" + " World" = 11
+        let grow = fast
+            .execute_plain_append_borrowed(b"s", b" World", 2)
+            .expect("default APPEND should take borrowed fast path");
+        assert_eq!(
+            grow,
+            generic.execute_frame(command(&[b"APPEND", b"s", b" World"]), 2)
+        );
+        assert_eq!(grow, RespFrame::Integer(11));
+        // create on missing key -> len of value
+        let created = fast
+            .execute_plain_append_borrowed(b"fresh", b"abc", 3)
+            .expect("new-key APPEND should take borrowed fast path");
+        assert_eq!(
+            created,
+            generic.execute_frame(command(&[b"APPEND", b"fresh", b"abc"]), 3)
+        );
+        assert_eq!(created, RespFrame::Integer(3));
+        // append empty value to existing -> unchanged length
+        let noop = fast.execute_plain_append_borrowed(b"s", b"", 4).unwrap();
+        assert_eq!(
+            noop,
+            generic.execute_frame(command(&[b"APPEND", b"s", b""]), 4)
+        );
+        // wrong type -> WRONGTYPE
+        let wt = fast.execute_plain_append_borrowed(b"l", b"x", 5).unwrap();
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"APPEND", b"l", b"x"]), 5)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        // stored values + write/error/command stats match the generic path.
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"s"]), 6),
+            generic.execute_frame(command(&[b"GET", b"s"]), 6)
+        );
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_writes_processed,
+            generic.server.store.stat_total_writes_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_append_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 2).is_some());
+        // a configured replica link / subscribe disables the write fast path
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4).is_none());
     }
 
     #[test]
@@ -22179,12 +23628,18 @@ mod tests {
         // container subcommand expands to "parent|sub". Pre-fix, fr
         // namespaced only PUBSUB; CLIENT/CONFIG/etc. surfaced the
         // bare parent name and broke parity for monitoring tools.
+        //
+        // (frankenredis-7tpx0) Every case must use a VALID-arity,
+        // non-protected container subcommand so it actually reaches the
+        // pub/sub-context gate. DEBUG is intentionally absent: it is
+        // CMD_PROTECTED (server.c:3878) so a subscribed DEBUG gets the
+        // protected error before the context gate (covered by
+        // subscribe_mode_protected_and_subcommand_arity_precede_context_gate_7tpx0).
         let cases: &[(&[&[u8]], &str)] = &[
             (&[b"CLIENT", b"INFO"], "client|info"),
             (&[b"CLIENT", b"LIST"], "client|list"),
             (&[b"CLIENT", b"KILL", b"ID", b"1"], "client|kill"),
             (&[b"CONFIG", b"GET", b"maxmemory"], "config|get"),
-            (&[b"DEBUG", b"OBJECT", b"k"], "debug|object"),
             (&[b"OBJECT", b"ENCODING", b"k"], "object|encoding"),
             (&[b"MEMORY", b"USAGE", b"k"], "memory|usage"),
             (&[b"SLOWLOG", b"GET"], "slowlog|get"),
@@ -22211,6 +23666,62 @@ mod tests {
                 argv,
             );
         }
+    }
+
+    #[test]
+    fn subscribe_mode_protected_and_subcommand_arity_precede_context_gate_7tpx0() {
+        // (frankenredis-7tpx0) Upstream processCommand order is
+        // arity(incl. subcommand) -> CMD_PROTECTED -> ... -> pub/sub-context
+        // gate, so while subscribed:
+        //   * a known container subcommand with the WRONG argc surfaces its own
+        //     arity error, not the context wording (CONFIG GET / OBJECT ENCODING);
+        //   * DEBUG (protected, enable-debug-command="no") surfaces the protected
+        //     error, not the context wording;
+        //   * PING with argc>2 surfaces "wrong number of arguments for 'ping'"
+        //     (PING's table arity is -1, so the bound is command-specific);
+        //   * valid-arity disallowed commands STILL get the context error.
+        let arity = |name: &str| format!("ERR wrong number of arguments for '{name}' command");
+        let context = |name: &str| {
+            format!(
+                "ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+            )
+        };
+        let cases: &[(&[&[u8]], String)] = &[
+            // wrong subcommand arity -> own arity error (gate skipped)
+            (&[b"CONFIG", b"GET"], arity("config|get")),
+            (&[b"OBJECT", b"ENCODING"], arity("object|encoding")),
+            // PING argc>2 -> command-specific arity error
+            (&[b"PING", b"a", b"b"], arity("ping")),
+            // DEBUG (protected) -> protected error, never the context error
+            (
+                &[b"DEBUG", b"SLEEP", b"0"],
+                "ERR DEBUG command not allowed. If the enable-debug-command \
+                 option is set to \"local\", you can run it from a local \
+                 connection, otherwise you need to set this option in the \
+                 configuration file, and then restart the server."
+                    .to_string(),
+            ),
+            // valid-arity disallowed command -> still the context error
+            (&[b"CONFIG", b"GET", b"maxmemory"], context("config|get")),
+            (&[b"OBJECT", b"ENCODING", b"k"], context("object|encoding")),
+            (&[b"GET", b"k"], context("get")),
+        ];
+        for (argv, expected) in cases {
+            let mut rt = Runtime::default_strict();
+            let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0);
+            let reply = rt.execute_frame(command(argv), 1);
+            assert_eq!(reply, RespFrame::Error(expected.clone()), "argv={argv:?}");
+        }
+        // PING / PING msg keep the subscribe-mode 2-element shape.
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING", b"hi"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(b"hi".to_vec())),
+            ])),
+        );
     }
 
     #[test]
@@ -25313,6 +26824,202 @@ mod tests {
     }
 
     #[test]
+    fn monitor_prints_real_peer_addr_ax9ox() {
+        // (frankenredis-ax9ox) When the session has a real socket peer, the
+        // MONITOR `[db addr]` prefix must show it, not the `127.0.0.1:0`
+        // placeholder fr used to hardcode for every client.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 13;
+        rt.session.peer_addr = Some(
+            "127.0.0.1:51468"
+                .parse::<std::net::SocketAddr>()
+                .expect("parse addr"),
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"alpha", b"1"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(
+                13,
+                b"+0.004000 [0 127.0.0.1:51468] \"SET\" \"alpha\" \"1\"\r\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn monitor_escapes_control_chars_like_sdscatrepr_ax9ox() {
+        // (frankenredis-ax9ox) Upstream sds.c::sdscatrepr emits the C named
+        // escapes for \n \r \t \a \b and \xNN for other non-printables; fr had
+        // emitted \xNN for the named bytes too.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 21;
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"ek", b"a\nb\tc\r\x07\x08d\xfe"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(
+                21,
+                b"+0.005000 [0 127.0.0.1:0] \"SET\" \"ek\" \"a\\nb\\tc\\r\\a\\bd\\xfe\"\r\n"
+                    .to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn replica_monitor_echoes_select_from_master_stream_3s0ra() {
+        // Upstream: a replica's MONITOR echoes the SELECT commands its primary
+        // injects into the replication stream when the db changes. fr's special-
+        // command dispatch early-returned before the MONITOR feed, so SELECT
+        // never reached a monitoring client on the replica. The feed is scoped
+        // to the replication-replay path (applying_master_stream).
+        // (frankenredis-3s0ra)
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 9;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        // Replaying the primary's stream: SELECT 1 must reach the monitor with
+        // the post-switch db in the prefix, exactly like redis.
+        rt.server.applying_master_stream = true;
+        let _ = rt.execute_frame(command(&[b"SELECT", b"1"]), 2);
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(9, b"+0.002000 [1 127.0.0.1:0] \"SELECT\" \"1\"\r\n".to_vec())],
+            "replica MONITOR must echo the replayed SELECT"
+        );
+
+        // REPLCONF (admin) carried in the stream stays hidden from MONITOR.
+        let _ = rt.execute_frame(command(&[b"REPLCONF", b"GETACK", b"*"]), 3);
+        assert!(
+            rt.drain_monitor_output().is_empty(),
+            "REPLCONF (admin) must not reach MONITOR"
+        );
+        rt.server.applying_master_stream = false;
+
+        // A normal client's SELECT is now also mirrored (frankenredis-e8f9q):
+        // upstream feeds MONITOR for every non-admin command, special ones
+        // included, with the post-switch db in the prefix.
+        let _ = rt.execute_frame(command(&[b"SELECT", b"2"]), 4);
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(9, b"+0.004000 [2 127.0.0.1:0] \"SELECT\" \"2\"\r\n".to_vec())],
+            "normal-client SELECT must now be mirrored to MONITOR (e8f9q)"
+        );
+    }
+
+    #[test]
+    fn monitor_mirrors_multi_exec_and_queued_commands_e8f9q() {
+        // (frankenredis-e8f9q) Upstream mirrors MULTI, each queued command (run
+        // during EXEC), and EXEC, in that order. fr previously mirrored none of
+        // them (special-command + queued paths skipped the feed).
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 31;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"tx", b"1"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"tx"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        let _ = rt.execute_frame(command(&[b"EXEC"]), 5);
+
+        // Order: MULTI (recv), then the queued SET + INCR (during EXEC), then
+        // EXEC itself. The QUEUED commands are NOT fed at queue time.
+        let cmds: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                // keep just the `"CMD" ...` payload after the `] `
+                let pos = line.windows(2).position(|w| w == b"] ").unwrap();
+                line[pos + 2..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                b"\"MULTI\"\r\n".to_vec(),
+                b"\"SET\" \"tx\" \"1\"\r\n".to_vec(),
+                b"\"INCR\" \"tx\"\r\n".to_vec(),
+                b"\"EXEC\"\r\n".to_vec(),
+            ],
+            "MULTI, queued SET/INCR, then EXEC must all be mirrored in order"
+        );
+    }
+
+    #[test]
+    fn monitor_mirrors_script_redis_call_with_lua_addr_ax9ox() {
+        // (frankenredis-ax9ox residual c) Upstream mirrors each redis.call a
+        // script runs with the special `lua` address, after the EVAL line.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 53;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        let _ = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('set', KEYS[1], '1'); return redis.call('get', KEYS[1])",
+                b"1",
+                b"lk",
+            ]),
+            2,
+        );
+        // Keep `[db addr] payload` (strip the leading timestamp).
+        let lines: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                let pos = line.iter().position(|&b| b == b'[').unwrap();
+                line[pos..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                b"[0 127.0.0.1:0] \"EVAL\" \"redis.call('set', KEYS[1], '1'); return redis.call('get', KEYS[1])\" \"1\" \"lk\"\r\n".to_vec(),
+                b"[0 lua] \"set\" \"lk\" \"1\"\r\n".to_vec(),
+                b"[0 lua] \"get\" \"lk\"\r\n".to_vec(),
+            ],
+            "EVAL line then its redis.call set/get mirrored with the lua address"
+        );
+    }
+
+    #[test]
     fn client_tracking_stateful_info_matches_redis() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
@@ -25707,6 +27414,12 @@ mod tests {
         );
 
         let previous = rt.swap_session(observer);
+        // (frankenredis-obohf) CLIENT LIST enumerates the server's
+        // `client_sessions` registry, which the real fr-server loop syncs after
+        // every command via record_client_session. A bare execute_frame test
+        // must replicate that sync, otherwise the just-subscribed session is
+        // absent from the registry and its sub/psub/ssub counts never surface.
+        rt.record_client_session(&previous);
         let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 4);
         let info = match client_list {
             RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client list utf8"),
@@ -31340,6 +33053,383 @@ mod tests {
         }
     }
 
+    /// (frankenredis-wdn01) Mirror upstream config.c::
+    /// setConfigOOMScoreAdjValuesOption: exactly 3 space-separated integers,
+    /// each in [-2000, 2000]. fr previously stored any string unchecked.
+    #[test]
+    fn config_set_oom_score_adj_values_validates_count_and_range_wdn01() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let arity_err = RespFrame::Error(
+            "ERR CONFIG SET failed (possibly related to argument 'oom-score-adj-values') - wrong number of arguments"
+                .to_string(),
+        );
+        let range_err = RespFrame::Error(
+            "ERR CONFIG SET failed (possibly related to argument 'oom-score-adj-values') - Invalid oom-score-adj-values, elements must be between -2000 and 2000."
+                .to_string(),
+        );
+
+        // Wrong number of arguments (must be exactly 3).
+        for bad in ["", "1 2", "1 2 3 4", "1"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", bad.as_bytes()]),
+                    0,
+                ),
+                arity_err,
+                "oom-score-adj-values '{bad}' must be a count error",
+            );
+        }
+        // Right count but bad/out-of-range elements.
+        for bad in ["a b c", "1 2 2001", "0 0 -2001", "1 2 x"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", bad.as_bytes()]),
+                    0,
+                ),
+                range_err,
+                "oom-score-adj-values '{bad}' must be a range error",
+            );
+        }
+        // Accepted: 3 in-range integers (incl. bounds).
+        for good in ["1 2 3", "0 200 800", "-2000 0 2000"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", good.as_bytes()]),
+                    0,
+                ),
+                ok,
+                "oom-score-adj-values '{good}' must be accepted",
+            );
+        }
+    }
+
+    /// (frankenredis-0fuq4) CONFIG SET error wording for two params that used the
+    /// non-standard "Invalid argument for CONFIG SET" generic message instead of
+    /// (frankenredis-vqmkt) CONFIG SET bool params that fell through unvalidated
+    /// (activedefrag, jemalloc-bg-thread) or rejected with the wrong generic
+    /// message (latency-tracking, replica/slave-read-only, repl-diskless-sync,
+    /// cluster-allow-pubsubshard-when-down, ...), plus two int params whose
+    /// parse/range errors used the wrong wording.
+    #[test]
+    fn config_set_bool_and_int_wording_parity_vqmkt() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let yn = |p: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{p}') - argument must be 'yes' or 'no'"
+            ))
+        };
+        // Bool params: bogus rejected with the canonical yes/no message; yes ok.
+        for p in [
+            "activedefrag",
+            "jemalloc-bg-thread",
+            "latency-tracking",
+            "replica-read-only",
+            "slave-read-only",
+            "replica-serve-stale-data",
+            "slave-serve-stale-data",
+            "repl-diskless-sync",
+            "cluster-allow-pubsubshard-when-down",
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"__bogus__"]), 0),
+                yn(p),
+                "bool '{p}' must reject non-yes/no with the canonical message",
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"yes"]), 0),
+                ok,
+                "bool '{p}' must accept yes",
+            );
+        }
+        // Int params: parse error vs out-of-range, both via config_set_failed.
+        for p in ["latency-monitor-threshold", "busy-reply-threshold", "lua-time-limit"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"__bogus__"]), 0),
+                RespFrame::Error(format!(
+                    "ERR CONFIG SET failed (possibly related to argument '{p}') - argument couldn't be parsed into an integer"
+                )),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"-1"]), 0),
+                RespFrame::Error(format!(
+                    "ERR CONFIG SET failed (possibly related to argument '{p}') - argument must be between 0 and 9223372036854775807 inclusive"
+                )),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"100"]), 0),
+                ok,
+            );
+        }
+    }
+
+    /// (frankenredis-jd75g) CONFIG SET bind is MODIFIABLE_CONFIG | MULTI_ARG in
+    /// redis 7.2.4, not immutable: the value is split on whitespace into up to
+    /// CONFIG_BINDADDR_MAX (16) addresses, echoed space-joined by CONFIG GET. In
+    /// library/test contexts (empty bind_addr) it validates the count + stores
+    /// the list with no socket side-effect; the standalone server rebinds.
+    #[test]
+    fn config_set_bind_is_modifiable_multi_arg_jd75g() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        // Single + multi address accepted; CONFIG GET echoes the space-joined list.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", b"127.0.0.1 ::1"]), 0),
+            ok,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"bind"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"bind".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1 ::1".to_vec())),
+            ])),
+        );
+        // Whitespace is normalized to single spaces (matches getConfigBindOption).
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", b"  127.0.0.1   ::1  "]), 0),
+            ok,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"bind"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"bind".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1 ::1".to_vec())),
+            ])),
+        );
+        // More than CONFIG_BINDADDR_MAX (16) addresses is rejected.
+        let seventeen = vec![b"127.0.0.1".as_slice(); 17].join(&b' ');
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", &seventeen]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'bind') - Too many bind addresses specified."
+                    .to_string()
+            ),
+        );
+        // Exactly 16 is allowed.
+        let sixteen = vec![b"127.0.0.1".as_slice(); 16].join(&b' ');
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", &sixteen]), 0),
+            ok,
+        );
+        // No pending rebind is queued when there is no event loop (bind_addr empty).
+        assert_eq!(rt.take_pending_bind_change(), None);
+    }
+
+    /// (frankenredis-zyx9q) CONFIG SET port is MODIFIABLE_CONFIG in redis
+    /// 7.2.4 (createIntConfig 0..65535), not immutable. In library/test
+    /// contexts (no event loop / empty bind_addr) it validates the range with
+    /// the INTEGER_CONFIG wording and updates the live port without any socket
+    /// side-effect; the standalone server performs the actual listener rebind.
+    #[test]
+    fn config_set_port_is_modifiable_with_range_validation_zyx9q() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument 'port') - {detail}"
+            ))
+        };
+        // Valid port: accepted, live value updated, CONFIG GET reflects it.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"6390"]), 0),
+            ok,
+        );
+        assert_eq!(rt.server_port(), 6390);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"port"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"port".to_vec())),
+                RespFrame::BulkString(Some(b"6390".to_vec())),
+            ])),
+        );
+        // 0 is valid (disable TCP listener); boundary 65535 valid.
+        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"0"]), 0), ok);
+        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65535"]), 0), ok);
+        // Out of range and unparseable: INTEGER_CONFIG wording, not "immutable".
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65536"]), 0),
+            err("argument must be between 0 and 65535 inclusive"),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"-1"]), 0),
+            err("argument must be between 0 and 65535 inclusive"),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"abc"]), 0),
+            err("argument couldn't be parsed into an integer"),
+        );
+        // No pending rebind is queued when there is no event loop (bind_addr empty).
+        assert_eq!(rt.take_pending_port_change(), None);
+    }
+
+    /// (frankenredis-vqmkt) The harder ACCEPT-GAP subset: MEMORY_CONFIG
+    /// params whose digit-overflow saturates (memtoull-style) and so is a
+    /// RANGE error not a parse error; INTEGER_CONFIG params that fell
+    /// through unvalidated; and the cluster-announce-hostname charset
+    /// validator. All wording is byte-exact vs vendored redis 7.2.4.
+    #[test]
+    fn config_set_memory_int_hostname_validation_vqmkt() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |field: &str, detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{field}') - {detail}"
+            ))
+        };
+        let set = |rt: &mut Runtime, p: &str, v: &str| {
+            rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), v.as_bytes()]), 0)
+        };
+
+        // MEMORY_CONFIG: garbage -> "memory value"; overflow/over-cap and
+        // sub-minimum -> RANGE error (upper always i64::MAX). (param, min)
+        for (p, min) in [
+            ("repl-backlog-size", 1u64),
+            ("proto-max-bulk-len", 1024 * 1024),
+            ("client-query-buffer-limit", 1024 * 1024),
+            ("stream-node-max-bytes", 0),
+            ("hll-sparse-max-bytes", 0),
+            ("active-defrag-ignore-bytes", 1),
+            ("auto-aof-rewrite-min-size", 0),
+            ("hash-max-listpack-value", 0),
+            ("hash-max-ziplist-value", 0),
+            ("zset-max-listpack-value", 0),
+            ("zset-max-ziplist-value", 0),
+        ] {
+            assert_eq!(set(&mut rt, p, "__garbage__"), err(p, "argument must be a memory value"));
+            let range = format!("argument must be between {min} and 9223372036854775807 inclusive");
+            assert_eq!(
+                set(&mut rt, p, "99999999999999999999999"),
+                err(p, &range),
+                "{p}: digit overflow is a RANGE error, not a parse error",
+            );
+            if min > 0 {
+                assert_eq!(set(&mut rt, p, "0"), err(p, &range), "{p}: 0 is below min");
+            } else {
+                assert_eq!(set(&mut rt, p, "0"), ok, "{p}: 0 is in range");
+            }
+            // A plain valid value (>= min) is accepted; suffix forms too.
+            assert_eq!(set(&mut rt, p, "2097152"), ok, "{p}: in-range value accepted");
+        }
+
+        // INTEGER_CONFIG: garbage/overflow -> parse error; out-of-range -> range.
+        for (p, max) in [
+            ("auto-aof-rewrite-percentage", i32::MAX as i64),
+            ("active-defrag-threshold-lower", 1000),
+            ("active-defrag-threshold-upper", 1000),
+        ] {
+            assert_eq!(
+                set(&mut rt, p, "__garbage__"),
+                err(p, "argument couldn't be parsed into an integer"),
+            );
+            assert_eq!(
+                set(&mut rt, p, "99999999999999999999999"),
+                err(p, "argument couldn't be parsed into an integer"),
+                "{p}: i64 overflow is a parse error for INTEGER_CONFIG",
+            );
+            let range = format!("argument must be between 0 and {max} inclusive");
+            assert_eq!(set(&mut rt, p, "-1"), err(p, &range));
+            assert_eq!(set(&mut rt, p, &(max + 1).to_string()), err(p, &range));
+            assert_eq!(set(&mut rt, p, &max.to_string()), ok);
+        }
+
+        // cluster-announce-hostname: charset + length validators; "" clears.
+        let hp = "cluster-announce-hostname";
+        assert_eq!(set(&mut rt, hp, "good.example-1.com"), ok);
+        assert_eq!(set(&mut rt, hp, ""), ok);
+        for bad in ["bad_underscore", "has space", "a@b"] {
+            assert_eq!(
+                set(&mut rt, hp, bad),
+                err(hp, "Hostnames may only contain alphanumeric characters, hyphens or dots"),
+            );
+        }
+        assert_eq!(
+            set(&mut rt, hp, &"x".repeat(256)),
+            err(hp, "Hostnames must be less than 256 characters"),
+        );
+        assert_eq!(set(&mut rt, hp, &"x".repeat(255)), ok);
+    }
+
+    /// upstream's config_set_failed wrapper + specific detail.
+    #[test]
+    fn config_set_error_wording_latency_percentiles_and_repl_diskless_delay_0fuq4() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |field: &str, detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{field}') - {detail}"
+            ))
+        };
+
+        // latency-tracking-info-percentiles: parse-fail vs range-fail.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"abc"]),
+                0,
+            ),
+            err(
+                "latency-tracking-info-percentiles",
+                "Invalid latency-tracking-info-percentiles parameters"
+            ),
+        );
+        for bad in ["50 101", "-1"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"latency-tracking-info-percentiles",
+                        bad.as_bytes()
+                    ]),
+                    0,
+                ),
+                err(
+                    "latency-tracking-info-percentiles",
+                    "latency-tracking-info-percentiles parameters should sit between [0.0,100.0]"
+                ),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"0 50 100"]),
+                0,
+            ),
+            ok,
+        );
+
+        // repl-diskless-sync-delay: [0, INT_MAX], with parse/range messages.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"abc"]), 0),
+            err(
+                "repl-diskless-sync-delay",
+                "argument couldn't be parsed into an integer"
+            ),
+        );
+        for bad in ["-1", "2147483648", "9999999999"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", bad.as_bytes()]),
+                    0,
+                ),
+                err(
+                    "repl-diskless-sync-delay",
+                    "argument must be between 0 and 2147483647 inclusive"
+                ),
+                "repl-diskless-sync-delay '{bad}' must be a range error",
+            );
+        }
+        for good in ["0", "5", "2147483647"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", good.as_bytes()]),
+                    0,
+                ),
+                ok,
+                "repl-diskless-sync-delay '{good}' must be accepted",
+            );
+        }
+    }
+
     #[test]
     fn config_set_validates_upstream_static_key_types() {
         // (frankenredis-3hj8) Adding Redis 7.2 CONFIG GET keys must not
@@ -34174,6 +36264,60 @@ mod tests {
     }
 
     #[test]
+    fn acl_setuser_selector_errors_match_upstream_aclsel() {
+        // (frankenredis-aclsel) Upstream acl.c selector parsing edge cases.
+        let mut rt = Runtime::default_strict();
+        let err = |rt: &mut Runtime, rule: &[u8]| -> String {
+            match rt.execute_frame(command(&[b"ACL", b"SETUSER", b"u", b"reset", rule]), 0) {
+                RespFrame::Error(e) => e,
+                other => panic!("expected error for {:?}, got {other:?}", String::from_utf8_lossy(rule)),
+            }
+        };
+        // Unmatched parenthesis reports the text from the '(' onward.
+        assert_eq!(
+            err(&mut rt, b"(+get"),
+            "ERR Unmatched parenthesis in acl selector starting at '(+get'."
+        );
+        assert_eq!(
+            err(&mut rt, b"("),
+            "ERR Unmatched parenthesis in acl selector starting at '('."
+        );
+        // Identity rules inside a selector report the ORIGINAL arg, not the
+        // inner token.
+        assert_eq!(
+            err(&mut rt, b"(on)"),
+            "ERR Error in ACL SETUSER modifier '(on)': Syntax error"
+        );
+        assert_eq!(
+            err(&mut rt, b"(>pass)"),
+            "ERR Error in ACL SETUSER modifier '(>pass)': Syntax error"
+        );
+        // Nested selectors are rejected (no recursion).
+        assert_eq!(
+            err(&mut rt, b"((+get))"),
+            "ERR Error in ACL SETUSER modifier '((+get))': Syntax error"
+        );
+        assert_eq!(
+            err(&mut rt, b"(~k1 (+get))"),
+            "ERR Error in ACL SETUSER modifier '(~k1 (+get))': Syntax error"
+        );
+        // Two parenthesised groups in one arg: the first inner token fails as an
+        // unknown command, reported against the whole original arg.
+        assert_eq!(
+            err(&mut rt, b"(+get) (+set)"),
+            "ERR Error in ACL SETUSER modifier '(+get) (+set)': Unknown command or category name in ACL"
+        );
+        // A valid selector still applies cleanly.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"u", b"reset", b"(+@read ~k*)"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
     fn acl_per_subcommand_rejects_unknown_selector() {
         // (frankenredis-6lgmx) Upstream's `+parent|sub` rule
         // validates the sub against the parent's known subcommands
@@ -36764,6 +38908,14 @@ mod tests {
             ]))
         );
         let subscriber = rt.swap_session(previous);
+        // (frankenredis-obohf) ACL channel-revocation scans the server's
+        // `client_sessions` registry to decide which subscribed clients now
+        // violate the user's channel ACL. The real fr-server loop populates
+        // that registry via record_client_session after each command; this
+        // bare execute_frame test must do the same so the subscriber is
+        // visible to the revocation pass (otherwise pending_client_kills is
+        // empty regardless of the ACL change).
+        rt.record_client_session(&subscriber);
 
         rt.server.pending_client_kills.clear();
         assert_eq!(
