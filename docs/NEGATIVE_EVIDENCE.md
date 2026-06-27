@@ -6118,3 +6118,18 @@ fns). ALWAYS grep for an existing execute_plain_*/parse_borrowed_plain_* before 
 no-drain. The ONE genuinely-uncovered dispatch gap the probe surfaced = `SET key val [EX n] GET` (0.446x, no fast-path:
 set_relexpire/absexpire/nx/xx/cond all reply +OK, none read+return the old value) — deferred as a dedicated lever (multi-
 option ordering + read-before-write + GET-on-non-string error = real byte-exact surface, not a quick hoist).
+
+### 2026-06-27 (part 166) WIN: SET ... EX|PX n GET new fast-path — cand/ctrl ~2.1x, byte-exact (cc/BlackThrush)
+The part-165 deferred lever. SET-with-GET was fast-pathed only for plain `SET key val GET` (execute_plain_set_get_borrowed);
+GET combined with ANY option fell to the generic argv path — measured EX+GET 0.42x, NX+GET 0.50x, XX+GET 0.62x, PX+GET
+0.67x, KEEPTTL+GET 0.71x (clean repeatable, SET overwrites so no drain artifact). Shipped the biggest+cleanest member:
+`SET key value EX|PX n GET` (*6). NEW execute_plain_set_relexpire_get_borrowed combines the EX/PX validation + store.set(
+Some(px)) of execute_plain_set_relexpire_borrowed with the read-old-first (records hit/miss, surfaces WRONGTYPE on a
+non-string key WITHOUT writing) of execute_plain_set_get_borrowed — reply = old value (nil if absent). NO new store code.
+NEW parse_borrowed_plain_set_relexpire_get_packet (`*6 $3 SET key val EX|PX time GET`), dispatched right after set_relexpire
+(distinct *5 vs *6 so no collision). Invalid/<=0/overflow time, GET-first order, EXAT/PXAT+GET, NX/XX/KEEPTTL+GET fall
+through to the generic (exact errors / not-yet-accelerated). A/B (cand vs ctrl=HEAD binary, pipe=300 trials=9, 3 runs, load
+14-65): EX_GET 2.02/2.06/2.26, PX_GET 2.09/2.34/1.93, EX_GET_miss 1.91/1.93/2.71 — **~2.1x** (cand/redis 1.04-1.58, now
+BEATS redis, up from 0.42-0.67x). BYTE-EXACT (cand==ctrl==redis, reply + GET value + PTTL band): EX/PX GET on existing-str
+/absent/wrong-type, EX 0/-5/abc/PX 0/overflow errors, GET-first order, RESP2+RESP3. fr-runtime + fr-server (my files only).
+Residual GET-combos still on generic (NX/XX/KEEPTTL/EXAT/PXAT + GET, 0.50-0.71x) = next siblings if pursued. 30 dispatch commits.

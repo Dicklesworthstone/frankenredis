@@ -2811,6 +2811,30 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some((is_seconds, packet)) =
+                    parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed(
+                        is_seconds,
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_set_absexpire_borrowed(
@@ -16322,6 +16346,52 @@ fn parse_borrowed_plain_set_relexpire_packet<'a>(
         return None;
     };
     let (time, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some((
+        is_seconds,
+        BorrowedPlainKeyRangePacket {
+            consumed,
+            key,
+            start: value,
+            end: time,
+        },
+    ))
+}
+
+// (frankenredis-setexget) `SET key value EX|PX n GET` (*6) — set-with-relative-TTL
+// returning the old value. Like set_relexpire but with a trailing literal GET token;
+// the runtime reads the old value before writing. GET-first order / EXAT/PXAT / NX/XX
+// fall through to the generic. Reuses BorrowedPlainKeyRangePacket (start=value, end=time).
+fn parse_borrowed_plain_set_relexpire_get_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(bool, BorrowedPlainKeyRangePacket<'a>)> {
+    if config.max_array_len < 6 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*6\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (unit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let is_seconds = if unit.eq_ignore_ascii_case(b"EX") {
+        true
+    } else if unit.eq_ignore_ascii_case(b"PX") {
+        false
+    } else {
+        return None;
+    };
+    let (time, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (get_tok, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !get_tok.eq_ignore_ascii_case(b"GET") {
+        return None;
+    }
     Some((
         is_seconds,
         BorrowedPlainKeyRangePacket {
