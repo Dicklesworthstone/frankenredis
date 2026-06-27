@@ -249,6 +249,53 @@ per-turn lever. Future digs should stop re-chasing the (now-closed) hot-write
 ratios and target `99fwc` (LPUSH/list-DUMP) or the keyspace-RAM `uhthd` lever
 directly, both owned structural work.
 
+## 2026-06-27 BlueFalcon PFADD one-byte HLL hash table rejected
+
+Land-or-dig found no measured unlanded source win in `.scratch/.worktrees`: the
+old zset-varint, HLL, BITFIELD, and stream consumer worktrees are already either
+landed on `origin/main` or recorded rejects. The largest current short-ledger
+per-crate loss remained `PFADD_16v` versus Redis 7.2.4, after prior rejects for
+PFADD parser admission, exact no-op batch memoization, HLL hash-tail matching,
+and register-cache encoding metadata.
+
+The tested alien-graveyard / artifact-coding lever was a different HLL hash-loop
+attack: cache the exact `(register_index, rho)` result for the complete one-byte
+element domain (`0..=255`) and route PFADD register-update loops through it. This
+targets the measured `PFADD_16v` shape (`a`..`q` one-byte elements) without
+changing HLL semantics or adding per-key element memoization. Focused proof while
+applied passed:
+`AGENT_NAME=BlueFalcon CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- cargo test -p fr-store
+hll_single_byte_register_table_matches_hash_path -- --nocapture` and
+`rch exec -- cargo test -p fr-store pfadd_ -- --nocapture` (`10` PFADD unit tests,
+`2` HLL metamorphic tests, plus the new table equivalence test).
+
+The required literal bench spelling,
+`rch exec -- cargo bench --release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`, was attempted and rejected by Cargo because this toolchain
+does not accept `--release` for `cargo bench`. `rch exec -- cargo bench --profile
+release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot` was also
+attempted, but remote workers failed before measurement because they lacked the
+vendored Redis oracle and/or the worker-scoped `fr-server` binary. The comparable
+measurement below used the same release profile and target dirs locally after
+the `rch` attempts, with candidate in
+`/data/projects/.rch-targets/frankenredis-cod-b` and clean `origin/main` control
+in `/data/projects/.rch-targets/frankenredis-cod-b-control-pfadd-bytehash`.
+
+Same-host PFADD_16v evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean `origin/main` control (`b5a9959c5`) | `553.36 Kelem/s` | `235.32 Kelem/s` | `0.425x` | baseline | target gap |
+| one-byte HLL hash table candidate | `510.07 Kelem/s` | `206.32 Kelem/s` | `0.404x` | `0.877x` vs control | reject |
+
+Decision: **REJECT / source reverted**. The one-byte hash table adds an extra
+branch/table path and loses against the adjacent control; it also worsens the
+Redis-relative ratio. Do not retry byte-domain HLL hash caching for PFADD_16v
+without a lower-noise microbench proving Murmur itself dominates. Remaining
+PFADD work needs a materially different primitive in the HLL register/update
+path, not another cache/header/parser micro-hunk.
+
 ## 2026-06-27 BlackThrush PFADD HLL hash-tail matcher rejected
 
 Land-or-dig found no measured unlanded source win in bench worktrees. Current
