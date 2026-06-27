@@ -3833,6 +3833,51 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                // (frankenredis-cheapcmdhoist) HEXISTS / HSTRLEN are cheap O(1)
+                // key+field reads whose only dispatch sites sat deep in the cascade
+                // (~6851 / ~9326), so they paid the full strip_prefix gauntlet and
+                // measured 0.52-0.64x. Hoist them next to the other early key+field
+                // reads. Same parser + executor -> byte-exact by construction.
+                } else if let Some(packet) =
+                    parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_hstrlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_hstrlen_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {

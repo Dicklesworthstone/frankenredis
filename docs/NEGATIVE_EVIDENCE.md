@@ -6163,3 +6163,15 @@ pipe=300 trials=9, 3 runs, load 20): EXPIRE_NX 1.70-1.77x, EXPIRE_GT 1.50-2.26x,
 — off-by-1ms is wall-clock now() skew, not divergence) + invalid-flag errors + RESP2/3. conformance 194/0 GREEN. fr-server
 only. LESSON: a fast-path present in ONE of the two process_buffered_frames cascades but not the other reads as a 0.5x
 "missing fast-path" gap — grep BOTH cascade positions; the fix is a hoist not new code. 32 dispatch commits.
+
+### 2026-06-27 (part 169) WIN: hoist HEXISTS/HSTRLEN up the dispatch cascade — cand/ctrl ~1.8-2.1x, byte-exact (cc/BlackThrush)
+Probe of cheap O(1) reads vs redis: HGETALL/SMEMBERS/LRANGE near-parity (real store iteration dilutes dispatch), but the
+CHEAP ones stuck deep in the strip_prefix cascade are dispatch-bound: HSTRLEN @line~9326 = 0.523x, HEXISTS @~6851 = 0.644x,
+HLEN @5423 = 0.724x, LLEN @5123 = 0.795x (scard @5159 = 1.05x is fine — position/cheapness both matter). Hoisted the two
+worst (HEXISTS, HSTRLEN — both *3 key+field, cheap, common-ish) next to the early key+field reads (after APPEND ~3835).
+PURE reorder: same parser + execute_plain_hexists/hstrlen_borrowed -> byte-exact by construction (the late dup branches at
+6851/9326 become dead but harmless). A/B (cand=HEAD+hoist vs ctrl=HEAD, both local-built, pipe=400 trials=11, load 25-40):
+HEXISTS cand/ctrl 1.59-2.21x, HSTRLEN 1.86-2.13x (~1.8-2.1x). BYTE-EXACT cand==ctrl==redis (FRESH conn per cmd — reusing a
+conn across RESP2/3 + WRONGTYPE error replies desyncs the test reader, false :52/:4): missing-key :0, hit, missing-field :0,
+WRONGTYPE, RESP2/3. conformance GREEN. fr-server only. Cheap-cmd-late is a real hoist vein; HLEN/LLEN (0.72-0.80x) are
+milder mid-cascade candidates. The deep fix remains the hash/(arity,cmd) dispatch refactor (multi-day). 33 dispatch commits.
