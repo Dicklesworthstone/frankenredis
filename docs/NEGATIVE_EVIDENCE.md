@@ -6052,3 +6052,19 @@ None → generic path emits the exact error. A/B (cand=cc HEAD+ZADD vs ctrl=HEAD
 (cand==ctrl==redis, reply AND resulting ZRANGE WITHSCORES state): GT/LT/NX/XX/CH × 2-5 pairs, float scores, all 4 invalid
 combos, bad-score-in-pair, wrong-type, RESP2 + RESP3, both protocols. zset differs (score_emit/tiebreak/4000-iter fuzz)
 green. fr-runtime + fr-server (my files only; built atop peer's just-landed PFADD commit 4787e9386). 29 dispatch commits.
+
+### 2026-06-27 (part 165) NO-SHIP/REVERTED: LPOP/RPOP COUNT dispatch fast-path = DUPLICATE + ~0-gain (cc/BlackThrush)
+A single-key broad probe (200-elem list, PIPE=200) flagged LPOP/RPOP COUNT at 0.56-0.68x — looked like the next big
+dispatch gap. Built a full borrowed fast-path (parser + execute_plain_list_pop_count_borrowed + parse_list_pop_count_arg
+made pub). A/B against HEAD ctrl came back ~1.0 (cand/ctrl 1.03-1.04 at low load, swinging 0.81-1.16 at load avg 157 =
+pure noise). Root cause: **HEAD ALREADY has execute_plain_list_pop_count_borrowed (fr-server:7709, fr-runtime:18954)** — my
+impl was a DUPLICATE; the probe's "loss" was a DEGENERATE measurement (PIPE*COUNT > list_len drains the list, so most pops
+hit empty/nil — not real pops). Re-measured with a 200k-elem prefill + no refill: cand/redis 0.73-0.94, and that residual
+is STORE-SIDE (multi-element pop + per-element reply build), NOT dispatch — a dispatch fast-path cannot move it. REVERTED
+(stash, dcg blocks git restore). LESSON: the single-small-key probe OVER-REPORTS dispatch losses on (a) commands that drain
+their collection, (b) random-output commands (SRANDMEMBER/ZRANDMEMBER/HRANDFIELD show DIFF = ordering, not bugs), and (c)
+commands ALREADY fast-pathed (verified SINTERCARD/OBJECT-ENCODING/ZADD-INCR/GETDEL/LMPOP-count all already have borrowed
+fns). ALWAYS grep for an existing execute_plain_*/parse_borrowed_plain_* before implementing, and A/B with big-prefill
+no-drain. The ONE genuinely-uncovered dispatch gap the probe surfaced = `SET key val [EX n] GET` (0.446x, no fast-path:
+set_relexpire/absexpire/nx/xx/cond all reply +OK, none read+return the old value) — deferred as a dedicated lever (multi-
+option ordering + read-before-write + GET-on-non-string error = real byte-exact surface, not a quick hoist).
