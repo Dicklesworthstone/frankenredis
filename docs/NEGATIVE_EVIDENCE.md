@@ -5608,3 +5608,14 @@ BEATS redis, up from 0.538x), LRANGE mean 1.634 (cand/redis 1.109 BEATS redis, u
 redis. Confirmed the _into (FastEncodedReply) branch form hoists cleanly too. 9 dispatch-ordering commits, ~24 commands
 closed. REMAINING no-fast-path (need NEW parser, not hoist): HMSET 0.383, SUBSTR 0.381 (GETRANGE alias), ZMSCORE 0.482,
 ZRANGEBYSCORE-variants. ULTIMATE = reorder whole cascade by frequency (retire ~24 dead late branches). conformance pending.
+
+### 2026-06-26 (part 145) WIN: hoist ZREVRANK + RPOPLPUSH dispatch early — 1.13-1.87x (cc/BlackThrush)
+10th dispatch-ordering commit. Final sweep found ZREVRANK@8258 (very late, rank form PlainRankCmd::Zrevrank) + RPOPLPUSH
+@4904. Hoisted before DECR. A/B (cand vs ctrl=committed ae91d2a89): ZREVRANK cand/ctrl mean 1.865 (cand/redis 0.963
+near-parity, up from 0.511x), RPOPLPUSH mean 1.131 (cand/redis 1.031, up from 0.968x — smaller, was already near-parity).
+Byte-exact: ZREVRANK hit/miss/nil, RPOPLPUSH pop/push/empty-nil cand==ctrl==redis. 10 dispatch-ordering commits, ~26
+commands closed. SWEEP-RESIDUAL not-worth-hoisting: ZCOUNT@4403/ZLEXCOUNT@4423 (just past early cluster = marginal),
+ZADD-INCR 0.440 (needs INCR-flag handling not a hoist). REMAINING need NEW fast-path: HMSET 0.383 (=HSET+OK, new execute_
+plain_hmset_borrowed w/ +OK reply + hmset cmdstat + parser — moderate 2-crate work, deprecated cmd), SUBSTR 0.381 (=GETRANGE
+alias), ZMSCORE 0.482 (variadic). HOISTABLE VEIN NOW EXHAUSTED — every late command with an existing fast-path is hoisted.
+ULTIMATE = reorder whole cascade by frequency (retire ~26 dead late branches). conformance pending.
