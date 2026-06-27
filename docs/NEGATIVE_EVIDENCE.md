@@ -4,6 +4,52 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlueFalcon PFADD dense in-place mutation rejected
+
+Land-or-dig found no unmerged measured source win in the bench worktrees; the
+only non-main worktree head was a docs-only ZADD guard-loss note. The largest
+named residual with current routing evidence was still `PFADD_1v` against
+Redis 7.2.4. Prior same-worker evidence for the current control on `ovh-a` was
+Redis `1.7976 Melem/s`, FrankenRedis `543.30 Kelem/s`, fr/Redis `0.302x`.
+
+The tested alien-graveyard / artifact-coding lever was direct in-place mutation
+of Redis dense HLL payloads: compute the PFADD register index/rho and update the
+packed 6-bit dense payload instead of decoding 16,384 registers and re-encoding
+12 KiB. Sparse, legacy, and malformed HLLs fell back to the existing path. The
+source hunk is rejected and not present in this commit.
+
+Commands used `AGENT_NAME=BlueFalcon` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`. The literal
+requested `rch exec -- cargo bench --release ...` form was attempted and failed
+before measurement because this Cargo rejects `--release` for `cargo bench`;
+the supported per-crate bench spelling used `cargo bench --profile release -p
+fr-bench --bench keyed_write_vs_redis -- PFADD_1v --noplot`. RCH first selected
+`ovh-a` but the bench failed before measurement because the worker-scoped target
+lacked `frankenredis`; a later remote retry selected `vmi1227854` and hit the
+same missing-server precondition. The measurable run was RCH local fallback
+after building `fr-server` in the requested target dir.
+
+Measured PFADD evidence:
+
+| gate | Redis median throughput | FrankenRedis median throughput | fr/Redis throughput | verdict |
+|---|---:|---:|---:|---|
+| prior current control (`ovh-a`, 2026-06-24 ledger) | `1.7976 Melem/s` | `543.30 Kelem/s` | `0.302x` | target loss |
+| dense in-place candidate (`rch` local fallback) | `945.19 Kelem/s` | `252.13 Kelem/s` | `0.267x` | reject; no Redis-ratio improvement |
+
+Focused behavior proof while the hunk was applied: `cargo test -p fr-store hll
+-- --nocapture` passed (`19` HLL unit tests plus `8` HLL metamorphic tests), and
+the direct dense helper matched the full dense re-encode in the temporary proof
+tests. Post-revert conformance gate: RCH local fallback
+`cargo test -p fr-conformance -- --nocapture` passed (`194` library tests, all
+conformance bins, smoke `99/99`, doctests). Decision: **REJECT / source
+reverted**. The existing `PFADD_1v` bench is mostly cached sparse no-op traffic,
+so a dense-only payload mutation does not attack the measured hot shape and can
+add probe overhead before the cache path. Next route: either add a
+Redis-comparable dense-PFADD row before retrying dense payload mutation, or
+attack the actual `PFADD_1v` shape at the command/dispatch or cached-noop hash
+path. Do not retry the decoded-register side cache or dense-only mutation as a
+claimed fix for `PFADD_1v`.
+
 ## 2026-06-27 BlueFalcon compact-zset DUMP cache confirmation
 
 Independent land-or-dig pass found the compact-zset DUMP payload cache already
