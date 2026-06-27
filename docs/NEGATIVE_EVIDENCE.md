@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlackThrush compact-zset DUMP payload cache kept
+
+Land-or-dig found no unmerged measured-win bench worktree: the only non-main
+worktree head was the old docs-only ZADD guard-loss note. The new lever came
+from the remaining `dump@p128` Redis 7.2.4 gap: repeated compact-zset `DUMP`
+rebuilt the same listpack payload and CRC on every read. The kept change caches
+compact-zset DUMP payloads by key, entry `modification_count`, and zset
+listpack thresholds, invalidating through the existing mutation/removal paths.
+
+Focused commands used `AGENT_NAME=BlackThrush` and candidate
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. The required
+remote build passed on `ovh-a`:
+`rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+cargo build --release -p fr-server -p fr-bench`. The literal requested
+`cargo bench --release -p fr-bench --bench keyed_write_vs_redis` form was
+attempted through `rch exec` and failed before measurement because this Cargo
+does not accept `--release` for `cargo bench`; the valid spelling is
+`cargo bench --profile release`. The DUMP gate below uses the release `fr-bench`
+binary directly because the Criterion bench suite has no compact-zset DUMP
+Redis comparison row.
+
+Same-host A/B used a clean detached control worktree at
+`/data/projects/.worktrees/frankenredis-cod-a-dumpcache-control-20260627`
+(`37c012433`) plus a local symlink to the shared vendored Redis oracle so the
+hardcoded `fr-command` build metadata path could resolve. RCH had no admissible
+workers for the control build, so it fell open locally into
+`/data/projects/.rch-targets/frankenredis-cod-a-control-dumpcache`.
+
+Five interleaved `fr-bench --workload dump --requests 200000 --clients 4
+--pipeline 128 --trials 1` passes:
+
+| gate | median ops/sec | ratio vs Redis 7.2.4 | direct ratio | verdict |
+|---|---:|---:|---:|---|
+| Redis 7.2.4 | `188666.95` | baseline | baseline | oracle |
+| clean main control | `79474.48` | `0.421x` | baseline | target gap |
+| compact-zset DUMP cache candidate | `130149.93` | `0.690x` | `1.638x` vs control | keep |
+
+Earlier candidate-only Redis-relative probes were noisy but consistent with the
+direction: `239114.86 / 270018.45 = 0.886x` with FR CV `10.98%`, then
+`302019.83 / 288981.80 = 1.045x` with both engines noisy under shared load.
+The interleaved control run is the keep decision. The residual `0.69x` vs Redis
+means DUMP is improved but not dominated; next work should target cold first
+DUMP/listpack encode cost or lower-noise DUMP profiling, not score-formatting
+shortcuts already rejected in `frankenredis-zset-listpack-score-zero-copy-z56kl`.
+
 ## 2026-06-25 BlackThrush 1-value keyed-write direct integer reply rejected
 
 BOLD-VERIFY targeted the remaining 1-value keyed-write gap versus Redis 7.2.4
