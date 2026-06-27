@@ -53,6 +53,46 @@ per-turn lever. Future digs should stop re-chasing the (now-closed) hot-write
 ratios and target `99fwc` (LPUSH/list-DUMP) or the keyspace-RAM `uhthd` lever
 directly, both owned structural work.
 
+## 2026-06-27 BlackThrush PFADD HLL hash-tail matcher rejected
+
+Land-or-dig found no measured unlanded source win in bench worktrees. Current
+`origin/main` already contains the historical pubsub direct-encoder and chained
+timing wins, the dirty HLL/bitfield worktrees are documented rejects, and the
+absent zset score-varint WIP is already recorded as rejected with direct packed
+zset RSS evidence. The largest fresh short-ledger loss remained `PFADD_16v`
+versus Redis 7.2.4.
+
+The tested alien-graveyard / artifact-coding lever targeted the remaining
+hash/register loop rather than repeating parser admission or HLL cache-metadata
+ideas: replace the `hll_hash` tail `enumerate()` loop with an explicit 0..7 byte
+little-endian matcher for the short element payloads in `PFADD_16v`. Focused
+proof while applied passed:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo test -p fr-store hll -- --nocapture` (`18` HLL/PFADD tests
+plus `8` HLL metamorphic tests; RCH local fallback because workers were full).
+
+The exact requested bench spelling,
+`rch exec -- cargo bench --release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`, was attempted and rejected by Cargo because this toolchain
+does not accept `--release` for `cargo bench`. The measured per-crate bench used
+the supported release-profile spelling:
+`rch exec -- cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`, with
+`FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`.
+
+Same-target PFADD_16v evidence on `ac6550772`:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean main control (`ac6550772`) | `423.25 Kelem/s` | `173.15 Kelem/s` | `0.409x` | baseline | target gap |
+| HLL hash-tail matcher candidate | `246.99 Kelem/s` | `69.474 Kelem/s` | `0.281x` | `0.401x` vs control | reject |
+
+Decision: **REJECT / source reverted**. The explicit tail matcher is a
+subtractive micro-hunk at best and regressed the adjacent control badly in this
+run. Do not retry HLL hash tail packing without a profile naming it; remaining
+PFADD_16v work should target a materially different cost in the register update
+loop or use a lower-noise HLL microbench before touching the production path.
+
 ## 2026-06-27 AmberRiver BITFIELD SET u8 aligned store fast-path rejected
 
 Land-or-dig found one unlanded, *unbenched* source candidate sitting dirty in
