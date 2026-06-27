@@ -10306,6 +10306,8 @@ impl Runtime {
             fr_store::ZaddOptions { nx: false, xx: false, gt: true, lt: false, ch: false }
         } else if flag_arg.eq_ignore_ascii_case(b"LT") {
             fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: true, ch: false }
+        } else if flag_arg.eq_ignore_ascii_case(b"CH") {
+            fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: false, ch: true }
         } else {
             return None;
         };

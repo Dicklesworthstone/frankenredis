@@ -5728,3 +5728,14 @@ position (pre-part-136). The plain multi-pair path uses insert_result (the same 
 bound. *** 5 confounded-reject corrections now (parts 138/143/151/152/154). 19 dispatch commits (15 hoists+fp / 4 new-fp),
 ~50 commands closed. REMAINING ZADD: CH form 0.290 (extend execute_plain_zadd_flag_borrowed ch branch), GT-CH/*6 combos,
 flag+multipair. conformance pending.
+
+### 2026-06-26 (part 155) WIN: ZADD CH form — 2.05x (0.42x->0.84x); tiny extension of the flag fast-path (cc/BlackThrush)
+20th dispatch commit. ZADD CH (0.290-0.417x) was the last big ZADD gap. TINY extension of part-152's flag fast-path: added
+CH to the parser flag-check + one execute branch (ZaddOptions ch:true). KEY: the generic uses the FIRST tuple element of
+zadd_with_options's (count, _changed) return as the reply (Integer(count)) — and the store CH-ADJUSTS count internally based
+on opts.ch (count=added+changed when ch, else added). So my existing `Ok((added,_))=>Integer(added)` reply is already
+correct for CH; only opts.ch=true needed. A/B (cand vs ctrl=committed f09071f1b): ZADD-CH cand/ctrl 1.954/1.933/2.276 mean
+2.054, cand/redis 0.841 (up from 0.417x). BYTE-EXACT: CH new=1(added)/score-change=1(changed)/same=0/new-member=1, WRONGTYPE,
+GT-CH combo (*6) defers to generic, cmdstat_zadd; cand==ctrl==redis. 20 dispatch commits, ~51 commands closed. ZADD single-
+pair surface now COMPLETE (plain 1/2 + multi 3-8 + INCR + NX/XX/GT/LT + CH). REMAINING ZADD: *6 two-flag combos (GT CH etc.)
++ flag+multipair = niche. The whole ZADD-flag-class "store-bound" reject (part-125) is now FULLY overturned. conformance pending.

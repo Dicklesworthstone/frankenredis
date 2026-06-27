@@ -12168,7 +12168,8 @@ fn parse_borrowed_plain_zadd_flag_packet<'a>(
     if !(flag.eq_ignore_ascii_case(b"NX")
         || flag.eq_ignore_ascii_case(b"XX")
         || flag.eq_ignore_ascii_case(b"GT")
-        || flag.eq_ignore_ascii_case(b"LT"))
+        || flag.eq_ignore_ascii_case(b"LT")
+        || flag.eq_ignore_ascii_case(b"CH"))
     {
         return None;
     }
