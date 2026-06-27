@@ -4,6 +4,48 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver dig: ZCOUNT 0.65x root-caused to rank-treap warm threshold (RAM tradeoff for CoralOx)
+
+Broad-command sweep (`scripts/broad_command_headtohead.py`, current `main` binary
+vs vendored Redis 7.2.4) over the compute-heavy long tail came back with fr
+**dominating** almost everything (sunionstore `3.91x`, bitcount `2.57x`, lpos
+`2.40x`, sinterstore `1.73x`, sintercard/zrandmember/srandmember all fr-faster).
+Two sweep "losses" — `smismember 0.80x`, `zcount 0.83x` — were re-checked with
+interleaved best-of-5 `redis-benchmark -P16 -c50` (the sweep's pipe=200 python
+loop is unreliable at host load ~93):
+- **SMISMEMBER = `1.113x` (fr FASTER, won all 5 rounds)** — sweep loss was noise.
+- **ZCOUNT = `0.654x` (Redis ~1.5x faster, Redis won all 5 rounds)** — REAL and
+  reproducible. fr `~568 Krps` vs Redis `~869 Krps` on a 200-member zset,
+  `ZCOUNT myzset 30 170`.
+
+**Root cause (newly pinned — supersedes the old vague "zcount micro/rejected"):**
+fr's zset count already has an adaptive O(log n) path (`frankenredis-p94tu`:
+`score_bound_count_adaptive` -> `maybe_warm_rank_tree_for_count` -> two-`rank_of`
+subtraction over the order-statistic treap, mirroring redis `zslGetRank`). But it
+only warms when `dict.len() >= ZSET_INDEX_TREE_WARM_MIN_LEN`, and that constant is
+**`4096`** (`crates/fr-store/src/lib.rs:693`). Redis uses its skiplist (O(log n)
+rank spans for free) for **every** zset above `zset-max-listpack-entries`
+(default 128). So in the **128 < n < 4096** band fr falls to the cold path —
+`full.ordered.range((lower,upper)).filter(..).count()`
+(`crates/fr-store/src/lib.rs:2057`), an O(range) BTreeMap walk — while Redis pays
+O(log n). At n=200, range 30-170, that is ~141 node visits vs ~log2(200). The cold
+scan is already optimal for a `BTreeMap` (no rank spans), so the only general fix
+is to warm the treap earlier.
+
+**Why no source change this turn (tradeoff is the owner's call):** lowering
+`ZSET_INDEX_TREE_WARM_MIN_LEN` toward 128 is the redis-matching fix and would close
+ZCOUNT/ZLEXCOUNT/deep-ZRANGE counts to parity, BUT it adds a third per-zset index
+(the rank treap) to every *hot* medium zset (gated by `WARM_HITS=2`, so cold zsets
+never pay) — i.e. it trades the **known zset RAM gap (`uybhq`, ~1.54x)** worse for
+count throughput. `4096` looks like a deliberate RAM-protecting choice in
+`p94tu`/CoralOx's zset core. Flipping it unilaterally (under load ~93, no clean RSS
+measurement, owned crate) is the wrong call. **Flagged to CoralOx** (zset owner) to
+decide the speed/RAM tradeoff; a middle value (e.g. 512-1024) or a count-specific
+lower gate would capture most practical medium zsets at bounded RAM.
+
+Decision: **no source change — documented + flagged.** Sole real sub-parity command
+the sweep surfaced (everything else parity-or-faster).
+
 ## 2026-06-27 AmberRiver dig: hot-path scorecard refresh — parity-or-faster, stale write residuals refuted
 
 Land-or-dig found no unlanded measured source win (no local branch ahead of
