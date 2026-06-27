@@ -4147,6 +4147,21 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(consumed) =
+                    parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_randomkey_borrowed(ts) {
+                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
@@ -11563,6 +11578,24 @@ fn parse_borrowed_plain_dump_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainGetPacket { consumed, key })
+}
+
+// (frankenredis-randomkeyfast) `RANDOMKEY` (*1, no args). No fast path existed, so it
+// fell to the generic argv path (measured 0.40x). Returns the consumed length;
+// execute_plain_randomkey_borrowed produces the reply.
+fn parse_borrowed_plain_randomkey_packet(input: &[u8], config: &ParserConfig) -> Option<usize> {
+    if config.max_array_len < 1 || config.max_bulk_len < b"RANDOMKEY".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*1\r\n$9\r\n")?;
+    if !rest.get(..9)?.eq_ignore_ascii_case(b"RANDOMKEY") {
+        return None;
+    }
+    let after = b"*1\r\n$9\r\n".len() + 9;
+    if input.get(after..after + 2)? != b"\r\n" {
+        return None;
+    }
+    Some(after + 2)
 }
 
 struct BorrowedPlainGetdelPacket<'a> {

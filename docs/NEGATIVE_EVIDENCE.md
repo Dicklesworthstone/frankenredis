@@ -6245,3 +6245,13 @@ with a 1-key slice. Byte-exact by construction. A/B (cand=HEAD+fast vs ctrl=HEAD
 runs): EXISTS 1.90-2.05x, TOUCH 2.19-2.32x, DEL 1.86-2.24x (~2x). BYTE-EXACT cand==ctrl==REDIS: hit/miss/wrong-type reply +
 resulting EXISTS state (DEL mutates -> reset per case), fresh conn. conformance GREEN. fr-server only. STILL-UNCOVERED (next):
 MOVE 0.40x / RANDOMKEY 0.36x / OBJECT IDLETIME 0.65x (no fast path). 37 dispatch commits.
+
+### 2026-06-27 (part 175) WIN: RANDOMKEY borrowed fast-path — ~2x, property-exact (cc/BlackThrush)
+Part-174's biggest still-uncovered gap. RANDOMKEY (*1, no args) had no fast path -> generic (0.40x). The default-read gate
+already requires selected_db==0, so execute_plain_randomkey_borrowed scopes to db 0 exactly like the generic (store.
+randomkey_in_db(0) + decode_db_key for the logical name, same RNG advancement). parse_borrowed_plain_randomkey_packet matches
+`*1 $9 RANDOMKEY` (case-insensitive) -> consumed len. A/B (cand=HEAD+fast vs ctrl=HEAD, both local-built, pipe=400 trials=13,
+3 runs): 1.95-2.12x (~2x). PROPERTY-EXACT (random output -> can't byte-compare values; validated the invariant instead):
+cand/ctrl/redis all return a key that EXISTS (30 draws each verified via EXISTS), nil on empty db, lowercase works.
+conformance GREEN (its seeded RANDOMKEY tests pass = same store primitive + RNG calls as generic). fr-runtime + fr-server.
+Remaining uncovered: MOVE (complex cross-db, byte-exact error surface), OBJECT IDLETIME/FREQ, PFMERGE. 38 dispatch commits.

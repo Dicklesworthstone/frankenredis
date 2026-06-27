@@ -12685,6 +12685,107 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-randomkeyfast) Borrowed READ fast path for the no-arg `RANDOMKEY`.
+    /// The default-read gate already requires selected_db == 0, so this scopes to db 0
+    /// exactly like the generic randomkey (store.randomkey_in_db + decode_db_key for the
+    /// logical name); reply is the chosen key bulk string, or nil on an empty db. Same
+    /// store primitive + RNG advancement as the generic handler.
+    pub fn execute_plain_randomkey_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 1
+            || self.policy.gate.max_bulk_len < b"RANDOMKEY".len()
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("randomkey");
+        self.session.last_argv_len_sum = b"RANDOMKEY".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Gate guarantees selected_db == 0; mirror the generic randomkey exactly.
+        let reply = match self.server.store.randomkey_in_db(0, now_ms) {
+            Some(physical) => {
+                let logical = fr_store::decode_db_key(&physical)
+                    .map(|(_, logical)| logical.to_vec())
+                    .unwrap_or(physical);
+                RespFrame::BulkString(Some(logical))
+            }
+            None => RespFrame::BulkString(None),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_randomkey_borrowed_metrics(elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_randomkey_borrowed_metrics(
+        &mut self,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || vec![b"RANDOMKEY".to_vec()];
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "randomkey",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'RANDOMKEY' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::BulkString(None),
+            });
+        }
+    }
+
     fn can_execute_plain_getrange_borrowed(
         &mut self,
         key: &[u8],
