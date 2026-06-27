@@ -83,6 +83,43 @@ lower gate would capture most practical medium zsets at bounded RAM.
 Decision: **no source change — documented + flagged.** Sole real sub-parity command
 the sweep surfaced (everything else parity-or-faster).
 
+## 2026-06-27 BlackThrush MOVE missing DB0 source-borrow fast path kept
+
+Land-or-dig found no bench worktree source win ahead of `origin/main`: the only
+off-main worktree head was docs-only, and dirty HLL/BITFIELD/zset candidates
+were already recorded rejects. The largest fresh measured short-ledger runtime
+gap was still `exists_vs_redis/move_missing` after the BlueFalcon borrowed MOVE
+landing (`0.650x` vs Redis 7.2.4 in the prior entry).
+
+Lever: keep the existing Redis-visible MOVE ordering, but avoid constructing the
+physical source `Vec<u8>` for selected DB 0 and defer destination key encoding
+until the source exists. The measured `MOVE missing 1` packet now probes the
+default-DB source directly as `&[u8]` and returns `:0` without allocating either
+physical key. Successful and non-zero-source-DB MOVE still materializes the
+owned source key for copy/delete.
+
+The required literal bench spelling was attempted and rejected by this Cargo:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo bench --release -p fr-bench --bench exists_vs_redis --
+move_missing --noplot` (`unexpected argument '--release'`). Measurements used
+the accepted equivalent `--profile release` spelling with the same per-crate
+bench, target dir, `FR_SERVER_BIN`, and vendored Redis 7.2.4 oracle.
+
+Same-target Criterion evidence:
+
+| gate | Redis 7.2.4 median / throughput | FrankenRedis median / throughput | FR/Redis | direct candidate/control |
+|---|---:|---:|---:|---:|
+| control `413e12c7`, `move_missing` | `84.348 us`, `1.5175 Melem/s` | `152.24 us`, `840.80 Kelem/s` | `0.554x` | n/a |
+| DB0 source-borrow candidate, `move_missing` | `103.88 us`, `1.2321 Melem/s` | `129.62 us`, `987.53 Kelem/s` | `0.801x` | `1.17x` faster |
+
+Proof:
+- `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo test -p fr-runtime plain_move_borrowed_matches_generic -- --nocapture` passed.
+- `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --profile release -p fr-server -p fr-bench` passed.
+- `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo check --workspace --all-targets` passed.
+- `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo test -p fr-conformance -- --nocapture` passed on `ovh-a` (`194` lib tests, `99` smoke tests, bin/doc suites green).
+- Unadjusted workspace `cargo fmt --check` remains blocked by pre-existing `fr-server/src/main.rs` formatting drift outside this hunk. Unadjusted clippy remains blocked by pre-existing `chunks_exact_to_as_chunks` / `too_many_arguments` lints outside the MOVE hunk; `cargo clippy -p fr-runtime --all-targets --no-deps -- -D warnings -A clippy::chunks_exact_to_as_chunks -A clippy::too_many_arguments` passed.
+- `ubs crates/fr-runtime/src/lib.rs docs/NEGATIVE_EVIDENCE.md` completed and exited non-zero on pre-existing full-file `fr-runtime` findings (`docs` ignored by `.ubsignore`); no UBS-driven change was made in this MOVE hunk.
+
 ## 2026-06-27 AmberRiver dig: hot-path scorecard refresh — parity-or-faster, stale write residuals refuted
 
 Land-or-dig found no unlanded measured source win (no local branch ahead of

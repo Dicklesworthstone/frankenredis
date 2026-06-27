@@ -12777,29 +12777,36 @@ impl Runtime {
                 "ERR DB index is out of range",
                 self.server.store.database_count,
             ) {
-                Ok(target_db) if target_db == self.session.selected_db => RespFrame::Error(
-                    "ERR source and destination objects are the same".to_string(),
-                ),
+                Ok(target_db) if target_db == self.session.selected_db => {
+                    RespFrame::Error("ERR source and destination objects are the same".to_string())
+                }
                 Ok(target_db) => {
-                    let source = encode_db_key(self.session.selected_db, key);
-                    let destination = encode_db_key(target_db, key);
-                    if !self.server.store.exists_no_stat(&source, now_ms)
-                        || self.server.store.exists_no_stat(&destination, now_ms)
-                    {
+                    let source = if self.session.selected_db == 0 {
+                        std::borrow::Cow::Borrowed(key)
+                    } else {
+                        std::borrow::Cow::Owned(encode_db_key(self.session.selected_db, key))
+                    };
+                    if !self.server.store.exists_no_stat(source.as_ref(), now_ms) {
                         RespFrame::Integer(0)
                     } else {
-                        let dirty_before = self.server.store.dirty;
-                        match self
-                            .server
-                            .store
-                            .copy_no_stat(&source, &destination, false, now_ms)
-                        {
-                            Ok(_) => {
-                                self.server.store.del(&[source], now_ms);
-                                self.server.store.dirty = dirty_before.saturating_add(1);
-                                RespFrame::Integer(1)
+                        let destination = encode_db_key(target_db, key);
+                        if self.server.store.exists_no_stat(&destination, now_ms) {
+                            RespFrame::Integer(0)
+                        } else {
+                            let dirty_before = self.server.store.dirty;
+                            match self.server.store.copy_no_stat(
+                                source.as_ref(),
+                                &destination,
+                                false,
+                                now_ms,
+                            ) {
+                                Ok(_) => {
+                                    self.server.store.del(&[source.into_owned()], now_ms);
+                                    self.server.store.dirty = dirty_before.saturating_add(1);
+                                    RespFrame::Integer(1)
+                                }
+                                Err(err) => CommandError::Store(err).to_resp(),
                             }
-                            Err(err) => CommandError::Store(err).to_resp(),
                         }
                     }
                 }
@@ -34921,24 +34928,29 @@ impl Runtime {
                 "ERR source and destination objects are the same".to_string(),
             ));
         }
-        let source = encode_db_key(self.session.selected_db, &argv[1]);
-        let destination = encode_db_key(target_db, &argv[1]);
         // Upstream db.c::moveCommand reaches source/destination via
         // lookupKeyWrite (and transfers the object likewise) — lookupKeyWrite
         // does NOT touch keyspace_hits/misses, so use the no-stat probes/copy.
         // Plain store.exists / store.copy record a keyspace lookup and would
         // over-count MOVE as a read.
-        if !self.server.store.exists_no_stat(&source, now_ms)
-            || self.server.store.exists_no_stat(&destination, now_ms)
-        {
+        let source = if self.session.selected_db == 0 {
+            std::borrow::Cow::Borrowed(argv[1].as_slice())
+        } else {
+            std::borrow::Cow::Owned(encode_db_key(self.session.selected_db, &argv[1]))
+        };
+        if !self.server.store.exists_no_stat(source.as_ref(), now_ms) {
+            return Ok(RespFrame::Integer(0));
+        }
+        let destination = encode_db_key(target_db, &argv[1]);
+        if self.server.store.exists_no_stat(&destination, now_ms) {
             return Ok(RespFrame::Integer(0));
         }
         let dirty_before = self.server.store.dirty;
         self.server
             .store
-            .copy_no_stat(&source, &destination, false, now_ms)
+            .copy_no_stat(source.as_ref(), &destination, false, now_ms)
             .map_err(CommandError::Store)?;
-        self.server.store.del(&[source], now_ms);
+        self.server.store.del(&[source.into_owned()], now_ms);
         // (frankenredis-movedirty) Upstream db.c::moveCommand does
         // `server.dirty++` exactly once; the copy + del helpers each bump the
         // counter, double-counting. Normalize to a single dirty unit so
