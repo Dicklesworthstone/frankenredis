@@ -5585,3 +5585,15 @@ the time-dependent remaining-seconds of an absolute expiry differing ~1s across 
 EXPIREAT reply itself matches). 7 dispatch-ordering commits, ~16 commands closed to near-parity-or-faster. REMAINING:
 SMISMEMBER 0.419x = needs a NEW fast-path (no parser exists, dispatch@NONE), not a hoist. ULTIMATE = reorder whole cascade
 by frequency. conformance pending.
+
+### 2026-06-26 (part 143) WIN: hoist ZINCRBY/HGET/GETBIT dispatch early — 1.30-1.75x (cc/BlackThrush)
+8th dispatch-ordering commit. Fresh -c50-P16 sweep after the 7 prior hoists found new late gaps. Hoisted ZINCRBY
+(dispatch@8013 VERY late, 3-arg key/delta/member), HGET (@5361), GETBIT (@5601) before DECR. A/B (cand vs ctrl=committed
+95809fefd): ZINCRBY cand/ctrl mean 1.745 (cand/redis 1.257 BEATS redis, up from 0.660x), HGET mean 1.295 (cand/redis 0.844,
+up from 0.669x), GETBIT mean 1.517 (cand/redis 0.844, up from 0.619x). Byte-exact: ZINCRBY int+float scores, HGET hit/miss,
+GETBIT cand==ctrl==redis. NOTE: HGET's gain corrects an earlier memory claim ("HGET already fr-faster, skip") — that was a
+SINGLE-CONN measurement which MASKS the late-dispatch gauntlet; under proper -c50-P16 load HGET@5361 was 0.669x. LESSON
+REINFORCED: always measure dispatch-position gaps under -c50-P16, never single-conn. 8 dispatch-ordering commits, ~19
+commands closed. REMAINING new-sweep gaps: HMSET 0.383x (NO fast-path, needs new parser — peer added SMISMEMBER+? bench
+rows, may be on hash cmds), HINCRBY 0.782 (@4545 already early = store-floor), COPY 0.813 (@4634 early), OBJECT ENCODING
+0.735. ULTIMATE = reorder whole cascade by frequency. conformance pending.
