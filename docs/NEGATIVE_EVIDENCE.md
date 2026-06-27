@@ -4,6 +4,56 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlueFalcon PFADD_16v parser admission rejected
+
+Land-or-dig found no measured unlanded source win in bench worktrees: the only
+worktree head not already reachable from `origin/main` was the old docs-only
+ZADD guard-loss note (`a4b709ea`). Current `origin/main` already contains the
+`PFADD_1v` borrowed fast path (`4787e9386`). The biggest fresh measured
+per-crate gap in the current short ledger was therefore still `PFADD_16v`
+versus Redis 7.2.4.
+
+The tested alien-graveyard / artifact-coding lever was a different path from
+the rejected no-op cache: admit canonical `*18 PFADD key v1 ... v16` packets
+into the existing 16-value borrowed keyed-write parser so runtime could call
+the already-landed borrowed `Store::pfadd_borrowed` path instead of falling
+through to owned argv construction. The source hunk is fully reverted because
+the same-host FrankenRedis median did not improve.
+
+Commands used `AGENT_NAME=BlueFalcon` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`. The literal
+requested `rch exec -- cargo bench --release -p fr-bench --bench
+keyed_write_vs_redis -- PFADD_16v --noplot` spelling was attempted and failed
+before measurement because this Cargo rejects `--release` for `cargo bench`;
+the measured per-crate bench used `cargo bench --profile release -p fr-bench
+--bench keyed_write_vs_redis -- PFADD_16v --noplot`. The control run selected
+`ovh-a` but remote sync timed out and RCH fell back locally; the candidate run
+also used RCH local fallback, same target dir, same local Redis oracle.
+
+Same-target PFADD_16v evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean main control (`4787e9386`) | `502.39 Kelem/s` | `214.49 Kelem/s` | `0.427x` | baseline | target gap |
+| 16-value PFADD parser admission candidate | `272.15 Kelem/s` | `200.48 Kelem/s` | `0.737x` | `0.935x` vs control | reject |
+
+The candidate's Redis-relative ratio rose only because the Redis side slowed in
+the candidate sample; Criterion reported no FrankenRedis improvement
+(`-3.9994%` median throughput, `p = 0.47`). Decision: **REJECT / revert**.
+Do not retry fixed-arity parser admission for `PFADD_16v` without first showing
+the parser miss is material in a profile; route the batch gap to the HLL
+hash/register path or to a lower-noise benchmark shape that isolates repeated
+multi-element PFADD work.
+
+Proof while the hunk was applied: RCH local
+`cargo test -p fr-server
+borrowed_plain_keyed_values16_packet_parser_accepts_canonical_write --
+--nocapture` passed. Post-revert conformance gate: RCH remote `ovh-a`
+`cargo test -p fr-conformance -- --nocapture` passed (`194` library tests, all
+conformance bins, smoke `99/99`, doctests). An earlier `hz2` conformance run
+failed before testing because the worker lacked the `legacy_redis_code` oracle
+tree for `fr-command` build metadata.
+
 ## 2026-06-27 BlackThrush PFADD_1v borrowed keyed-values fast path kept
 
 Land-or-dig found no clear measured unlanded source win in bench worktrees.
