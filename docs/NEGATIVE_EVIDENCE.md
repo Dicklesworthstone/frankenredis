@@ -5707,3 +5707,12 @@ measured fast-path-vs-generic at the same late position, missing the gauntlet. z
 than insert_result (GT 0.867 slightly below NX 0.942 = the GT compare), NOT the bottleneck. *** 17 dispatch commits (13
 hoists + 4 new-fp HMSET/SUBSTR/ZADD-INCR/ZADD-flags), ~44 commands closed. The re-audit-old-rejects lesson is DOUBLY proven.
 conformance pending.
+
+### 2026-06-26 (part 153) WIN: hoist keyed_values5-8 (multi-member SADD/LPUSH/RPUSH 5-8) — 1.47-1.59x (cc/BlackThrush)
+18th dispatch commit. Sweep found multi-member SADD/LPUSH still slow: keyed_values5/6/7/8 (5-8 member/value writes) were
+dispatched LATE @8139-8216 (parts 139/140 only hoisted keyed_values1/2/3; keyed_values4 was already early). Hoisted 5-8
+before DECR (existing parsers, just late). A/B (cand vs ctrl=committed 69626ea83): SADD5 cand/ctrl 1.594 (0.650->1.066 BEATS
+redis), SADD8 1.560 (0.619->0.988), LPUSH6 1.467 (0.770->1.133 BEATS redis). Byte-exact: SADD multi/dup, LPUSH/RPUSH multi,
+SCARD, SMEMBERS cand==ctrl==redis. 18 dispatch commits (14 hoists + 4 new-fp), ~48 commands closed. STILL-OPEN confounded-
+reject candidates (need NEW code not hoist): ZADD CH 0.290 (extend flag fast-path: reply added+changed), ZADD multi-pair
+0.375 (zadd3+ parser, part-74 reject was confounded), ZADD GT-CH combo 0.353 (*6 two-flag). conformance pending.
