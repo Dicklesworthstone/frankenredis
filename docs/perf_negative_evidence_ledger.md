@@ -1502,3 +1502,50 @@ hint, so the result is Redis-relative rejection evidence only.
 Focused `fr-store` list tests passed while the candidate was present. The
 byte-slice helper source hunk is not retained. Score: **0 wins / 3 losses / 0
 neutral** on the rechecked arity-one rows.
+
+## 2026-06-27 AmberRiver — list-push (99fwc) root cause pinned to exact code obstacle
+
+Land-or-dig dig turn: confirmed (again) that the SOLE sub-parity command on the
+whole reliably-measurable surface is list-push. Fresh `redis-benchmark -P16 -c50`
+(network-masked view) shows LPUSH `0.932x` / RPUSH `0.970x`; the Criterion
+`keyed_write_vs_redis` (CPU-bound, less network masking) view above is the truer
+~`0.80x` / `0.71x`. Everything else is parity-or-faster (ZADD `1.109x`, SADD
+`1.017x`, GET/SET/INCR/HSET `0.95–1.01x` — see the 2026-06-27 scorecard refresh
+in `docs/NEGATIVE_EVIDENCE.md`). The prior cod-b `uhthd` entries already
+concluded "needs to change the mutable quicklist/chunk layout or batch append
+primitive" but did not pin WHERE. This turn traced it:
+
+**Root cause (per-element heap alloc vs Redis inline packing):** the mutable
+list chunk `ListChunk::Owned { elems: Arc<Vec<Vec<u8>>> }`
+(`crates/fr-store/src/packed_set.rs:2251`) stores every pushed element as its own
+heap-allocated `Vec<u8>`. The hot loop in `Store::lpush`
+(`crates/fr-store/src/lib.rs:10779`) does `l.push_front(bytes.to_vec())` →
+`ChunkedList::push_front_with_fill` → `ListChunk::push_front_owned`
+(`packed_set.rs:2436`), i.e. **1 heap allocation per element**. Redis quicklist
+appends the element's bytes inline into the tail listpack node's contiguous
+buffer (~0 allocs/element until the ~8 KiB node fills). That alloc-per-element is
+the entire structural delta.
+
+**Exact obstacle for the 99fwc lever:** the packed `ListChunk::Listpack { bytes:
+Arc<Vec<u8>>, entries: Arc<Vec<ListpackValueSpan>> }` variant (the redis-shaped,
+contiguous representation) ALREADY exists — but it is **read-only on the mutate
+path**: `push_back_owned`/`push_front_owned` (`packed_set.rs:2410` and `:2438`)
+begin by *exploding* a `Listpack` chunk back into `Owned` (re-`to_vec()`-ing every
+entry) before appending. So today pushes never build or grow a packed node; they
+always land in `Owned`. The credible lever is to make `ListChunk::Listpack`
+support **in-place listpack-encoded append** (encode the new entry into `bytes`,
+bump the listpack header count/total-bytes, push one `ListpackValueSpan` to
+`entries`) and have `push_*_with_fill` append into a live `Listpack` tail/head
+chunk until it crosses the `quicklist_packed_node_accepts_local` boundary, only
+then sealing and starting a new node — instead of going through `Owned` at all.
+This keeps the chunk byte-identical to what DUMP/DEBUG serialization already emits
+(the `Listpack` variant is what `seal_if_owned` produces), so DUMP/RESTORE/digest
+stay byte-exact.
+
+Decision: **no source change this turn** — this is a multi-day fr-store-core
+rewrite (mutable listpack codec + span-index maintenance, byte-exactness across
+the entire list/DUMP/RESTORE/DEBUG surface), not a per-turn all-safe lever. Logged
+so the eventual 99fwc implementer starts at `packed_set.rs:2410/2438` instead of
+rediscovering the explode-to-`Owned` obstacle. Shallow borrowed-helper / byte-slice
+attempts are exhausted (this entry + the three `uhthd` entries above); do not
+repeat them.
