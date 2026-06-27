@@ -5781,3 +5781,15 @@ HINCRBY, HINCRBYFLOAT, SMOVE 1/0+SMEMBERS cand==ctrl==redis. SMALL wins (moderat
 small moderate-late hoists (1.05-1.19x, lmove/getex-variants/hmget/xrange @5400-6100) or niche new-code (LMPOP-2key/ZADD-
 flag+multipair/ZMSCORE-4+). The big structural lever left = convert the linear strip_prefix cascade to a hash/(arity,cmd)
 dispatch (eliminates the gauntlet for ALL cmds at once) — multi-day refactor, the true remaining win. conformance pending.
+
+### 2026-06-27 (part 160) WIN (marginal tail): hoist plain XRANGE/XREVRANGE — cand/redis 0.89->1.06 / 0.98->1.10 (beats redis) (cc/BlackThrush)
+25th dispatch commit. Plain XRANGE/XREVRANGE (key start end, no COUNT) had fast-paths dispatched late @6065 (generic
+key_arg2 w/ b"*4\\r\\n$6\\r\\n"+XRANGE / $9+XREVRANGE). Hoisted before DECR. A/B (cand vs ctrl=committed f5e8412e2): XRANGE
+cand/ctrl mean 1.049 (cand/redis 0.888->1.060 BEATS redis), XREVRANGE 1.067 (0.978->1.100 BEATS redis). MARGINAL cand/ctrl
+(XRANGE has real store work = stream entry iteration, so dispatch is a small fraction) but the redis-ratio clearly crosses
+parity. Byte-exact: XRANGE -/+ entries, id-range, empty-stream (*0), WRONGTYPE-on-string; XREVRANGE reverse cand==ctrl==
+redis. (COUNT variants left late = less common + COUNT-guard branch.) 25 dispatch commits, ~67 commands closed. *** CLEAN-
+HOIST VEIN NOW EXHAUSTED: simple km/k3/key_arg2 shipped-but-late all hoisted; remaining = complex multi-arg-guard (xrange-
+COUNT/getex-options/lmove-4arg, all ~1.05x marginal) or niche new-code (LMPOP-2key/ZADD-flag-multipair/ZMSCORE-4+) or the
+big hash-dispatch refactor (multi-day). The dispatch campaign (parts 136-160, 25 commits, ~67 cmds) is COMPLETE for
+per-turn value. conformance pending.
