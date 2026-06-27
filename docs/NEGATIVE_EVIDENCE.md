@@ -5541,3 +5541,37 @@ EXPIRE/EXPIRE-XX/TTL cand==ctrl==redis. 5 dispatch-ordering commits now (INCRBY/
 multi-val+EXPIRE), every measured hot-write gap closed to near-parity-or-faster. NEXT remaining late gaps: SETRANGE 0.617
 (7714), LINDEX 0.655 (6766), GETSET 0.801 (4533), APPEND 0.837 (5349), PEXPIRE/EXPIREAT family, SMISMEMBER 0.419 (NO
 fast-path = needs one, not just a hoist). ULTIMATE = reorder whole cascade by frequency. conformance pending.
+
+### 2026-06-26 (part 141) WIN: batch-hoist GETSET/APPEND/LINDEX/PEXPIRE dispatch early — 1.17-1.67x (cc/BlackThrush)
+6th dispatch-ordering commit. Hoisted 4 more late (key,member) commands before DECR. A/B (cand vs ctrl=committed d4faf430c):
+LINDEX cand/ctrl mean 1.608 (cand/redis 0.830, up from 0.580x), PEXPIRE mean 1.665 (cand/redis 1.099 BEATS redis, up from
+0.662x), GETSET mean 1.171 (cand/redis 1.000 PARITY, up from 0.820x — smaller win since GETSET was at 4533, less late),
+APPEND hoisted (byte-exact, was 5349). Byte-exact: GETSET/APPEND/LINDEX/LINDEX-neg/PEXPIRE/PTTL cand==ctrl==redis. CONFIRMS
+the position-to-gain law: later dispatch position = bigger hoist win (LINDEX@6766 1.61x >> GETSET@4533 1.17x). 6 dispatch-
+ordering commits, ~13 commands now near-parity-or-faster. REMAINING late gaps: SETRANGE 0.617 (7714, 3-arg), EXPIREAT/
+PEXPIREAT (expire family), SMISMEMBER 0.419 (no fast-path). ULTIMATE = reorder whole cascade by frequency. conformance pending.
+
+### 2026-06-26 (part 142) REJECT: early SMISMEMBER fixed-arity dispatch hoist was ~0-gain (codex/BlackThrush)
+Added `fr-bench` SMISMEMBER_2v/3v Redis 7.2.4 rows to make the biggest remaining set-membership gap reproducible, then
+tested a one-lever hoist of the existing `parse_borrowed_plain_smismember2_packet` and `parse_borrowed_plain_smismember3_packet`
+branches from line ~7959 into the early dispatch block after DECRBY. The server code was reverted after measurement.
+
+Warm target and per-crate command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b
+rch exec -- env FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-b/release/frankenredis
+REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server cargo bench --profile release
+-p fr-bench --bench keyed_write_vs_redis -- 'SMISMEMBER' --noplot`. RCH fell open locally for the actual bench because no
+admissible workers were available; the attempted remote build on `hz2` failed only because that worker lacks
+`legacy_redis_code/redis/src/commands`.
+
+Baseline current main vs Redis 7.2.4:
+- `SMISMEMBER_2v`: FrankenRedis `386.02 Kelem/s`, Redis `953.47 Kelem/s`, ratio `0.405x`.
+- `SMISMEMBER_3v`: FrankenRedis `322.69 Kelem/s`, Redis `828.22 Kelem/s`, ratio `0.390x`.
+
+Candidate early fixed-arity hoist:
+- `SMISMEMBER_2v`: FrankenRedis `369.04 Kelem/s`, Redis `962.28 Kelem/s`, ratio `0.383x`; candidate/control `0.956x`;
+  Criterion reported no change (`p=0.39`).
+- `SMISMEMBER_3v`: FrankenRedis `349.18 Kelem/s`, Redis `852.77 Kelem/s`, ratio `0.409x`; candidate/control `1.082x`;
+  Criterion reported no change (`p=0.67`).
+
+Verdict: reject/reverted. SMISMEMBER remains a ~0.39-0.41x Redis gap after parser-order hoisting, so the next lever should
+not be a simple dispatch move; it needs response encoding/store-membership work or a broader table-dispatch replacement.
