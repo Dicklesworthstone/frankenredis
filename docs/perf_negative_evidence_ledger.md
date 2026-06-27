@@ -1659,3 +1659,58 @@ Decision: **REVERT ~0-gain** (preserved as a labeled stash). The guard is
 byte-exact and harmless but not a throughput lever. The hot SET path is confirmed
 at redis-parity work (parse_i64 == string2ll, send dominates). Do not re-chase
 per-write probe-shaving for throughput.
+
+## 2026-06-27 AmberRiver: RESTORE-decode profiled — biggest gap = hash 5.04x, root-caused to CompactFieldMap arena build
+
+Dig targeted the biggest throughput gap (RESTORE-decode). Fresh measurement
+(prefill→DUMP→RESTORE loop, 2000 restores/trial, best-of-9 interleaved, fr
+`4de710b9e` vs vendored Redis 7.2.4, host load ~8, N=300 elements), time ratio
+fr_ms/redis_ms (>1 = Redis faster):
+
+| type | payload | fr/redis | verdict |
+|---|---:|---:|---|
+| hash | 2251 B | **`5.04x`** | biggest |
+| zset | 3803 B | `2.94x` | loss |
+| list | 1437 B | `2.80x` | loss |
+| set  | 3203 B | `1.40x` | loss |
+
+(Supersedes the stale "collection RESTORE 0.36–0.46x" ledger note — the real
+gap is 1.4–5x, MUCH worse.) `perf` flat self-time of the hash-RESTORE hot loop:
+
+| % | function | role |
+|---:|---|---|
+| 15.0 | `CompactFieldMap::get_index` | per-element arena re-decode (via `iter()`) |
+| 10.9 | `decode_rdb_string` | field/value string decode |
+| 8.3 | `CompactFieldMap::lookup_slot` | per-insert dup probe |
+| 5.9 | `CompactFieldMap::insert` | build |
+| 4.9 | `listpack::decode_value_spans` | listpack span decode |
+| 4.4 | `__memmove_avx` | arena buf growth |
+| 3.8 | `CompactFieldMap::append_entry` | varint+memcpy into arena |
+| 3.7 | `CompactFieldMap::rehash` | incremental table grows |
+
+**Root cause:** the hash RESTORE path (`lib.rs:21398`) builds the value field-by-
+field via `HashFieldMap::insert` — incremental rehashes + arena reallocs + per-
+insert `lookup_slot`. This is the *cost side* of the `ideww` CompactFieldMap
+arena design (which WON ~45% hash RAM + 2.32x HGET — net positive, don't revert).
+Redis's dict-of-sds build is leaner for one-shot load. `from_unique_pairs`'s Hash
+branch (`packed_set.rs:495`) has the SAME non-presized `CompactFieldMap::new()`
+loop, so even the bulk path doesn't presize.
+
+**Levers + risk assessment (no source change this turn):**
+- SAFE: add `CompactFieldMap::with_capacity(n)` (presize `slots` empty + reserve
+  `buf`/`order`/`slot_of`; `insert` already maintains `slot_of` incrementally so
+  no rehash fires) and use it in `from_unique_pairs`/`_borrowed` Hash branches —
+  byte-exact (same Hash storage), removes the `rehash` 3.7% + realloc on the
+  bulk-load/DEBUG-RELOAD path. Niche (RDB-file load, not the live RESTORE cmd).
+- RISKY: routing the streaming RESTORE decoder (`lib.rs:21398`) through a presized
+  direct-Hash build changes the config-dependent Packed↔Hash storage decision
+  (`PACKED_MAX_ENTRIES` vs configured `hash-max-listpack-entries`), which feeds
+  OBJECT ENCODING + used_memory estimate + digest — a subtle byte-exactness hazard
+  across ALL hashes. Not a per-turn all-safe lever.
+- STRUCTURAL: keep-listpack (store small collections as the raw listpack blob,
+  lazy-decode) closes the gap the redis way but is the multi-day fr-store RdbValue
+  rewrite.
+
+Decision: **profiled + root-caused; no source change** (the safe lever is niche,
+the impactful ones are storage-risky/multi-day). RESTORE is not a hot command;
+this documents the real gap (1.4–5x, not 0.36x) and the exact lever ladder.
