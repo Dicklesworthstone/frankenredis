@@ -33,7 +33,9 @@ use fr_eventloop::{
 };
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
-use fr_runtime::{ClientSession, ClientUnblockMode, Runtime};
+use fr_runtime::{
+    ClientSession, ClientUnblockMode, PlainKeyedPopCmd, PlainKeyedValuesCmd, Runtime,
+};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
@@ -41,8 +43,11 @@ use mio::{Events, Interest, Poll, Token};
 const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_MODE: &str = "strict";
 
-/// Token for the TCP listener socket.
-const LISTENER: Token = Token(0); // ubs:ignore
+/// (frankenredis-jd75g) Tokens `0..MAX_LISTENERS` are reserved for listening
+/// sockets (one per bind address, mirroring redis CONFIG_BINDADDR_MAX); client
+/// connection handles start at `MAX_LISTENERS`. Lets CONFIG SET bind rebind a
+/// multi-address listener set without colliding with client tokens.
+const MAX_LISTENERS: usize = 16;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -852,7 +857,15 @@ fn main() -> ExitCode {
     };
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
+    // (frankenredis-zyx9q) Let the runtime's CONFIG SET port handler test-bind
+    // the new port and signal a live listener rebind.
+    runtime.set_bind_addr(bind_addr.clone());
     runtime.set_sentinel_mode(sentinel_mode);
+    if sentinel_mode {
+        // (frankenredis-pkdgs) Announce our listening port in hello messages so
+        // peer sentinels discover us at the right address.
+        runtime.set_sentinel_announce_port(port);
+    }
     runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
     // CLI flag wins over config-file directive; both override the
     // runtime's "no" default which mirrors upstream Redis 7.2's
@@ -948,21 +961,6 @@ fn main() -> ExitCode {
         }
     }
 
-    let addr: SocketAddr = match format!("{bind_addr}:{port}").parse() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: invalid bind address '{bind_addr}:{port}': {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut listener = match TcpListener::bind(addr) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: failed to bind to {addr}: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     let mut poll = match Poll::new() {
         Ok(p) => p,
         Err(e) => {
@@ -971,13 +969,20 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Err(e) = poll
-        .registry()
-        .register(&mut listener, LISTENER, Interest::READABLE)
-    {
-        eprintln!("error: failed to register listener: {e}");
-        return ExitCode::from(1);
-    }
+    // (frankenredis-jd75g) Bind one listener per configured address. Startup
+    // binds the single configured bind address; CONFIG SET bind can later grow
+    // this to a set of up to MAX_LISTENERS. cur_binds / cur_listen_port track
+    // the live set so a CONFIG SET port or bind change can recompute it.
+    let mut cur_binds: Vec<String> = vec![bind_addr.clone()];
+    let mut cur_listen_port: u16 = port;
+    let mut listeners: Vec<TcpListener> =
+        match bind_and_register(&poll, &cur_binds, cur_listen_port) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+        };
 
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port})",
@@ -994,9 +999,17 @@ fn main() -> ExitCode {
     let mut paused_tokens: HashSet<Token> = HashSet::new();
     let mut deferred_tokens: HashSet<Token> = HashSet::new();
     let mut replica_sync = ReplicaSyncState::new();
-    let mut next_handle: usize = 1;
+    // (frankenredis-jd75g) Client handles start above the reserved listener
+    // token range (0..MAX_LISTENERS).
+    let mut next_handle: usize = MAX_LISTENERS;
     let tick_budget = TickBudget::default();
     let mut last_ops_sample_ms: u64 = now_ms();
+    // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
+    // the monitored masters ran. 0 = never, so the first tick probes immediately.
+    let mut last_sentinel_probe_ms: u64 = 0;
+    // (frankenredis-pkdgs) Per-master persistent __sentinel__:hello subscriptions
+    // (sentinel mode only), drained each iteration to discover peer sentinels.
+    let mut sentinel_hello_subs: HashMap<String, SentinelHelloSub> = HashMap::new();
 
     loop {
         // Use fr-eventloop's tick planner to determine poll timeout.
@@ -1029,9 +1042,11 @@ fn main() -> ExitCode {
 
         for event in events.iter() {
             match event.token() {
-                LISTENER => {
+                // (frankenredis-jd75g) Tokens 0..listeners.len() are listening
+                // sockets; accept from the one that signalled readiness.
+                listener_tok if listener_tok.0 < listeners.len() => {
                     accept_connections(
-                        &listener,
+                        &listeners[listener_tok.0],
                         &mut poll,
                         &mut clients,
                         &mut client_id_to_token,
@@ -1149,6 +1164,17 @@ fn main() -> ExitCode {
             }
         }
 
+        // (frankenredis-pkdgs) In Sentinel mode, actively PING + INFO the
+        // monitored masters so their runid / flags / ping & info-refresh times
+        // fill in (otherwise SENTINEL MASTER reports an empty,
+        // "master,disconnected" instance forever).
+        run_sentinel_monitoring_tick(
+            &mut runtime,
+            ts,
+            &mut last_sentinel_probe_ms,
+            &mut sentinel_hello_subs,
+        );
+
         // Deliver pending replication writes to connected replicas.
         propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
 
@@ -1240,6 +1266,37 @@ fn main() -> ExitCode {
             }
         }
 
+        // (frankenredis-zyx9q / jd75g) Apply a pending CONFIG SET port or bind
+        // change by rebinding the whole listener set. The runtime has already
+        // test-bound the new addresses (so this should succeed); rebind_listeners
+        // binds + registers the NEW set first and only swaps it in on success,
+        // leaving the old set reachable on any rare TOCTOU failure. Existing
+        // client connections (tokens >= MAX_LISTENERS) are untouched.
+        if let Some(new_port) = runtime.take_pending_port_change() {
+            if rebind_listeners(
+                &mut poll,
+                &mut listeners,
+                &cur_binds,
+                cur_listen_port,
+                &cur_binds.clone(),
+                new_port,
+            ) {
+                cur_listen_port = new_port;
+            }
+        }
+        if let Some(new_binds) = runtime.take_pending_bind_change() {
+            if rebind_listeners(
+                &mut poll,
+                &mut listeners,
+                &cur_binds,
+                cur_listen_port,
+                &new_binds,
+                cur_listen_port,
+            ) {
+                cur_binds = new_binds;
+            }
+        }
+
         let eventloop_duration_us =
             u64::try_from(eventloop_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         runtime.record_eventloop_cycle(eventloop_duration_us);
@@ -1261,6 +1318,79 @@ fn main() -> ExitCode {
             }
             eprintln!("info: shutdown requested, exiting gracefully");
             return ExitCode::SUCCESS;
+        }
+    }
+}
+
+/// (frankenredis-jd75g) Bind one TCP listener per address in `addrs` at `port`
+/// and register each with the poll under its listener token (`Token(0..N)`),
+/// mirroring redis's multi-address bind. Binds all first, then registers all,
+/// so a mid-way failure cleans up fully and never disturbs the caller's
+/// existing listeners. An empty `addrs` yields zero listeners (server listens
+/// on nothing — matching redis `bind ""`).
+fn bind_and_register(poll: &Poll, addrs: &[String], port: u16) -> Result<Vec<TcpListener>, String> {
+    if addrs.len() > MAX_LISTENERS {
+        return Err(format!(
+            "too many bind addresses ({} > {MAX_LISTENERS})",
+            addrs.len()
+        ));
+    }
+    let mut listeners: Vec<TcpListener> = Vec::with_capacity(addrs.len());
+    for a in addrs {
+        let sa: SocketAddr = format!("{a}:{port}")
+            .parse()
+            .map_err(|e| format!("invalid bind address '{a}:{port}': {e}"))?;
+        let listener = TcpListener::bind(sa).map_err(|e| format!("failed to bind to {sa}: {e}"))?;
+        listeners.push(listener);
+    }
+    for (i, listener) in listeners.iter_mut().enumerate() {
+        if let Err(e) = poll
+            .registry()
+            .register(listener, Token(i), Interest::READABLE)
+        {
+            for prev in listeners.iter_mut().take(i) {
+                let _ = poll.registry().deregister(prev);
+            }
+            return Err(format!("failed to register listener {i}: {e}"));
+        }
+    }
+    Ok(listeners)
+}
+
+/// (frankenredis-jd75g) Apply a CONFIG SET port/bind change by rebinding the
+/// whole listener set to `new_binds` x `new_port`, mirroring redis
+/// changeListener: deregister + close the OLD listeners first (so a retained
+/// address:port can be re-bound — the server can't hold two sockets on its own
+/// address), then bind + register the NEW set. On failure the OLD set is
+/// rebound (rollback) so the server stays reachable. The runtime test-binds any
+/// genuinely-new addresses beforehand, so this normally succeeds; the no-listener
+/// window is a single event-loop iteration (sub-millisecond, no awaits). Existing
+/// client connections (tokens >= MAX_LISTENERS) are untouched. Returns true iff
+/// the new set is now live.
+fn rebind_listeners(
+    poll: &mut Poll,
+    listeners: &mut Vec<TcpListener>,
+    old_binds: &[String],
+    old_port: u16,
+    new_binds: &[String],
+    new_port: u16,
+) -> bool {
+    for old in listeners.iter_mut() {
+        let _ = poll.registry().deregister(old);
+    }
+    listeners.clear(); // drop closes the old sockets, freeing their addresses
+    match bind_and_register(poll, new_binds, new_port) {
+        Ok(new_listeners) => {
+            *listeners = new_listeners;
+            true
+        }
+        Err(e) => {
+            eprintln!("warn: CONFIG SET port/bind: rebind failed ({e}); restoring previous listeners");
+            match bind_and_register(poll, old_binds, old_port) {
+                Ok(restored) => *listeners = restored,
+                Err(e2) => eprintln!("error: failed to restore previous listeners: {e2}"),
+            }
+            false
         }
     }
 }
@@ -1293,9 +1423,10 @@ fn accept_connections(
             Ok((mut stream, peer_addr)) => {
                 let conn_handle = Token(*next_handle);
                 *next_handle = next_handle.wrapping_add(1);
-                // Avoid colliding with LISTENER token (0).
-                if *next_handle == 0 {
-                    *next_handle = 1;
+                // Avoid colliding with the reserved listener token range
+                // (0..MAX_LISTENERS). (frankenredis-jd75g)
+                if *next_handle < MAX_LISTENERS {
+                    *next_handle = MAX_LISTENERS;
                 }
 
                 if let Err(e) = stream.set_nodelay(true) {
@@ -1709,6 +1840,53 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, value)) =
+                                borrowed_plain_append_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_append_borrowed(key, value, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((cmd, key, values)) =
+                                borrowed_plain_keyed_values_args(&borrowed_args)
+                                && let Some(response) = runtime
+                                    .execute_plain_keyed_values_write_borrowed(
+                                        cmd, key, values, ts,
+                                    )
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((key, pairs)) =
+                                borrowed_plain_hset_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_hset_borrowed(key, pairs, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((key, pairs)) =
+                                borrowed_plain_zadd_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_zadd_borrowed(key, pairs, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((cmd, key)) =
+                                borrowed_plain_keyed_pop_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2031,6 +2209,101 @@ fn borrowed_plain_decr_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8
     }
 }
 
+fn borrowed_plain_append_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, value] if command.eq_ignore_ascii_case(b"APPEND") => Some((*key, *value)),
+        _ => None,
+    }
+}
+
+/// `SADD | LPUSH | RPUSH key value [value ...]` borrowed-arg matcher for the
+/// shared keyed-values write fast path. (frankenredis-ev067)
+fn borrowed_plain_keyed_values_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainKeyedValuesCmd, &'a [u8], &'a [&'a [u8]])> {
+    let [command, key, values @ ..] = borrowed_args else {
+        return None;
+    };
+    if values.is_empty() {
+        return None;
+    }
+    let cmd = if command.eq_ignore_ascii_case(b"SADD") {
+        PlainKeyedValuesCmd::Sadd
+    } else if command.eq_ignore_ascii_case(b"LPUSH") {
+        PlainKeyedValuesCmd::Lpush
+    } else if command.eq_ignore_ascii_case(b"RPUSH") {
+        PlainKeyedValuesCmd::Rpush
+    } else {
+        return None;
+    };
+    Some((cmd, *key, values))
+}
+
+/// `HSET key field value [field value ...]` borrowed-arg matcher: requires a
+/// non-empty even-length field/value tail (odd/empty falls back to the generic
+/// WrongArity path). (frankenredis-ev067)
+fn borrowed_plain_hset_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    let [command, key, pairs @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"HSET") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    Some((*key, pairs))
+}
+
+/// `ZADD key score member [score member ...]` borrowed-arg matcher for the PLAIN
+/// flagless form only: the first tail token must not be an NX/XX/GT/LT/CH/INCR
+/// flag (upstream stops flag parsing at the first non-flag token, so a non-flag
+/// at that position means no leading flags), and the tail must be a non-empty
+/// even-length score/member sequence. Anything else (flags, odd/empty tail)
+/// falls back to the generic handler, which owns flag + arity semantics. Score
+/// validity is checked in the runtime fast path. (frankenredis-ev067)
+fn borrowed_plain_zadd_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    let [command, key, pairs @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"ZADD") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    let first = pairs[0];
+    let is_flag = first.eq_ignore_ascii_case(b"NX")
+        || first.eq_ignore_ascii_case(b"XX")
+        || first.eq_ignore_ascii_case(b"GT")
+        || first.eq_ignore_ascii_case(b"LT")
+        || first.eq_ignore_ascii_case(b"CH")
+        || first.eq_ignore_ascii_case(b"INCR");
+    if is_flag {
+        return None;
+    }
+    Some((*key, pairs))
+}
+
+/// `LPOP | RPOP | SPOP key` borrowed-arg matcher for the no-count pop fast path.
+/// The COUNT form (`CMD key count`) falls back to the generic handler, which
+/// owns the array-reply + count-validation semantics. (frankenredis-ev067)
+fn borrowed_plain_keyed_pop_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainKeyedPopCmd, &'a [u8])> {
+    let [command, key] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"LPOP") {
+        PlainKeyedPopCmd::Lpop
+    } else if command.eq_ignore_ascii_case(b"RPOP") {
+        PlainKeyedPopCmd::Rpop
+    } else if command.eq_ignore_ascii_case(b"SPOP") {
+        PlainKeyedPopCmd::Spop
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
+}
+
 fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, delta] if command.eq_ignore_ascii_case(b"DECRBY") => Some((*key, *delta)),
@@ -2178,8 +2451,33 @@ fn process_argv_frame(
     // `c->resp == 2`. RESP3 clients may freely interleave any
     // command with push frames, so the gate (and its runtime mirror
     // at lib.rs ~5426) must be skipped for them.
+    //
+    // (frankenredis-nnbig) Upstream processCommand performs command
+    // LOOKUP (unknown -> "unknown command") and the generic ARITY check
+    // (server.c:3787) BEFORE the pub/sub-context gate (server.c:4072), so a
+    // wrong-arity or unknown command issued while subscribed surfaces its own
+    // error rather than the "...allowed in this context" wording. The runtime
+    // mirror gate (lib.rs ~8861) already conditions on `command_arity_ok`; this
+    // fast-path gate must too — when the command is unknown or its argc fails
+    // the generic arity, skip the gate so the command reaches dispatch, which
+    // emits the matching unknown/arity error (no side effect: arity fails
+    // before execution).
+    //
+    // (frankenredis-7tpx0) Two refinements so this fast gate stays a strict
+    // subset of the runtime gate:
+    //   * Full arity (`check_full_command_arity`) so a known container
+    //     subcommand with the wrong argc (e.g. `CONFIG GET`, `OBJECT ENCODING`)
+    //     skips the gate and reaches dispatch for its own arity error.
+    //   * DEBUG is deferred to the runtime: it is CMD_PROTECTED (server.c:3878),
+    //     so a subscribed DEBUG must get the protected/arity error from
+    //     handle_debug_command_gate (which runs before the runtime context
+    //     gate), not the context wording this fast gate would emit.
     if runtime.is_in_subscription_mode()
         && runtime.client_session().resp_protocol_version() != 3
+        && !argv
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case(b"DEBUG"))
+        && fr_command::check_full_command_arity(argv).is_ok()
         && let Some(reject) = check_subscription_mode_gate(argv, true)
     {
         reject.encode_into(&mut conn.write_buf);
@@ -2327,6 +2625,206 @@ fn handle_parse_error(
 }
 
 use fr_server::{InlineParseResult, should_try_inline_parsing, try_parse_inline};
+
+/// (frankenredis-pkdgs) How often a Sentinel actively PINGs + INFOs each
+/// monitored master. Upstream pings every `down-after/2` (<=1s) and INFOs every
+/// 10s; a unified 1s probe keeps the observable instance fields (runid, flags,
+/// ping/info-refresh times, discovered replicas) fresh without two schedules.
+const SENTINEL_PROBE_INTERVAL_MS: u64 = 1000;
+
+/// (frankenredis-pkdgs) Blocking PING + INFO of one monitored master. Returns
+/// the INFO payload on success; any connect / IO / protocol failure is an `Err`
+/// the caller folds into a link disconnect. Short timeouts stop a dead master
+/// from stalling the event loop.
+fn probe_sentinel_master(
+    ip: &str,
+    port: u16,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+    hello: Option<&str>,
+) -> io::Result<String> {
+    let addr: std::net::SocketAddr = format!("{ip}:{port}")
+        .parse()
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "bad master addr"))?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
+    let _ = stream.set_nodelay(true);
+    stream.set_read_timeout(Some(Duration::from_millis(300)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(300)))?;
+    let mut read_buf = Vec::new();
+
+    stream.write_all(&replica_handshake_frame(&[b"PING"]).to_bytes())?;
+    let pong =
+        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    if !matches!(&pong, RespFrame::SimpleString(s) if s.eq_ignore_ascii_case("PONG")) {
+        return Err(io::Error::new(ErrorKind::InvalidData, "master did not PONG"));
+    }
+
+    // (frankenredis-pkdgs) Gossip our hello on the master's pub/sub channel so
+    // peer sentinels discover us. Best-effort: the integer reply is drained but
+    // a failure here still lets the INFO below decide link liveness.
+    if let Some(hello) = hello {
+        stream.write_all(
+            &replica_handshake_frame(&[b"PUBLISH", b"__sentinel__:hello", hello.as_bytes()])
+                .to_bytes(),
+        )?;
+        let _ = read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    }
+
+    stream.write_all(&replica_handshake_frame(&[b"INFO"]).to_bytes())?;
+    let info =
+        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    match info {
+        RespFrame::BulkString(Some(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "master INFO not a bulk string",
+        )),
+    }
+}
+
+/// (frankenredis-pkdgs) Once per `SENTINEL_PROBE_INTERVAL_MS`, PING + INFO every
+/// monitored master and fold the result into the sentinel state (runid, role,
+/// link liveness, discovered replicas) via the fr-store/fr-sentinel primitives.
+/// Without this, a sentinel registers a master but never contacts it, so
+/// SENTINEL MASTER reports an empty "master,disconnected" instance forever.
+/// (frankenredis-pkdgs) A persistent connection SUBSCRIBEd to a monitored
+/// master's `__sentinel__:hello` channel, drained non-blocking each iteration to
+/// receive peer sentinels' hello announcements.
+struct SentinelHelloSub {
+    stream: StdTcpStream,
+    buf: Vec<u8>,
+}
+
+/// Open + SUBSCRIBE + switch to non-blocking. None on any connect/IO failure
+/// (the caller retries next tick).
+fn open_sentinel_hello_sub(ip: &str, port: u16) -> Option<SentinelHelloSub> {
+    let addr: SocketAddr = format!("{ip}:{port}").parse().ok()?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    stream
+        .write_all(&replica_handshake_frame(&[b"SUBSCRIBE", b"__sentinel__:hello"]).to_bytes())
+        .ok()?;
+    stream.set_nonblocking(true).ok()?;
+    Some(SentinelHelloSub {
+        stream,
+        buf: Vec::new(),
+    })
+}
+
+/// Non-blocking drain of pending bytes, parsing pub/sub `message` frames on
+/// `__sentinel__:hello` and folding each payload via runtime.sentinel_process_hello.
+/// Err means the connection is dead/garbled and should be reopened.
+fn drain_sentinel_hello_sub(
+    sub: &mut SentinelHelloSub,
+    runtime: &mut Runtime,
+    parser_config: &ParserConfig,
+    now_ms: u64,
+) -> io::Result<()> {
+    let mut tmp = [0u8; 8192];
+    loop {
+        match sub.stream.read(&mut tmp) {
+            Ok(0) => return Err(io::Error::new(ErrorKind::UnexpectedEof, "hello sub closed")),
+            Ok(n) => sub.buf.extend_from_slice(&tmp[..n]),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+        // Cap the buffer to avoid unbounded growth on a chatty channel.
+        if sub.buf.len() > 1 << 20 {
+            return Err(io::Error::new(ErrorKind::InvalidData, "hello sub overflow"));
+        }
+    }
+    loop {
+        match fr_protocol::parse_frame_with_config(&sub.buf, parser_config) {
+            Ok(parsed) => {
+                handle_sentinel_hello_frame(&parsed.frame, runtime, now_ms);
+                sub.buf.drain(..parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(_) => return Err(io::Error::new(ErrorKind::InvalidData, "bad hello frame")),
+        }
+    }
+    Ok(())
+}
+
+/// A pub/sub push is `["message", "__sentinel__:hello", "<payload>"]`; ignore the
+/// `subscribe` confirmation and anything else.
+fn handle_sentinel_hello_frame(frame: &RespFrame, runtime: &mut Runtime, now_ms: u64) {
+    if let RespFrame::Array(Some(items)) = frame
+        && items.len() == 3
+        && let (
+            RespFrame::BulkString(Some(kind)),
+            RespFrame::BulkString(Some(chan)),
+            RespFrame::BulkString(Some(payload)),
+        ) = (&items[0], &items[1], &items[2])
+        && kind.eq_ignore_ascii_case(b"message")
+        && chan.as_slice() == b"__sentinel__:hello"
+        && let Ok(s) = std::str::from_utf8(payload)
+    {
+        runtime.sentinel_process_hello(s, now_ms);
+    }
+}
+
+fn run_sentinel_monitoring_tick(
+    runtime: &mut Runtime,
+    now_ms: u64,
+    last_probe_ms: &mut u64,
+    hello_subs: &mut HashMap<String, SentinelHelloSub>,
+) {
+    if !runtime.sentinel_mode() {
+        return;
+    }
+    // Advance the sentinel clock on EVERY event-loop iteration (cheap tilt
+    // check), not just on a probe tick: SENTINEL MASTER/SLAVES render their
+    // "ms-ago" delta fields as (previous_time - last_event_time). Advancing it
+    // only once per probe pinned those fields to ~0; tracking real now makes
+    // them report the true elapsed time since the last ping/info (0..interval),
+    // matching redis's mstime()-based deltas.
+    runtime.sentinel_begin_tick(now_ms);
+
+    let parser_config = runtime.parser_config();
+    // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
+    // sentinel state across the network IO.
+    let targets = runtime.sentinel_monitor_targets();
+
+    // Receive half of gossip (every iteration): keep a hello subscription per
+    // monitored master and drain it so peer sentinels' hellos are ingested as
+    // they arrive. Reconcile against the current master set first.
+    {
+        let current: HashSet<&str> = targets.iter().map(|(n, _, _)| n.as_str()).collect();
+        hello_subs.retain(|name, _| current.contains(name.as_str()));
+        for (name, ip, port) in &targets {
+            if !hello_subs.contains_key(name)
+                && let Some(conn) = open_sentinel_hello_sub(ip, *port)
+            {
+                hello_subs.insert(name.clone(), conn);
+            }
+            if let Some(conn) = hello_subs.get_mut(name)
+                && drain_sentinel_hello_sub(conn, runtime, &parser_config, now_ms).is_err()
+            {
+                hello_subs.remove(name);
+            }
+        }
+    }
+
+    // Probe half (network IO) stays throttled.
+    if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
+        return;
+    }
+    *last_probe_ms = now_ms;
+    let query_buffer_limit = runtime.server.query_buffer_limit;
+    for (name, ip, port) in &targets {
+        // Gossip a hello on this master's __sentinel__:hello channel when due,
+        // so peer sentinels discover this instance. Decided (and rate-limited)
+        // by the store before the blocking probe sends it.
+        let hello = runtime.sentinel_take_hello_to_publish(name, now_ms);
+        let info =
+            probe_sentinel_master(ip, *port, &parser_config, query_buffer_limit, hello.as_deref())
+                .ok();
+        runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
+    }
+}
 
 fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
     RespFrame::Array(Some(
@@ -4173,7 +4671,8 @@ mod tests {
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         command_frame_can_move_to_argv, consume_complete_replication_prefix, drain_replica_stream,
         drive_replica_sync, encode_eof_marked_replication_snapshot, encode_replication_snapshot,
-        find_crlf, frame_matches_suppressed_replication_reply, is_quit_frame,
+        check_subscription_mode_gate, find_crlf, frame_matches_suppressed_replication_reply,
+        is_quit_frame,
         parse_blocking_deadline, parse_xread_block_deadline_argv, process_buffered_frames,
         read_frame_from_stream, read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
@@ -6597,10 +7096,17 @@ mod tests {
 
     #[test]
     fn inline_parser_gate_recognizes_all_resp_prefixes() {
-        for prefix in *b"+-:$*~%#,_(=|>!" {
+        // Upstream: only '*' (multibulk) stays on the RESP parser path; every
+        // other first byte — including the RESP2 reply and RESP3 type prefixes
+        // — is the start of an inline command. (frankenredis-c6vt7)
+        assert!(
+            !should_try_inline_parsing(b'*'),
+            "'*' must stay on the RESP multibulk parser path"
+        );
+        for prefix in *b"+-:$~%#,_(=|>!" {
             assert!(
-                !should_try_inline_parsing(prefix),
-                "prefix {prefix:?} should stay on RESP parser path"
+                should_try_inline_parsing(prefix),
+                "non-'*' prefix {prefix:?} must be treated as inline like redis"
             );
         }
 
@@ -7713,5 +8219,47 @@ mod tests {
         let mut blocked_reply = vec![0_u8; RespFrame::Array(None).to_bytes().len()];
         std::io::Read::read_exact(&mut peer, &mut blocked_reply).unwrap();
         assert_eq!(blocked_reply, RespFrame::Array(None).to_bytes());
+    }
+
+    // (frankenredis-nnbig) The pub/sub-context gate must only fire when
+    // the command is known and its generic arity is OK. Upstream processCommand
+    // does command LOOKUP (unknown -> "unknown command") and the generic ARITY
+    // check (server.c:3787) BEFORE the pub/sub-context gate (server.c:4072), so a
+    // wrong-arity or unknown command issued while subscribed surfaces its own
+    // error, not "...allowed in this context". This pins the exact predicate the
+    // fast-path gate in process_argv_frame applies: arity-ok AND gate-rejects.
+    #[test]
+    fn subscribe_mode_gate_runs_arity_before_context_gate_nnbig() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // gate_fires == the exact condition used in process_argv_frame's RESP2
+        // subscription gate: known + arity-ok AND on the deny-list.
+        let gate_fires = |parts: &[&str]| -> bool {
+            let a = argv(parts);
+            fr_command::check_command_arity(a.first().map(Vec::as_slice).unwrap_or(b""), a.len())
+                .is_ok()
+                && check_subscription_mode_gate(&a, true).is_some()
+        };
+
+        // Wrong-arity / unknown -> gate SKIPPED, command reaches dispatch so its
+        // own unknown/arity error surfaces (matching upstream order).
+        assert!(!gate_fires(&["GET"]), "GET with no key is wrong-arity");
+        assert!(!gate_fires(&["SET", "k"]), "SET missing value is wrong-arity");
+        assert!(!gate_fires(&["GET", "k", "x"]), "GET with extra arg is wrong-arity");
+        assert!(!gate_fires(&["FOOBARNOTACMD", "x"]), "unknown command");
+        assert!(!gate_fires(&["DEBUG"]), "DEBUG with no subcommand is wrong-arity");
+
+        // Valid-arity deny-listed commands -> gate FIRES (subscribe-context error).
+        assert!(gate_fires(&["GET", "k"]));
+        assert!(gate_fires(&["SET", "k", "v"]));
+        assert!(gate_fires(&["INCR", "k"]));
+
+        // Allow-listed pub/sub commands -> gate never fires regardless of arity.
+        assert!(!gate_fires(&["SUBSCRIBE", "c"]));
+        assert!(!gate_fires(&["UNSUBSCRIBE"]));
+        assert!(!gate_fires(&["PING"]));
+        assert!(!gate_fires(&["RESET"]));
+        assert!(!gate_fires(&["QUIT"]));
     }
 }
