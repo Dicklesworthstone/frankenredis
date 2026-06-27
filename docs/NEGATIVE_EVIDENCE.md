@@ -86,6 +86,58 @@ should avoid another cache-metadata micro-hunk and instead target the dominant
 hash/register loop or add a lower-noise dense/sparse-specific PFADD bench before
 changing HLL payload mutation again.
 
+## 2026-06-27 BlueFalcon BITFIELD_SET_u8 aligned store primitive rejected
+
+Land-or-dig found no measured unlanded source win in bench worktrees. After
+fetching current `origin/main`, the only worktree head not already reachable
+from main was the old docs-only ZADD guard-loss note (`a4b709ea`). Current
+main already contains the later `RANDOMKEY`, single-key `DEL`/`EXISTS`/`TOUCH`,
+and `DUMP` wins, so the new dig targeted the largest current per-crate
+Redis 7.2.4 write gap with an existing bench row: `BITFIELD_SET_u8_0_1`.
+
+The tested alien-graveyard / artifact-coding lever added a store-owned
+byte-aligned unsigned `u8` BITFIELD SET primitive and routed the existing
+borrowed `BITFIELD key SET u8 0 1` runtime fast path to it when the offset was
+byte-aligned. The intent was to avoid the generic per-bit read/write loops and
+the post-write reread in `Store::bitfield_set`. The source hunk is fully
+reverted because the clean adjacent control was faster.
+
+Commands used `AGENT_NAME=BlueFalcon`. Candidate build/bench used the requested
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`; clean
+control used
+`/data/projects/.rch-targets/frankenredis-cod-b-control-bitfield-u8` so both
+release binaries could coexist. RCH had no admissible workers and fell back
+locally for focused tests, builds, and benches. The literal requested
+`rch exec -- cargo bench --release -p fr-bench --bench bitfield_vs_redis --
+BITFIELD_SET_u8_0_1 --noplot` spelling was attempted and failed before
+measurement because this Cargo rejects `--release` for `cargo bench`; the
+measured per-crate bench used `cargo bench --profile release -p fr-bench
+--bench bitfield_vs_redis -- BITFIELD_SET_u8_0_1 --noplot`.
+
+Same-host BITFIELD SET evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean main control (`0de3fdcff`) | `743.41 Kelem/s` | `427.11 Kelem/s` | `0.575x` | baseline | target gap |
+| aligned-u8 store primitive candidate | `702.87 Kelem/s` | `328.51 Kelem/s` | `0.467x` | `0.769x` vs control | reject |
+
+Decision: **REJECT / revert**. Do not retry byte-aligned `u8` store
+specialization for this benchmark shape without a profile proving
+`bitfield_read`/`bitfield_write` dominate. The remaining BITFIELD SET loss is
+more likely in command/runtime accounting, array reply construction, or the
+packet-per-command benchmark shape than in the eight-bit store mutation itself.
+
+Proof while the hunk was applied: RCH/local
+`cargo test -p fr-store
+bitfield_set_aligned_u8_matches_generic_for_existing_and_missing_strings --
+--nocapture` passed, and RCH/local
+`cargo test -p fr-runtime
+plain_bitfield_set_borrowed_matches_generic_for_unsigned_in_range --
+--nocapture` passed. Post-revert conformance gate: two `rch exec` attempts
+stalled before cargo startup; direct local
+`cargo test -p fr-conformance -- --nocapture` with the requested target dir
+passed (`194` library tests, all conformance bins, smoke `99/99`, doctests).
+
 ## 2026-06-27 BlueFalcon PFADD_16v parser admission rejected
 
 Land-or-dig found no measured unlanded source win in bench worktrees: the only
