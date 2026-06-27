@@ -1623,3 +1623,39 @@ Net campaign state: insert path parity (prior turn), removal path parity (this
 turn), reads fr-faster, dispatch saturated (68+), GET single-lookup done. The only
 remaining measured residual is owner-gated ZCOUNT (rank-treap `4096` threshold,
 RAM tradeoff — flagged to CoralOx). No source change; conformance untouched.
+
+## 2026-06-27 AmberRiver: SET drop_if_expired guard — profile-driven, MEASURED ~0-gain, REVERTED
+
+Dig via profile (/extreme-software-optimization): `perf record` of a write-heavy
+mix (`-t set,hset,zadd,lpush,sadd -P24 -c50 -r100000`, host load ~18) on the
+current-main binary. Flat self-time top hotspots:
+`canonical_string_value_from_slice` 9.69% (= `parse_i64`, already a tight
+redis-`string2ll`-equivalent byte loop — not a lever), RESP parser
+`process_buffered_frames` 5.64%, and ~3% attributable to `drop_if_expired` on the
+write path (reply `__send` dominates at ~34% inclusive — shared with redis).
+
+Lever tried: `Store::set` / `set_plain_borrowed` / `set_plain_owned` call
+`drop_if_expired` unconditionally, doing an expiry-map probe + `evaluate_expiry`
+that can NEVER evict when no key has a TTL. Guarded with `if self.expires_count
+!= 0 { … } else { entries.contains_key(key) }` — byte-exact (with
+`expires_count==0` nothing is evictable and the returned existence flag is
+identical), mirroring the shipped lpush/rpush guard and GET `get-single-lookup`.
+Correctness: 84 `fr-store` `set_` unit tests pass.
+
+A/B (interleaved best-of-6, `redis-benchmark -P16 -c50 -n2M -r100000`, candidate
+vs current-main control, per-crate `cargo build -p fr-server`):
+
+| cmd | cand/ctrl | note |
+|---|---:|---|
+| SET (changed) | `1.008x` | within noise |
+| GET (unchanged baseline) | `1.058x` | candidate had ~6% favorable measurement skew this run |
+
+SET (1.008x) UNDERperformed the GET unchanged-baseline skew (1.058x) → normalized
+SET ≈ 0.95x = **no measurable win**. The saved hash-probe is sub-noise at the
+throughput level (the reply-`send` syscall + mimalloc dominate; same lesson as the
+GET single-lookup, which only showed up in instruction counts, not throughput).
+
+Decision: **REVERT ~0-gain** (preserved as a labeled stash). The guard is
+byte-exact and harmless but not a throughput lever. The hot SET path is confirmed
+at redis-parity work (parse_i64 == string2ll, send dominates). Do not re-chase
+per-write probe-shaving for throughput.
