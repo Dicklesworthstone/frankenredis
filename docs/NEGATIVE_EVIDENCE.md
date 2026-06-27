@@ -5666,3 +5666,13 @@ redis. Residual cand/redis <0.95 (XLEN 0.76, OBJ-ENC 0.81) = store/container-dis
 (OBJECT 2-token subcommand parse, XLEN stream lookup) — the hoist closed the position portion only. 14 dispatch commits
 (12 hoists + 2 new-fp), ~34 commands closed. STORE-BOUND (skip, part-125 class): ZADD GT 0.346/ZADD INCR 0.396 (flags),
 PFADD 0.320 (HLL sparse), XADD 0.379 (stream BTreeMap insert tcknm). conformance pending.
+
+### 2026-06-26 (part 150) WIN: hoist TTL/PTTL/EXPIRETIME/PEXPIRETIME/PERSIST early — 1.13-1.28x (cc/BlackThrush)
+15th dispatch commit. Hoisted the expire-read family (keymeta form) + PERSIST (key-only) — common cache reads at moderate-
+late @4793-5352. A/B (cand vs ctrl=committed d7b7ed833): EXPIRETIME cand/ctrl mean 1.275 (0.690->0.811), PERSIST 1.218
+(0.716->0.912), PTTL 1.151 (0.729->0.868), TTL 1.126 (0.789->0.870). Byte-exact: TTL/PTTL/EXPIRETIME/PEXPIRETIME -1/-2/
+absolute-value, PERSIST 0/1 cand==ctrl==redis. Smaller wins (moderate position) but above-noise + TTL/PTTL are very hot
+(every cache-expiry check). Residual cand/redis ~0.87 = keymeta store lookup floor. 15 dispatch commits (13 hoists + 2
+new-fp), ~39 commands closed. DISPATCH VEIN NOW NEAR-EXHAUSTED: remaining <0.85 are STORE-BOUND (ZADD GT/INCR flags, PFADD
+HLL, XADD stream, GEODIST/GEOPOS geo-compute, SETBIT bit-write) — not hoists. Further dispatch hoists (GEODIST@4604/GEOPOS
+@4723) would be marginal (already moderate-early). conformance pending.
