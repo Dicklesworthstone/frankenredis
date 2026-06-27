@@ -4488,7 +4488,9 @@ mod tests {
 
         assert_eq!(
             result,
-            RespFrame::Error("ERR unknown subcommand 'notACommand'. Try SENTINEL HELP.".into())
+            RespFrame::Error(
+                "ERR unknown subcommand 'notACommand'. Try SENTINEL HELP.".into()
+            )
         );
     }
 
