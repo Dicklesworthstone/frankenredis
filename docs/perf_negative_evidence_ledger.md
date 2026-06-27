@@ -1590,3 +1590,36 @@ reconstruct.
 Decision: **no source change** (clean surface exhausted; structural levers are
 owner-gated multi-day work) + **blocker surfaced** for operator action. Conformance
 untouched (docs-only).
+
+## 2026-06-27 AmberRiver: HDEL/SREM removal gap (ym6ih) CLOSED — measured parity, supersedes stale 2.83x/2.4x
+
+Dig targeted the one hot-command class never measured this campaign: the REMOVAL
+path. Memory/this ledger long advertised it as the **biggest** hot-command gap and
+the **#1 highest-ROI, ready-to-implement** lever: "HDEL ~2.83x, SREM ~2.4x slower;
+CompactFieldMap delete does ~3 probes + 2 allocs/del vs redis 1-probe; fix =
+slot-index return + O(1) repoint + bool-return no-value-alloc (ym6ih)."
+
+**That fix is SHIPPED and the gap is CLOSED.** `CompactFieldMap::delete()`
+(`crates/fr-store/src/packed_set.rs:1042`) already does exactly the ym6ih
+optimization — "one probe + zero owned allocations per delete" — and HDEL
+(`lib.rs:10102`) / SREM call it (not the value-allocating `swap_remove`).
+
+Measured (prefill-then-delete 1000 fields/members, pipelined, best-of-12
+interleaved, fr `47e319396` vs vendored Redis 7.2.4, host load ~13,
+`connected_slaves:0`), time ratio fr_ms / redis_ms (>1 = Redis faster):
+
+| op | fr | Redis 7.2.4 | fr/redis | verdict |
+|---|---:|---:|---:|---|
+| HDEL 1000 | `0.404 ms` | `0.388 ms` | `1.042x` | parity |
+| SREM 1000 | `0.394 ms` | `0.369 ms` | `1.067x` | parity |
+
+Both within ~4–7% (near noise), NOT 2.4–2.83x. The stale numbers predate the
+ym6ih `delete()` landing. **Do not re-target HDEL/SREM removal** — it is the
+optimized 1-probe/0-alloc path and at parity. The tiny residual is the
+`CompactFieldMap` open-addressing probe vs redis dict (structural, sub-noise, not
+a lever).
+
+Net campaign state: insert path parity (prior turn), removal path parity (this
+turn), reads fr-faster, dispatch saturated (68+), GET single-lookup done. The only
+remaining measured residual is owner-gated ZCOUNT (rank-treap `4096` threshold,
+RAM tradeoff — flagged to CoralOx). No source change; conformance untouched.
