@@ -336,7 +336,8 @@ impl GenericSet {
             }
             GenericSet::Packed(p)
         } else {
-            let mut h = CompactStrSet::new();
+            let bytes: usize = members.iter().map(|m| m.as_ref().len() + 2).sum();
+            let mut h = CompactStrSet::with_capacity(n, bytes);
             for m in members {
                 h.insert(m.as_ref());
             }
@@ -1145,6 +1146,17 @@ impl CompactStrSet {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// (frankenredis-cfm-presize) Pre-sized empty set for `entries` inserts and
+    /// ~`buf_bytes` of member payload — delegates to
+    /// [`CompactFieldMap::with_capacity`] so the bulk unique-members build skips
+    /// incremental `rehash`/realloc. Byte-identical to `new()` + the same inserts.
+    #[must_use]
+    pub(crate) fn with_capacity(entries: usize, buf_bytes: usize) -> Self {
+        Self {
+            inner: CompactFieldMap::with_capacity(entries, buf_bytes),
+        }
     }
 
     #[must_use]

@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver: LANDED CompactStrSet presize — large-set RDB load ~1.2-1.44x faster
+
+Extends the CompactFieldMap presize win (entry below) to the **set** bulk path.
+`GenericSet::from_unique_str_members` (the all-non-int string-set bulk builder
+behind `SetValue::try_bulk_unique_strings`, used on RDB / DEBUG-RELOAD load of a
+hashtable-encoded set) built its `CompactStrSet` via `new()` + per-member insert
+— the same incremental `rehash`/realloc cost. Added `CompactStrSet::with_capacity`
+(delegates to `CompactFieldMap::with_capacity`) and used it there (`packed_set.rs`).
+Byte-exact (CompactStrSet is a thin wrapper; members carry empty values).
+
+Measured (DEBUG RELOAD of a 20 000-member all-string hashtable set, interleaved
+best-of-12, candidate vs freshly-built current-main control `d6968e84d`, host
+load ~10), wall-clock per reload:
+
+| metric | cand (presize) | control | control/cand |
+|---|---:|---:|---:|
+| best of 12 | `2.95 ms` | `4.25 ms` | **`1.441x`** |
+| median | `~3.85 ms` | `~4.49 ms` | `~1.17x` |
+
+cand won **11/12** head-to-head. Correctness: live `DEBUG DIGEST-VALUE` identical
+(`0a2b5a22…`); all **659** `fr-store` lib tests green. RAM-neutral.
+
 ## 2026-06-27 AmberRiver: LANDED CompactFieldMap presize — large-hash RDB load 1.25-1.31x faster
 
 Acting on the prior turn's RESTORE profile (hash RESTORE 5x; build dominated by
