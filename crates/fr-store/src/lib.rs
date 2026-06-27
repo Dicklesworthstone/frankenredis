@@ -56,6 +56,7 @@ const RDB_OPCODE_FUNCTION2: u8 = 245;
 const DUMP_VERSION_LEN: usize = 2;
 const DUMP_CRC64_LEN: usize = 8;
 const DUMP_TRAILER_LEN: usize = DUMP_VERSION_LEN + DUMP_CRC64_LEN;
+const DUMP_PAYLOAD_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 const AOF_REWRITE_ITEMS_PER_CMD: usize = 64;
 const RDB_ENCVAL: u8 = 0xC0;
 const RDB_ENC_INT8: u8 = 0;
@@ -4602,6 +4603,14 @@ struct HllRegisterCache {
     registers: Box<[u8; HLL_REGISTERS]>,
 }
 
+#[derive(Debug, Clone)]
+struct DumpPayloadCache {
+    modification_count: u64,
+    zset_max_listpack_entries: usize,
+    zset_max_listpack_value: usize,
+    payload: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
@@ -4687,6 +4696,8 @@ pub struct Store {
     digest_stale: bool,
     zintercard_cache: Option<ZIntercardCache>,
     hll_register_cache: HashMap<Vec<u8>, HllRegisterCache, foldhash::quality::RandomState>,
+    dump_payload_cache: HashMap<Vec<u8>, DumpPayloadCache, foldhash::quality::RandomState>,
+    dump_payload_cache_bytes: usize,
     /// (frankenredis-c3he2) Memoized memory-usage estimate for the few LARGE
     /// collections (hashtable/skiplist/large-stream branch), keyed by keyspace
     /// key → `(modification_count, value_estimate_bytes)`. The value estimate is
@@ -5180,6 +5191,8 @@ impl Default for Store {
             digest_stale: false,
             zintercard_cache: None,
             hll_register_cache: HashMap::default(),
+            dump_payload_cache: HashMap::default(),
+            dump_payload_cache_bytes: 0,
             mem_estimate_cache: RefCell::new(HashMap::default()),
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
@@ -5373,6 +5386,33 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn clear_dump_payload_cache(&mut self) {
+        self.dump_payload_cache.clear();
+        self.dump_payload_cache_bytes = 0;
+    }
+
+    fn remove_dump_payload_cache_entry(&mut self, key: &[u8]) {
+        if let Some(cache) = self.dump_payload_cache.remove(key) {
+            self.dump_payload_cache_bytes = self
+                .dump_payload_cache_bytes
+                .saturating_sub(cache.payload.len());
+        }
+    }
+
+    fn insert_dump_payload_cache(&mut self, key: &[u8], cache: DumpPayloadCache) {
+        let payload_len = cache.payload.len();
+        if payload_len > DUMP_PAYLOAD_CACHE_MAX_BYTES {
+            return;
+        }
+        self.remove_dump_payload_cache_entry(key);
+        if self.dump_payload_cache_bytes.saturating_add(payload_len) > DUMP_PAYLOAD_CACHE_MAX_BYTES
+        {
+            self.clear_dump_payload_cache();
+        }
+        self.dump_payload_cache_bytes = self.dump_payload_cache_bytes.saturating_add(payload_len);
+        self.dump_payload_cache.insert(key.to_vec(), cache);
     }
 
     /// (frankenredis-pkdgs) Advance the sentinel clock at the start of a
@@ -6761,6 +6801,7 @@ impl Store {
             self.forget_volatile_key(key);
         }
         self.hll_register_cache.remove(key);
+        self.remove_dump_payload_cache_entry(key);
         self.mem_estimate_cache.borrow_mut().remove(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
@@ -8967,6 +9008,7 @@ impl Store {
             self.forget_volatile_key(&key);
         }
         self.hll_register_cache.remove(&key);
+        self.remove_dump_payload_cache_entry(&key);
         self.mem_estimate_cache.borrow_mut().remove(&key);
         let old_entry = match canonical_key {
             // New key: insert the boxed bytes as the canonical key.
@@ -9013,6 +9055,7 @@ impl Store {
         let old_expiry = self.expiry_ms(key);
         if let Some(entry) = self.entries.remove(key) {
             self.hll_register_cache.remove(key);
+            self.remove_dump_payload_cache_entry(key);
             self.mem_estimate_cache.borrow_mut().remove(key);
             self.mark_ordered_keys_dirty();
             self.expiry_deadlines.remove(key);
@@ -9455,6 +9498,7 @@ impl Store {
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
         self.hll_register_cache.clear();
+        self.clear_dump_payload_cache();
         {
             let mut mem_estimate_cache = self.mem_estimate_cache.borrow_mut();
             mem_estimate_cache.clear();
@@ -9493,6 +9537,8 @@ impl Store {
         self.db_scan_cache.clear();
         self.db_scan_cache.shrink_to_fit();
         self.hll_register_cache.shrink_to_fit();
+        self.clear_dump_payload_cache();
+        self.dump_payload_cache.shrink_to_fit();
         self.mem_estimate_cache.borrow_mut().shrink_to_fit();
         for index in &mut self.random_key_slots {
             index.keys.shrink_to_fit();
@@ -21014,7 +21060,16 @@ impl Store {
             return None;
         }
         let entry = self.entries.get(key)?;
+        let modification_count = entry.modification_count;
+        if let Some(cache) = self.dump_payload_cache.get(key).filter(|cache| {
+            cache.modification_count == modification_count
+                && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
+                && cache.zset_max_listpack_value == self.zset_max_listpack_value
+        }) {
+            return Some(cache.payload.clone());
+        }
         let mut buf = Vec::new();
+        let mut cache_compact_zset_dump = false;
         match &entry.value {
             Value::String(v) => {
                 buf.push(RDB_TYPE_STRING);
@@ -21131,6 +21186,7 @@ impl Store {
                         entry_count += 2;
                     }
                     encode_rdb_string(&mut buf, &finish_listpack_entries(encoded, entry_count)?);
+                    cache_compact_zset_dump = true;
                 } else {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
@@ -21167,6 +21223,17 @@ impl Store {
         // Compute and append CRC64 over all preceding bytes
         let crc = fr_persist::crc64_redis(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
+        if cache_compact_zset_dump {
+            self.insert_dump_payload_cache(
+                key,
+                DumpPayloadCache {
+                    modification_count,
+                    zset_max_listpack_entries: self.zset_max_listpack_entries,
+                    zset_max_listpack_value: self.zset_max_listpack_value,
+                    payload: buf.clone(),
+                },
+            );
+        }
         Some(buf)
     }
 
@@ -41959,6 +42026,53 @@ mod tests {
 
         assert_eq!(direct, encode_listpack_strings(&flat).unwrap());
         assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
+    }
+
+    #[test]
+    fn dump_compact_zset_cache_tracks_modification_count_codb_uhthd() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"alpha".to_vec()),
+                    (2.0, b"beta".to_vec()),
+                    (3.0, b"gamma".to_vec()),
+                ],
+                100,
+            )
+            .unwrap();
+
+        let first = store.dump_key(b"z", 100).expect("initial zset dump");
+        let entry_modification = store
+            .entries
+            .get(b"z".as_slice())
+            .expect("zset entry")
+            .modification_count;
+        let cached = store
+            .dump_payload_cache
+            .get(b"z".as_slice())
+            .expect("compact zset dump cache entry");
+        assert_eq!(cached.modification_count, entry_modification);
+        assert_eq!(cached.payload, first);
+
+        let second = store.dump_key(b"z", 101).expect("cached zset dump");
+        assert_eq!(second, first);
+
+        store.zadd(b"z", &[(4.0, b"delta".to_vec())], 102).unwrap();
+        let after_mutation = store.dump_key(b"z", 103).expect("mutated zset dump");
+        assert_ne!(after_mutation, first);
+        let mutated_modification = store
+            .entries
+            .get(b"z".as_slice())
+            .expect("mutated zset entry")
+            .modification_count;
+        let refreshed = store
+            .dump_payload_cache
+            .get(b"z".as_slice())
+            .expect("refreshed compact zset dump cache entry");
+        assert_eq!(refreshed.modification_count, mutated_modification);
+        assert_eq!(refreshed.payload, after_mutation);
     }
 
     #[test]
