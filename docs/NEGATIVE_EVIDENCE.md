@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlackThrush: REJECTED retain QUICKLIST_2 nodes through whole-RDB decode/load — 0.915x vs ORIG
+
+Dig target: RDB-load quicklist/listpack retained representation. The attempted
+lever changed `fr-persist` whole-RDB decode of all-PACKED `RDB_TYPE_LIST_QUICKLIST_2`
+from flattened `RdbValue::List(Vec<Vec<u8>>)` into retained
+`RdbValue::ListQuicklist2Packed(Vec<Vec<u8>>)`, then routed runtime RDB apply
+through a new `Store::load_quicklist2_packed_nodes` path so load could preserve
+listpack chunks instead of cloning every element through `rpush`.
+
+Correctness while applied: focused `fr-persist` quicklist decode tests, focused
+`fr-store` quicklist restore tests, and focused `fr-runtime load_rdb` tests were
+green. The literal requested `cargo bench --release` spelling was attempted
+earlier in this BOLD-VERIFY pass and failed because this Cargo rejects
+`--release` for `cargo bench`; measured runs used the release profile equivalent,
+`cargo bench --profile release`, via
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- ...`.
+RCH fell open locally with no admissible workers.
+
+Measured per-crate in `fr-persist` with the existing RDB codec Criterion harness,
+plus a temporary focused row added to both the clean origin/main control scratch
+and candidate scratch:
+
+| row | ORIG/control `origin/main ae05bbc2c` | candidate | candidate/ORIG throughput |
+|---|---:|---:|---:|
+| broad `rdb_codec/decode_rdb` | `12.305 ms`, `479.48 Kelem/s` | `11.754 ms`, `501.97 Kelem/s` | `1.047x` but not significant (`p = 0.12`) |
+| focused `rdb_codec_quicklist/decode_quicklist_rdb` | `6.0153 ms`, `49.873 Kelem/s` | `6.5772 ms`, `45.612 Kelem/s` | **`0.915x`**, regression (`p = 0.00`) |
+
+Decision: REVERTED before commit. The retained-node decode/load path loses on
+the quicklist-specific gate, likely because extra validation/span retention and
+node-level store installation do not amortize better than the existing flattened
+decode for this RDB codec workload. No source or bench changes landed; this row
+is ledger-only negative evidence.
+
 ## 2026-06-27 AmberRiver: LANDED multi-field HSET bulk path — O(n²)→O(n), 15.5x vs main / 8.4x faster than Redis
 
 Biggest fresh measured gap found: a large fresh-key `HSET key f v [f v …]`
