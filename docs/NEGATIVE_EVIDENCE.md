@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver: LANDED CompactFieldMap presize — large-hash RDB load 1.25-1.31x faster
+
+Acting on the prior turn's RESTORE profile (hash RESTORE 5x; build dominated by
+incremental `rehash` + arena realloc in the field-by-field `CompactFieldMap`
+construction). Added `CompactFieldMap::with_capacity(entries, buf_bytes)`
+(`packed_set.rs`) — pre-sizes `slots` to a power-of-two large enough that the
+load factor stays < 0.75 across all inserts (so the per-insert grow check never
+fires `rehash`) and reserves `buf`/`order`/`slot_of`. Wired into the Hash branch
+of `HashFieldMap::from_unique_pairs` + `from_unique_pairs_borrowed` (the bulk
+RDB / DEBUG-RELOAD load path for hashtable-encoded hashes). Byte-exact: `insert`
+already maintains `slot_of` incrementally, so the only thing skipped is
+intermediate rehashing/realloc.
+
+Measured (DEBUG RELOAD of a 20 000-field hashtable hash, interleaved, candidate
+vs current-main control `6dfdfb4ad`, host load ~20), wall-clock per reload:
+
+| run | cand (presize) best | control best | control/cand | head-to-head |
+|---|---:|---:|---:|---|
+| best-of-10 | `3.73 ms` | `4.62 ms` | **`1.239x`** | cand 8/10 |
+| best-of-12 | `4.32 ms` | `5.64 ms` | **`1.306x`** | cand 9/12 |
+
+≈ **1.25–1.31x faster RDB-load of large hashes** (also exercised on server
+startup + replication full-sync). Correctness: `from_unique_pairs` equivalence
+unit test passes; live `DEBUG DIGEST-VALUE` identical between candidate and
+control (`aa9e2a6b…`); all **659** `fr-store` lib tests green. RAM-neutral
+(presize to the exact element count). The deeper structural keep-listpack lever
+(streaming RESTORE cmd) remains; this banks the safe bulk-path win.
+
 ## 2026-06-27 BlueFalcon OBJECT IDLETIME/FREQ first-cascade hoist kept
 
 Targeted the remaining uncovered `OBJECT IDLETIME/FREQ` dispatch gap named after

@@ -492,7 +492,8 @@ impl HashFieldMap {
                 .iter()
                 .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
         if to_hash {
-            let mut h = CompactFieldMap::new();
+            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 h.insert(&field, &value);
             }
@@ -522,7 +523,8 @@ impl HashFieldMap {
                 .iter()
                 .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
         if to_hash {
-            let mut h = CompactFieldMap::new();
+            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 h.insert(field, value);
             }
@@ -774,6 +776,28 @@ impl CompactFieldMap {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// (frankenredis-cfm-presize) Build an empty map already sized for `entries`
+    /// inserts and ~`buf_bytes` of arena payload. Pre-sizing `slots` to a
+    /// power-of-two big enough that the load factor stays < 0.75 across all
+    /// `entries` inserts means the per-insert grow check never fires `rehash`,
+    /// and reserving `buf`/`order`/`slot_of` removes the incremental reallocs.
+    /// Byte-identical to `new()` + the same insert sequence (`insert` maintains
+    /// `slot_of` incrementally; the only thing skipped is intermediate rehashing
+    /// and buffer growth). Used by the unique-pairs bulk builders (RDB / DEBUG
+    /// RELOAD load of a hashtable-encoded hash).
+    #[must_use]
+    pub(crate) fn with_capacity(entries: usize, buf_bytes: usize) -> Self {
+        let mut m = Self::default();
+        if entries > 0 {
+            m.buf.reserve(buf_bytes);
+            m.order.reserve(entries);
+            m.slot_of.reserve(entries);
+            let cap = ((entries + 1) * 2).next_power_of_two().max(8);
+            m.slots = vec![CFM_EMPTY; cap];
+        }
+        m
     }
 
     #[must_use]
