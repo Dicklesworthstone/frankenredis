@@ -5,173 +5,15 @@
 // while, repeat/until, tables, function calls/definitions, redis.call/pcall,
 // KEYS/ARGV, and standard library functions.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
-use std::rc::{Rc, Weak};
-
-/// (CrimsonHawk) Fast, DoS-resistant hasher for the Lua interpreter's HOT maps —
-/// table string-fields and the globals env, hashed on every field/global access.
-/// The std default `RandomState` (SipHash) was ~9.5% of a redis.call-heavy EVAL
-/// profile; this matches fr-store's keyspace hasher (`foldhash::quality`).
-type LuaMap<K, V> = std::collections::HashMap<K, V, foldhash::quality::RandomState>;
-
-/// (CrimsonHawk) Fast decimal i64 → owned ASCII bytes, byte-identical to
-/// `format!("{}", v).into_bytes()` but without the core::fmt machinery. Used on
-/// the redis.call integer-argument hot path. `unsigned_abs()` makes i64::MIN safe.
-fn i64_to_ascii_bytes(v: i64) -> Vec<u8> {
-    let mut buf = [0u8; 20]; // i64::MIN = "-9223372036854775808" = 20 chars
-    let mut i = buf.len();
-    let neg = v < 0;
-    let mut u = v.unsigned_abs();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (u % 10) as u8;
-        u /= 10;
-        if u == 0 {
-            break;
-        }
-    }
-    if neg {
-        i -= 1;
-        buf[i] = b'-';
-    }
-    buf[i..].to_vec()
-}
+use std::rc::Rc;
 use std::time::Instant;
 
 use fr_protocol::RespFrame;
 use fr_store::{SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store};
 
 use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, dispatch_argv, parse_i64_arg};
-
-// ── Lua cycle-breaking GC (frankenredis-qqq17) ──────────────────────────────
-//
-// Our Lua values are reference-counted (`Rc<RefCell<..>>`) with no tracing
-// collector, so any value CYCLE leaks: the strong counts never reach zero even
-// after the owning `LuaState` drops. Two shapes occur in practice and were both
-// surfaced by `fuzz_lua_eval` under LeakSanitizer:
-//   (a) a recursive `local function f() ... f ... end` — the closure's
-//       `captured_env` upvalue cell holds an `Rc` to a `LuaValue::Function`
-//       whose `captured_env` holds that same cell;
-//   (b) a self-referential table `local t = {}; t.x = t` — the table inner
-//       holds an `Rc` (via a contained `LuaValue::Table`) back to itself.
-// Real Redis's Lua has a mark-sweep collector; we emulate the teardown half.
-// Every allocation that can participate in a cycle — table inners and local
-// upvalue cells — registers a `Weak` handle in a thread-local registry. At the
-// end of each `eval_script` (success, error, OR panic-unwind, via the
-// `LuaGcScope` Drop guard) we sweep the slice of the registry allocated by that
-// eval and CLEAR each still-live object's contents: emptying a table inner /
-// setting a cell to `Nil` severs the internal back-edge, the strong counts
-// collapse to zero, and the memory is reclaimed. The sweep runs only after the
-// script's return value has been serialized to an owned `RespFrame` and the
-// `LuaState` has dropped, so live results and non-cyclic data are unaffected
-// (their `Weak`s simply fail to upgrade). The registry holds only `Weak`s, so
-// it never itself keeps a Lua object alive.
-
-enum LuaGcHandle {
-    Table(Weak<RefCell<LuaTableInner>>),
-    Cell(Weak<RefCell<LuaValue>>),
-}
-
-thread_local! {
-    static LUA_GC_REGISTRY: RefCell<Vec<LuaGcHandle>> = const { RefCell::new(Vec::new()) };
-}
-
-// (frankenredis-qqq17) Test-only live-`LuaTableInner` counter, used by the
-// cycle-leak regression test to prove that a self-referential table is
-// ACTUALLY reclaimed (count returns to baseline) rather than merely that the
-// registry was truncated. Zero cost in non-test builds (cfg-gated out).
-#[cfg(test)]
-thread_local! {
-    static LUA_TEST_LIVE_TABLES: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn lua_test_live_tables() -> i64 {
-    LUA_TEST_LIVE_TABLES.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-impl Drop for LuaTableInner {
-    fn drop(&mut self) {
-        if self.shared_template {
-            return;
-        }
-        LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() - 1));
-    }
-}
-
-/// Register a freshly-created table inner so the next eval-end sweep can break
-/// any cycle it participates in.
-fn lua_gc_register_table(inner: &Rc<RefCell<LuaTableInner>>) {
-    LUA_GC_REGISTRY.with(|reg| {
-        reg.borrow_mut()
-            .push(LuaGcHandle::Table(Rc::downgrade(inner)))
-    });
-}
-
-/// Register a freshly-created local/upvalue cell (the carrier of recursive
-/// closure self-references).
-fn lua_gc_register_cell(cell: &Rc<RefCell<LuaValue>>) {
-    LUA_GC_REGISTRY.with(|reg| {
-        reg.borrow_mut()
-            .push(LuaGcHandle::Cell(Rc::downgrade(cell)))
-    });
-}
-
-/// RAII guard scoping one `eval_script` invocation. Records the registry
-/// high-water mark on entry; on drop (incl. panic unwind) it breaks every cycle
-/// allocated since then and truncates the registry back to the mark, so the
-/// registry length returns to its pre-eval baseline. Declared BEFORE the
-/// `LuaState` in `eval_script` so the state (and its `Env`) drop first, leaving
-/// only genuinely-leaked cycle islands for the sweep to clear. Nested/reentrant
-/// evals each sweep only their own `[mark..]` range.
-struct LuaGcScope {
-    mark: usize,
-}
-
-impl LuaGcScope {
-    fn enter() -> Self {
-        let mark = LUA_GC_REGISTRY.with(|reg| reg.borrow().len());
-        Self { mark }
-    }
-}
-
-impl Drop for LuaGcScope {
-    fn drop(&mut self) {
-        LUA_GC_REGISTRY.with(|reg| {
-            let mut reg = reg.borrow_mut();
-            for handle in reg.iter().skip(self.mark) {
-                match handle {
-                    LuaGcHandle::Table(weak) => {
-                        if let Some(inner) = weak.upgrade() {
-                            // try_borrow_mut is defensive: post-teardown nothing
-                            // should hold a live borrow, and a contended borrow
-                            // must never panic during cleanup.
-                            if let Ok(mut inner) = inner.try_borrow_mut() {
-                                inner.array.clear();
-                                inner.string_hash.clear();
-                                inner.other_hash.clear();
-                                inner.other_keys.clear();
-                                inner.metatable = None;
-                            }
-                        }
-                    }
-                    LuaGcHandle::Cell(weak) => {
-                        if let Some(cell) = weak.upgrade()
-                            && let Ok(mut slot) = cell.try_borrow_mut()
-                        {
-                            *slot = LuaValue::Nil;
-                        }
-                    }
-                }
-            }
-            reg.truncate(self.mark);
-        });
-    }
-}
 
 // ── Value type ──────────────────────────────────────────────────────────
 
@@ -182,12 +24,8 @@ pub enum LuaValue {
     Number(f64),
     Str(Vec<u8>),
     Table(LuaTable),
-    // (CrimsonHawk) Boxed: LuaFunc is 144 bytes; inline it made every LuaValue
-    // (even a Number) 144 bytes, so every clone/move copied 144 bytes. Boxing
-    // shrinks LuaValue to 32 bytes, speeding all value ops interpreter-wide.
-    // Box (not Rc) preserves the prior deep-clone semantics.
-    Function(Box<LuaFunc>),
-    RustFunction(std::rc::Rc<str>), // name of built-in
+    Function(LuaFunc),
+    RustFunction(String), // name of built-in
     Userdata(LuaUserdata),
     Coroutine(LuaCoroutine),
     WrappedCoroutine(LuaCoroutine),
@@ -261,26 +99,12 @@ pub struct LuaTable {
 #[derive(Clone, Debug)]
 pub struct LuaTableInner {
     pub array: Vec<LuaValue>,
-    pub string_hash: LuaMap<Vec<u8>, LuaValue>,
+    pub string_hash: HashMap<Vec<u8>, LuaValue>,
     pub other_hash: Vec<(LuaValue, LuaValue)>,
     /// Set of keys in `other_hash` for fast O(1) existence checks.
     pub other_keys: HashSet<LuaHashKey>,
     /// Optional metatable for Lua 5.1 metamethods.
     pub metatable: Option<LuaTable>,
-    /// Shared immutable standard-library template tables are reused across
-    /// EVAL calls and must not be cleared by per-state cycle teardown.
-    /// They are script-readonly before user code can observe them.
-    pub shared_template: bool,
-    /// When true, this table is protected: any script-level write (field
-    /// assignment, `rawset`, `setmetatable`, `table.insert/remove/sort`) raises
-    /// "Attempt to modify a readonly table". Redis applies this recursively to
-    /// the whole script global env (math/string/table/struct/bit/cjson/cmsgpack/
-    /// redis) via `luaSetTableProtectionRecursively`; fr previously left these
-    /// library tables mutable. Internal `set()` during env construction is NOT
-    /// gated (the flag is only consulted at the script-facing write sites), so
-    /// the interpreter can still build the tables before locking them.
-    /// (frankenredis-8mwy9)
-    pub readonly: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -337,17 +161,13 @@ fn stamp_user_script_line(msg: String, line: u32) -> String {
     }
 }
 
-type LuaCell = Rc<RefCell<LuaValue>>;
-type LuaCapturedScope = Vec<(String, LuaCell)>;
-type LuaCapturedEnv = Vec<LuaCapturedScope>;
-
 #[derive(Clone, Debug)]
 pub struct LuaFunc {
     pub params: Vec<String>,
     pub body: Block,
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
-    pub captured_env: Option<LuaCapturedEnv>,
+    pub captured_env: Option<Vec<HashMap<String, Rc<RefCell<LuaValue>>>>>,
     /// Lua 5.1 function environment used for unresolved global reads and
     /// writes. `None` means the interpreter's default protected globals.
     pub env_table: Rc<RefCell<Option<LuaTable>>>,
@@ -390,70 +210,6 @@ struct LuaCoroutineInner {
     env: Option<Env>,
     varargs: Vec<LuaValue>,
     pc: usize,
-    continuation: Option<LuaCoroutineContinuation>,
-}
-
-#[derive(Clone, Debug)]
-enum LuaCoroutineContinuation {
-    Assign {
-        lhs: Vec<Expr>,
-        prefix: Vec<LuaValue>,
-        remaining: Vec<Expr>,
-        yield_was_last: bool,
-    },
-    LocalAssign {
-        names: Vec<String>,
-        prefix: Vec<LuaValue>,
-        remaining: Vec<Expr>,
-        yield_was_last: bool,
-    },
-    Return {
-        prefix: Vec<LuaValue>,
-        remaining: Vec<Expr>,
-        yield_was_last: bool,
-    },
-    NumericFor {
-        name: String,
-        stop: f64,
-        step: f64,
-        body: Block,
-        current: f64,
-        body_pc: usize,
-    },
-    /// (CrimsonHawk 7lmle) A top-level `if <coroutine.yield(...)> then ...` whose
-    /// branch condition was a bare yield. On resume the yielded value becomes that
-    /// condition's result: truthy → run `then_body`; falsy → fall through to the
-    /// `remaining` branches / `else_body` (evaluated normally — a second bare-yield
-    /// condition there errors exactly as before, so this is purely additive).
-    If {
-        then_body: Block,
-        remaining: Vec<(Expr, Block)>,
-        else_body: Option<Block>,
-    },
-    /// (CrimsonHawk 7lmle) A top-level `while <coroutine.yield(...)> do ... end`
-    /// whose loop condition is a bare yield. The condition is evaluated (and thus
-    /// suspends) once per iteration: on a truthy resume the body runs and the loop
-    /// re-yields at the condition; a falsy resume exits the loop. A body-level
-    /// yield still errors exactly as before, so this is purely additive.
-    While { cond: Expr, body: Block },
-    /// (CrimsonHawk 7lmle) A top-level `repeat ... until <coroutine.yield(...)>`
-    /// whose loop condition is a bare yield. The body runs first, then the
-    /// condition suspends (still inside the body's scope, so the yield args see
-    /// body locals): a truthy resume exits the loop, a falsy resume re-runs the
-    /// body and re-yields. Additive — a body-level yield still errors as before.
-    Repeat { body: Block, cond: Expr },
-    /// (CrimsonHawk 7lmle) A top-level `for <names> in <iter exprs> do ... end`
-    /// whose iterator expression list contains a bare `coroutine.yield(...)`.
-    /// On resume the yielded value(s) complete the iterator triple (fn, state,
-    /// control) — exactly as for a local/assign RHS — and the loop then runs to
-    /// completion. A body-level yield still errors as before (additive).
-    GenericFor {
-        names: Vec<String>,
-        prefix: Vec<LuaValue>,
-        remaining: Vec<Expr>,
-        yield_was_last: bool,
-        body: Block,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -472,7 +228,6 @@ impl LuaCoroutine {
                 env: None,
                 varargs: Vec::new(),
                 pc: 0,
-                continuation: None,
             })),
         }
     }
@@ -488,36 +243,16 @@ impl LuaCoroutine {
 
 impl LuaTable {
     fn new() -> Self {
-        let inner = Rc::new(RefCell::new(LuaTableInner {
-            array: Vec::new(),
-            string_hash: LuaMap::default(),
-            other_hash: Vec::new(),
-            other_keys: HashSet::new(),
-            metatable: None,
-            shared_template: false,
-            readonly: false,
-        }));
-        // (frankenredis-qqq17) Track for cycle-breaking at eval end.
-        lua_gc_register_table(&inner);
-        #[cfg(test)]
-        LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() + 1));
-        Self { inner }
-    }
-
-    fn new_shared_template() -> Self {
         Self {
             inner: Rc::new(RefCell::new(LuaTableInner {
                 array: Vec::new(),
-                string_hash: LuaMap::default(),
+                string_hash: HashMap::new(),
                 other_hash: Vec::new(),
                 other_keys: HashSet::new(),
                 metatable: None,
-                shared_template: true,
-                readonly: false,
             })),
         }
     }
-
     fn get(&self, key: &LuaValue) -> LuaValue {
         self.inner.borrow().get(key)
     }
@@ -548,38 +283,6 @@ impl LuaTable {
     }
     fn set(&self, key: LuaValue, value: LuaValue) {
         self.inner.borrow_mut().set(key, value)
-    }
-    /// Whether this table is protected against script-level writes. (8mwy9)
-    fn is_readonly(&self) -> bool {
-        self.inner.borrow().readonly
-    }
-    /// Mark this table (and any nested table values, guarding against cycles)
-    /// read-only, mirroring redis's `luaSetTableProtectionRecursively`. Called
-    /// once on the library tables after env construction, before user code runs.
-    /// (frankenredis-8mwy9)
-    fn mark_readonly_recursive(&self) {
-        // Already protected (or being protected up the stack) → stop; this also
-        // breaks self-referential cycles like `_G._G`.
-        if self.inner.borrow().readonly {
-            return;
-        }
-        let nested: Vec<LuaTable> = {
-            let mut inner = self.inner.borrow_mut();
-            inner.readonly = true;
-            inner
-                .array
-                .iter()
-                .chain(inner.string_hash.values())
-                .chain(inner.other_hash.iter().map(|(_, v)| v))
-                .filter_map(|v| match v {
-                    LuaValue::Table(t) => Some(t.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
-        for t in nested {
-            t.mark_readonly_recursive();
-        }
     }
     fn len(&self) -> usize {
         self.inner.borrow().len()
@@ -991,7 +694,7 @@ fn lua_check_string(
         Some(LuaValue::Str(b)) => Ok(b.clone()),
         Some(LuaValue::Number(n)) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
-                Ok(i64_to_ascii_bytes(*n as i64))
+                Ok(format!("{}", *n as i64).into_bytes())
             } else {
                 Ok(lua_number_to_string(*n).into_bytes())
             }
@@ -1026,13 +729,6 @@ fn lua_check_table(
 }
 
 impl LuaValue {
-    // (CrimsonHawk) Construct a Function value, boxing the 144-byte LuaFunc off
-    // the hot LuaValue (see the enum comment).
-    #[inline]
-    fn function(f: LuaFunc) -> Self {
-        LuaValue::Function(Box::new(f))
-    }
-
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
     }
@@ -1075,11 +771,7 @@ impl LuaValue {
         }
     }
 
-    /// (CrimsonHawk) Consume this value into a redis.call argument, MOVING the
-    /// bytes of a string arg (`mem::take`) instead of cloning them — the args
-    /// vector is discarded right after argv is built, so the clone was pure
-    /// overhead (bigger the larger the value passed through redis.call).
-    fn take_redis_arg(&mut self) -> Result<Vec<u8>, String> {
+    fn to_redis_arg(&self) -> Result<Vec<u8>, String> {
         // Upstream src/script_lua.c::luaArgsToRedisArgv only accepts
         // numbers (formatted via %.17g) and strings; lua_tolstring on
         // any other type (nil, boolean, table, function, thread,
@@ -1092,16 +784,12 @@ impl LuaValue {
         match self {
             LuaValue::Number(n) => {
                 if *n == (*n as i64) as f64 && n.is_finite() {
-                    // (CrimsonHawk) Manual itoa on the redis.call integer-arg hot
-                    // path — avoids the `format!`/core::fmt machinery (~2.6% of a
-                    // redis.call-heavy EVAL profile). Byte-identical to
-                    // `format!("{}", v)`.
-                    Ok(i64_to_ascii_bytes(*n as i64))
+                    Ok(format!("{}", *n as i64).into_bytes())
                 } else {
                     Ok(format!("{n}").into_bytes())
                 }
             }
-            LuaValue::Str(s) => Ok(std::mem::take(s)),
+            LuaValue::Str(s) => Ok(s.clone()),
             _ => Err("Lua redis lib command arguments must be strings or integers".to_string()),
         }
     }
@@ -1130,7 +818,7 @@ impl LuaValue {
                 let abs = n.abs();
                 let needs_scientific = abs >= 1e14;
                 if !is_neg_zero && !needs_scientific && *n == (*n as i64) as f64 && n.is_finite() {
-                    i64_to_ascii_bytes(*n as i64)
+                    format!("{}", *n as i64).into_bytes()
                 } else {
                     lua_number_to_string(*n).into_bytes()
                 }
@@ -1300,7 +988,7 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
             }
         }
         Expr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
-        Expr::Name(n) | Expr::LocalName(n, _) => n.clone(),
+        Expr::Name(n) => n.clone(),
         Expr::VarArgs => "...".to_string(),
         Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
         Expr::TableConstructor(_) => "{".to_string(),
@@ -1891,7 +1579,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn tokenize_all(&mut self) -> Result<Vec<Token>, String> {
         Ok(self.tokenize_all_with_lines()?.0)
     }
@@ -1899,17 +1586,7 @@ impl<'a> Lexer<'a> {
     /// Tokenize, also returning the 1-based source line where each token begins
     /// (parallel to the token vec, including the trailing `Eof`). Used to thread
     /// real line numbers into Lua error messages. (frankenredis-m7oy8)
-    #[allow(dead_code)]
     fn tokenize_all_with_lines(&mut self) -> Result<(Vec<Token>, Vec<u32>), String> {
-        // Bare-message form — preserves the contract tokenize_all / loadstring
-        // assert on. (frankenredis-5qhz7)
-        self.tokenize_all_located().map_err(|(_, msg)| msg)
-    }
-
-    /// Like `tokenize_all_with_lines`, but a lexer error carries the 1-based
-    /// line where it occurred so callers can render `user_script:N`.
-    /// (frankenredis-5qhz7)
-    fn tokenize_all_located(&mut self) -> Result<(Vec<Token>, Vec<u32>), (u32, String)> {
         let mut tokens = Vec::new();
         let mut lines = Vec::new();
         let mut cur_line: u32 = 1;
@@ -1917,22 +1594,14 @@ impl<'a> Lexer<'a> {
         loop {
             // Position at the next token's first byte, then count newlines in
             // the gap since the previous token (O(n) total, not O(n^2)).
-            self.skip_whitespace_and_comments().map_err(|e| {
-                let upto = self.pos.min(self.src.len());
-                let ln = cur_line
-                    + self.src[counted..upto]
-                        .iter()
-                        .filter(|&&b| b == b'\n')
-                        .count() as u32;
-                (ln, e)
-            })?;
+            self.skip_whitespace_and_comments()?;
             let start = self.pos.min(self.src.len());
             cur_line += self.src[counted..start]
                 .iter()
                 .filter(|&&b| b == b'\n')
                 .count() as u32;
             counted = start;
-            let tok = self.next_token().map_err(|e| (cur_line, e))?;
+            let tok = self.next_token()?;
             let is_eof = tok == Token::Eof;
             tokens.push(tok);
             lines.push(cur_line);
@@ -1953,7 +1622,6 @@ pub enum Expr {
     Number(f64),
     Str(Vec<u8>),
     Name(String),
-    LocalName(String, LocalSlotRef),
     VarArgs,
     BinOp(Box<Expr>, BinOp, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
@@ -1963,12 +1631,6 @@ pub enum Expr {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     TableConstructor(Vec<TableField>),
     FunctionDef(Vec<String>, bool, Block),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LocalSlotRef {
-    depth: usize,
-    slot: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -2036,7 +1698,6 @@ struct Parser {
 }
 
 impl Parser {
-    #[allow(dead_code)]
     fn new(tokens: Vec<Token>) -> Self {
         // Default line map (all 1) for callers that don't supply one — keeps
         // the line numbers harmless when source positions aren't tracked.
@@ -2058,14 +1719,6 @@ impl Parser {
         self.lines.get(self.pos).copied().unwrap_or(1)
     }
 
-    /// 1-based line of the parse-error position, clamped to the last real token
-    /// so an error at `<eof>` reports the final line rather than 1. Used to
-    /// surface the true compile-error line in `user_script:N`. (frankenredis-5qhz7)
-    fn error_line(&self) -> u32 {
-        let idx = self.pos.min(self.lines.len().saturating_sub(1));
-        self.lines.get(idx).copied().unwrap_or(1)
-    }
-
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
     }
@@ -2083,31 +1736,6 @@ impl Parser {
         } else {
             // (frankenredis-i0h24) Use upstream's "X expected near Y" wording.
             Err(parser_expected_near(expected, &tok))
-        }
-    }
-
-    /// Lua 5.1 lparser.c::check_match — consume a block closer (`end`/`until`), or, when it is
-    /// missing, raise the diagnostic Lua does: if the opener sits on a DIFFERENT source line
-    /// than the (unexpected) current token, append "(to close '<opener>' at line <N>)";
-    /// otherwise fall back to the plain "'<close>' expected near '<got>'". The same-line case
-    /// is why a one-line `if true then return 1` reports just "'end' expected near '<eof>'".
-    /// (frankenredis-5qhz7)
-    fn check_match(&mut self, close: &Token, opener: &str, opener_line: u32) -> Result<(), String> {
-        let got_line = self.error_line();
-        let tok = self.advance();
-        if std::mem::discriminant(&tok) == std::mem::discriminant(close) {
-            return Ok(());
-        }
-        if got_line == opener_line {
-            Err(parser_expected_near(close, &tok))
-        } else {
-            Err(format!(
-                "'{}' expected (to close '{}' at line {}) near '{}'",
-                expected_token_label(close),
-                opener,
-                opener_line,
-                token_display(&tok),
-            ))
         }
     }
 
@@ -2154,10 +1782,9 @@ impl Parser {
             Token::Repeat => self.parse_repeat(),
             Token::For => self.parse_for(),
             Token::Do => {
-                let opener_line = self.cur_line();
                 self.advance();
                 let body = self.parse_block()?;
-                self.check_match(&Token::End, "do", opener_line)?;
+                self.expect(&Token::End)?;
                 Ok(Stmt::DoBlock(body))
             }
             Token::Local => self.parse_local(),
@@ -2182,7 +1809,6 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, String> {
-        let opener_line = self.cur_line();
         self.advance(); // 'if'
         let mut branches = Vec::new();
         let cond = self.parse_expr()?;
@@ -2206,12 +1832,11 @@ impl Parser {
                 break;
             }
         }
-        self.check_match(&Token::End, "if", opener_line)?;
+        self.expect(&Token::End)?;
         Ok(Stmt::If(branches, else_body))
     }
 
     fn parse_while(&mut self) -> Result<Stmt, String> {
-        let opener_line = self.cur_line();
         self.advance(); // 'while'
         let cond = self.parse_expr()?;
         self.expect(&Token::Do)?;
@@ -2219,24 +1844,22 @@ impl Parser {
         let body_result = self.parse_block();
         self.loop_depth -= 1;
         let body = body_result?;
-        self.check_match(&Token::End, "while", opener_line)?;
+        self.expect(&Token::End)?;
         Ok(Stmt::While(cond, body))
     }
 
     fn parse_repeat(&mut self) -> Result<Stmt, String> {
-        let opener_line = self.cur_line();
         self.advance(); // 'repeat'
         self.loop_depth += 1;
         let body_result = self.parse_block();
         self.loop_depth -= 1;
         let body = body_result?;
-        self.check_match(&Token::Until, "repeat", opener_line)?;
+        self.expect(&Token::Until)?;
         let cond = self.parse_expr()?;
         Ok(Stmt::Repeat(body, cond))
     }
 
     fn parse_for(&mut self) -> Result<Stmt, String> {
-        let opener_line = self.cur_line();
         self.advance(); // 'for'
         let name = match self.advance() {
             Token::Name(n) => n,
@@ -2260,7 +1883,7 @@ impl Parser {
             let body_result = self.parse_block();
             self.loop_depth -= 1;
             let body = body_result?;
-            self.check_match(&Token::End, "for", opener_line)?;
+            self.expect(&Token::End)?;
             Ok(Stmt::NumericFor(name, start, stop, step, body))
         } else {
             // Generic for: for name [, name ...] in explist do ... end
@@ -2279,7 +1902,7 @@ impl Parser {
             let body_result = self.parse_block();
             self.loop_depth -= 1;
             let body = body_result?;
-            self.check_match(&Token::End, "for", opener_line)?;
+            self.expect(&Token::End)?;
             Ok(Stmt::GenericFor(names, exprs, body))
         }
     }
@@ -2287,13 +1910,12 @@ impl Parser {
     fn parse_local(&mut self) -> Result<Stmt, String> {
         self.advance(); // 'local'
         if self.check(&Token::Function) {
-            let fn_line = self.cur_line();
             self.advance(); // 'function'
             let name = match self.advance() {
                 Token::Name(n) => n,
                 t => return Err(parser_name_expected_near(&t)),
             };
-            let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
+            let (params, is_variadic, body) = self.parse_func_body()?;
             return Ok(Stmt::LocalFunctionDecl(name, params, is_variadic, body));
         }
 
@@ -2334,7 +1956,6 @@ impl Parser {
     }
 
     fn parse_function_decl(&mut self) -> Result<Stmt, String> {
-        let fn_line = self.cur_line();
         self.advance(); // 'function'
         let mut names = Vec::new();
         match self.advance() {
@@ -2348,11 +1969,11 @@ impl Parser {
                 t => return Err(parser_name_expected_near(&t)),
             }
         }
-        let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
+        let (params, is_variadic, body) = self.parse_func_body()?;
         Ok(Stmt::FunctionDecl(names, params, is_variadic, body))
     }
 
-    fn parse_func_body(&mut self, opener_line: u32) -> Result<(Vec<String>, bool, Block), String> {
+    fn parse_func_body(&mut self) -> Result<(Vec<String>, bool, Block), String> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         let mut is_variadic = false;
@@ -2375,7 +1996,7 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
-        self.check_match(&Token::End, "function", opener_line)?;
+        self.expect(&Token::End)?;
         Ok((params, is_variadic, body))
     }
 
@@ -2419,7 +2040,7 @@ impl Parser {
             for lvalue in &lhs {
                 if !matches!(
                     lvalue,
-                    Expr::Name(_) | Expr::LocalName(_, _) | Expr::Index(_, _) | Expr::Field(_, _)
+                    Expr::Name(_) | Expr::Index(_, _) | Expr::Field(_, _)
                 ) {
                     return Err(format!(
                         "syntax error near '=': '{}' is not a valid assignment target",
@@ -2716,9 +2337,8 @@ impl Parser {
             }
             Token::LBrace => self.parse_table_constructor(),
             Token::Function => {
-                let fn_line = self.cur_line();
                 self.advance();
-                let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
+                let (params, is_variadic, body) = self.parse_func_body()?;
                 Ok(Expr::FunctionDef(params, is_variadic, body))
             }
             Token::Dots => {
@@ -2772,212 +2392,10 @@ impl Parser {
     }
 }
 
-// ── Local slot resolver ──────────────────────────────────────────────────
-
-#[derive(Default)]
-struct ResolveScope {
-    locals: Vec<String>,
-}
-
-struct LocalResolver {
-    scopes: Vec<ResolveScope>,
-}
-
-impl LocalResolver {
-    fn new() -> Self {
-        Self {
-            scopes: vec![ResolveScope::default()],
-        }
-    }
-
-    fn enter_scope(&mut self) {
-        self.scopes.push(ResolveScope::default());
-    }
-
-    fn exit_scope(&mut self) {
-        let _ = self.scopes.pop();
-    }
-
-    fn declare_local(&mut self, name: &str) {
-        let Some(scope) = self.scopes.last_mut() else {
-            return;
-        };
-        if scope
-            .locals
-            .iter()
-            .rposition(|local| local == name)
-            .is_none()
-        {
-            scope.locals.push(name.to_string());
-        }
-    }
-
-    fn resolve_local(&self, name: &str) -> Option<LocalSlotRef> {
-        for (scope_idx, scope) in self.scopes.iter().enumerate().rev() {
-            if let Some(slot) = scope.locals.iter().rposition(|local| local == name) {
-                return Some(LocalSlotRef {
-                    depth: self.scopes.len() - 1 - scope_idx,
-                    slot,
-                });
-            }
-        }
-        None
-    }
-
-    fn resolve_child_block(&mut self, body: &mut Block) {
-        self.enter_scope();
-        self.resolve_stmts(body);
-        self.exit_scope();
-    }
-
-    fn resolve_function_body(&mut self, params: &[String], body: &mut Block) {
-        self.enter_scope();
-        for param in params {
-            self.declare_local(param);
-        }
-        self.resolve_stmts(body);
-        self.exit_scope();
-    }
-
-    fn resolve_stmts(&mut self, stmts: &mut Block) {
-        for (_, stmt) in stmts {
-            self.resolve_stmt(stmt);
-        }
-    }
-
-    fn resolve_stmt(&mut self, stmt: &mut Stmt) {
-        match stmt {
-            Stmt::Assign(lhs, rhs) => {
-                for expr in lhs {
-                    self.resolve_expr(expr);
-                }
-                for expr in rhs {
-                    self.resolve_expr(expr);
-                }
-            }
-            Stmt::LocalAssign(names, exprs) => {
-                for expr in exprs {
-                    self.resolve_expr(expr);
-                }
-                for name in names {
-                    self.declare_local(name);
-                }
-            }
-            Stmt::Expression(expr) => self.resolve_expr(expr),
-            Stmt::If(branches, else_body) => {
-                for (cond, body) in branches {
-                    self.resolve_expr(cond);
-                    self.resolve_child_block(body);
-                }
-                if let Some(body) = else_body {
-                    self.resolve_child_block(body);
-                }
-            }
-            Stmt::NumericFor(name, start, stop, step, body) => {
-                self.resolve_expr(start);
-                self.resolve_expr(stop);
-                if let Some(step) = step {
-                    self.resolve_expr(step);
-                }
-                self.enter_scope();
-                self.declare_local(name);
-                self.resolve_stmts(body);
-                self.exit_scope();
-            }
-            Stmt::GenericFor(names, iter_exprs, body) => {
-                for expr in iter_exprs {
-                    self.resolve_expr(expr);
-                }
-                self.enter_scope();
-                for name in names {
-                    self.declare_local(name);
-                }
-                self.resolve_stmts(body);
-                self.exit_scope();
-            }
-            Stmt::While(cond, body) => {
-                self.resolve_expr(cond);
-                self.resolve_child_block(body);
-            }
-            Stmt::Repeat(body, cond) => {
-                self.enter_scope();
-                self.resolve_stmts(body);
-                self.resolve_expr(cond);
-                self.exit_scope();
-            }
-            Stmt::DoBlock(body) => self.resolve_child_block(body),
-            Stmt::Return(exprs) => {
-                for expr in exprs {
-                    self.resolve_expr(expr);
-                }
-            }
-            Stmt::FunctionDecl(_, params, _, body) => self.resolve_function_body(params, body),
-            Stmt::LocalFunctionDecl(name, params, _, body) => {
-                self.declare_local(name);
-                self.resolve_function_body(params, body);
-            }
-            Stmt::Break => {}
-        }
-    }
-
-    fn resolve_expr(&mut self, expr: &mut Expr) {
-        match expr {
-            Expr::Name(name) => {
-                if let Some(local) = self.resolve_local(name) {
-                    *expr = Expr::LocalName(name.clone(), local);
-                }
-            }
-            Expr::LocalName(_, _) | Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::Str(_) => {}
-            Expr::VarArgs => {}
-            Expr::BinOp(left, _, right) => {
-                self.resolve_expr(left);
-                self.resolve_expr(right);
-            }
-            Expr::UnaryOp(_, inner) => self.resolve_expr(inner),
-            Expr::Index(table, key) => {
-                self.resolve_expr(table);
-                self.resolve_expr(key);
-            }
-            Expr::Field(table, _) => self.resolve_expr(table),
-            Expr::Call(func, args) => {
-                self.resolve_expr(func);
-                for arg in args {
-                    self.resolve_expr(arg);
-                }
-            }
-            Expr::MethodCall(obj, _, args) => {
-                self.resolve_expr(obj);
-                for arg in args {
-                    self.resolve_expr(arg);
-                }
-            }
-            Expr::TableConstructor(fields) => {
-                for field in fields {
-                    match field {
-                        TableField::Index(key, val) => {
-                            self.resolve_expr(key);
-                            self.resolve_expr(val);
-                        }
-                        TableField::Named(_, val) | TableField::Positional(val) => {
-                            self.resolve_expr(val);
-                        }
-                    }
-                }
-            }
-            Expr::FunctionDef(params, _, body) => self.resolve_function_body(params, body),
-        }
-    }
-}
-
-fn resolve_lua_local_slots(stmts: &mut Block) {
-    LocalResolver::new().resolve_stmts(stmts);
-}
-
 // ── Evaluator ───────────────────────────────────────────────────────────
 
 const MAX_CALL_DEPTH: usize = 128;
 const MAX_ITERATIONS: u64 = 1_000_000;
-const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
 /// Sentinel error string emitted by `error()` when the argument is a
 /// non-string, non-number value (bool/nil/table/function/thread). The
@@ -3013,21 +2431,6 @@ enum ControlFlow {
     Break,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NumericForAddend {
-    LoopVar,
-    LoopVarSquare,
-}
-
-impl NumericForAddend {
-    fn value(self, current: f64) -> f64 {
-        match self {
-            Self::LoopVar => current,
-            Self::LoopVarSquare => current * current,
-        }
-    }
-}
-
 enum CoroutineRun {
     Complete(Vec<LuaValue>),
     Yield {
@@ -3039,7 +2442,7 @@ enum CoroutineRun {
 pub struct LuaState<'a> {
     pub store: &'a mut Store,
     pub now_ms: u64,
-    globals: LuaGlobals,
+    globals: HashMap<String, LuaValue>,
     /// (frankenredis-j02x9) Set to true at the start of execute(); once
     /// locked, any write to a top-level global raises "Attempt to modify
     /// a readonly table" and any read of an undefined global raises
@@ -3076,12 +2479,7 @@ pub struct LuaState<'a> {
     /// We mirror that algorithm exactly so seeded math.random sequences
     /// match vendored output byte-for-byte.
     lua_random: RedisLrand48,
-    // (BlackThrush) Lazy: only os.clock reads this, and the `os` table is NOT bound in the sandbox
-    // (see set_keys_argv), so os.clock is unreachable from real scripts. Reading the monotonic clock
-    // (Instant::now) eagerly in `new` cost a ~3.6% per-eval clock syscall for nothing; defer it to
-    // the first os.clock call. os.clock semantics are elapsed-since-first-observation either way
-    // (the handler only ever reports a monotonic delta), and the os_clock test only asserts that.
-    script_started_at: Option<Instant>,
+    script_started_at: Instant,
     current_coroutine: Option<LuaCoroutine>,
     pending_yield: Option<Vec<LuaValue>>,
     /// Original LuaValue passed to `error()` when its type is not
@@ -3259,58 +2657,15 @@ impl RedisLrand48 {
 }
 
 #[derive(Clone, Debug)]
-struct LocalBinding {
-    name: String,
-    cell: LuaCell,
-}
-
-#[derive(Clone, Debug)]
 struct Scope {
-    locals: Vec<LocalBinding>,
+    locals: HashMap<String, Rc<RefCell<LuaValue>>>,
 }
 
 impl Scope {
     fn new() -> Self {
-        Self { locals: Vec::new() }
-    }
-
-    fn set_local_cell(&mut self, name: &str, cell: LuaCell) {
-        if let Some(existing) = self
-            .locals
-            .iter_mut()
-            .rev()
-            .find(|local| local.name == name)
-        {
-            existing.cell = cell;
-        } else {
-            self.locals.push(LocalBinding {
-                name: name.to_string(),
-                cell,
-            });
+        Self {
+            locals: HashMap::new(),
         }
-    }
-
-    fn get_local_cell(&self, name: &str) -> Option<&LuaCell> {
-        self.locals
-            .iter()
-            .rev()
-            .find(|local| local.name == name)
-            .map(|local| &local.cell)
-    }
-
-    fn get_local_cell_at(&self, slot: usize) -> Option<&LuaCell> {
-        self.locals.get(slot).map(|local| &local.cell)
-    }
-
-    fn contains_local(&self, name: &str) -> bool {
-        self.locals.iter().rev().any(|local| local.name == name)
-    }
-
-    fn captured_locals(&self) -> Vec<(String, LuaCell)> {
-        self.locals
-            .iter()
-            .map(|local| (local.name.clone(), local.cell.clone()))
-            .collect()
     }
 }
 
@@ -3361,32 +2716,15 @@ impl Env {
 
     fn set_local(&mut self, name: &str, value: LuaValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            let cell = Rc::new(RefCell::new(value));
-            // (frankenredis-qqq17) Track upvalue cells: a recursive closure.s
-            // captured_env can hold an Rc back to this cell, forming a leak.
-            lua_gc_register_cell(&cell);
-            scope.set_local_cell(name, cell);
+            scope
+                .locals
+                .insert(name.to_string(), Rc::new(RefCell::new(value)));
         }
-    }
-
-    // (CrimsonHawk) Insert an ALREADY-allocated (and already GC-registered) cell
-    // into the top scope. Lets the numeric-for loop reuse one loop-variable cell
-    // across iterations instead of allocating + GC-registering a fresh one each
-    // time (safe only while nothing captured the previous cell).
-    fn set_local_cell_top(&mut self, name: &str, cell: LuaCell) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.set_local_cell(name, cell);
-        }
-    }
-
-    // (CrimsonHawk) Clone the cell for `name` out of the top scope, if present.
-    fn top_local_cell(&self, name: &str) -> Option<LuaCell> {
-        self.scopes.last()?.get_local_cell(name).cloned()
     }
 
     fn get_local(&self, name: &str) -> Option<LuaValue> {
         for scope in self.scopes.iter().rev() {
-            if let Some(value) = scope.get_local_cell(name) {
+            if let Some(value) = scope.locals.get(name) {
                 return Some(value.borrow().clone());
             }
         }
@@ -3394,8 +2732,8 @@ impl Env {
     }
 
     fn set_existing_local(&mut self, name: &str, value: LuaValue) -> bool {
-        for scope in self.scopes.iter().rev() {
-            if let Some(existing) = scope.get_local_cell(name) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.locals.get(name) {
                 *existing.borrow_mut() = value;
                 return true;
             }
@@ -3403,52 +2741,13 @@ impl Env {
         false
     }
 
-    fn scope_index_for_slot(&self, local: LocalSlotRef) -> Option<usize> {
-        let from_top = local.depth.checked_add(1)?;
-        self.scopes.len().checked_sub(from_top)
-    }
-
-    fn get_local_slot(&self, local: LocalSlotRef) -> Option<LuaValue> {
-        let scope_idx = self.scope_index_for_slot(local)?;
-        let cell = self.scopes.get(scope_idx)?.get_local_cell_at(local.slot)?;
-        Some(cell.borrow().clone())
-    }
-
-    fn set_existing_local_slot(&mut self, local: LocalSlotRef, value: LuaValue) -> bool {
-        let Some(scope_idx) = self.scope_index_for_slot(local) else {
-            return false;
-        };
-        let Some(cell) = self
-            .scopes
-            .get(scope_idx)
-            .and_then(|scope| scope.get_local_cell_at(local.slot))
-        else {
-            return false;
-        };
-        *cell.borrow_mut() = value;
-        true
-    }
-
-    fn local_cell_for_slot(&self, local: LocalSlotRef) -> Option<LuaCell> {
-        let scope_idx = self.scope_index_for_slot(local)?;
-        self.scopes
-            .get(scope_idx)?
-            .get_local_cell_at(local.slot)
-            .cloned()
-    }
-
-    fn classify_slot(&self, local: LocalSlotRef) -> Option<bool> {
-        let scope_idx = self.scope_index_for_slot(local)?;
-        Some(scope_idx >= self.local_floor)
-    }
-
     /// Snapshot all current scope locals for upvalue capture.
-    fn snapshot(&self) -> LuaCapturedEnv {
-        self.scopes.iter().map(Scope::captured_locals).collect()
+    fn snapshot(&self) -> Vec<HashMap<String, Rc<RefCell<LuaValue>>>> {
+        self.scopes.iter().map(|s| s.locals.clone()).collect()
     }
 
     /// Create an Env pre-loaded with captured upvalue scopes.
-    fn from_captured(captured: &[LuaCapturedScope]) -> Self {
+    fn from_captured(captured: &[HashMap<String, Rc<RefCell<LuaValue>>>]) -> Self {
         // (frankenredis-md71j) The captured scopes are upvalues from the
         // outer function; any scopes pushed AFTER this point belong to the
         // freshly-entered function body and are reported as "local".
@@ -3457,13 +2756,7 @@ impl Env {
             scopes: captured
                 .iter()
                 .map(|locals| Scope {
-                    locals: locals
-                        .iter()
-                        .map(|(name, cell)| LocalBinding {
-                            name: name.clone(),
-                            cell: cell.clone(),
-                        })
-                        .collect(),
+                    locals: locals.clone(),
                 })
                 .collect(),
             global_env: None,
@@ -3477,7 +2770,7 @@ impl Env {
     /// (frankenredis-md71j)
     fn classify_name(&self, name: &str) -> Option<bool> {
         for (idx, scope) in self.scopes.iter().enumerate().rev() {
-            if scope.contains_local(name) {
+            if scope.locals.contains_key(name) {
                 return Some(idx >= self.local_floor);
             }
         }
@@ -3485,352 +2778,210 @@ impl Env {
     }
 }
 
-thread_local! {
-    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<Rc<LuaMap<String, LuaValue>>>> =
-        const { RefCell::new(None) };
-}
-
-fn lua_base_globals_template() -> Rc<LuaMap<String, LuaValue>> {
-    LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
-        let mut template = template.borrow_mut();
-        template
-            .get_or_insert_with(|| Rc::new(build_lua_base_globals_template()))
-            .clone()
-    })
-}
-
-#[derive(Clone, Debug)]
-struct LuaGlobals {
-    base: Rc<LuaMap<String, LuaValue>>,
-    overlay: LuaMap<String, LuaValue>,
-}
-
-impl LuaGlobals {
-    fn from_shared_base(base: Rc<LuaMap<String, LuaValue>>) -> Self {
-        Self {
-            base,
-            overlay: LuaMap::default(),
-        }
-    }
-
-    fn from_flat_map(map: LuaMap<String, LuaValue>) -> Self {
-        Self {
-            base: Rc::new(LuaMap::default()),
-            overlay: map,
-        }
-    }
-
-    fn get(&self, key: &str) -> Option<&LuaValue> {
-        self.overlay.get(key).or_else(|| self.base.get(key))
-    }
-
-    fn insert(&mut self, key: String, value: LuaValue) -> Option<LuaValue> {
-        self.overlay.insert(key, value)
-    }
-
-    fn contains_key(&self, key: &str) -> bool {
-        self.overlay.contains_key(key) || self.base.contains_key(key)
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (&String, &LuaValue)> {
-        self.overlay.iter().chain(
-            self.base
-                .iter()
-                .filter(|(key, _)| !self.overlay.contains_key(key.as_str())),
-        )
-    }
-}
-
-impl<'a> IntoIterator for &'a LuaGlobals {
-    type Item = (&'a String, &'a LuaValue);
-    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.iter())
-    }
-}
-
-fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
-    let mut globals = LuaMap::default();
-    // Register built-in functions.
-    for name in &[
-        "tonumber",
-        "tostring",
-        "type",
-        "error",
-        "pcall",
-        "pairs",
-        "ipairs",
-        "next",
-        "unpack",
-        "select",
-        "rawget",
-        "rawset",
-        // (frankenredis-uyj7c) rawlen was added in Lua 5.2; vendored Redis
-        // ships Lua 5.1, so the global must not be exposed. The dispatch
-        // handler is kept for any internal callers but is not bound.
-        "setmetatable",
-        "getmetatable",
-        "newproxy",
-        "getfenv",
-        "setfenv",
-        "assert",
-        "xpcall",
-        // (frankenredis-cfflo) loadstring/load parse a chunk of source code
-        // and return a callable function. Redis only blocks loadfile/dofile/
-        // io/os/require/print.
-        "loadstring",
-        "load",
-    ] {
-        globals.insert(
-            name.to_string(),
-            LuaValue::RustFunction(std::rc::Rc::from(*name)),
-        );
-    }
-
-    let math_table = LuaTable::new_shared_template();
-    for name in &[
-        "floor",
-        "ceil",
-        "abs",
-        "max",
-        "min",
-        "sqrt",
-        "huge",
-        "random",
-        "randomseed",
-        "fmod",
-        "log",
-        "log10",
-        "exp",
-        "pow",
-        "sin",
-        "cos",
-        "tan",
-        "asin",
-        "acos",
-        "atan",
-        "atan2",
-        "modf",
-        "frexp",
-        "ldexp",
-        "deg",
-        "rad",
-        "sinh",
-        "cosh",
-        "tanh",
-    ] {
-        math_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            if *name == "huge" {
-                LuaValue::Number(f64::INFINITY)
-            } else {
-                LuaValue::RustFunction(std::rc::Rc::from(format!("math.{name}")))
-            },
-        );
-    }
-    math_table.set(
-        LuaValue::Str(b"pi".to_vec()),
-        LuaValue::Number(std::f64::consts::PI),
-    );
-    globals.insert("math".to_string(), LuaValue::Table(math_table));
-
-    let string_table = LuaTable::new_shared_template();
-    for name in &[
-        "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
-        "match", "gsub", "gmatch", "dump",
-    ] {
-        string_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("string.{name}"))),
-        );
-    }
-    globals.insert("string".to_string(), LuaValue::Table(string_table));
-
-    let table_lib = LuaTable::new_shared_template();
-    for name in &[
-        "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
-    ] {
-        table_lib.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("table.{name}"))),
-        );
-    }
-    globals.insert("table".to_string(), LuaValue::Table(table_lib));
-
-    let cjson_table = LuaTable::new_shared_template();
-    for name in &["encode", "decode"] {
-        cjson_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("cjson.{name}"))),
-        );
-    }
-    cjson_table.set(
-        LuaValue::Str(b"null".to_vec()),
-        LuaValue::Userdata(LuaUserdata::CjsonNull),
-    );
-    globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
-
-    let cmsgpack_table = LuaTable::new_shared_template();
-    for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
-        cmsgpack_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("cmsgpack.{name}"))),
-        );
-    }
-    for (name, value) in &[
-        ("_NAME", "cmsgpack"),
-        ("_VERSION", "lua-cmsgpack 0.4.0"),
-        ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
-        ("_DESCRIPTION", "MessagePack C implementation for Lua"),
-    ] {
-        cmsgpack_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::Str(value.as_bytes().to_vec()),
-        );
-    }
-    globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
-
-    let struct_table = LuaTable::new_shared_template();
-    for name in &["pack", "unpack", "size"] {
-        struct_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("struct.{name}"))),
-        );
-    }
-    globals.insert("struct".to_string(), LuaValue::Table(struct_table));
-
-    globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
-    globals.insert(
-        "rawequal".to_string(),
-        LuaValue::RustFunction(std::rc::Rc::from("rawequal")),
-    );
-    globals.insert(
-        "gcinfo".to_string(),
-        LuaValue::RustFunction(std::rc::Rc::from("gcinfo")),
-    );
-    globals.insert(
-        "collectgarbage".to_string(),
-        LuaValue::RustFunction(std::rc::Rc::from("collectgarbage")),
-    );
-
-    let bit_table = LuaTable::new_shared_template();
-    for name in &[
-        "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
-        "tobit", "tohex",
-    ] {
-        bit_table.set(
-            LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from(format!("bit.{name}"))),
-        );
-    }
-    globals.insert("bit".to_string(), LuaValue::Table(bit_table));
-    globals.insert(
-        "redis".to_string(),
-        LuaValue::Table(lua_redis_table_template()),
-    );
-
-    for name in [
-        "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
-    ] {
-        if let Some(LuaValue::Table(table)) = globals.get(name) {
-            table.mark_readonly_recursive();
-        }
-    }
-    globals
-}
-
-fn lua_redis_table_template() -> LuaTable {
-    let redis_table = LuaTable::new_shared_template();
-    redis_table.set(
-        LuaValue::Str(b"call".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.call")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"pcall".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.pcall")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"error_reply".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.error_reply")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"status_reply".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.status_reply")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"log".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.log")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"sha1hex".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.sha1hex")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"replicate_commands".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.replicate_commands")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"set_repl".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.set_repl")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"breakpoint".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.breakpoint")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"debug".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.debug")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"setresp".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.setresp")),
-    );
-    redis_table.set(
-        LuaValue::Str(b"acl_check_cmd".to_vec()),
-        LuaValue::RustFunction(std::rc::Rc::from("redis.acl_check_cmd")),
-    );
-    redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
-    redis_table.set(
-        LuaValue::Str(b"LOG_VERBOSE".to_vec()),
-        LuaValue::Number(1.0),
-    );
-    redis_table.set(LuaValue::Str(b"LOG_NOTICE".to_vec()), LuaValue::Number(2.0));
-    redis_table.set(
-        LuaValue::Str(b"LOG_WARNING".to_vec()),
-        LuaValue::Number(3.0),
-    );
-    redis_table.set(LuaValue::Str(b"REPL_NONE".to_vec()), LuaValue::Number(0.0));
-    redis_table.set(LuaValue::Str(b"REPL_AOF".to_vec()), LuaValue::Number(1.0));
-    redis_table.set(LuaValue::Str(b"REPL_SLAVE".to_vec()), LuaValue::Number(2.0));
-    redis_table.set(
-        LuaValue::Str(b"REPL_REPLICA".to_vec()),
-        LuaValue::Number(2.0),
-    );
-    redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
-    redis_table.set(
-        LuaValue::Str(b"REDIS_VERSION".to_vec()),
-        LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
-    );
-    redis_table.set(
-        LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
-        LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
-    );
-    redis_table
-}
-
 impl<'a> LuaState<'a> {
     pub fn new(store: &'a mut Store, now_ms: u64) -> Self {
-        let globals = LuaGlobals::from_shared_base(lua_base_globals_template());
-        Self::with_globals(store, now_ms, globals)
-    }
+        let mut globals = HashMap::new();
+        // Register built-in functions
+        for name in &[
+            "tonumber",
+            "tostring",
+            "type",
+            "error",
+            "pcall",
+            "pairs",
+            "ipairs",
+            "next",
+            "unpack",
+            "select",
+            "rawget",
+            "rawset",
+            // (frankenredis-uyj7c) rawlen was added in Lua 5.2; vendored Redis
+            // ships Lua 5.1, so the global must not be exposed. The dispatch
+            // handler is kept for any internal callers but is not bound.
+            "setmetatable",
+            "getmetatable",
+            "newproxy",
+            "getfenv",
+            "setfenv",
+            "assert",
+            "xpcall",
+            // (frankenredis-cfflo) loadstring/load parse a chunk of
+            // source code and return a callable function. Both are part
+            // of vendored Redis 7.2.4's Lua 5.1 sandbox surface; Redis
+            // only blocks loadfile/dofile/io/os/require/print etc.
+            "loadstring",
+            "load",
+            // (frankenredis-1khox) 'print' is *not* exposed in the
+            // Redis 7.2 Lua sandbox (script_lua.c blocks it alongside
+            // loadfile/dofile/io/os/require). The print RustFunction
+            // dispatch handler remains in case internal callers want
+            // it, but the global is not bound.
+        ] {
+            globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
+        }
+        // Math library
+        let math_table = LuaTable::new();
+        for name in &[
+            "floor",
+            "ceil",
+            "abs",
+            "max",
+            "min",
+            "sqrt",
+            "huge",
+            "random",
+            "randomseed",
+            "fmod",
+            "log",
+            "log10",
+            "exp",
+            "pow",
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "modf",
+            "frexp",
+            "ldexp",
+            // (frankenredis-9dmqr) Trig helpers vendored Redis 7.2.4
+            // exposes through Lua 5.1's lmathlib but fr was missing.
+            "deg",
+            "rad",
+            "sinh",
+            "cosh",
+            "tanh",
+        ] {
+            math_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                if *name == "huge" {
+                    LuaValue::Number(f64::INFINITY)
+                } else {
+                    LuaValue::RustFunction(format!("math.{name}"))
+                },
+            );
+        }
+        math_table.set(
+            LuaValue::Str(b"pi".to_vec()),
+            LuaValue::Number(std::f64::consts::PI),
+        );
+        globals.insert("math".to_string(), LuaValue::Table(math_table));
 
-    fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
-        let globals = LuaGlobals::from_flat_map(lua_base_globals_template().as_ref().clone());
-        Self::with_globals(store, now_ms, globals)
-    }
+        // String library
+        let string_table = LuaTable::new();
+        for name in &[
+            "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
+            "match", "gsub", "gmatch",
+            // (frankenredis-dqbdr) Vendored Redis 7.2.4 exposes
+            // string.dump from Lua 5.1's stdlib. The function has no
+            // useful semantics in fr's tree-walking interpreter (no
+            // bytecode form to serialize) so the dispatch handler
+            // errors at call time, but `type(string.dump)` must still
+            // return 'function' for scripts that probe the surface.
+            "dump",
+        ] {
+            string_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("string.{name}")),
+            );
+        }
+        globals.insert("string".to_string(), LuaValue::Table(string_table));
 
-    fn with_globals(store: &'a mut Store, now_ms: u64, globals: LuaGlobals) -> Self {
+        // Table library
+        let table_lib = LuaTable::new();
+        for name in &[
+            "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
+        ] {
+            table_lib.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("table.{name}")),
+            );
+        }
+        globals.insert("table".to_string(), LuaValue::Table(table_lib));
+
+        // cjson library (commonly used in Redis scripts)
+        let cjson_table = LuaTable::new();
+        for name in &["encode", "decode"] {
+            cjson_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("cjson.{name}")),
+            );
+        }
+        cjson_table.set(
+            LuaValue::Str(b"null".to_vec()),
+            LuaValue::Userdata(LuaUserdata::CjsonNull),
+        );
+        globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
+
+        // cmsgpack library bundled with Redis' Lua sandbox.
+        let cmsgpack_table = LuaTable::new();
+        for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
+            cmsgpack_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("cmsgpack.{name}")),
+            );
+        }
+        for (name, value) in &[
+            ("_NAME", "cmsgpack"),
+            ("_VERSION", "lua-cmsgpack 0.4.0"),
+            ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
+            ("_DESCRIPTION", "MessagePack C implementation for Lua"),
+        ] {
+            cmsgpack_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::Str(value.as_bytes().to_vec()),
+            );
+        }
+        globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
+
+        // struct library bundled with Redis' Lua sandbox.
+        let struct_table = LuaTable::new();
+        for name in &["pack", "unpack", "size"] {
+            struct_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("struct.{name}")),
+            );
+        }
+        globals.insert("struct".to_string(), LuaValue::Table(struct_table));
+
+        // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
+        // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
+        // gcinfo / collectgarbage function entries. fr's tree-walking
+        // interpreter has no real Lua heap accounting so gcinfo /
+        // collectgarbage('count') return a stable placeholder value
+        // and the control variants of collectgarbage are no-ops.
+        globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
+        globals.insert(
+            "rawequal".to_string(),
+            LuaValue::RustFunction("rawequal".to_string()),
+        );
+        globals.insert(
+            "gcinfo".to_string(),
+            LuaValue::RustFunction("gcinfo".to_string()),
+        );
+        globals.insert(
+            "collectgarbage".to_string(),
+            LuaValue::RustFunction("collectgarbage".to_string()),
+        );
+
+        // (frankenredis-v95aj) Redis 7.2.4 exposes LuaJIT's bit library
+        // as a global 'bit' table. Operations are 32-bit; numbers are
+        // truncated to u32 before each op and the result is returned
+        // as a Lua number (f64-representable for the 0..=u32::MAX range).
+        let bit_table = LuaTable::new();
+        for name in &[
+            "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
+            "tobit", "tohex",
+        ] {
+            bit_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("bit.{name}")),
+            );
+        }
+        globals.insert("bit".to_string(), LuaValue::Table(bit_table));
+
         let rng_seed = store.rng_seed;
         // (frankenredis-lwj8o) Initialize math.random's PRNG with the
         // low 32 bits of the store's rng_seed (or 1 if zero). User
@@ -3853,7 +3004,7 @@ impl<'a> LuaState<'a> {
             current_line: 1,
             rng_seed,
             lua_random,
-            script_started_at: None,
+            script_started_at: Instant::now(),
             current_coroutine: None,
             pending_yield: None,
             pending_error_value: None,
@@ -3885,6 +3036,99 @@ impl<'a> LuaState<'a> {
         self.globals
             .insert("ARGV".to_string(), LuaValue::Table(argv_table));
 
+        // Set up redis table with call/pcall
+        let redis_table = LuaTable::new();
+        redis_table.set(
+            LuaValue::Str(b"call".to_vec()),
+            LuaValue::RustFunction("redis.call".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"pcall".to_vec()),
+            LuaValue::RustFunction("redis.pcall".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"error_reply".to_vec()),
+            LuaValue::RustFunction("redis.error_reply".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"status_reply".to_vec()),
+            LuaValue::RustFunction("redis.status_reply".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"log".to_vec()),
+            LuaValue::RustFunction("redis.log".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"sha1hex".to_vec()),
+            LuaValue::RustFunction("redis.sha1hex".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"replicate_commands".to_vec()),
+            LuaValue::RustFunction("redis.replicate_commands".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"set_repl".to_vec()),
+            LuaValue::RustFunction("redis.set_repl".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"breakpoint".to_vec()),
+            LuaValue::RustFunction("redis.breakpoint".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"debug".to_vec()),
+            LuaValue::RustFunction("redis.debug".to_string()),
+        );
+        // Upstream script_lua.c registers `setresp` and
+        // `acl_check_cmd` even though their effects are largely
+        // no-ops in standalone mode — clients still expect them
+        // to validate their arguments. (br-frankenredis-redislua)
+        redis_table.set(
+            LuaValue::Str(b"setresp".to_vec()),
+            LuaValue::RustFunction("redis.setresp".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"acl_check_cmd".to_vec()),
+            LuaValue::RustFunction("redis.acl_check_cmd".to_string()),
+        );
+        redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
+        redis_table.set(
+            LuaValue::Str(b"LOG_VERBOSE".to_vec()),
+            LuaValue::Number(1.0),
+        );
+        redis_table.set(LuaValue::Str(b"LOG_NOTICE".to_vec()), LuaValue::Number(2.0));
+        redis_table.set(
+            LuaValue::Str(b"LOG_WARNING".to_vec()),
+            LuaValue::Number(3.0),
+        );
+        // Replication mode constants. Upstream server.h defines
+        // PROPAGATE_AOF=1 and PROPAGATE_REPL=2; script_lua.c then
+        // exports REPL_AOF=PROPAGATE_AOF and REPL_SLAVE=REPL_REPLICA=
+        // PROPAGATE_REPL. fr previously had AOF and SLAVE/REPLICA
+        // swapped. (br-frankenredis-replconst)
+        redis_table.set(LuaValue::Str(b"REPL_NONE".to_vec()), LuaValue::Number(0.0));
+        redis_table.set(LuaValue::Str(b"REPL_AOF".to_vec()), LuaValue::Number(1.0));
+        redis_table.set(LuaValue::Str(b"REPL_SLAVE".to_vec()), LuaValue::Number(2.0));
+        redis_table.set(
+            LuaValue::Str(b"REPL_REPLICA".to_vec()),
+            LuaValue::Number(2.0),
+        );
+        redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
+        // (frankenredis-luaver) Upstream script_lua.c exposes the server
+        // version to scripts: redis.REDIS_VERSION (string) and
+        // redis.REDIS_VERSION_NUM ((major<<16)|(minor<<8)|patch). For 7.2.4
+        // that is 0x070204 = 459268. Derived from REDIS_COMPAT_VERSION so the
+        // two stay in lock-step if the compat target ever moves.
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION".to_vec()),
+            LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
+            LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
+        );
+        self.globals
+            .insert("redis".to_string(), LuaValue::Table(redis_table));
+
         // (frankenredis-1khox) Redis 7.2.4's Lua sandbox does NOT
         // expose the os table -- scripts that reference 'os' get the
         // standard 'Script attempted to access nonexistent global
@@ -3893,22 +3137,11 @@ impl<'a> LuaState<'a> {
 
         // Coroutine table registration. Redis 7.2 keeps the Lua
         // coroutine library available inside the script sandbox.
-        // (BlackThrush) Static full names. The previous `format!("coroutine.{name}")` allocated a
-        // fresh String and ran the Display formatting machinery for all six CONSTANT names on EVERY
-        // eval (set_keys_argv runs once per EVAL). Byte-identical RustFunction dispatch names.
-        const COROUTINE_FNS: [(&str, &str); 6] = [
-            ("create", "coroutine.create"),
-            ("resume", "coroutine.resume"),
-            ("yield", "coroutine.yield"),
-            ("status", "coroutine.status"),
-            ("wrap", "coroutine.wrap"),
-            ("running", "coroutine.running"),
-        ];
         let coroutine_table = LuaTable::new();
-        for (key, full) in COROUTINE_FNS {
+        for name in &["create", "resume", "yield", "status", "wrap", "running"] {
             coroutine_table.set(
-                LuaValue::Str(key.as_bytes().to_vec()),
-                LuaValue::RustFunction(std::rc::Rc::from(full)),
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("coroutine.{name}")),
             );
         }
         self.globals
@@ -3916,47 +3149,31 @@ impl<'a> LuaState<'a> {
     }
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
-        let stmts = compile_lua_chunk_cached(source)?;
-        self.execute_compiled(stmts.as_ref())
-    }
-
-    fn execute_compiled(&mut self, stmts: &Block) -> Result<LuaValue, String> {
+        let mut lexer = Lexer::new(source);
+        let (tokens, lines) = lexer.tokenize_all_with_lines()?;
+        let mut parser = Parser::with_lines(tokens, lines);
+        let stmts = parser.parse_block()?;
+        if !parser.check(&Token::Eof) {
+            return Err(format!(
+                "'<eof>' expected near '{}'",
+                token_display(parser.peek())
+            ));
+        }
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
         // table error and any read of an undefined global raises the
         // upstream sandbox error. Mirrors script_lua.c::
         // luaSetTableProtectionRecursively run after script env init.
-        // (frankenredis-u24vv) The script's environment is exposed as `_G`.
-        // Build that snapshot lazily when script code observes `_G` or asks
-        // for the default environment; trivial scripts should not pay for a
-        // full globals table clone. The snapshot stays behavior-equivalent
-        // because globals are locked before user code executes.
+        // (frankenredis-u24vv) Snapshot the globals into a `_G` table
+        // right before locking, mirroring Lua 5.1 / vendored Redis 7.2.4
+        // where the script's environment IS exposed as `_G`. Reads come
+        // from the snapshot (since globals are readonly after locking,
+        // the snapshot stays in sync); the metatable __index handler
+        // emits the nonexistent-global error for missing keys, and the
+        // __newindex handler emits the readonly-table error for writes.
+        // `_G._G` self-references so scripts can detect the table.
+        self.install_g_table();
         self.globals_locked = true;
-        // (frankenredis-8mwy9) Protect the standard library tables the same way
-        // redis's `luaSetTableProtectionRecursively` does: after env init the
-        // math/string/table/struct/bit/cjson/cmsgpack/redis tables are read-only
-        // for the duration of the script. KEYS/ARGV stay mutable (redis leaves
-        // them writable), so they are deliberately excluded.
-        //
-        // (BlackThrush) The shared base globals template already marks these read-only ONCE at build
-        // time (build_lua_base_globals_template) and is reused across evals, so on the normal
-        // shared-base path this loop just re-walks already-immutable tables (8 gets + 8 no-op mark
-        // calls per eval). Skip it when they are verified read-only; only the bench cloned-globals
-        // path produces a fresh mutable copy that still needs marking. Provably byte-identical — the
-        // loop is skipped SOLELY when the tables are already protected.
-        let already_protected = matches!(
-            self.globals.get("math"),
-            Some(LuaValue::Table(t)) if t.is_readonly()
-        );
-        if !already_protected {
-            for name in [
-                "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
-            ] {
-                if let Some(LuaValue::Table(t)) = self.globals.get(name) {
-                    t.mark_readonly_recursive();
-                }
-            }
-        }
         // (frankenredis-vr8rg) Every script starts in RESP2 for redis.call,
         // independent of the client's HELLO version.
         self.resp_version = 2;
@@ -3966,7 +3183,7 @@ impl<'a> LuaState<'a> {
         // frame for the purposes of luaL_where; push before exec_block so
         // error(msg, N) at the bottom of the call stack can find it.
         self.lua_frame_kinds.push(true);
-        let outcome = self.exec_block(stmts, &mut env, &mut varargs);
+        let outcome = self.exec_block(&stmts, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
@@ -4051,418 +3268,6 @@ impl<'a> LuaState<'a> {
         outcome
     }
 
-    fn direct_coroutine_yield_args(expr: &Expr) -> Option<&[Expr]> {
-        let Expr::Call(func_expr, args) = expr else {
-            return None;
-        };
-        let Expr::Field(table_expr, method) = func_expr.as_ref() else {
-            return None;
-        };
-        if method == "yield"
-            && matches!(table_expr.as_ref(), Expr::Name(name) if name == "coroutine")
-        {
-            Some(args)
-        } else {
-            None
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn split_direct_yield_exprs(
-        &mut self,
-        exprs: &[Expr],
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<Option<(Vec<LuaValue>, Vec<Expr>, Vec<Expr>, bool)>, String> {
-        for (idx, expr) in exprs.iter().enumerate() {
-            let Some(yield_args) = Self::direct_coroutine_yield_args(expr) else {
-                continue;
-            };
-            let mut prefix = Vec::with_capacity(idx);
-            for prefix_expr in &exprs[..idx] {
-                prefix.push(self.eval_expr(prefix_expr, env, varargs)?);
-            }
-            return Ok(Some((
-                prefix,
-                yield_args.to_vec(),
-                exprs[idx + 1..].to_vec(),
-                idx + 1 == exprs.len(),
-            )));
-        }
-        Ok(None)
-    }
-
-    fn complete_exprs_after_yield(
-        &mut self,
-        mut prefix: Vec<LuaValue>,
-        remaining: &[Expr],
-        yield_was_last: bool,
-        resume_args: &[LuaValue],
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<Vec<LuaValue>, String> {
-        if yield_was_last {
-            prefix.extend_from_slice(resume_args);
-        } else {
-            prefix.push(resume_args.first().cloned().unwrap_or(LuaValue::Nil));
-            prefix.extend(self.eval_call_args(remaining, env, varargs)?);
-        }
-        Ok(prefix)
-    }
-
-    /// Run a generic-for loop given its already-resolved iterator values
-    /// (fn, state, control). Shared by the direct `Stmt::GenericFor` path and
-    /// the coroutine resume path where the iterator expression list yielded.
-    fn run_generic_for_from_iter_vals(
-        &mut self,
-        names: &[String],
-        iter_vals: Vec<LuaValue>,
-        body: &[(u32, Stmt)],
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<ControlFlow, String> {
-        let iter_fn = iter_vals.first().cloned().unwrap_or(LuaValue::Nil);
-        let mut state = iter_vals.get(1).cloned().unwrap_or(LuaValue::Nil);
-        let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
-        // (CrimsonHawk) Per-var loop-cell reuse (same Rc::strong_count trick as
-        // numeric-for): reuse each name.s cell unless a closure captured it.
-        let mut loop_cells: Vec<Option<LuaCell>> = vec![None; names.len()];
-
-        loop {
-            self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                return Err("script exceeded maximum iteration count".to_string());
-            }
-            let mut iter_args = vec![state.clone(), control.clone()];
-            let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
-            // Update state from mutated args (needed for stateful iterators like gmatch)
-            state = iter_args[0].clone();
-            let first = results.first().cloned().unwrap_or(LuaValue::Nil);
-            if matches!(first, LuaValue::Nil) {
-                break;
-            }
-            control = first.clone();
-            env.push_scope();
-            for (i, name) in names.iter().enumerate() {
-                let val = results.get(i).cloned().unwrap_or(LuaValue::Nil);
-                match loop_cells[i].take() {
-                    Some(cell) if Rc::strong_count(&cell) == 1 => {
-                        *cell.borrow_mut() = val;
-                        env.set_local_cell_top(name, cell.clone());
-                        loop_cells[i] = Some(cell);
-                    }
-                    _ => {
-                        env.set_local(name, val);
-                        loop_cells[i] = env.top_local_cell(name);
-                    }
-                }
-            }
-            let cf = self.exec_stmts(body, env, varargs)?;
-            env.pop_scope();
-            match cf {
-                ControlFlow::Break => break,
-                ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
-                ControlFlow::None => {}
-            }
-        }
-        Ok(ControlFlow::None)
-    }
-
-    fn start_coroutine_yield(
-        &mut self,
-        yield_args: &[Expr],
-        continuation: LuaCoroutineContinuation,
-        allow_nested: bool,
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<ControlFlow, String> {
-        if self.current_coroutine.is_none() || (self.nested_exec_stmts_depth > 0 && !allow_nested) {
-            return Err("attempt to yield across metamethod/C-call boundary".to_string());
-        }
-        let values = self.eval_call_args(yield_args, env, varargs)?;
-        if let Some(coroutine) = &self.current_coroutine {
-            coroutine.inner.borrow_mut().continuation = Some(continuation);
-        }
-        self.pending_yield = Some(values);
-        Err(LUA_YIELD_SENTINEL.to_string())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn exec_numeric_for_body_from(
-        &mut self,
-        name: &str,
-        stop: f64,
-        step: f64,
-        body: &[(u32, Stmt)],
-        current: f64,
-        start_pc: usize,
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<ControlFlow, String> {
-        self.nested_exec_stmts_depth = self.nested_exec_stmts_depth.saturating_add(1);
-        let mut outcome = Ok(ControlFlow::None);
-        for (offset, (line, stmt)) in body.iter().enumerate().skip(start_pc) {
-            self.current_line = *line;
-            self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                outcome = Err("script exceeded maximum iteration count".to_string());
-                break;
-            }
-            if let Stmt::Expression(expr) = stmt
-                && let Some(yield_args) = Self::direct_coroutine_yield_args(expr)
-            {
-                outcome = self.start_coroutine_yield(
-                    yield_args,
-                    LuaCoroutineContinuation::NumericFor {
-                        name: name.to_string(),
-                        stop,
-                        step,
-                        body: body.to_vec(),
-                        current,
-                        body_pc: offset + 1,
-                    },
-                    true,
-                    env,
-                    varargs,
-                );
-                break;
-            }
-            match self.exec_stmt(stmt, env, varargs) {
-                Ok(ControlFlow::None) => {}
-                Ok(other) => {
-                    outcome = Ok(other);
-                    break;
-                }
-                Err(err) => {
-                    outcome = Err(err);
-                    break;
-                }
-            }
-        }
-        self.nested_exec_stmts_depth = self.nested_exec_stmts_depth.saturating_sub(1);
-        outcome
-    }
-
-    fn numeric_for_add_assign_accumulator_slot(
-        loop_name: &str,
-        body: &[(u32, Stmt)],
-    ) -> Option<(LocalSlotRef, NumericForAddend)> {
-        let [(_, Stmt::Assign(lhs, rhs))] = body else {
-            return None;
-        };
-        let [Expr::LocalName(_, lhs_slot)] = lhs.as_slice() else {
-            return None;
-        };
-        let [Expr::BinOp(left, BinOp::Add, right)] = rhs.as_slice() else {
-            return None;
-        };
-
-        fn is_loop_var(expr: &Expr, loop_name: &str) -> bool {
-            matches!(expr, Expr::LocalName(name, _) if name == loop_name)
-        }
-
-        fn addend_kind(expr: &Expr, loop_name: &str) -> Option<NumericForAddend> {
-            if is_loop_var(expr, loop_name) {
-                return Some(NumericForAddend::LoopVar);
-            }
-            let Expr::BinOp(left, BinOp::Mul, right) = expr else {
-                return None;
-            };
-            if is_loop_var(left, loop_name) && is_loop_var(right, loop_name) {
-                Some(NumericForAddend::LoopVarSquare)
-            } else {
-                None
-            }
-        }
-
-        match (&**left, &**right) {
-            (Expr::LocalName(_, acc_slot), term) if acc_slot == lhs_slot => {
-                addend_kind(term, loop_name).map(|kind| (*lhs_slot, kind))
-            }
-            (term, Expr::LocalName(_, acc_slot)) if acc_slot == lhs_slot => {
-                addend_kind(term, loop_name).map(|kind| (*lhs_slot, kind))
-            }
-            _ => None,
-        }
-    }
-
-    fn exact_lua_integer(value: f64) -> Option<i128> {
-        if !value.is_finite() || value.fract() != 0.0 {
-            return None;
-        }
-        let exact_limit = LUA_EXACT_INTEGER_LIMIT as f64;
-        if value < -exact_limit || value > exact_limit {
-            return None;
-        }
-        let int_value = value as i128;
-        if int_value as f64 == value {
-            Some(int_value)
-        } else {
-            None
-        }
-    }
-
-    fn numeric_for_trip_count(start: i128, stop: i128, step: i128) -> Option<u64> {
-        if step == 0 {
-            return None;
-        }
-        let count = if step > 0 {
-            if start > stop {
-                0
-            } else {
-                (stop - start) / step + 1
-            }
-        } else if start < stop {
-            0
-        } else {
-            (start - stop) / (-step) + 1
-        };
-        u64::try_from(count).ok()
-    }
-
-    fn checked_half_product(left: i128, right: i128) -> Option<i128> {
-        if left % 2 == 0 {
-            (left / 2).checked_mul(right)
-        } else if right % 2 == 0 {
-            left.checked_mul(right / 2)
-        } else {
-            None
-        }
-    }
-
-    fn checked_sum_of_squares_indices(n: i128) -> Option<i128> {
-        if n == 0 {
-            return Some(0);
-        }
-        let two_n_minus_one = n.checked_mul(2)?.checked_sub(1)?;
-        let mut factors = [n, n - 1, two_n_minus_one];
-        for divisor in [2, 3] {
-            let factor = factors.iter_mut().find(|factor| **factor % divisor == 0)?;
-            *factor /= divisor;
-        }
-        factors[0].checked_mul(factors[1])?.checked_mul(factors[2])
-    }
-
-    fn numeric_for_closed_form_delta(
-        addend: NumericForAddend,
-        start: f64,
-        stop: f64,
-        step: f64,
-        remaining_iterations: u64,
-    ) -> Option<(u64, u64, i128)> {
-        let start = Self::exact_lua_integer(start)?;
-        let stop = Self::exact_lua_integer(stop)?;
-        let step = Self::exact_lua_integer(step)?;
-        let trips = Self::numeric_for_trip_count(start, stop, step)?;
-        let consumed_iterations = trips.checked_mul(2)?.checked_add(1)?;
-        if consumed_iterations > remaining_iterations {
-            return None;
-        }
-        let n = i128::from(trips);
-        if n == 0 {
-            return Some((trips, consumed_iterations, 0));
-        }
-
-        let delta = match addend {
-            NumericForAddend::LoopVar => {
-                let last = start.checked_add((n - 1).checked_mul(step)?)?;
-                Self::checked_half_product(n, start.checked_add(last)?)?
-            }
-            NumericForAddend::LoopVarSquare => {
-                let sum_k = Self::checked_half_product(n, n - 1)?;
-                let sum_k_squared = Self::checked_sum_of_squares_indices(n)?;
-                let start_squared = start.checked_mul(start)?;
-                let step_squared = step.checked_mul(step)?;
-                let first = n.checked_mul(start_squared)?;
-                let second = start
-                    .checked_mul(step)?
-                    .checked_mul(2)?
-                    .checked_mul(sum_k)?;
-                let third = step_squared.checked_mul(sum_k_squared)?;
-                first.checked_add(second)?.checked_add(third)?
-            }
-        };
-        if delta.abs() <= LUA_EXACT_INTEGER_LIMIT {
-            Some((trips, consumed_iterations, delta))
-        } else {
-            None
-        }
-    }
-
-    fn execute_numeric_for_add_assign_fast_path(
-        &mut self,
-        loop_name: &str,
-        stop: f64,
-        step: f64,
-        body: &[(u32, Stmt)],
-        mut current: f64,
-        env: &mut Env,
-    ) -> Option<Result<ControlFlow, String>> {
-        let (acc_slot, addend) = Self::numeric_for_add_assign_accumulator_slot(loop_name, body)?;
-        let body_line = body[0].0;
-        env.push_scope();
-        let acc_cell = match env.local_cell_for_slot(acc_slot) {
-            Some(cell) => cell,
-            None => {
-                env.pop_scope();
-                return None;
-            }
-        };
-        let mut acc = match &*acc_cell.borrow() {
-            LuaValue::Number(n) => *n,
-            _ => {
-                env.pop_scope();
-                return None;
-            }
-        };
-
-        if let Some(acc_int) = Self::exact_lua_integer(acc) {
-            let remaining_iterations = MAX_ITERATIONS.saturating_sub(self.iterations);
-            if let Some((trips, consumed_iterations, delta)) = Self::numeric_for_closed_form_delta(
-                addend,
-                current,
-                stop,
-                step,
-                remaining_iterations,
-            ) && let Some(final_acc) = acc_int.checked_add(delta)
-                && final_acc.abs() <= LUA_EXACT_INTEGER_LIMIT
-            {
-                self.iterations += consumed_iterations;
-                if trips > 0 {
-                    self.current_line = body_line;
-                }
-                *acc_cell.borrow_mut() = LuaValue::Number(final_acc as f64);
-                env.pop_scope();
-                return Some(Ok(ControlFlow::None));
-            }
-        }
-
-        loop {
-            self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                *acc_cell.borrow_mut() = LuaValue::Number(acc);
-                env.pop_scope();
-                return Some(Err("script exceeded maximum iteration count".to_string()));
-            }
-            if (step > 0.0 && current > stop) || (step < 0.0 && current < stop) {
-                break;
-            }
-            self.current_line = body_line;
-            self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                *acc_cell.borrow_mut() = LuaValue::Number(acc);
-                env.pop_scope();
-                return Some(Err("script exceeded maximum iteration count".to_string()));
-            }
-            acc += addend.value(current);
-            current += step;
-        }
-
-        *acc_cell.borrow_mut() = LuaValue::Number(acc);
-        env.pop_scope();
-        Some(Ok(ControlFlow::None))
-    }
-
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
@@ -4471,21 +3276,6 @@ impl<'a> LuaState<'a> {
     ) -> Result<ControlFlow, String> {
         match stmt {
             Stmt::Return(exprs) => {
-                if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                    self.split_direct_yield_exprs(exprs, env, varargs)?
-                {
-                    return self.start_coroutine_yield(
-                        &yield_args,
-                        LuaCoroutineContinuation::Return {
-                            prefix,
-                            remaining,
-                            yield_was_last,
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 Ok(ControlFlow::Return(vals))
             }
@@ -4504,36 +3294,6 @@ impl<'a> LuaState<'a> {
                 result
             }
             Stmt::LocalAssign(names, exprs) => {
-                // (CrimsonHawk) Fast path for the ubiquitous `local x = expr`
-                // (one name, one value, non-yield RHS): skip the whole-list
-                // yield scan and the eval_expr_list Vec allocation + per-slot
-                // clone. eval_expr adjusts a multi-return call to its first value
-                // (see Expr::Call arm), matching the general path's vals.get(0),
-                // so this is byte-identical.
-                if names.len() == 1
-                    && exprs.len() == 1
-                    && Self::direct_coroutine_yield_args(&exprs[0]).is_none()
-                {
-                    let val = self.eval_expr(&exprs[0], env, varargs)?;
-                    env.set_local(&names[0], val);
-                    return Ok(ControlFlow::None);
-                }
-                if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                    self.split_direct_yield_exprs(exprs, env, varargs)?
-                {
-                    return self.start_coroutine_yield(
-                        &yield_args,
-                        LuaCoroutineContinuation::LocalAssign {
-                            names: names.clone(),
-                            prefix,
-                            remaining,
-                            yield_was_last,
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 for (i, name) in names.iter().enumerate() {
                     let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
@@ -4542,36 +3302,6 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::Assign(lhs_list, rhs_list) => {
-                // (CrimsonHawk) Fast path for the ubiquitous `x = expr` (one
-                // target, one value, non-yield RHS): skip the whole-list yield
-                // scan and the eval_expr_list Vec allocation + per-slot clone.
-                // eval_expr adjusts a multi-return call to its first value (see
-                // Expr::Call arm), matching the general path's vals.get(0), so
-                // this is byte-identical.
-                if lhs_list.len() == 1
-                    && rhs_list.len() == 1
-                    && Self::direct_coroutine_yield_args(&rhs_list[0]).is_none()
-                {
-                    let val = self.eval_expr(&rhs_list[0], env, varargs)?;
-                    self.assign_to(&lhs_list[0], val, env, varargs)?;
-                    return Ok(ControlFlow::None);
-                }
-                if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                    self.split_direct_yield_exprs(rhs_list, env, varargs)?
-                {
-                    return self.start_coroutine_yield(
-                        &yield_args,
-                        LuaCoroutineContinuation::Assign {
-                            lhs: lhs_list.clone(),
-                            prefix,
-                            remaining,
-                            yield_was_last,
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
                 let vals = self.eval_expr_list(rhs_list, env, varargs)?;
                 for (i, lhs) in lhs_list.iter().enumerate() {
                     let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
@@ -4580,25 +3310,7 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::If(branches, else_body) => {
-                for (idx, (cond, body)) in branches.iter().enumerate() {
-                    // (CrimsonHawk 7lmle) A branch condition that is a bare
-                    // `coroutine.yield(...)` suspends here; on resume the yielded
-                    // value is the condition result. Only the FIRST such condition
-                    // is handled per suspension (resume must not re-yield); a later
-                    // branch's bare-yield condition still errors as before.
-                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                        return self.start_coroutine_yield(
-                            yield_args,
-                            LuaCoroutineContinuation::If {
-                                then_body: body.clone(),
-                                remaining: branches[idx + 1..].to_vec(),
-                                else_body: else_body.clone(),
-                            },
-                            false,
-                            env,
-                            varargs,
-                        );
-                    }
+                for (cond, body) in branches {
                     let cv = self.eval_expr(cond, env, varargs)?;
                     if cv.is_truthy() {
                         return self.exec_block(body, env, varargs);
@@ -4614,23 +3326,6 @@ impl<'a> LuaState<'a> {
                     self.iterations += 1;
                     if self.iterations > MAX_ITERATIONS {
                         return Err("script exceeded maximum iteration count".to_string());
-                    }
-                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
-                    // condition suspends here; on resume the yielded value is the
-                    // condition result (truthy → run body then re-check; falsy →
-                    // exit). Only valid at the coroutine's top statement level;
-                    // deeper it errors as before.
-                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                        return self.start_coroutine_yield(
-                            yield_args,
-                            LuaCoroutineContinuation::While {
-                                cond: cond.clone(),
-                                body: body.clone(),
-                            },
-                            false,
-                            env,
-                            varargs,
-                        );
                     }
                     let cv = self.eval_expr(cond, env, varargs)?;
                     if !cv.is_truthy() {
@@ -4652,38 +3347,13 @@ impl<'a> LuaState<'a> {
                     }
                     env.push_scope();
                     let cf = self.exec_stmts(body, env, varargs)?;
-                    // A `break`/`return` in the body exits before the until
-                    // condition is ever evaluated (matches Lua 5.1).
-                    match cf {
-                        ControlFlow::Break => {
-                            env.pop_scope();
-                            break;
-                        }
-                        ControlFlow::Return(v) => {
-                            env.pop_scope();
-                            return Ok(ControlFlow::Return(v));
-                        }
-                        ControlFlow::None => {}
-                    }
-                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
-                    // condition suspends here. The body scope stays pushed so the
-                    // yield args see body locals; it is saved with the env on
-                    // yield and popped in the resume handler. Top-level only;
-                    // deeper it errors as before.
-                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                        return self.start_coroutine_yield(
-                            yield_args,
-                            LuaCoroutineContinuation::Repeat {
-                                body: body.clone(),
-                                cond: cond.clone(),
-                            },
-                            false,
-                            env,
-                            varargs,
-                        );
-                    }
                     let cv = self.eval_expr(cond, env, varargs)?;
                     env.pop_scope();
+                    match cf {
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                        ControlFlow::None => {}
+                    }
                     if cv.is_truthy() {
                         break;
                     }
@@ -4714,16 +3384,7 @@ impl<'a> LuaState<'a> {
                 // either breaks/returns or the loop is infinite (caller's
                 // responsibility, same as `while true do end`). Vendored
                 // does not reject step=0 at the runtime layer.
-                if let Some(result) =
-                    self.execute_numeric_for_add_assign_fast_path(name, e, st, body, s, env)
-                {
-                    return result;
-                }
                 let mut i = s;
-                // (CrimsonHawk) Reuse one loop-var cell across iterations unless a
-                // closure captured it (Rc strong_count > 1; GC registry holds only a
-                // Weak). Byte-identical to fresh-every-iteration.
-                let mut loop_cell: Option<LuaCell> = None;
                 loop {
                     self.iterations += 1;
                     if self.iterations > MAX_ITERATIONS {
@@ -4733,19 +3394,8 @@ impl<'a> LuaState<'a> {
                         break;
                     }
                     env.push_scope();
-                    match loop_cell.take() {
-                        Some(cell) if Rc::strong_count(&cell) == 1 => {
-                            *cell.borrow_mut() = LuaValue::Number(i);
-                            env.set_local_cell_top(name, cell.clone());
-                            loop_cell = Some(cell);
-                        }
-                        _ => {
-                            env.set_local(name, LuaValue::Number(i));
-                            loop_cell = env.top_local_cell(name);
-                        }
-                    }
-                    let cf =
-                        self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
+                    env.set_local(name, LuaValue::Number(i));
+                    let cf = self.exec_stmts(body, env, varargs)?;
                     env.pop_scope();
                     match cf {
                         ControlFlow::Break => break,
@@ -4757,33 +3407,43 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::GenericFor(names, iter_exprs, body) => {
-                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
-                // the iterator expression list suspends here; on resume the
-                // yielded value(s) complete the iterator triple and the loop
-                // runs. Top-level only; deeper it errors as before.
-                if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                    self.split_direct_yield_exprs(iter_exprs, env, varargs)?
-                {
-                    return self.start_coroutine_yield(
-                        &yield_args,
-                        LuaCoroutineContinuation::GenericFor {
-                            names: names.clone(),
-                            prefix,
-                            remaining,
-                            yield_was_last,
-                            body: body.clone(),
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
                 let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
-                self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
+                let iter_fn = iter_vals.first().cloned().unwrap_or(LuaValue::Nil);
+                let mut state = iter_vals.get(1).cloned().unwrap_or(LuaValue::Nil);
+                let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
+
+                loop {
+                    self.iterations += 1;
+                    if self.iterations > MAX_ITERATIONS {
+                        return Err("script exceeded maximum iteration count".to_string());
+                    }
+                    let mut iter_args = vec![state.clone(), control.clone()];
+                    let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
+                    // Update state from mutated args (needed for stateful iterators like gmatch)
+                    state = iter_args[0].clone();
+                    let first = results.first().cloned().unwrap_or(LuaValue::Nil);
+                    if matches!(first, LuaValue::Nil) {
+                        break;
+                    }
+                    control = first.clone();
+                    env.push_scope();
+                    for (i, name) in names.iter().enumerate() {
+                        let val = results.get(i).cloned().unwrap_or(LuaValue::Nil);
+                        env.set_local(name, val);
+                    }
+                    let cf = self.exec_stmts(body, env, varargs)?;
+                    env.pop_scope();
+                    match cf {
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                        ControlFlow::None => {}
+                    }
+                }
+                Ok(ControlFlow::None)
             }
             Stmt::DoBlock(body) => self.exec_block(body, env, varargs),
             Stmt::FunctionDecl(names, params, is_variadic, body) => {
-                let func = LuaValue::function(LuaFunc {
+                let func = LuaValue::Function(LuaFunc {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
@@ -4805,20 +3465,17 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::LocalFunctionDecl(name, params, is_variadic, body) => {
-                env.set_local(name, LuaValue::Nil);
-                let func = LuaValue::function(LuaFunc {
+                let func = LuaValue::Function(LuaFunc {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                    self_name: None,
+                    self_name: Some(name.clone()),
                     source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
-                if !env.set_existing_local(name, func.clone()) {
-                    env.set_local(name, func);
-                }
+                env.set_local(name, func);
                 Ok(ControlFlow::None)
             }
         }
@@ -4908,26 +3565,6 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         match lhs {
-            Expr::LocalName(name, local) => {
-                if !env.set_existing_local_slot(*local, value.clone())
-                    && !env.set_existing_local(name, value.clone())
-                {
-                    if let Some(global_env) = env.current_global_env() {
-                        self.table_assign_with_newindex(
-                            global_env,
-                            LuaValue::Str(name.as_bytes().to_vec()),
-                            value,
-                            env,
-                            varargs,
-                        )?;
-                        return Ok(());
-                    }
-                    if self.globals_locked {
-                        return Err("user_script:1: Attempt to modify a readonly table".to_string());
-                    }
-                    self.globals.insert(name.clone(), value);
-                }
-            }
             Expr::Name(name) => {
                 if !env.set_existing_local(name, value.clone()) {
                     if let Some(global_env) = env.current_global_env() {
@@ -5019,11 +3656,6 @@ impl<'a> LuaState<'a> {
     ) -> Result<(), String> {
         let mut current = table;
         for _ in 0..16 {
-            // (frankenredis-8mwy9) A protected library table rejects every
-            // field write (new or overwriting) with redis's readonly error.
-            if current.is_readonly() {
-                return Err("user_script:1: Attempt to modify a readonly table".to_string());
-            }
             let existing = current.inner.borrow().get(&key);
             if !matches!(existing, LuaValue::Nil) {
                 current.set(key, value);
@@ -5077,24 +3709,6 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         match table_expr {
-            Expr::LocalName(name, local) => {
-                if !env.set_existing_local_slot(*local, table.clone())
-                    && !env.set_existing_local(name, table.clone())
-                {
-                    if let Some(global_env) = env.current_global_env() {
-                        self.table_assign_with_newindex(
-                            global_env,
-                            LuaValue::Str(name.as_bytes().to_vec()),
-                            table,
-                            env,
-                            varargs,
-                        )?;
-                        return Ok(());
-                    }
-                    self.globals.insert(name.clone(), table);
-                }
-                Ok(())
-            }
             Expr::Name(name) => {
                 if !env.set_existing_local(name, table.clone()) {
                     if let Some(global_env) = env.current_global_env() {
@@ -5140,30 +3754,6 @@ impl<'a> LuaState<'a> {
                 // Return first vararg; multi-value context handled in eval_expr_list
                 Ok(varargs.first().cloned().unwrap_or(LuaValue::Nil))
             }
-            Expr::LocalName(name, local) => {
-                if let Some(val) = env.get_local_slot(*local) {
-                    Ok(val)
-                } else if let Some(val) = env.get_local(name) {
-                    Ok(val)
-                } else if let Some(global_env) = env.current_global_env() {
-                    self.table_lookup_with_index_meta(
-                        &global_env,
-                        &LuaValue::Str(name.as_bytes().to_vec()),
-                        env,
-                        varargs,
-                    )
-                } else if name == "_G" {
-                    Ok(LuaValue::Table(self.ensure_g_table()))
-                } else if let Some(val) = self.globals.get(name) {
-                    Ok(val.clone())
-                } else if self.globals_locked {
-                    Err(format!(
-                        "user_script:1: Script attempted to access nonexistent global variable '{name}'"
-                    ))
-                } else {
-                    Ok(LuaValue::Nil)
-                }
-            }
             Expr::Name(name) => {
                 if let Some(val) = env.get_local(name) {
                     Ok(val.clone())
@@ -5174,8 +3764,6 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
-                } else if name == "_G" {
-                    Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.globals.get(name) {
                     Ok(val.clone())
                 } else if self.globals_locked {
@@ -5521,30 +4109,16 @@ impl<'a> LuaState<'a> {
                 )?;
                 // Write back table mutations (table.sort/insert/remove mutate args[0] in-place).
                 // The inner `if` has a side-effect (set_existing_local) so must not be collapsed.
-                #[allow(clippy::collapsible_if, clippy::collapsible_match)]
+                #[allow(clippy::collapsible_if)]
                 if let LuaValue::RustFunction(ref name) = func
                     && matches!(
-                        name.as_ref(),
+                        name.as_str(),
                         "table.sort" | "table.insert" | "table.remove" | "rawset"
                     )
+                    && let Some(Expr::Name(var_name)) = args.first()
                 {
-                    match args.first() {
-                        Some(Expr::LocalName(var_name, local)) => {
-                            if !env.set_existing_local_slot(*local, arg_vals[0].clone())
-                                && !env.set_existing_local(var_name, arg_vals[0].clone())
-                            {
-                                self.globals.insert(var_name.clone(), arg_vals[0].clone());
-                            }
-                        }
-                        Some(Expr::Name(var_name)) => {
-                            match env.set_existing_local(var_name, arg_vals[0].clone()) {
-                                true => {}
-                                false => {
-                                    self.globals.insert(var_name.clone(), arg_vals[0].clone());
-                                }
-                            }
-                        }
-                        _ => {}
+                    if !env.set_existing_local(var_name, arg_vals[0].clone()) {
+                        self.globals.insert(var_name.clone(), arg_vals[0].clone());
                     }
                 }
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
@@ -5683,7 +4257,7 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(LuaValue::Table(table))
             }
-            Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::function(LuaFunc {
+            Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::Function(LuaFunc {
                 params: params.clone(),
                 body: body.clone(),
                 is_variadic: *is_variadic,
@@ -5706,10 +4280,7 @@ impl<'a> LuaState<'a> {
         if args.is_empty() {
             return Ok(Vec::new());
         }
-        // (CrimsonHawk) Pre-size to the arg count (the common no-trailing-expansion
-        // case is exact) so building a redis.call / function arg list doesn't
-        // re-grow the Vec from zero on every call.
-        let mut vals = Vec::with_capacity(args.len());
+        let mut vals = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             if i == args.len() - 1 {
                 // Last arg: expand multi-value
@@ -5853,283 +4424,12 @@ impl<'a> LuaState<'a> {
         Ok(CoroutineRun::Complete(Vec::new()))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn resume_numeric_for_continuation(
-        &mut self,
-        name: String,
-        stop: f64,
-        step: f64,
-        body: Block,
-        mut current: f64,
-        mut body_pc: usize,
-        outer_stmts: &[(u32, Stmt)],
-        outer_pc: usize,
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<CoroutineRun, String> {
-        loop {
-            match self.exec_numeric_for_body_from(
-                &name, stop, step, &body, current, body_pc, env, varargs,
-            ) {
-                Ok(ControlFlow::None) => {}
-                Ok(ControlFlow::Break) => {
-                    env.pop_scope();
-                    break;
-                }
-                Ok(ControlFlow::Return(vals)) => {
-                    env.pop_scope();
-                    return Ok(CoroutineRun::Complete(vals));
-                }
-                Err(err) if is_lua_yield_signal(&err) && self.pending_yield.is_some() => {
-                    let values = self.pending_yield.take().unwrap_or_default();
-                    return Ok(CoroutineRun::Yield {
-                        values,
-                        next_pc: outer_pc,
-                    });
-                }
-                Err(err) => {
-                    env.pop_scope();
-                    return Err(err);
-                }
-            }
-            env.pop_scope();
-            current += step;
-            if (step > 0.0 && current > stop) || (step < 0.0 && current < stop) {
-                break;
-            }
-            env.push_scope();
-            env.set_local(&name, LuaValue::Number(current));
-            body_pc = 0;
-        }
-        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-    }
-
-    fn resume_coroutine_continuation(
-        &mut self,
-        continuation: LuaCoroutineContinuation,
-        resume_args: &[LuaValue],
-        outer_stmts: &[(u32, Stmt)],
-        outer_pc: usize,
-        env: &mut Env,
-        varargs: &mut Vec<LuaValue>,
-    ) -> Result<CoroutineRun, String> {
-        match continuation {
-            LuaCoroutineContinuation::Assign {
-                lhs,
-                prefix,
-                remaining,
-                yield_was_last,
-            } => {
-                let vals = self.complete_exprs_after_yield(
-                    prefix,
-                    &remaining,
-                    yield_was_last,
-                    resume_args,
-                    env,
-                    varargs,
-                )?;
-                for (i, lhs_expr) in lhs.iter().enumerate() {
-                    let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
-                    self.assign_to(lhs_expr, val, env, varargs)?;
-                }
-                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-            }
-            LuaCoroutineContinuation::LocalAssign {
-                names,
-                prefix,
-                remaining,
-                yield_was_last,
-            } => {
-                let vals = self.complete_exprs_after_yield(
-                    prefix,
-                    &remaining,
-                    yield_was_last,
-                    resume_args,
-                    env,
-                    varargs,
-                )?;
-                for (i, name) in names.iter().enumerate() {
-                    let val = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
-                    env.set_local(name, val);
-                }
-                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-            }
-            LuaCoroutineContinuation::Return {
-                prefix,
-                remaining,
-                yield_was_last,
-            } => {
-                let vals = self.complete_exprs_after_yield(
-                    prefix,
-                    &remaining,
-                    yield_was_last,
-                    resume_args,
-                    env,
-                    varargs,
-                )?;
-                Ok(CoroutineRun::Complete(vals))
-            }
-            LuaCoroutineContinuation::NumericFor {
-                name,
-                stop,
-                step,
-                body,
-                current,
-                body_pc,
-            } => self.resume_numeric_for_continuation(
-                name,
-                stop,
-                step,
-                body,
-                current,
-                body_pc,
-                outer_stmts,
-                outer_pc,
-                env,
-                varargs,
-            ),
-            LuaCoroutineContinuation::If {
-                then_body,
-                remaining,
-                else_body,
-            } => {
-                // The yielded value is the branch condition's result.
-                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
-                let cf = if cond_val.is_truthy() {
-                    self.exec_block(&then_body, env, varargs)?
-                } else if !remaining.is_empty() || else_body.is_some() {
-                    // Fall through to the remaining branches / else, evaluated
-                    // normally via the Stmt::If arm — which itself detects a
-                    // bare-yield `elseif` condition and suspends again. Real
-                    // redis 7.2.4 supports such chained yields (each `elseif
-                    // coroutine.yield(...)` is a fresh suspension point), so
-                    // propagate the re-yield as another CoroutineRun::Yield
-                    // rather than erroring: start_coroutine_yield has already
-                    // stored the nested If continuation, and next_pc stays at
-                    // outer_pc so that once the chain resolves, execution
-                    // resumes right after the original `if`.
-                    match self.exec_stmt(&Stmt::If(remaining, else_body), env, varargs) {
-                        Ok(cf) => cf,
-                        Err(e) if is_lua_yield_signal(&e) && self.pending_yield.is_some() => {
-                            let values = self.pending_yield.take().unwrap_or_default();
-                            return Ok(CoroutineRun::Yield {
-                                values,
-                                next_pc: outer_pc,
-                            });
-                        }
-                        Err(e) => return Err(e),
-                    }
-                } else {
-                    ControlFlow::None
-                };
-                match cf {
-                    ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
-                    ControlFlow::Break => Ok(CoroutineRun::Complete(vec![LuaValue::Nil])),
-                    ControlFlow::None => {
-                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-                    }
-                }
-            }
-            LuaCoroutineContinuation::While { cond, body } => {
-                // The yielded value is this iteration's loop-condition result.
-                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
-                if cond_val.is_truthy() {
-                    match self.exec_block(&body, env, varargs)? {
-                        ControlFlow::Return(vals) => return Ok(CoroutineRun::Complete(vals)),
-                        // `break` inside the body exits the loop; fall through
-                        // to the outer statements after the while.
-                        ControlFlow::Break => {}
-                        ControlFlow::None => {
-                            // Loop back: re-execute the while, which suspends
-                            // again at its bare-yield condition. Propagate that
-                            // re-yield as a fresh CoroutineRun::Yield (the nested
-                            // While continuation is already stored); next_pc
-                            // stays at outer_pc so the post-loop statements run
-                            // once the condition finally reads falsy.
-                            match self.exec_stmt(&Stmt::While(cond, body), env, varargs) {
-                                Ok(ControlFlow::Return(vals)) => {
-                                    return Ok(CoroutineRun::Complete(vals));
-                                }
-                                Ok(ControlFlow::Break | ControlFlow::None) => {}
-                                Err(e)
-                                    if is_lua_yield_signal(&e) && self.pending_yield.is_some() =>
-                                {
-                                    let values = self.pending_yield.take().unwrap_or_default();
-                                    return Ok(CoroutineRun::Yield {
-                                        values,
-                                        next_pc: outer_pc,
-                                    });
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                }
-                // Condition read falsy (or the loop broke): continue with the
-                // statements following the while.
-                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-            }
-            LuaCoroutineContinuation::Repeat { body, cond } => {
-                // We suspended at the until-condition with the just-run
-                // iteration's body scope still on the env; pop it now.
-                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
-                env.pop_scope();
-                if cond_val.is_truthy() {
-                    // until-condition true → exit the loop.
-                    return self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs);
-                }
-                // Falsy → run another iteration by re-executing the repeat,
-                // which suspends again at its bare-yield until-condition. Chain
-                // the re-yield as a fresh CoroutineRun::Yield; next_pc stays at
-                // outer_pc so post-loop statements run once it finally reads true.
-                match self.exec_stmt(&Stmt::Repeat(body, cond), env, varargs) {
-                    Ok(ControlFlow::Return(vals)) => Ok(CoroutineRun::Complete(vals)),
-                    Ok(ControlFlow::Break | ControlFlow::None) => {
-                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-                    }
-                    Err(e) if is_lua_yield_signal(&e) && self.pending_yield.is_some() => {
-                        let values = self.pending_yield.take().unwrap_or_default();
-                        Ok(CoroutineRun::Yield {
-                            values,
-                            next_pc: outer_pc,
-                        })
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            LuaCoroutineContinuation::GenericFor {
-                names,
-                prefix,
-                remaining,
-                yield_was_last,
-                body,
-            } => {
-                // The yielded value(s) complete the iterator triple; then run
-                // the loop to completion and continue past it.
-                let iter_vals = self.complete_exprs_after_yield(
-                    prefix,
-                    &remaining,
-                    yield_was_last,
-                    resume_args,
-                    env,
-                    varargs,
-                )?;
-                match self.run_generic_for_from_iter_vals(&names, iter_vals, &body, env, varargs)? {
-                    ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
-                    ControlFlow::Break | ControlFlow::None => {
-                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
-                    }
-                }
-            }
-        }
-    }
-
     fn resume_coroutine(
         &mut self,
         coroutine: &LuaCoroutine,
         args: &[LuaValue],
     ) -> Result<Vec<LuaValue>, String> {
-        let (func, mut env, mut func_varargs, pc, continuation) = {
+        let (func, mut env, mut func_varargs, pc) = {
             let mut inner = coroutine.inner.borrow_mut();
             match inner.status {
                 LuaCoroutineStatus::Running => {
@@ -6149,19 +4449,12 @@ impl<'a> LuaState<'a> {
             inner.status = LuaCoroutineStatus::Running;
             let func = inner.func.clone();
             let pc = inner.pc;
-            let continuation = inner.continuation.take();
             if let Some(env) = inner.env.take() {
-                (
-                    func,
-                    env,
-                    std::mem::take(&mut inner.varargs),
-                    pc,
-                    continuation,
-                )
+                (func, env, std::mem::take(&mut inner.varargs), pc)
             } else {
-                let func_value = LuaValue::function(func.clone());
+                let func_value = LuaValue::Function(func.clone());
                 let (env, func_varargs) = Self::prepare_lua_function_env(func_value, &func, args);
-                (func, env, func_varargs, pc, continuation)
+                (func, env, func_varargs, pc)
             }
         };
 
@@ -6185,18 +4478,7 @@ impl<'a> LuaState<'a> {
         // doesn't enter through call_function — push the kind frame here
         // so error()/assert() inside the body see a Lua frame at level 1.
         self.lua_frame_kinds.push(true);
-        let run_result = if let Some(continuation) = continuation {
-            self.resume_coroutine_continuation(
-                continuation,
-                args,
-                &func.body,
-                pc,
-                &mut env,
-                &mut func_varargs,
-            )
-        } else {
-            self.exec_coroutine_stmts(&func.body, pc, &mut env, &mut func_varargs)
-        };
+        let run_result = self.exec_coroutine_stmts(&func.body, pc, &mut env, &mut func_varargs);
         self.lua_frame_kinds.pop();
         self.inside_bare_expression_stmt = previous_bare_stmt;
         self.nested_exec_stmts_depth = previous_nested_depth;
@@ -6326,13 +4608,10 @@ impl<'a> LuaState<'a> {
     /// Lua 5.1's string-as-metatable __index behavior: `s.foo` and
     /// `s:foo()` resolve `foo` via the string library. Unknown keys
     /// (including non-string keys) return nil. (frankenredis-tbu4k)
-    /// Build the `_G` table that mirrors the post-init globals and install it
-    /// under the "_G" key. Idempotent so lazy callers can force materialization
-    /// from global lookup, getfenv, and setfenv surfaces. (frankenredis-u24vv)
-    fn ensure_g_table(&mut self) -> LuaTable {
-        if let Some(LuaValue::Table(table)) = self.globals.get("_G") {
-            return table.clone();
-        }
+    /// Build the `_G` table that mirrors the post-init globals and
+    /// install it under the "_G" key. Idempotent if called twice
+    /// (replaces any existing _G entry). (frankenredis-u24vv)
+    fn install_g_table(&mut self) {
         let g_table = LuaTable::new();
         for (k, v) in &self.globals {
             g_table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
@@ -6344,23 +4623,29 @@ impl<'a> LuaState<'a> {
         let mt = LuaTable::new();
         mt.set(
             LuaValue::Str(b"__index".to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from("__fr_g_protected_index")),
+            LuaValue::RustFunction("__fr_g_protected_index".to_string()),
         );
         mt.set(
             LuaValue::Str(b"__newindex".to_vec()),
-            LuaValue::RustFunction(std::rc::Rc::from("__fr_g_readonly_newindex")),
+            LuaValue::RustFunction("__fr_g_readonly_newindex".to_string()),
         );
         g_table.inner.borrow_mut().metatable = Some(mt);
         self.globals
-            .insert("_G".to_string(), LuaValue::Table(g_table.clone()));
-        g_table
+            .insert("_G".to_string(), LuaValue::Table(g_table));
     }
 
-    fn default_global_env_table(&mut self) -> LuaTable {
-        self.ensure_g_table()
+    fn default_global_env_table(&self) -> LuaTable {
+        if let Some(LuaValue::Table(table)) = self.globals.get("_G") {
+            return table.clone();
+        }
+        let table = LuaTable::new();
+        for (k, v) in &self.globals {
+            table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
+        }
+        table
     }
 
-    fn effective_global_env_table(&mut self, env: &Env) -> LuaTable {
+    fn effective_global_env_table(&self, env: &Env) -> LuaTable {
         env.current_global_env()
             .unwrap_or_else(|| self.default_global_env_table())
     }
@@ -6388,21 +4673,6 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<LuaValue, String> {
-        // (CrimsonHawk) Fast path for the overwhelmingly common lookup: a present
-        // key, or an absent key on a metatable-less table. Do the raw get through
-        // a borrow WITHOUT the per-lookup `table.clone()` (Rc bump + drop) or
-        // entering the __index chain loop below. table_lookup was ~4.9% of a
-        // compute-heavy EVAL profile; every `t[i]` read hits this.
-        {
-            let inner = table.inner.borrow();
-            let raw = inner.get(key);
-            if !matches!(raw, LuaValue::Nil) {
-                return Ok(raw);
-            }
-            if inner.metatable.is_none() {
-                return Ok(LuaValue::Nil);
-            }
-        }
         let mut current = table.clone();
         for _ in 0..16 {
             let raw = current.inner.borrow().get(key);
@@ -6477,14 +4747,6 @@ impl<'a> LuaState<'a> {
     /// (frankenredis-md71j)
     fn callee_label(&self, expr: &Expr, env: &Env) -> Option<String> {
         match expr {
-            Expr::LocalName(name, local) => match env
-                .classify_slot(*local)
-                .or_else(|| env.classify_name(name))
-            {
-                Some(true) => Some(format!("local '{name}'")),
-                Some(false) => Some(format!("upvalue '{name}'")),
-                None => None,
-            },
             Expr::Name(name) => match env.classify_name(name) {
                 Some(true) => Some(format!("local '{name}'")),
                 Some(false) => Some(format!("upvalue '{name}'")),
@@ -6552,7 +4814,7 @@ impl<'a> LuaState<'a> {
             return Some(m.to_string());
         }
         match callee_expr {
-            Expr::Name(n) | Expr::LocalName(n, _) => Some(n.clone()),
+            Expr::Name(n) => Some(n.clone()),
             Expr::Field(_, f) => Some(f.clone()),
             Expr::Index(_, key) => match key.as_ref() {
                 Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
@@ -6819,8 +5081,6 @@ impl<'a> LuaState<'a> {
         match name {
             "redis.call" => self.redis_call(args, false),
             "redis.pcall" => self.redis_call(args, true),
-            // (note) `args` is already `&mut [LuaValue]`; redis_call moves string
-            // arg bytes out of it, which is fine — args is discarded after.
             "redis.error_reply" => {
                 // Upstream script_lua.c::luaRedisErrorReplyCommand
                 // requires exactly one string argument; non-string
@@ -7012,7 +5272,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(b) => b.clone(),
                     LuaValue::Number(n) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            i64_to_ascii_bytes(*n as i64)
+                            format!("{}", *n as i64).into_bytes()
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -7066,7 +5326,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(s) => s.clone(),
                     LuaValue::Number(n) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            i64_to_ascii_bytes(*n as i64)
+                            format!("{}", *n as i64).into_bytes()
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -7438,10 +5698,18 @@ impl<'a> LuaState<'a> {
                     }
                 };
                 let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
-                // (frankenredis-5qhz7) Use the located compile path so a
-                // multi-line chunk reports the true error line, not :1:.
-                match parse_lua_chunk_located(&src_bytes) {
-                    Ok(body) => Ok(vec![LuaValue::function(LuaFunc {
+                match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
+                    let mut parser = Parser::new(tokens);
+                    let stmts = parser.parse_block()?;
+                    if !parser.check(&Token::Eof) {
+                        return Err(format!(
+                            "'<eof>' expected near '{}'",
+                            token_display(parser.peek())
+                        ));
+                    }
+                    Ok(stmts)
+                }) {
+                    Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
                         params: Vec::new(),
                         body,
                         is_variadic: true,
@@ -7455,9 +5723,9 @@ impl<'a> LuaState<'a> {
                         source_label: Some(chunk_label),
                         identity: next_function_identity(),
                     })]),
-                    Err((line, msg)) => Ok(vec![
+                    Err(msg) => Ok(vec![
                         LuaValue::Nil,
-                        LuaValue::Str(format!("{chunk_label}:{line}: {msg}").into_bytes()),
+                        LuaValue::Str(format!("{chunk_label}:1: {msg}").into_bytes()),
                     ]),
                 }
             }
@@ -7487,84 +5755,11 @@ impl<'a> LuaState<'a> {
                 match &raw {
                     LuaValue::Function(_)
                     | LuaValue::RustFunction(_)
-                    | LuaValue::WrappedCoroutine(_) => {
-                        // (frankenredis-36wn7) Lua 5.1 load(func [, chunkname])
-                        // calls the reader function repeatedly; each call
-                        // returns a string piece and a nil/empty-string return
-                        // terminates. fr's tree-walking interpreter cannot
-                        // STREAM source, but it can EAGERLY collect every piece,
-                        // concatenate, and compile via the same path as
-                        // loadstring — the identical result Lua's load(func)
-                        // yields. Matches redis 7.2.4 (which supports load(func));
-                        // the prior fr build rejected it outright.
-                        let func = raw.clone();
-                        let chunkname = args.get(1).and_then(|v| match v {
-                            LuaValue::Str(s) => Some(s.clone()),
-                            _ => None,
-                        });
-                        // Defensive cap so a generator that never terminates
-                        // can't build an unbounded chunk (the per-script timeout
-                        // is the ultimate backstop).
-                        const MAX_LOAD_SOURCE_BYTES: usize = 64 * 1024 * 1024;
-                        let mut src_bytes: Vec<u8> = Vec::new();
-                        loop {
-                            let mut call_args: Vec<LuaValue> = Vec::new();
-                            let piece =
-                                self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
-                            match piece.into_iter().next() {
-                                None | Some(LuaValue::Nil) => break,
-                                Some(LuaValue::Str(s)) => {
-                                    if s.is_empty() {
-                                        break;
-                                    }
-                                    src_bytes.extend_from_slice(&s);
-                                }
-                                // Lua's generic_reader accepts a number (lua_isstring
-                                // is true for numbers); coerce like loadstring does.
-                                Some(LuaValue::Number(n)) => {
-                                    src_bytes.extend_from_slice(n.to_string().as_bytes());
-                                }
-                                Some(_other) => {
-                                    return Ok(vec![
-                                        LuaValue::Nil,
-                                        LuaValue::Str(
-                                            b"reader function must return a string".to_vec(),
-                                        ),
-                                    ]);
-                                }
-                            }
-                            if src_bytes.len() > MAX_LOAD_SOURCE_BYTES {
-                                return Ok(vec![
-                                    LuaValue::Nil,
-                                    LuaValue::Str(b"too long".to_vec()),
-                                ]);
-                            }
-                        }
-                        // (frankenredis-5qhz7) load(func) with no chunkname uses
-                        // the literal `(load)` label (vendored's `=(load)`), not a
-                        // source-derived `[string "..."]` label; and the located
-                        // compile path reports the true error line, not :1:.
-                        let chunk_label = match chunkname.as_deref() {
-                            Some(n) => format_lua_chunk_label(Some(n), &src_bytes),
-                            None => "(load)".to_string(),
-                        };
-                        match parse_lua_chunk_located(&src_bytes) {
-                            Ok(body) => Ok(vec![LuaValue::function(LuaFunc {
-                                params: Vec::new(),
-                                body,
-                                is_variadic: true,
-                                captured_env: Some(env.snapshot()),
-                                env_table: Rc::new(RefCell::new(env.current_global_env())),
-                                self_name: None,
-                                source_label: Some(chunk_label),
-                                identity: next_function_identity(),
-                            })]),
-                            Err((line, msg)) => Ok(vec![
-                                LuaValue::Nil,
-                                LuaValue::Str(format!("{chunk_label}:{line}: {msg}").into_bytes()),
-                            ]),
-                        }
-                    }
+                    | LuaValue::WrappedCoroutine(_) => Err(
+                        "load with a chunk-generator function is not yet implemented in fr; \
+                         use loadstring(source) instead"
+                            .to_string(),
+                    ),
                     _ => Err(lua_format_argerror(
                         self.current_invocation_name.as_deref(),
                         "load",
@@ -7715,7 +5910,7 @@ impl<'a> LuaState<'a> {
                 }
                 // Return next, table, nil
                 Ok(vec![
-                    LuaValue::RustFunction(std::rc::Rc::from("next")),
+                    LuaValue::RustFunction("next".to_string()),
                     table,
                     LuaValue::Nil,
                 ])
@@ -7730,7 +5925,7 @@ impl<'a> LuaState<'a> {
                     ));
                 }
                 Ok(vec![
-                    LuaValue::RustFunction(std::rc::Rc::from("__ipairs_iter")),
+                    LuaValue::RustFunction("__ipairs_iter".to_string()),
                     table,
                     LuaValue::Number(0.0),
                 ])
@@ -7870,19 +6065,23 @@ impl<'a> LuaState<'a> {
             "unpack" => {
                 let inv = self.current_invocation_name.as_deref();
                 let t = lua_table_arg(inv, 1, args.first())?;
-                let start = lua_optional_integer_arg(inv, 2, args.get(1), 1)?;
+                let start = lua_optional_integer_arg(inv, 2, args.get(1), 1)? as usize;
                 let end = lua_optional_integer_arg(
                     inv,
                     3,
                     args.get(2),
                     t.inner.borrow().array.len() as i64,
-                )?;
+                )? as usize;
                 if start <= end && end.saturating_sub(start) >= 8000 {
                     return Err("too many results to unpack".to_string());
                 }
                 let mut results = Vec::new();
                 for i in start..=end {
-                    results.push(t.get(&LuaValue::Number(i as f64)));
+                    if i >= 1 && i <= t.inner.borrow().array.len() {
+                        results.push(t.inner.borrow().array[i - 1].clone());
+                    } else {
+                        results.push(LuaValue::Nil);
+                    }
                 }
                 Ok(results)
             }
@@ -7996,12 +6195,6 @@ impl<'a> LuaState<'a> {
                 if args.get(2).is_none() {
                     return Err(self.format_builtin_argerror("rawset", 3, "value expected"));
                 }
-                // (frankenredis-8mwy9) rawset bypasses __newindex but NOT the
-                // table protection — redis raises the readonly error (no
-                // user_script prefix) before the nil/NaN key checks below.
-                if matches!(&args[0], LuaValue::Table(t) if t.is_readonly()) {
-                    return Err("Attempt to modify a readonly table".to_string());
-                }
                 // (frankenredis-uyj7c) Upstream lua_rawset routes a nil key
                 // through luaH_set which raises 'table index is nil' (no
                 // user_script:1 prefix — this comes from the VM core rather
@@ -8054,12 +6247,6 @@ impl<'a> LuaState<'a> {
                         2,
                         "nil or table expected",
                     ));
-                }
-                // (frankenredis-8mwy9) A protected library table rejects
-                // setmetatable with the bare readonly error (no source prefix),
-                // matching redis.
-                if t.is_readonly() {
-                    return Err("Attempt to modify a readonly table".to_string());
                 }
                 // (frankenredis-fnh42) Upstream luaL_getmetafield checks
                 // the existing metatable for __metatable; if present,
@@ -8250,9 +6437,9 @@ impl<'a> LuaState<'a> {
                         if level == 0 {
                             Ok(Vec::new())
                         } else {
-                            Ok(vec![LuaValue::RustFunction(std::rc::Rc::from(
-                                "__fr_current_chunk_env",
-                            ))])
+                            Ok(vec![LuaValue::RustFunction(
+                                "__fr_current_chunk_env".to_string(),
+                            )])
                         }
                     }
                     None => Err(lua_bad_number_arg(inv, 1, None)),
@@ -8571,14 +6758,9 @@ impl<'a> LuaState<'a> {
             // ── OS library ───────────────────────────────────────────────
             "os.clock" => {
                 // Redis exposes Lua's os.clock. Approximate CPU time with
-                // monotonic elapsed wall time for this script invocation. The start instant is
-                // captured lazily on first use (os is unbound, so this is rarely — if ever —
-                // reached), avoiding a clock read on every eval that never calls os.clock.
+                // monotonic elapsed wall time for this script invocation.
                 Ok(vec![LuaValue::Number(
-                    self.script_started_at
-                        .get_or_insert_with(Instant::now)
-                        .elapsed()
-                        .as_secs_f64(),
+                    self.script_started_at.elapsed().as_secs_f64(),
                 )])
             }
             // ── Coroutine library ──────────────────────────────────────
@@ -8594,9 +6776,7 @@ impl<'a> LuaState<'a> {
             // direct calls keep the named/prefixed shape.
             "coroutine.create" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
-                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new(
-                        (**func).clone(),
-                    ))])
+                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new(func.clone()))])
                 } else {
                     Err(lua_format_argerror(
                         self.current_invocation_name.as_deref(),
@@ -8609,7 +6789,7 @@ impl<'a> LuaState<'a> {
             "coroutine.wrap" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
                     Ok(vec![LuaValue::WrappedCoroutine(LuaCoroutine::new(
-                        (**func).clone(),
+                        func.clone(),
                     ))])
                 } else {
                     Err(lua_format_argerror(
@@ -8847,7 +7027,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(b)) => b.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            i64_to_ascii_bytes(*n as i64)
+                            format!("{}", *n as i64).into_bytes()
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -9038,7 +7218,7 @@ impl<'a> LuaState<'a> {
                 let mt = LuaTable::new();
                 mt.set(
                     LuaValue::Str(b"__call".to_vec()),
-                    LuaValue::RustFunction(std::rc::Rc::from("__gmatch_iter")),
+                    LuaValue::RustFunction("__gmatch_iter".to_string()),
                 );
                 iter_state.inner.borrow_mut().metatable = Some(mt);
                 Ok(vec![
@@ -9186,12 +7366,6 @@ impl<'a> LuaState<'a> {
                         body.to_string()
                     });
                 }
-                // (frankenredis-8mwy9) Writing into a protected library table
-                // raises the readonly error (after the arity check, before any
-                // element move), matching redis.
-                if matches!(&args[0], LuaValue::Table(t) if t.is_readonly()) {
-                    return Err("Attempt to modify a readonly table".to_string());
-                }
                 if args.len() == 2 {
                     let val = args[1].clone();
                     if let LuaValue::Table(ref mut t) = args[0] {
@@ -9273,7 +7447,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(s)) => s.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            i64_to_ascii_bytes(*n as i64)
+                            format!("{}", *n as i64).into_bytes()
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -9313,22 +7487,27 @@ impl<'a> LuaState<'a> {
                 let mut result: Vec<u8> = Vec::new();
                 if start <= end {
                     let mut first = true;
+                    let array = &t.inner.borrow().array;
                     for i in start..=end {
-                        let val = t.get(&LuaValue::Number(i as f64));
+                        let val: Option<&LuaValue> = if i >= 1 && (i as usize) <= array.len() {
+                            Some(&array[(i - 1) as usize])
+                        } else {
+                            None
+                        };
                         let bytes = match val {
-                            LuaValue::Str(b) => b,
-                            LuaValue::Number(n) => {
-                                if n == (n as i64) as f64 && n.is_finite() {
-                                    i64_to_ascii_bytes(n as i64)
+                            Some(LuaValue::Str(b)) => b.clone(),
+                            Some(LuaValue::Number(n)) => {
+                                if *n == (*n as i64) as f64 && n.is_finite() {
+                                    format!("{}", *n as i64).into_bytes()
                                 } else {
-                                    lua_number_to_string(n).into_bytes()
+                                    lua_number_to_string(*n).into_bytes()
                                 }
                             }
-                            LuaValue::Nil => {
-                                return Err(invalid_value(i, "nil"));
-                            }
-                            other => {
+                            Some(other) => {
                                 return Err(invalid_value(i, other.type_name()));
+                            }
+                            None => {
+                                return Err(invalid_value(i, "nil"));
                             }
                         };
                         if !first {
@@ -9802,7 +7981,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(s)) => s.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            i64_to_ascii_bytes(*n as i64)
+                            format!("{}", *n as i64).into_bytes()
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -9950,11 +8129,7 @@ impl<'a> LuaState<'a> {
         }
     }
 
-    fn redis_call(
-        &mut self,
-        args: &mut [LuaValue],
-        is_pcall: bool,
-    ) -> Result<Vec<LuaValue>, String> {
+    fn redis_call(&mut self, args: &[LuaValue], is_pcall: bool) -> Result<Vec<LuaValue>, String> {
         // (frankenredis-sj52g) Upstream's luaPushError prepends "ERR "
         // to the body of the error table that bubbles out of
         // luaRedisGenericCommand — both for the empty-args branch and
@@ -9990,9 +8165,9 @@ impl<'a> LuaState<'a> {
         }
 
         // Build argv for dispatch
-        let mut argv: Vec<Vec<u8>> = Vec::with_capacity(args.len());
-        for arg in args.iter_mut() {
-            match arg.take_redis_arg() {
+        let mut argv: Vec<Vec<u8>> = Vec::new();
+        for arg in args {
+            match arg.to_redis_arg() {
                 Ok(b) => argv.push(b),
                 Err(msg) => return arg_error(&msg, is_pcall),
             }
@@ -10025,6 +8200,16 @@ impl<'a> LuaState<'a> {
                     // existing prefix and avoids double-stamping.
                     // (br-frankenredis-fo1s, br-frankenredis-fdys,
                     // br-frankenredis-pcallerr)
+                    let err_msg = if err_msg.starts_with("ERR unknown command ") {
+                        "ERR Unknown Redis command called from script".to_string()
+                    } else if err_msg.starts_with("ERR wrong number of arguments")
+                        || err_msg
+                            .starts_with("ERR Unknown subcommand or wrong number of arguments")
+                    {
+                        "ERR Wrong number of args calling Redis command from script".to_string()
+                    } else {
+                        err_msg
+                    };
                     Err(err_msg)
                 }
             }
@@ -10054,43 +8239,13 @@ impl<'a> LuaState<'a> {
                     .unwrap_or_else(|| argv.clone());
                     self.store.record_script_propagation(&effect);
                 }
-                // (frankenredis-0czgc) redis.call must RAISE a command error reply
-                // (aborting the script), not return it as a value; redis.pcall packages
-                // it as {err=...}. fr-command returns ~160 command errors as
-                // Ok(RespFrame::Error(..)) rather than Err, which previously let the
-                // script CONTINUE past a failed redis.call AND dropped redis's
-                // "script: <sha>" context suffix. Route Error reply-frames through the
-                // same path as a dispatch Err so both behaviors match upstream.
-                if let RespFrame::Error(msg) = &frame {
-                    // (frankenredis-0czgc) redis resolves a container command's
-                    // subcommand at the script command-lookup stage, so an
-                    // unresolvable subcommand surfaces as "Unknown Redis command
-                    // called from script" — not the command's own
-                    // "unknown subcommand '<x>'. Try <CMD> HELP." reply (which is the
-                    // byte-exact DIRECT wording). Rewrite uniformly for all containers.
-                    let err_msg = script_context_rewrite_error(msg.clone());
-                    return if is_pcall {
-                        let t = LuaTable::new();
-                        t.set(
-                            LuaValue::Str(b"err".to_vec()),
-                            LuaValue::Str(err_msg.into_bytes()),
-                        );
-                        Ok(vec![LuaValue::Table(t)])
-                    } else {
-                        Err(err_msg)
-                    };
-                }
                 Ok(vec![resp_to_lua_command_result(
                     &argv,
-                    frame,
+                    &frame,
                     self.resp_version == 3,
                 )])
             }
             Err(err_msg) => {
-                // (frankenredis-0czgc) apply the script command-lookup rewrites
-                // uniformly — intercepted paths (e.g. acl_script_result) produce the
-                // raw command error, bypassing the dispatch-Err branch's rewrite.
-                let err_msg = script_context_rewrite_error(err_msg);
                 if is_pcall {
                     let t = LuaTable::new();
                     t.set(
@@ -10103,28 +8258,6 @@ impl<'a> LuaState<'a> {
                 }
             }
         }
-    }
-}
-
-/// (frankenredis-0czgc) Mirror redis's script command-lookup error rewrites that
-/// happen before/around luaRedisGenericCommand: an unresolvable command OR container
-/// subcommand becomes "Unknown Redis command called from script", and an arity failure
-/// becomes "Wrong number of args calling Redis command from script". Applied uniformly
-/// to every command error surfaced from redis.call/redis.pcall — whether it came from
-/// dispatch (Err) or an intercepted path (acl_script_result, etc.) or a command reply
-/// frame (Ok(Error)). The verbatim "unknown subcommand '<x>'. Try <CMD> HELP." /
-/// "wrong number of arguments for '<cmd>'" wording is the DIRECT (non-script) reply.
-/// Idempotent: the rewritten strings don't match the input prefixes.
-fn script_context_rewrite_error(err_msg: String) -> String {
-    if err_msg.starts_with("ERR unknown command ") || err_msg.starts_with("ERR unknown subcommand ")
-    {
-        "ERR Unknown Redis command called from script".to_string()
-    } else if err_msg.starts_with("ERR wrong number of arguments")
-        || err_msg.starts_with("ERR Unknown subcommand or wrong number of arguments")
-    {
-        "ERR Wrong number of args calling Redis command from script".to_string()
-    } else {
-        err_msg
     }
 }
 
@@ -10973,15 +9106,8 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Option<LuaPatMatch> {
         return None;
     }
 
-    // (BlackThrush) Reuse ONE captures buffer across start positions instead of allocating a fresh
-    // Vec per position. For a pattern that opens a capture immediately (e.g. `(%w+)...`), every start
-    // position pushed into — and so allocated — a new Vec; clearing keeps the capacity and reuses the
-    // buffer (finish_grow/malloc churn was ~12% of the pattern-matcher self-time). Byte-identical:
-    // the match logic always sees an empty captures Vec at each start, and on a hit the buffer is
-    // moved out into the LuaPatMatch (the loop returns, so it is never cleared after the move).
-    let mut captures = Vec::new();
     for start in init..=s.len() {
-        captures.clear();
+        let mut captures = Vec::new();
         if let Some(end) = lua_pat_match(s, start, pat, pat_start, &mut captures, 0) {
             return Some(LuaPatMatch {
                 start,
@@ -11056,7 +9182,7 @@ fn lua_gsub_normalise_repl(s: &[u8], m: &LuaPatMatch, val: &LuaValue) -> Result<
         LuaValue::Str(b) => Ok(b.clone()),
         LuaValue::Number(n) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
-                Ok(i64_to_ascii_bytes(*n as i64))
+                Ok(format!("{}", *n as i64).into_bytes())
             } else {
                 Ok(lua_number_to_string(*n).into_bytes())
             }
@@ -11130,28 +9256,13 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
 
 // ── Type conversions ────────────────────────────────────────────────────
 
-fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: RespFrame, resp3: bool) -> LuaValue {
+fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: &RespFrame, resp3: bool) -> LuaValue {
     if config_get_returns_map_in_lua(argv)
-        && let Some(table) = config_get_resp_to_lua_map(&frame, resp3)
+        && let Some(table) = config_get_resp_to_lua_map(frame, resp3)
     {
         return LuaValue::Table(table);
     }
-    // (CrimsonHawk) MOVE the bytes of the common top-level BulkString reply
-    // (GET/HGET/LINDEX/... via redis.call) straight into the Lua string instead
-    // of cloning them (resp_to_lua's `data.clone()`); scales with the read value
-    // size. Complex shapes (arrays/maps/sets) fall back to the borrowed converter,
-    // which stays byte-identical.
-    match frame {
-        RespFrame::BulkString(Some(data)) => LuaValue::Str(data),
-        RespFrame::BulkString(None) => {
-            if resp3 {
-                LuaValue::Nil
-            } else {
-                LuaValue::Bool(false)
-            }
-        }
-        other => resp_to_lua(&other, resp3),
-    }
+    resp_to_lua(frame, resp3)
 }
 
 fn config_get_returns_map_in_lua(argv: &[Vec<u8>]) -> bool {
@@ -11172,8 +9283,7 @@ fn config_get_resp_to_lua_map(frame: &RespFrame, resp3: bool) -> Option<LuaTable
     }
 
     let table = LuaTable::new();
-    let (chunks, _) = items.as_chunks::<2>();
-    for chunk in chunks {
+    for chunk in items.chunks_exact(2) {
         let key = match &chunk[0] {
             RespFrame::BulkString(Some(bytes)) => bytes.clone(),
             RespFrame::SimpleString(text) => text.as_bytes().to_vec(),
@@ -11435,11 +9545,10 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
             // {big_number = "..."}: upstream luaReplyToRedisReply emits a
             // RESP3 Big Number (`(<digits>\r\n`), downconverted to a bulk
             // string under RESP2 (handled in downconvert_lua_reply_to_resp2).
-            // It also maps CR/LF to spaces before writing the line-based frame.
-            // (frankenredis-h2uga, frankenredis-sg1nm)
+            // (frankenredis-h2uga)
             let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
             if let LuaValue::Str(s) = bn_field {
-                return RespFrame::BigNumber(lua_big_number_payload(&s));
+                return RespFrame::BigNumber(String::from_utf8_lossy(&s).into_owned());
             }
 
             // {verbatim_string = {format = "<3char>", string = "..."}}:
@@ -11479,17 +9588,6 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
         | LuaValue::Coroutine(_)
         | LuaValue::WrappedCoroutine(_) => RespFrame::BulkString(None),
     }
-}
-
-fn lua_big_number_payload(bytes: &[u8]) -> String {
-    let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n') {
-        text = text
-            .chars()
-            .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
-            .collect();
-    }
-    text
 }
 
 // ── string.format implementation ────────────────────────────────────────
@@ -11817,7 +9915,7 @@ fn lua_string_format(
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
                                     if *n == (*n as i64) as f64 && n.is_finite() {
-                                        i64_to_ascii_bytes(*n as i64)
+                                        format!("{}", *n as i64).into_bytes()
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
                                     }
@@ -11863,7 +9961,7 @@ fn lua_string_format(
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
                                     if *n == (*n as i64) as f64 && n.is_finite() {
-                                        i64_to_ascii_bytes(*n as i64)
+                                        format!("{}", *n as i64).into_bytes()
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
                                     }
@@ -12555,16 +10653,6 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
         };
     }
     const PRECISION: i32 = 14;
-    // (BlackThrush) Fast path for integer-valued numbers that %.14g renders as a plain decimal:
-    // |n| < 1e14 means ≤14 significant digits, so %g stays in fixed notation and the result is
-    // exactly the integer's decimal form. Formatting the i64 directly skips Rust's EXACT float
-    // formatter (the Dragon `format_exact` algorithm), which a live perf-record put at ~47% of
-    // cjson.encode of an integer table. Byte-identical to the fixed-notation + strip_trailing_zeros
-    // path below for this range (all integers < 1e14 are exactly representable — 1e14 < 2^53 — so
-    // `fract() == 0.0` is exact). Verified by lua_number_to_string_integer_fast_path_matches_slow.
-    if n.fract() == 0.0 && n.abs() < 1e14 {
-        return (n as i64).to_string();
-    }
     let abs = n.abs();
     let exponent = abs.log10().floor() as i32;
     // C's %g uses scientific when X < -4 or X >= precision, where
@@ -13210,20 +11298,14 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                         by_idx.insert(*n as i64, v.clone());
                     }
                 }
-                // (BlackThrush) Render straight into one buffer instead of a Vec<String> + join +
-                // format!("[{}]", …). Byte-identical: `[v1,v2,…]`.
-                let mut out = String::from('[');
+                let mut items = Vec::with_capacity(max_int_key as usize);
                 for i in 1..=max_int_key {
-                    if i > 1 {
-                        out.push(',');
-                    }
                     match by_idx.get(&i) {
-                        Some(v) => out.push_str(&lua_value_to_json(v)?),
-                        None => out.push_str("null"),
+                        Some(v) => items.push(lua_value_to_json(v)?),
+                        None => items.push("null".to_string()),
                     }
                 }
-                out.push(']');
-                return Ok(out);
+                return Ok(format!("[{}]", items.join(",")));
             }
 
             // Object form: every key (array indices + hash) becomes a
@@ -13231,32 +11313,17 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
             if array_len == 0 && hash_pairs.is_empty() {
                 return Ok("{}".to_string());
             }
-            // (BlackThrush) Render straight into one buffer instead of a Vec<String> with a
-            // format!() per pair + join. Byte-identical: `{"1":v,…,"key":v}` (array-index keys first,
-            // then hash keys, comma-separated — the same order the join produced).
-            let mut out = String::from('{');
-            let mut first = true;
+            let mut pairs: Vec<String> = Vec::new();
             let inner = t.inner.borrow();
             for (i, v) in inner.array.iter().enumerate() {
-                if !first {
-                    out.push(',');
-                }
-                first = false;
-                let _ = write!(out, "\"{}\":", i + 1);
-                out.push_str(&lua_value_to_json(v)?);
+                pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)?));
             }
             drop(inner);
             for (k, v) in &hash_pairs {
-                if !first {
-                    out.push(',');
-                }
-                first = false;
-                out.push_str(&json_escape_bytes(&k.to_display_string()));
-                out.push(':');
-                out.push_str(&lua_value_to_json(v)?);
+                let key_json = json_escape_bytes(&k.to_display_string());
+                pairs.push(format!("{key_json}:{}", lua_value_to_json(v)?));
             }
-            out.push('}');
-            Ok(out)
+            Ok(format!("{{{}}}", pairs.join(",")))
         }
         LuaValue::Function(_) | LuaValue::RustFunction(_) => {
             Err("Cannot serialise function: type not supported".to_string())
@@ -13533,7 +11600,6 @@ impl<'a> JsonParser<'a> {
 
     fn parse_number(&mut self) -> Result<f64, String> {
         let start = self.pos;
-        let mut is_integer = true;
         if self.bytes.get(self.pos) == Some(&b'-') {
             self.pos += 1;
         }
@@ -13553,7 +11619,6 @@ impl<'a> JsonParser<'a> {
             }
         }
         if self.bytes.get(self.pos) == Some(&b'.') {
-            is_integer = false;
             self.pos += 1;
             let digits_start = self.pos;
             while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
@@ -13567,7 +11632,6 @@ impl<'a> JsonParser<'a> {
             }
         }
         if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
-            is_integer = false;
             self.pos += 1;
             if matches!(self.bytes.get(self.pos), Some(b'+' | b'-')) {
                 self.pos += 1;
@@ -13589,17 +11653,6 @@ impl<'a> JsonParser<'a> {
                 start + 1
             )
         })?;
-        // (BlackThrush) Integer fast path: a pure-integer token (no '.'/'e') that fits in i64 parses
-        // to exactly the same f64 as the full dec2flt float parser — both round the exact integer to
-        // the nearest f64, ties-to-even — but skips dec2flt, which a perf-record put at ~13% of
-        // cjson.decode. The `i != 0` guard preserves -0.0 for the "-0" token (i64 parse drops the
-        // sign), and an i64 overflow on a huge integer simply falls through to the float parser.
-        if is_integer
-            && let Ok(i) = text.parse::<i64>()
-            && i != 0
-        {
-            return Ok(i as f64);
-        }
         text.parse::<f64>().map_err(|_| {
             format!(
                 "Expected value but found invalid token at character {}",
@@ -13609,104 +11662,50 @@ impl<'a> JsonParser<'a> {
     }
 }
 
-// (BlackThrush) LuaState deliberately has NO `Drop` impl. Cycle-breaking is handled entirely by the
-// `LuaGcScope` registry sweep (see the module-level comment and `impl Drop for LuaGcScope`): every
-// non-template table/cell registers a `Weak` on creation, and the scope — declared BEFORE the
-// LuaState in `eval_compiled_script_inner`, so it drops AFTER — sweeps `[mark..]` and clears every
-// still-live registered object, breaking ALL cycles (local, upvalue, AND global-reachable). That is
-// a strict superset of the old per-eval `clear_table_recursive` walk of `self.globals`, which only
-// reached globals and skipped the shared templates: the ONLY two table constructors are
-// `LuaTable::new` (registers) and `new_shared_template` (never cleared by either mechanism), so the
-// sweep covers everything that walk did. The walk was therefore redundant work on every eval
-// (measured ~14% of the return-1 eval self-time in a live perf-record); non-cyclic tables are now
-// freed by the normal LuaState field drop, cyclic ones by the sweep. Guarded by
-// `lua_cyclic_scripts_do_not_leak_qqq17` (local cycles) and
-// `lua_global_reachable_cycle_reclaimed_by_sweep_bt` (a global-reachable cycle stored in KEYS).
-
-// ── Compiled chunk cache ────────────────────────────────────────────────
-
-const LUA_COMPILED_CHUNK_CACHE_MAX: usize = 256;
-
-thread_local! {
-    static LUA_COMPILED_CHUNK_CACHE: RefCell<HashMap<Vec<u8>, Rc<Block>>> =
-        RefCell::new(HashMap::new());
-}
-
-fn lua_execution_source(script: &[u8]) -> Cow<'_, [u8]> {
-    if script.starts_with(b"#!") {
-        let line_end = script
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(script.len());
-        let mut stripped = Vec::with_capacity(script.len());
-        stripped.extend(std::iter::repeat_n(b' ', line_end));
-        stripped.extend_from_slice(&script[line_end..]);
-        Cow::Owned(stripped)
-    } else {
-        Cow::Borrowed(script)
-    }
-}
-
-/// Compile a chunk, returning the parse error as `(1-based line, bare message)`
-/// on failure. The line comes from the parser's per-token line map (with_lines).
-/// (frankenredis-5qhz7)
-fn parse_lua_chunk_located(source: &[u8]) -> Result<Block, (u32, String)> {
-    let mut lexer = Lexer::new(source);
-    let (tokens, lines) = lexer.tokenize_all_located()?;
-    let mut parser = Parser::with_lines(tokens, lines);
-    let mut stmts = parser.parse_block().map_err(|m| (parser.error_line(), m))?;
-    if !parser.check(&Token::Eof) {
-        return Err((
-            parser.error_line(),
-            format!("'<eof>' expected near '{}'", token_display(parser.peek())),
-        ));
-    }
-    resolve_lua_local_slots(&mut stmts);
-    Ok(stmts)
-}
-
-fn parse_lua_chunk(source: &[u8]) -> Result<Block, String> {
-    // Bare-message form (no line prefix) — preserves the contract that
-    // compile_check / loadstring assert on. Use compile_error_line() when the
-    // caller needs the `user_script:N` line. (frankenredis-5qhz7)
-    parse_lua_chunk_located(source).map_err(|(_, msg)| msg)
-}
-
-/// The compile error for `source` formatted as `N: <message>` with the true
-/// 1-based error line — for callers that render `user_script:N: <message>`
-/// (EVAL/EVALSHA/SCRIPT LOAD). Returns the same bare message parse_lua_chunk
-/// produces, prefixed with the actual line. (frankenredis-5qhz7)
-pub(crate) fn compile_error_line(source: &[u8]) -> String {
-    let resolved = lua_execution_source(source);
-    match parse_lua_chunk_located(resolved.as_ref()) {
-        Err((line, msg)) => format!("{line}: {msg}"),
-        // Only called on the error path; if it unexpectedly compiles, fall back
-        // to the line-1 form so the envelope stays well-formed.
-        Ok(_) => "1: ".to_string(),
-    }
-}
-
-pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, String> {
-    let source = lua_execution_source(script);
-    if let Some(cached) =
-        LUA_COMPILED_CHUNK_CACHE.with(|cache| cache.borrow().get(source.as_ref()).cloned())
-    {
-        return Ok(cached);
-    }
-
-    let compiled = Rc::new(parse_lua_chunk(source.as_ref())?);
-    let cached = LUA_COMPILED_CHUNK_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(cached) = cache.get(source.as_ref()) {
-            return cached.clone();
+impl Drop for LuaState<'_> {
+    fn drop(&mut self) {
+        // Break Rc<RefCell<LuaTableInner>> cycles to prevent memory leaks.
+        // User scripts can create cyclic tables (e.g., `t.self = t`) which
+        // form Rc cycles that won't be reclaimed without manual clearing.
+        // We recursively clear all tables reachable from globals to break
+        // these cycles on LuaState destruction.
+        fn clear_table_recursive(table: &LuaTable, visited: &mut HashSet<usize>) {
+            let ptr = Rc::as_ptr(&table.inner) as usize;
+            if !visited.insert(ptr) {
+                return;
+            }
+            let inner = &mut *table.inner.borrow_mut();
+            for value in inner.array.drain(..) {
+                if let LuaValue::Table(t) = value {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            for (_, value) in inner.string_hash.drain() {
+                if let LuaValue::Table(t) = value {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            for (k, v) in inner.other_hash.drain(..) {
+                if let LuaValue::Table(t) = k {
+                    clear_table_recursive(&t, visited);
+                }
+                if let LuaValue::Table(t) = v {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            inner.other_keys.clear();
+            if let Some(mt) = inner.metatable.take() {
+                clear_table_recursive(&mt, visited);
+            }
         }
-        if cache.len() >= LUA_COMPILED_CHUNK_CACHE_MAX {
-            cache.clear();
+
+        let mut visited = HashSet::new();
+        for value in self.globals.values() {
+            if let LuaValue::Table(t) = value {
+                clear_table_recursive(t, &mut visited);
+            }
         }
-        cache.insert(source.as_ref().to_vec(), compiled.clone());
-        compiled
-    });
-    Ok(cached)
+    }
 }
 
 // ── Public entry point ──────────────────────────────────────────────────
@@ -13718,60 +11717,40 @@ pub fn eval_script(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, String> {
-    let compiled = compile_lua_chunk_cached(script)?;
-    eval_compiled_script(compiled, keys, argv, store, now_ms)
-}
-
-#[doc(hidden)]
-pub fn eval_script_cloned_globals_for_bench(
-    script: &[u8],
-    keys: &[Vec<u8>],
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, String> {
-    let compiled = compile_lua_chunk_cached(script)?;
-    eval_compiled_script_inner(compiled, keys, argv, store, now_ms, true)
-}
-
-pub(crate) fn eval_compiled_script(
-    compiled: Rc<Block>,
-    keys: &[Vec<u8>],
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, String> {
-    eval_compiled_script_inner(compiled, keys, argv, store, now_ms, false)
-}
-
-fn eval_compiled_script_inner(
-    compiled: Rc<Block>,
-    keys: &[Vec<u8>],
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-    clone_globals_template: bool,
-) -> Result<RespFrame, String> {
     store.clear_script_propagation_state();
     store.script_propagation_mode = SCRIPT_PROPAGATE_ALL;
-    // (frankenredis-qqq17) Break any Rc cycles this script allocates when it
-    // returns. Declared before `state` so the LuaState/Env drop first (reverse
-    // declaration order), leaving only leaked cycle islands for the sweep.
-    let _lua_gc = LuaGcScope::enter();
-    let mut state = if clone_globals_template {
-        LuaState::new_with_cloned_globals_for_bench(store, now_ms)
-    } else {
-        LuaState::new(store, now_ms)
-    };
+    let mut state = LuaState::new(store, now_ms);
 
     let keys_vals: Vec<LuaValue> = keys.iter().map(|k| LuaValue::Str(k.clone())).collect();
     let argv_vals: Vec<LuaValue> = argv.iter().map(|a| LuaValue::Str(a.clone())).collect();
     state.set_keys_argv(keys_vals, argv_vals);
 
+    // Strip a Redis 7.0+ Lua shebang line if present; upstream Lua
+    // parses `#!...\n` as a comment, but our minimal interpreter
+    // doesn't. The flag-honouring side of the shebang is handled
+    // upstream of this call in fr-command::eval_cmd. Replace the
+    // shebang line with whitespace of the same length so reported
+    // line numbers stay aligned with the user's script.
+    // (br-frankenredis-r75v)
+    let stripped: Vec<u8>;
+    let executed_script: &[u8] = if script.starts_with(b"#!") {
+        let line_end = script
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(script.len());
+        let mut tmp = Vec::with_capacity(script.len());
+        tmp.extend(std::iter::repeat_n(b' ', line_end));
+        tmp.extend_from_slice(&script[line_end..]);
+        stripped = tmp;
+        &stripped
+    } else {
+        script
+    };
+
     // (frankenredis-m7oy8) On error, record the failing statement's source line
     // so the command layer can stamp it into the `on @user_script:N.` envelope
     // suffix (covers prefix-less errors like "invalid key to 'next'" too).
-    let result = match state.execute_compiled(compiled.as_ref()) {
+    let result = match state.execute(executed_script) {
         Ok(value) => value,
         Err(err) => {
             let line = state.current_line;
@@ -13850,7 +11829,31 @@ pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
 /// performed by `eval_script` so SCRIPT LOAD validates the same source
 /// EVAL would later run. (frankenredis-scrldch)
 pub fn compile_check(script: &[u8]) -> Result<(), String> {
-    compile_lua_chunk_cached(script).map(|_| ())
+    let stripped: Vec<u8>;
+    let source: &[u8] = if script.starts_with(b"#!") {
+        let line_end = script
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(script.len());
+        let mut tmp = Vec::with_capacity(script.len());
+        tmp.extend(std::iter::repeat_n(b' ', line_end));
+        tmp.extend_from_slice(&script[line_end..]);
+        stripped = tmp;
+        &stripped
+    } else {
+        script
+    };
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize_all()?;
+    let mut parser = Parser::new(tokens);
+    let _ = parser.parse_block()?;
+    if !parser.check(&Token::Eof) {
+        return Err(format!(
+            "'<eof>' expected near '{}'",
+            token_display(parser.peek())
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -13860,107 +11863,8 @@ mod tests {
 
     use super::{
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
-        json_to_lua_value, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
+        json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
-
-    /// (frankenredis-qqq17) Regression gate for the Lua Rc-cycle leak DoS.
-    /// Cyclic scripts — a self-referential table and a recursive closure that
-    /// captures its own upvalue cell — used to leak on every EVAL because the
-    /// GC-less `Rc<RefCell<..>>` graph never reached refcount 0. The
-    /// `LuaGcScope` sweep at `eval_script` end must break those cycles so the
-    /// objects are actually reclaimed. We prove reclamation directly via the
-    /// test-only live-`LuaTableInner` counter (returns to baseline), not just
-    /// registry truncation — and confirm behavior parity is untouched (the
-    /// sweep runs post-serialization, so the scripts still return correctly).
-    #[test]
-    fn lua_cyclic_scripts_do_not_leak_qqq17() {
-        let mut store = Store::new();
-        let bulk = |s: &str| RespFrame::BulkString(Some(s.as_bytes().to_vec()));
-
-        let baseline = lua_test_live_tables();
-
-        // (b) self-referential table: `t.x = t`.
-        for _ in 0..200 {
-            let r = eval_script(
-                b"local t={}; t.x=t; return type(t.x)",
-                &[],
-                &[],
-                &mut store,
-                0,
-            )
-            .unwrap();
-            assert_eq!(
-                r,
-                bulk("table"),
-                "self-referential table output must be intact"
-            );
-        }
-        // (a) recursive closure capturing its own binding.
-        for _ in 0..200 {
-            let r = eval_script(
-                b"local function f(n) if n<=0 then return 0 else return f(n-1) end end return f(5)",
-                &[],
-                &[],
-                &mut store,
-                0,
-            )
-            .unwrap();
-            assert_eq!(
-                r,
-                RespFrame::Integer(0),
-                "recursive closure must still compute"
-            );
-        }
-        // A deeper nested cycle: table holding a closure that captures the table.
-        for _ in 0..200 {
-            let r = eval_script(
-                b"local t={}; t.f=function() return t end; return type(t.f().f)",
-                &[],
-                &[],
-                &mut store,
-                0,
-            )
-            .unwrap();
-            assert_eq!(r, bulk("function"));
-        }
-
-        // The live-table count must return to its baseline: every cyclic table
-        // allocated across the 600 evals has been reclaimed. Before the fix this
-        // grew without bound (one leaked inner per cyclic eval).
-        let after = lua_test_live_tables();
-        assert_eq!(
-            after, baseline,
-            "Lua table inners leaked: {after} live vs baseline {baseline} (qqq17 cycle sweep regressed)"
-        );
-    }
-
-    #[test]
-    fn lua_global_reachable_cycle_reclaimed_by_sweep_bt() {
-        // Complements qqq17 (which exercises LOCAL cycles): a GLOBAL-reachable cycle — a
-        // self-referential table stored in KEYS, still referenced from LuaState.globals at teardown
-        // — must also be fully reclaimed. LuaState::Drop's `clear_table_recursive` walked globals
-        // precisely for this case; this test guards that the `LuaGcScope` registry sweep (which
-        // clears EVERY registered table, reachable or not, after the LuaState drops) keeps it
-        // reclaimed, so removing that redundant per-eval walk cannot leak.
-        let mut store = Store::new();
-        let baseline = lua_test_live_tables();
-        for _ in 0..200 {
-            let r = eval_script(
-                b"KEYS[1] = {}; KEYS[1].self = KEYS[1]; return type(KEYS[1].self)",
-                &[b"seed".to_vec()],
-                &[],
-                &mut store,
-                0,
-            )
-            .unwrap();
-            assert_eq!(r, RespFrame::BulkString(Some(b"table".to_vec())));
-        }
-        let after = lua_test_live_tables();
-        assert_eq!(
-            after, baseline,
-            "global-reachable cyclic table in KEYS leaked: {after} live vs baseline {baseline}"
-        );
-    }
 
     #[test]
     fn redis_setresp3_drives_resp3_call_reply_conversion_vr8rg() {
@@ -13983,10 +11887,7 @@ mod tests {
 
         // RESP3: null -> nil; RESP2 (default): null -> false (a boolean).
         assert_eq!(
-            run(
-                &mut store,
-                b"redis.setresp(3); return type(redis.call('get','nokey'))"
-            ),
+            run(&mut store, b"redis.setresp(3); return type(redis.call('get','nokey'))"),
             bulk("nil")
         );
         assert_eq!(
@@ -13995,18 +11896,12 @@ mod tests {
         );
         // RESP3 Double -> {double = n}.
         assert_eq!(
-            run(
-                &mut store,
-                b"redis.setresp(3); return tostring(redis.call('zscore','z','m').double)"
-            ),
+            run(&mut store, b"redis.setresp(3); return tostring(redis.call('zscore','z','m').double)"),
             bulk("1.5")
         );
         // RESP3 Map -> {map = {k = v}}.
         assert_eq!(
-            run(
-                &mut store,
-                b"redis.setresp(3); return redis.call('hgetall','h').map.f"
-            ),
+            run(&mut store, b"redis.setresp(3); return redis.call('hgetall','h').map.f"),
             bulk("v")
         );
         // RESP3 Set -> {set = {member = true}}.
@@ -14023,10 +11918,7 @@ mod tests {
             bulk("string")
         );
         assert_eq!(
-            run(
-                &mut store,
-                b"return redis.call('hgetall','h').map and 'Y' or 'N'"
-            ),
+            run(&mut store, b"return redis.call('hgetall','h').map and 'Y' or 'N'"),
             bulk("N")
         );
         // setresp is per-script: a later script defaults back to RESP2.
@@ -14048,23 +11940,11 @@ mod tests {
             eval_script(src, &[], &[], &mut store, 0).unwrap()
         };
         // RESP3 caller + setresp(3): real Bool frame.
-        assert_eq!(
-            eval(3, b"redis.setresp(3); return true"),
-            RespFrame::Bool(true)
-        );
-        assert_eq!(
-            eval(3, b"redis.setresp(3); return false"),
-            RespFrame::Bool(false)
-        );
+        assert_eq!(eval(3, b"redis.setresp(3); return true"), RespFrame::Bool(true));
+        assert_eq!(eval(3, b"redis.setresp(3); return false"), RespFrame::Bool(false));
         // RESP2 caller + setresp(3): Bool downgrades to :1 / :0.
-        assert_eq!(
-            eval(2, b"redis.setresp(3); return true"),
-            RespFrame::Integer(1)
-        );
-        assert_eq!(
-            eval(2, b"redis.setresp(3); return false"),
-            RespFrame::Integer(0)
-        );
+        assert_eq!(eval(2, b"redis.setresp(3); return true"), RespFrame::Integer(1));
+        assert_eq!(eval(2, b"redis.setresp(3); return false"), RespFrame::Integer(0));
         // Default (no setresp): true -> :1, false -> nil, on both protocols.
         assert_eq!(eval(2, b"return true"), RespFrame::Integer(1));
         assert_eq!(eval(2, b"return false"), RespFrame::BulkString(None));
@@ -16125,41 +14005,6 @@ mod tests {
     }
 
     #[test]
-    fn lua_local_slot_resolution_preserves_lexical_semantics_v0u4b() {
-        let mut store = Store::new();
-        let frame = eval_script(
-            br#"
-local x = 'outer'
-local outer = function() return x end
-local t = {}
-local sum = 0
-for i = 1, 100 do
-    t[i] = i
-    sum = sum + t[i]
-end
-do
-    local x = x .. ':inner'
-    local function g(n)
-        if n <= 1 then return n end
-        return g(n - 1) + n
-    end
-    local loaded = loadstring('local a = 2; local b = a + 3; return b')
-    return outer() .. ':' .. x .. ':' .. sum .. ':' .. t[100] .. ':' .. g(4) .. ':' .. loaded()
-end
-"#,
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"outer:outer:inner:5050:100:10:5".to_vec()))
-        );
-    }
-
-    #[test]
     fn lua_compare_concat_unary_errors_match_upstream_wording() {
         // Pins frankenredis-7w22v. Upstream Lua 5.1 (vendored Redis 7.2.4)
         // emits per-type wording for unary/concat/comparison failures.
@@ -16363,25 +14208,6 @@ end
             frame,
             RespFrame::BulkString(Some(b"1234567890123456789012345".to_vec()))
         );
-        let frame = eval_script(
-            b"return {big_number = '12\\r34\\n56'}",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("big_number hint with CR/LF should not error");
-        assert_eq!(frame, RespFrame::BigNumber("12 34 56".to_string()));
-        let mut store_bn_crlf_resp2 = Store::new();
-        let frame = eval_script(
-            b"return {big_number = '12\\r34\\n56'}",
-            &[],
-            &[],
-            &mut store_bn_crlf_resp2,
-            0,
-        )
-        .expect("big_number hint with CR/LF resp2 should not error");
-        assert_eq!(frame, RespFrame::BulkString(Some(b"12 34 56".to_vec())));
 
         // {verbatim_string = {format='txt', string='hi'}} → BulkString of `string`.
         let frame = eval_script(
@@ -16595,23 +14421,6 @@ end
     }
 
     #[test]
-    fn compiled_chunk_cache_reuses_ast_but_rebinds_call_state_45ywg() {
-        let script = b"local arg = ARGV[1]; return arg";
-        let first = super::compile_lua_chunk_cached(script).expect("compile first");
-        let second = super::compile_lua_chunk_cached(script).expect("compile second");
-        assert!(
-            std::rc::Rc::ptr_eq(&first, &second),
-            "expected repeated compile to reuse cached AST"
-        );
-
-        let mut store = Store::new();
-        let one = eval_script(script, &[], &[b"one".to_vec()], &mut store, 0).unwrap();
-        let two = eval_script(script, &[], &[b"two".to_vec()], &mut store, 0).unwrap();
-        assert_eq!(one, RespFrame::BulkString(Some(b"one".to_vec())));
-        assert_eq!(two, RespFrame::BulkString(Some(b"two".to_vec())));
-    }
-
-    #[test]
     fn parser_rejects_bare_identifier_statements_with_upstream_wording() {
         // Pins frankenredis-luabarestmt. Lua's grammar allows expression
         // statements only for function calls; bare `var` (Name / Field /
@@ -16785,7 +14594,7 @@ end
         );
         assert_eq!(
             wrong_multi,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'multi' command".to_string())
         );
 
         let multi = eval_script(b"return redis.call('MULTI')", &[], &[], &mut store, 0);
@@ -16800,7 +14609,7 @@ end
         );
         assert_eq!(
             wrong_exec,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'exec' command".to_string())
         );
 
         let exec = eval_script(b"return redis.call('EXEC')", &[], &[], &mut store, 0);
@@ -16815,7 +14624,7 @@ end
         );
         assert_eq!(
             wrong_discard,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'discard' command".to_string())
         );
 
         let discard = eval_script(b"return redis.call('DISCARD')", &[], &[], &mut store, 0);
@@ -16824,7 +14633,7 @@ end
         let wrong_watch = eval_script(b"return redis.call('WATCH')", &[], &[], &mut store, 0);
         assert_eq!(
             wrong_watch,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'watch' command".to_string())
         );
 
         let watch = eval_script(
@@ -16845,7 +14654,7 @@ end
         );
         assert_eq!(
             wrong_unwatch,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'unwatch' command".to_string())
         );
 
         let unwatch = eval_script(b"return redis.call('UNWATCH')", &[], &[], &mut store, 0);
@@ -16873,7 +14682,7 @@ end
         let acl_arity = eval_script(b"return redis.call('ACL')", &[], &[], &mut store, 0);
         assert_eq!(
             acl_arity,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'acl' command".to_string())
         );
 
         let whoami_arity = eval_script(
@@ -16885,7 +14694,7 @@ end
         );
         assert_eq!(
             whoami_arity,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'acl|whoami' command".to_string())
         );
 
         let genpass_bits = eval_script(
@@ -16942,7 +14751,7 @@ end
         );
         assert_eq!(
             help_arity,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'acl|help' command".to_string())
         );
 
         // (frankenredis-sebba) Length must equal upstream's 29
@@ -17017,7 +14826,7 @@ end
         let auth_arity = eval_script(b"return redis.call('AUTH')", &[], &[], &mut store, 0);
         assert_eq!(
             auth_arity,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'auth' command".to_string())
         );
 
         for script in [
@@ -17122,7 +14931,7 @@ end
         );
         assert_eq!(
             arity,
-            Err("ERR Wrong number of args calling Redis command from script".to_string())
+            Err("ERR wrong number of arguments for 'sync' command".to_string())
         );
 
         let sync = eval_script(b"return redis.call('SYNC')", &[], &[], &mut store, 0);
@@ -17568,21 +15377,6 @@ end
     }
 
     #[test]
-    fn table_concat_reads_raw_signed_integer_keys_ozc36() {
-        let mut store = Store::new();
-        let frame = eval_script(
-            b"local t = {'one'}; t[-1] = 'neg'; t[0] = 'zero'; return table.concat(t, ',', -1, 1)",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(frame, RespFrame::BulkString(Some(b"neg,zero,one".to_vec())));
-    }
-
-    #[test]
     fn unpack_rejects_non_table_argument() {
         let mut store = Store::new();
         let result = eval_script(b"return unpack(42)", &[], &[], &mut store, 0);
@@ -17607,24 +15401,6 @@ end
     }
 
     #[test]
-    fn unpack_reads_raw_integer_keys_across_signed_range_53i6p() {
-        let mut store = Store::new();
-        let frame = eval_script(
-            b"local t = {10}; t[-1] = 'neg'; t[0] = 'zero'; t[3] = 'three'; local a,b,c,d,e = unpack(t, -1, 3); return tostring(a)..':'..tostring(b)..':'..tostring(c)..':'..tostring(d)..':'..tostring(e)",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"neg:zero:10:nil:three".to_vec()))
-        );
-    }
-
-    #[test]
     fn cjson_encode_sorts_string_hash_keys() {
         let table = LuaTable::new();
         table.set(LuaValue::Str(b"z".to_vec()), LuaValue::Number(1.0));
@@ -17642,101 +15418,6 @@ end
             lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())).expect("encode"),
             "\"\\b\\f\\u0001\""
         );
-    }
-
-    #[test]
-    fn lua_number_to_string_integer_fast_path_matches_slow() {
-        use super::{lua_number_to_string, strip_trailing_zeros};
-        // The integer fast path (fract()==0 && |n| < 1e14) must be byte-identical to the
-        // fixed-notation %.14g path it replaces. Reference = that path computed the old way.
-        fn slow_fixed(n: f64) -> String {
-            let exponent = n.abs().log10().floor() as i32;
-            let frac_digits = (14 - 1 - exponent).max(0) as usize;
-            strip_trailing_zeros(&format!("{:.*}", frac_digits, n))
-        }
-        let mut cases: Vec<i64> = vec![
-            1,
-            -1,
-            5,
-            -5,
-            9,
-            10,
-            99,
-            100,
-            120,
-            999,
-            1000,
-            12345,
-            -12345,
-            99_999_999_999_999, // 14 nines — largest integer < 1e14
-            10_000_000_000_000, // 1e13
-            99_999_999_999_998,
-            -99_999_999_999_999,
-        ];
-        for k in 0..14 {
-            cases.push(10i64.pow(k));
-            cases.push(-(10i64.pow(k)));
-        }
-        for i in -3000..3000 {
-            cases.push(i);
-        }
-        for &c in &cases {
-            if c == 0 {
-                continue; // 0/-0 handled before the fast path; slow_fixed's log10(0) is undefined
-            }
-            let n = c as f64;
-            assert!(n.abs() < 1e14, "case {c} must be in fast-path range");
-            assert_eq!(
-                lua_number_to_string(n),
-                slow_fixed(n),
-                "integer {c}: fast path must equal the fixed-notation %.14g path"
-            );
-        }
-        // Non-fast-path values must still behave (untouched slow path).
-        assert_eq!(lua_number_to_string(1.5), "1.5");
-        assert_eq!(lua_number_to_string(0.0), "0");
-        assert_eq!(lua_number_to_string(-0.0), "-0");
-        assert_eq!(lua_number_to_string(0.25), "0.25");
-    }
-
-    #[test]
-    fn json_decode_integer_fast_path_matches_float_parser() {
-        use super::{LuaValue, json_to_lua_value};
-        // parse_number's integer fast path must yield exactly the same f64 (bit-for-bit) as the
-        // full dec2flt float parser for every pure-integer token — including 2^53±1, i64 boundaries
-        // (which overflow into the fallback), and -0.
-        let mut cases: Vec<String> = vec![
-            "0".into(),
-            "-0".into(),
-            "1".into(),
-            "-1".into(),
-            "42".into(),
-            "-42".into(),
-            "9007199254740992".into(),     // 2^53 (exactly representable)
-            "9007199254740993".into(),     // 2^53 + 1 (not exact — rounds)
-            "9223372036854775807".into(),  // i64::MAX
-            "9223372036854775808".into(),  // i64::MAX + 1 → i64 overflow, float fallback
-            "-9223372036854775808".into(), // i64::MIN
-            "99999999999999999999".into(), // 20 digits, far over i64
-        ];
-        for i in -5000..5000i64 {
-            cases.push(i.to_string());
-        }
-        for p in 13..=18u32 {
-            cases.push(10i64.pow(p).to_string());
-        }
-        for s in &cases {
-            let got = match json_to_lua_value(s) {
-                Ok(LuaValue::Number(n)) => n,
-                other => panic!("decode {s} did not yield a number: {other:?}"),
-            };
-            let want: f64 = s.parse().expect("reference float parse");
-            assert_eq!(
-                got.to_bits(),
-                want.to_bits(),
-                "decode {s}: fast path must equal the float parser (got {got}, want {want})"
-            );
-        }
     }
 
     #[test]
@@ -18215,7 +15896,7 @@ end
             );
         }
         assert_eq!(
-            lua_value_to_json(&LuaValue::RustFunction(std::rc::Rc::from("noop"))).unwrap_err(),
+            lua_value_to_json(&LuaValue::RustFunction("noop".to_string())).unwrap_err(),
             "Cannot serialise function: type not supported"
         );
         // Wrap an unsupported value inside a table; encoder must propagate
@@ -19133,280 +16814,91 @@ end
     }
 
     #[test]
-    fn coroutine_yield_in_local_assign_receives_resume_values() {
-        let mut store = Store::new();
-        let script = b"
-            local co = coroutine.create(function(a)
-                local b = coroutine.yield(a + 1)
-                return b * 2
-            end)
-            local ok1, v1 = coroutine.resume(co, 10)
-            local ok2, v2 = coroutine.resume(co, 5)
-            return v1 .. ':' .. v2
-        ";
-        let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:10".to_vec()))));
-    }
-
-    #[test]
-    fn coroutine_yield_in_return_stmt_returns_resume_values() {
+    fn coroutine_yield_in_local_assign_errors_instead_of_returning_nil() {
+        // (frankenredis-gdbca) bw15's PC tracking advances next_pc
+        // past the whole containing stmt, so 'local v =
+        // coroutine.yield()' would have v unbound on resume —
+        // producing nil where upstream Lua passes the resume args.
+        // Until the resume mechanism captures yield-call return
+        // values, yield-as-non-bare-stmt is rejected with the
+        // upstream Lua 5.1 boundary wording.
         let mut store = Store::new();
         let script = b"
             local co = coroutine.create(function()
-                return coroutine.yield()
+                local v = coroutine.yield()
+                return v
             end)
-            local ok1, first = coroutine.resume(co)
-            local ok2, second = coroutine.resume(co, 'done')
-            return {ok1, tostring(first), ok2, second}
+            local ok, err = coroutine.resume(co)
+            return {tostring(ok), err}
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(
             result,
             Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(1),
-                RespFrame::BulkString(Some(b"nil".to_vec())),
-                RespFrame::Integer(1),
-                RespFrame::BulkString(Some(b"done".to_vec())),
+                RespFrame::BulkString(Some(b"false".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"attempt to yield across metamethod/C-call boundary".to_vec()
+                )),
             ])))
         );
     }
 
     #[test]
-    fn coroutine_yield_in_if_condition_truthy_runs_then_branch_7lmle() {
-        let mut store = Store::new();
-        let script = b"
-            local co = coroutine.create(function(a)
-                if coroutine.yield(a + 1) then
-                    return 'truthy'
-                else
-                    return 'falsy'
-                end
-            end)
-            local ok1, v1 = coroutine.resume(co, 10)
-            local ok2, v2 = coroutine.resume(co, true)
-            return v1 .. ':' .. v2
-        ";
-        let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(
-            result,
-            Ok(RespFrame::BulkString(Some(b"11:truthy".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_in_if_condition_falsy_falls_through_to_else_7lmle() {
-        let mut store = Store::new();
-        // Resume value nil is falsy, so the else branch must run.
-        let script = b"
-            local co = coroutine.create(function(a)
-                if coroutine.yield(a + 1) then
-                    return 'truthy'
-                else
-                    return 'falsy'
-                end
-            end)
-            local ok1, v1 = coroutine.resume(co, 10)
-            local ok2, v2 = coroutine.resume(co)
-            return v1 .. ':' .. v2
-        ";
-        let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(
-            result,
-            Ok(RespFrame::BulkString(Some(b"11:falsy".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_in_chained_elseif_conditions_resume_each_7lmle() {
-        // Verified against redis 7.2.4: `if coroutine.yield(1) ... elseif
-        // coroutine.yield(2) ...` yields 1, then on a falsy resume yields 2,
-        // then on a truthy resume runs that elseif branch. Result:
-        // "1,true,2,true,b".
+    fn coroutine_yield_in_return_stmt_errors() {
+        // (frankenredis-gdbca) Same defensive gate covers
+        // 'return coroutine.yield()' — the return stmt's eval_expr
+        // would never reach the ControlFlow::Return on resume.
         let mut store = Store::new();
         let script = b"
             local co = coroutine.create(function()
-                if coroutine.yield(1) then return 'a'
-                elseif coroutine.yield(2) then return 'b' end
+                return coroutine.yield()
             end)
-            local o1,y1 = coroutine.resume(co)
-            local o2,y2 = coroutine.resume(co, false)
-            local o3,y3 = coroutine.resume(co, true)
-            return tostring(y1)..','..tostring(o2)..','..tostring(y2)..','..tostring(o3)..','..tostring(y3)
+            local ok, err = coroutine.resume(co)
+            return {tostring(ok), err}
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(
             result,
-            Ok(RespFrame::BulkString(Some(b"1,true,2,true,b".to_vec())))
+            Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"false".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"attempt to yield across metamethod/C-call boundary".to_vec()
+                )),
+            ])))
         );
     }
 
     #[test]
-    fn coroutine_yield_chain_falls_through_to_else_and_past_if_7lmle() {
-        // Verified against redis 7.2.4.
-        let mut store = Store::new();
-        // 3-level chain, both yields falsy -> else branch runs: "1,2,true,c".
-        let script_else = b"
-            local co=coroutine.create(function()
-                if coroutine.yield(1) then return 'a'
-                elseif coroutine.yield(2) then return 'b'
-                else return 'c' end
-            end)
-            local _,y1=coroutine.resume(co)
-            local _,y2=coroutine.resume(co,false)
-            local o3,y3=coroutine.resume(co,false)
-            return tostring(y1)..','..tostring(y2)..','..tostring(o3)..','..tostring(y3)
-        ";
-        assert_eq!(
-            eval_script(script_else, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"1,2,true,c".to_vec())))
-        );
-        // Chain with no else and no match -> execution continues past the if.
-        let script_fall = b"
-            local co=coroutine.create(function()
-                if coroutine.yield(1) then return 'a' elseif coroutine.yield(2) then return 'b' end
-                return 'fell'
-            end)
-            coroutine.resume(co); coroutine.resume(co,false)
-            local o,v=coroutine.resume(co,false)
-            return tostring(o)..','..tostring(v)
-        ";
-        assert_eq!(
-            eval_script(script_fall, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"true,fell".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_as_while_condition_resumes_each_iteration_7lmle() {
-        // Verified against redis 7.2.4: `while coroutine.yield(n) do n=n+1 end`
-        // yields n each iteration; a truthy resume continues the loop, a falsy
-        // resume exits and runs the trailing return. Result: "0,1,2,done:2".
+    fn coroutine_yield_inside_for_loop_errors_instead_of_silently_dropping_iterations() {
+        // (frankenredis-ztawj) bw15's resume_coroutine + exec_
+        // coroutine_stmts only track next_pc at the outer-stmt
+        // level, so a yield from inside a for-loop body cannot be
+        // resumed correctly — the loop would be skipped entirely
+        // on the next resume, silently dropping iterations 2..N.
+        // The fix detects this via nested_exec_stmts_depth > 0 at
+        // yield time and returns the upstream Lua 5.1 wording
+        // 'attempt to yield across metamethod/C-call boundary'
+        // instead of producing wrong results.
         let mut store = Store::new();
         let script = b"
-            local co=coroutine.create(function()
-                local n=0
-                while coroutine.yield(n) do n=n+1 end
-                return 'done:'..n
-            end)
-            local _,a=coroutine.resume(co)
-            local _,b=coroutine.resume(co,true)
-            local _,c=coroutine.resume(co,true)
-            local _,d=coroutine.resume(co,false)
-            return tostring(a)..','..tostring(b)..','..tostring(c)..','..tostring(d)
-        ";
-        assert_eq!(
-            eval_script(script, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"0,1,2,done:2".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_as_while_condition_break_exits_loop_7lmle() {
-        // Verified against redis 7.2.4: a `break` in the body of a
-        // yield-conditioned while exits the loop and runs trailing code.
-        // Result: "0,1,after:2".
-        let mut store = Store::new();
-        let script = b"
-            local co=coroutine.create(function()
-                local n=0
-                while coroutine.yield(n) do n=n+1; if n==2 then break end end
-                return 'after:'..n
-            end)
-            local _,a=coroutine.resume(co)
-            local _,b=coroutine.resume(co,true)
-            local _,c=coroutine.resume(co,true)
-            return tostring(a)..','..tostring(b)..','..tostring(c)
-        ";
-        assert_eq!(
-            eval_script(script, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"0,1,after:2".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_as_repeat_until_condition_resumes_each_iteration_7lmle() {
-        // Verified against redis 7.2.4: `repeat n=n+1 until coroutine.yield(n)`
-        // runs the body then yields n; a falsy resume loops, a truthy resume
-        // exits. Result: "1,2,done:2".
-        let mut store = Store::new();
-        let script = b"
-            local co=coroutine.create(function()
-                local n=0
-                repeat n=n+1 until coroutine.yield(n)
-                return 'done:'..n
-            end)
-            local _,a=coroutine.resume(co)
-            local _,b=coroutine.resume(co,false)
-            local _,c=coroutine.resume(co,true)
-            return tostring(a)..','..tostring(b)..','..tostring(c)
-        ";
-        assert_eq!(
-            eval_script(script, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"1,2,done:2".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_repeat_until_return_in_body_completes_7lmle() {
-        // Verified against redis 7.2.4: a `return` in the repeat body completes
-        // the coroutine before the until-condition is reached. Result:
-        // "1,true,ret:2".
-        let mut store = Store::new();
-        let script = b"
-            local co=coroutine.create(function()
-                local n=0
-                repeat n=n+1; if n==2 then return 'ret:'..n end until coroutine.yield(n)
-                return 'done:'..n
-            end)
-            local _,a=coroutine.resume(co)
-            local o2,b=coroutine.resume(co,false)
-            return tostring(a)..','..tostring(o2)..','..tostring(b)
-        ";
-        assert_eq!(
-            eval_script(script, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"1,true,ret:2".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_as_generic_for_iterator_resumes_with_triple_7lmle() {
-        // Verified against redis 7.2.4: `for x in coroutine.yield("need") do ...`
-        // suspends at the iterator expression; the resume value(s) become the
-        // iterator triple (fn, state, control) and the loop runs. With the
-        // resumed iterator below (control gets set to the returned value, not an
-        // index) only the first element is produced. Result: "need,true,sum:10".
-        let mut store = Store::new();
-        let script = b"
-            local co=coroutine.create(function()
-                local sum=0
-                for x in coroutine.yield('need') do sum=sum+x end
-                return 'sum:'..sum
-            end)
-            local _,req=coroutine.resume(co)
-            local data={10,20,30}
-            local function it2(_, prev) prev=prev+1; if prev>3 then return nil end; return data[prev] end
-            local o2,res=coroutine.resume(co, it2, nil, 0)
-            return tostring(req)..','..tostring(o2)..','..tostring(res)
-        ";
-        assert_eq!(
-            eval_script(script, &[], &[], &mut store, 0),
-            Ok(RespFrame::BulkString(Some(b"need,true,sum:10".to_vec())))
-        );
-    }
-
-    #[test]
-    fn coroutine_yield_inside_for_loop_resumes_each_iteration() {
-        let mut store = Store::new();
-        let script = b"
-            local co = coroutine.wrap(function()
+            local co = coroutine.create(function()
                 for i = 1, 3 do
                     coroutine.yield(i)
                 end
             end)
-            return co() .. co() .. co()
+            local ok, err = coroutine.resume(co)
+            return {tostring(ok), err}
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"123".to_vec()))));
+        assert_eq!(
+            result,
+            Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"false".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"attempt to yield across metamethod/C-call boundary".to_vec()
+                )),
+            ])))
+        );
     }
 
     #[test]
@@ -20865,60 +18357,6 @@ end
                 *expected,
                 "wrong error for {:?}",
                 String::from_utf8_lossy(body),
-            );
-        }
-    }
-
-    #[test]
-    fn lua_numeric_for_add_assign_fast_path_keeps_results() {
-        let mut store = Store::new();
-        let cases: &[(&[u8], RespFrame)] = &[
-            (
-                b"local s=0; for i=1,1000 do s=s+i end; return s",
-                RespFrame::Integer(500_500),
-            ),
-            (
-                b"local s=0; for i=1,1000 do s=i+s end; return s",
-                RespFrame::Integer(500_500),
-            ),
-            (
-                b"local s=0; for i=1,1000 do s=s+i*i end; return s",
-                RespFrame::Integer(333_833_500),
-            ),
-            (
-                b"local s=0; for i=1,1000 do s=i*i+s end; return s",
-                RespFrame::Integer(333_833_500),
-            ),
-            (
-                b"local s=0; for i=1000,1,-1 do s=s+i end; return s",
-                RespFrame::Integer(500_500),
-            ),
-            (
-                b"local s=0; for i=1,999,2 do s=s+i end; return s",
-                RespFrame::Integer(250_000),
-            ),
-            (
-                b"local s=0; for i=1,10,3 do s=s+i*i end; return s",
-                RespFrame::Integer(166),
-            ),
-            (
-                b"local s='0'; for i=1,3 do s=s+i end; return s",
-                RespFrame::Integer(6),
-            ),
-            (
-                b"local s='0'; for i=1,3 do s=s+i*i end; return s",
-                RespFrame::Integer(14),
-            ),
-        ];
-        for (script, expected) in cases {
-            let got = eval_script(script, &[], &[], &mut store, 0).unwrap_or_else(|e| {
-                panic!("eval {:?} failed: {e}", String::from_utf8_lossy(script))
-            });
-            assert_eq!(
-                got,
-                *expected,
-                "wrong result for {:?}",
-                String::from_utf8_lossy(script)
             );
         }
     }

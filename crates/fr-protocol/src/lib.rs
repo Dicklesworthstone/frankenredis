@@ -48,117 +48,34 @@ pub enum RespFrame {
 /// Used both for encoding (output) and parsing (input) to ensure
 /// roundtrip consistency: `parse(encode(frame)) == frame`.
 fn sanitize_inline_body(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let Some(first_dirty) = bytes
-        .iter()
-        .position(|&byte| byte == b'\r' || byte == b'\n')
-    else {
+    if !s.bytes().any(|b| b == b'\r' || b == b'\n') {
         return s.to_owned();
-    };
-
-    let mut sanitized = String::with_capacity(s.len());
-    sanitized.push_str(&s[..first_dirty]);
-    sanitized.push(' ');
-
-    let scan_start = first_dirty + 1;
-    let mut clean_start = scan_start;
-    for (relative, &byte) in bytes[scan_start..].iter().enumerate() {
-        if byte == b'\r' || byte == b'\n' {
-            let dirty = scan_start + relative;
-            // CR/LF are one-byte UTF-8 code points, so both slice boundaries are exact.
-            sanitized.push_str(&s[clean_start..dirty]);
-            sanitized.push(' ');
-            clean_start = dirty + 1;
-        }
     }
-    sanitized.push_str(&s[clean_start..]);
-    sanitized
-}
-
-/// Bench-only entry point for the production parsed inline-body sanitizer.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_sanitize_inline_body_candidate(body: &str) -> String {
-    std::hint::black_box(0_u8);
-    sanitize_inline_body(body)
-}
-
-/// Frozen pre-optimization parsed inline-body sanitizer for same-binary proof.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_sanitize_inline_body_reference(body: &str) -> String {
-    std::hint::black_box(1_u8);
-    if !body.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
-        return body.to_owned();
-    }
-    body.chars()
-        .map(|character| {
-            if character == '\r' || character == '\n' {
-                ' '
-            } else {
-                character
-            }
-        })
+    s.chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
         .collect()
-}
-
-/// (frankenredis-itoa2) Two-digit decimal lookup table: `DIGIT_PAIRS[2*k..2*k+2]`
-/// is the ASCII for `k` (`00`..`99`). Formatting two digits per iteration halves
-/// the loop count and the (compiler-lowered) divide-by-constant operations vs a
-/// digit-at-a-time `%10`/`/10` loop, on the universal RESP reply path (every
-/// length header + integer reply runs through here).
-const fn build_digit_pairs() -> [u8; 200] {
-    let mut t = [0u8; 200];
-    let mut k = 0usize;
-    while k < 100 {
-        t[k * 2] = b'0' + (k / 10) as u8;
-        t[k * 2 + 1] = b'0' + (k % 10) as u8;
-        k += 1;
-    }
-    t
-}
-const DIGIT_PAIRS: [u8; 200] = build_digit_pairs();
-
-/// Write the decimal ASCII of `val` into `buf` ending at `buf[end]`, returning
-/// the start index. `buf` must be at least 20 bytes and `end == buf.len()`.
-/// Two digits per step via [`DIGIT_PAIRS`]. (frankenredis-itoa2)
-/// (frankenredis-c47rl) `#[inline]`: cross-crate callers (score/integer reply formatters in
-/// fr-store/fr-runtime) otherwise pay an un-inlined call per element at lto=false — the
-/// ZRANGE WITHSCORES(10k) profile showed this as a separate 6.22%-self frame.
-#[inline]
-pub fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut val: u64) -> usize {
-    let mut pos = end;
-    while val >= 100 {
-        let pair = (val % 100) as usize * 2;
-        val /= 100;
-        pos -= 2;
-        buf[pos] = DIGIT_PAIRS[pair];
-        buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-    }
-    if val < 10 {
-        pos -= 1;
-        buf[pos] = b'0' + val as u8;
-    } else {
-        let pair = val as usize * 2;
-        pos -= 2;
-        buf[pos] = DIGIT_PAIRS[pair];
-        buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-    }
-    pos
 }
 
 /// Fast integer-to-bytes without format machinery. Writes decimal representation
 /// of `n` directly into `out`. Avoids the allocation overhead of write!().
 fn push_i64(out: &mut Vec<u8>, n: i64) {
-    let (neg, val) = if n < 0 {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let (neg, mut val) = if n < 0 {
         (true, (n as i128).unsigned_abs() as u64)
     } else {
         (false, n as u64)
     };
+    // Max i64 is 19 digits + sign = 20 bytes
     let mut buf = [0u8; 20];
-    let mut pos = write_u64_digits(&mut buf, 20, val);
+    let mut pos = 20;
+    while val > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
     if neg {
         pos -= 1;
         buf[pos] = b'-';
@@ -168,566 +85,38 @@ fn push_i64(out: &mut Vec<u8>, n: i64) {
 
 /// Fast usize-to-bytes for lengths (always non-negative).
 fn push_usize(out: &mut Vec<u8>, n: usize) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut val = n;
+    // Max usize on 64-bit is 20 digits
     let mut buf = [0u8; 20];
-    let pos = write_u64_digits(&mut buf, 20, n as u64);
+    let mut pos = 20;
+    while val > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
     out.extend_from_slice(&buf[pos..]);
 }
 
-/// Append a RESP length-prefixed header (`<prefix><n>\r\n`, e.g. `$14\r\n`, `*3\r\n`, `%2\r\n`).
-///
-/// `FUSED == true` (production) builds the prefix, digits, and `\r\n` terminator right-aligned in
-/// one stack buffer and emits them with a SINGLE `extend_from_slice` — the digits are written
-/// exactly ONCE (two-at-a-time via `DIGIT_PAIRS`, same core as `write_u64_digits`) directly into
-/// their final position, no intermediate copy. This replaces the prior three-call header shape
-/// (`extend(prefix)` + `push_usize` + `extend("\r\n")`) on the borrow-encode reply path that fronts
-/// every bulk-string / aggregate / map reply (GET / MGET / HGETALL / LRANGE / SMEMBERS / ZRANGE...).
-/// `FUSED == false` retains that exact prior shape for the same-binary A/B in
-/// `benches/push_len_header_fastpath.rs`; it is not on a production path. Byte-identical: the digit
-/// core matches `push_usize`. `n` is a length/count, always non-negative (max 20 u64 digits fit).
-#[inline]
-fn push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n: u64) {
-    if FUSED {
-        // prefix (1) + up to 20 digits (u64::MAX) + "\r\n" (2) = 23 bytes; 24 leaves buf[0] slack.
-        let mut buf = [0u8; 24];
-        buf[22] = b'\r';
-        buf[23] = b'\n';
-        let mut val = n;
-        let mut pos = 22;
-        while val >= 100 {
-            let pair = (val % 100) as usize * 2;
-            val /= 100;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        if val < 10 {
-            pos -= 1;
-            buf[pos] = b'0' + val as u8;
-        } else {
-            let pair = val as usize * 2;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        pos -= 1;
-        buf[pos] = prefix;
-        out.extend_from_slice(&buf[pos..24]);
-    } else {
-        out.extend_from_slice(&[prefix]);
-        push_usize(out, n as usize);
-        out.extend_from_slice(b"\r\n");
+fn decimal_u64_len(mut n: u64) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
     }
+    len
 }
 
-/// Bench hook for the same-binary A/B in `benches/push_len_header_fastpath.rs`. `FUSED = false`
-/// forces the prior three-call header path. Not on a production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n: u64) {
-    push_len_header::<FUSED>(out, prefix, n)
-}
-
-/// Bench hook for `benches/encode_array_reply_fastpath.rs`: encode an array of `count` bulk strings
-/// each holding `body` — the shape a populated `RespFrame::Array(Some(..))` of `BulkString`s emits
-/// (LRANGE / MGET / SMEMBERS / ZRANGE), which is where the owned-arm `push_len_header` fusion lands.
-/// Every RESP header (`*count\r\n` and each `$len\r\n`) goes through `push_len_header`; the bodies
-/// are identical in both arms, so only the header path differs — this measures the fusion's win in
-/// a realistic reply where real bodies dilute it. `FUSED = false` forces the prior three-call header
-/// shape for the same-binary A/B. Not on a production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_array_reply<const FUSED: bool>(count: usize, body: &[u8], out: &mut Vec<u8>) {
-    push_len_header::<FUSED>(out, b'*', count as u64);
-    for _ in 0..count {
-        push_len_header::<FUSED>(out, b'$', body.len() as u64);
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\r\n");
+fn decimal_usize_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
     }
-}
-
-/// Bench hook that faithfully reproduces `encode_bulk_string_slice`'s `Some` arm (the shipped
-/// bab278487 change) so it can be A/B'd in isolation. `FUSED = true` is exactly current production
-/// (fused `$<len>\r\n` header via `push_len_header`); `FUSED = false` is the exact pre-bab278487
-/// path (`extend("$")` + `push_usize` + `extend("\r\n")`). Both keep the identical `reserve` and
-/// body/terminator writes, so the A/B isolates the header shape alone — verifying whether the fused
-/// header still wins on a single bulk-string reply (GET/HGET) WITH a body present. Not on a
-/// production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_bulk_string<const FUSED: bool>(bytes: &[u8], out: &mut Vec<u8>) {
-    out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
-    if FUSED {
-        push_len_header::<true>(out, b'$', bytes.len() as u64);
-    } else {
-        out.extend_from_slice(b"$");
-        push_usize(out, bytes.len());
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(bytes);
-    out.extend_from_slice(b"\r\n");
-}
-
-/// Encode a bulk-string reply from borrowed bytes.
-///
-/// This is byte-identical to `RespFrame::BulkString(...).encode_into*` while
-/// letting hot reply paths skip materializing an owned `Vec<u8>` just to hand
-/// it to the frame encoder.
-pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec<u8>) {
-    encode_bulk_string_slice_impl::<true>(value, resp3, out);
-}
-
-/// (frankenredis-vlis9) `SMALL_FAST = true` emits the `$<len>\r\n` header for `len < 100` as a
-/// single const-length `extend_from_slice` — a compile-time-size store with no stack-buffer
-/// build, no per-element `reserve`, and no `ilog10` — because collection replies (HGETALL /
-/// LRANGE / SMEMBERS / ZRANGE) emit one such header per element and their lengths are almost
-/// always one or two digits. `SMALL_FAST = false` is the exact prior shape, kept for the
-/// same-binary A/B in `benches/encode_bulk_small_len.rs`.
-#[inline]
-fn encode_bulk_string_slice_impl<const SMALL_FAST: bool>(
-    value: Option<&[u8]>,
-    resp3: bool,
-    out: &mut Vec<u8>,
-) {
-    match value {
-        Some(bytes) => {
-            let len = bytes.len();
-            if SMALL_FAST && len < 10 {
-                out.extend_from_slice(&[b'$', b'0' + len as u8, b'\r', b'\n']);
-            } else if SMALL_FAST && len < 100 {
-                let pair = len * 2;
-                out.extend_from_slice(&[
-                    b'$',
-                    DIGIT_PAIRS[pair],
-                    DIGIT_PAIRS[pair + 1],
-                    b'\r',
-                    b'\n',
-                ]);
-            } else {
-                out.reserve(1 + decimal_usize_len(len) + 2 + len + 2);
-                push_len_header::<true>(out, b'$', len as u64);
-            }
-            out.extend_from_slice(bytes);
-            out.extend_from_slice(b"\r\n");
-        }
-        None if resp3 => out.extend_from_slice(b"_\r\n"),
-        None => out.extend_from_slice(b"$-1\r\n"),
-    }
-}
-
-/// Bench hook for the same-binary A/B in `benches/encode_bulk_small_len.rs`. `SMALL_FAST = false`
-/// forces the prior always-fused-header path. Not on a production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_bulk_string_slice_small<const SMALL_FAST: bool>(
-    value: Option<&[u8]>,
-    resp3: bool,
-    out: &mut Vec<u8>,
-) {
-    encode_bulk_string_slice_impl::<SMALL_FAST>(value, resp3, out);
-}
-
-/// Write a RESP aggregate header for an array (`*N\r\n`) or, when `resp3_set`,
-/// a RESP3 set (`~N\r\n`). Byte-identical to `RespFrame::Array(Some(..))` /
-/// `RespFrame::Set(Some(..))`'s header, letting borrow-encoded reply paths emit
-/// a collection without materializing a `Vec<RespFrame>`. Pair with one
-/// `encode_bulk_string_slice` per element.
-pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
-    out.reserve(1 + decimal_usize_len(len) + 2);
-    push_len_header::<true>(out, if resp3_set { b'~' } else { b'*' }, len as u64);
-}
-
-/// Write a field-value collection header for `pairs` entries: a RESP3 map
-/// (`%pairs\r\n`) when `resp3`, else a flat RESP2 array of `2*pairs` elements
-/// (`*2pairs\r\n`). Byte-identical to `RespFrame::Map(Some(..))` (RESP3) /
-/// `RespFrame::Array(Some(..))` with interleaved field,value (RESP2). Follow with
-/// `encode_bulk_string_slice` for each field then value. (frankenredis: HGETALL
-/// borrow-encode)
-pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
-    if resp3 {
-        out.reserve(1 + decimal_usize_len(pairs) + 2);
-        push_len_header::<true>(out, b'%', pairs as u64);
-    } else {
-        let flat = pairs * 2;
-        out.reserve(1 + decimal_usize_len(flat) + 2);
-        push_len_header::<true>(out, b'*', flat as u64);
-    }
-}
-
-/// How Redis's `zzlInsertAt` encodes `score` as a sorted-set listpack entry: it renders
-/// `d2string(score)` and then lets `lpStringToInt64` re-decide int-vs-string. Deciding it
-/// straight from the `f64` lets the two common arms skip that format + decimal re-parse.
-///
-/// This lives beside [`push_redis_double_ascii`] on purpose: it is a statement *about*
-/// `d2string`'s branching, and both the DUMP encoder (`fr-store`) and the RDB-save encoder
-/// (`fr-persist`) must agree with it. They previously kept private copies, which silently
-/// drifted — `fr-persist` formatted with Rust's `{}` (never scientific) and emitted
-/// `"0.0000001"` where upstream emits `"1e-7"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZsetScoreListpackEntry {
-    /// `d2string` emits a canonical i64 decimal, so the entry is int-encoded.
-    Int(i64),
-    /// `d2string`'s output provably is NOT a canonical i64 decimal, so the entry is
-    /// string-encoded and the formatted bytes need no re-parse.
-    Str,
-    /// Integral but outside `double2ll`'s window, so `d2string` falls back to grisu2 —
-    /// whose shortest form may still be a canonical i64 decimal. Must be re-parsed.
-    Reparse,
-}
-
-/// Classify `score` exactly as [`push_redis_double_ascii`] (`d2string`) branches, so the
-/// emitted listpack entry is byte-IDENTICAL to formatting the score and re-parsing it.
-///
-/// The `Reparse` arm is load-bearing, not defensive: above `double2ll`'s window grisu2 still
-/// emits a plain canonical decimal for some integral doubles — upstream renders
-/// `6917529027641081856` as `"6917529027641082000"` and int-encodes it — so those bytes must
-/// go through a `parse_listpack_integer`. Only `Str` may skip it.
-pub fn zset_score_listpack_entry(score: f64) -> ZsetScoreListpackEntry {
-    // "nan" / "inf" / "-inf" — never a canonical decimal.
-    if !score.is_finite() {
-        return ZsetScoreListpackEntry::Str;
-    }
-    // `d2string` special-cases zero BEFORE `double2ll`, and "-0" is non-canonical
-    // (`lpStringToInt64` rejects it) while "0" int-encodes. This must precede the integral
-    // test below, for which -0.0 is indistinguishable from +0.0.
-    if score == 0.0 {
-        return if score.is_sign_negative() {
-            ZsetScoreListpackEntry::Str
-        } else {
-            ZsetScoreListpackEntry::Int(0)
-        };
-    }
-    // A non-integral double's shortest grisu2 form always carries a '.' or an 'e': the
-    // plain-integer emit branch requires a non-negative decimal exponent, which would make
-    // the value integral. So the render can never re-parse as an integer.
-    if score.fract() != 0.0 {
-        return ZsetScoreListpackEntry::Str;
-    }
-    // `double2ll`'s window, mirrored bound-for-bound from `push_redis_double_ascii` below.
-    // Upstream re-checks `(long long)d == d` afterwards; `fract() == 0.0` above already
-    // proves the cast is exact, so the round trip back through f64 is skipped.
-    let lo = (-i64::MAX / 2) as f64;
-    let hi = (i64::MAX / 2) as f64;
-    if score >= lo && score <= hi {
-        return ZsetScoreListpackEntry::Int(score as i64);
-    }
-    ZsetScoreListpackEntry::Reparse
-}
-
-/// Append the Redis 7.2 `d2string` ASCII representation of `value` directly
-/// into `out`, byte-identical to [`format_redis_double`] but without building an
-/// intermediate `String`.
-pub fn push_redis_double_ascii(out: &mut Vec<u8>, value: f64) {
-    if value.is_nan() {
-        out.extend_from_slice(b"nan");
-        return;
-    }
-    if value.is_infinite() {
-        out.extend_from_slice(if value > 0.0 { b"inf" } else { b"-inf" });
-        return;
-    }
-    if value == 0.0 {
-        out.extend_from_slice(if value.is_sign_negative() {
-            b"-0"
-        } else {
-            b"0"
-        });
-        return;
-    }
-
-    let lo = (-i64::MAX / 2) as f64;
-    let hi = (i64::MAX / 2) as f64;
-    if value >= lo && value <= hi {
-        let truncated = value as i64;
-        if truncated as f64 == value {
-            push_i64(out, truncated);
-            return;
-        }
-    }
-
-    fpconv_dtoa_into(value, out);
-}
-
-/// Write the `push_i64` decimal representation of `n` into the front of `buf`,
-/// returning the byte length. Byte-identical to [`push_i64`] (same
-/// `write_u64_digits` core, same leading `-`), but into a caller-owned stack
-/// slice so a length-prefixed reply can be framed without a memmove.
-#[cfg_attr(feature = "bench-reference", inline(never))]
-fn write_i64_to_slice(n: i64, buf: &mut [u8]) -> usize {
-    write_i64_to_slice_impl::<false>(n, buf)
-}
-
-#[inline(always)]
-fn write_i64_to_slice_impl<const DIRECT: bool>(n: i64, buf: &mut [u8]) -> usize {
-    let (neg, val) = if n < 0 {
-        (true, (n as i128).unsigned_abs() as u64)
-    } else {
-        (false, n as u64)
-    };
-    if DIRECT {
-        let digits = decimal_u64_len(val);
-        let total = usize::from(neg) + digits;
-        let mut pos = total;
-        let mut remaining = val;
-        while remaining >= 100 {
-            let pair = (remaining % 100) as usize * 2;
-            remaining /= 100;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        if remaining < 10 {
-            pos -= 1;
-            buf[pos] = b'0' + remaining as u8;
-        } else {
-            let pair = remaining as usize * 2;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        if neg {
-            buf[0] = b'-';
-        }
-        debug_assert_eq!(pos, usize::from(neg));
-        return total;
-    }
-
-    let mut tmp = [0u8; 20];
-    let pos = write_u64_digits(&mut tmp, 20, val);
-    let digits = &tmp[pos..];
-    let mut i = 0;
-    if neg {
-        buf[0] = b'-';
-        i = 1;
-    }
-    buf[i..i + digits.len()].copy_from_slice(digits);
-    i + digits.len()
-}
-
-/// Same-binary resurrection hook for the direct `write_i64_to_slice` digit path.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_write_i64_to_slice<const DIRECT: bool>(n: i64, buf: &mut [u8; 24]) -> usize {
-    write_i64_to_slice_impl::<DIRECT>(n, buf)
-}
-
-/// Frame a RESP integer reply (`:<n>\r\n`) into `out`. `FUSED == true` (production) builds the
-/// `:` prefix, digits, and `\r\n` terminator in one stack buffer and appends them with a SINGLE
-/// `extend_from_slice` — one capacity check + one memcpy — on the universal counter/length reply
-/// path (INCR / LLEN / SCARD / EXISTS / DEL / SADD count / ...), instead of three separate extends
-/// (`:` prefix, `push_i64`'s own extend, `\r\n`). `FUSED == false` retains the exact prior
-/// three-call path for the same-binary A/B in `benches/encode_integer_fastpath.rs`; it is not on a
-/// production path. Byte-identical: `write_i64_to_slice` renders the same digits and leading `-` as
-/// `push_i64`.
-#[inline]
-fn encode_integer_reply<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
-    if FUSED {
-        // Build ":<n>\r\n" right-aligned in one stack buffer and emit it with a SINGLE
-        // extend_from_slice. The digits are written exactly ONCE (two-at-a-time via DIGIT_PAIRS,
-        // same core as write_u64_digits) directly into their final position — no intermediate
-        // digit copy — with the terminator pre-placed to their right and the ':' prefix (and any
-        // '-') filled to their left. ':' + up to 20 signed digits + "\r\n" = 23 bytes; 24 leaves
-        // buf[0] as slack so the worst case (i64::MIN) lands at buf[1..24].
-        let mut buf = [0u8; 24];
-        buf[22] = b'\r';
-        buf[23] = b'\n';
-        let (neg, mut val) = if n < 0 {
-            (true, (n as i128).unsigned_abs() as u64)
-        } else {
-            (false, n as u64)
-        };
-        let mut pos = 22;
-        while val >= 100 {
-            let pair = (val % 100) as usize * 2;
-            val /= 100;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        if val < 10 {
-            pos -= 1;
-            buf[pos] = b'0' + val as u8;
-        } else {
-            let pair = val as usize * 2;
-            pos -= 2;
-            buf[pos] = DIGIT_PAIRS[pair];
-            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
-        }
-        if neg {
-            pos -= 1;
-            buf[pos] = b'-';
-        }
-        pos -= 1;
-        buf[pos] = b':';
-        out.extend_from_slice(&buf[pos..24]);
-    } else {
-        out.extend_from_slice(b":");
-        push_i64(out, n);
-        out.extend_from_slice(b"\r\n");
-    }
-}
-
-/// Bench hook for the same-binary A/B in `benches/encode_integer_fastpath.rs`. `FUSED = false`
-/// forces the prior three-`extend_from_slice` integer-reply path. Not on a production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_integer<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
-    encode_integer_reply::<FUSED>(n, out)
-}
-
-/// Fast d2string cases that format into a fixed stack `buf` (returning the byte
-/// length): NaN/±inf, signed zero, and any integer-valued double in the i64
-/// fast-range. Byte-identical to the matching arms of [`push_redis_double_ascii`].
-/// Returns `None` for a genuinely fractional value, which needs `fpconv`.
-#[inline]
-fn try_format_redis_double_simple(value: f64, buf: &mut [u8; 24]) -> Option<usize> {
-    if value.is_nan() {
-        buf[..3].copy_from_slice(b"nan");
-        return Some(3);
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            buf[..3].copy_from_slice(b"inf");
-            Some(3)
-        } else {
-            buf[..4].copy_from_slice(b"-inf");
-            Some(4)
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            buf[..2].copy_from_slice(b"-0");
-            Some(2)
-        } else {
-            buf[0] = b'0';
-            Some(1)
-        };
-    }
-    let lo = (-i64::MAX / 2) as f64;
-    let hi = (i64::MAX / 2) as f64;
-    if value >= lo && value <= hi {
-        let truncated = value as i64;
-        if truncated as f64 == value {
-            return Some(write_i64_to_slice(truncated, buf));
-        }
-    }
-    None
-}
-
-/// Encode a Redis double reply directly into `out`: RESP3 Double when `resp3`
-/// is true, RESP2 bulk string otherwise. This is the allocation-free score
-/// reply primitive for hot zset paths.
-pub fn encode_redis_double(value: f64, resp3: bool, out: &mut Vec<u8>) {
-    encode_redis_double_impl::<true>(value, resp3, out);
-}
-
-/// Bench hook for the same-binary A/B in the frankenredis-c47rl proof. `FUSED = false` forces
-/// the prior five-append simple-path framing. Not on a production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_redis_double<const FUSED: bool>(value: f64, resp3: bool, out: &mut Vec<u8>) {
-    encode_redis_double_impl::<FUSED>(value, resp3, out);
-}
-
-/// (frankenredis-c47rl) `FUSED = true` frames the simple-path score in TWO appends: a
-/// const-length `$<n>\r\n` header (n <= 20, so one or two digits — the vlis9 recipe) and one
-/// `body+\r\n` extend with the terminator written into the stack buffer's tail (body bytes are
-/// still written exactly once — the formatter writes them, the single extend copies them).
-/// The prior shape paid five appends per score (`push($)` + `push_usize` + CRLF extend + body
-/// extend + CRLF extend) plus a `reserve`; ZRANGE WITHSCORES(10k) profiled it at 27.09% self
-/// with `write_u64_digits` a further 6.22% as an un-inlined frame. `FUSED = false` is the exact
-/// prior code for the byte-identity gate and the same-binary A/B.
-#[inline]
-fn encode_redis_double_impl<const FUSED: bool>(value: f64, resp3: bool, out: &mut Vec<u8>) {
-    // Fast path — the overwhelmingly common zset scores (integer-valued) plus
-    // the special constants format into a stack buffer, so the length-prefixed
-    // RESP2 reply can be written header-then-body IN ORDER. Redis's
-    // addReplyHumanLongDouble frames the same way (stack buffer, then bulk
-    // write). Byte-identical output.
-    let mut buf = [0u8; 24];
-    if let Some(n) = try_format_redis_double_simple(value, &mut buf) {
-        if FUSED {
-            // n <= 20 (19 digits + sign), so `buf[n..n + 2]` stays in bounds and the
-            // bulk length is always one or two decimal digits.
-            buf[n] = b'\r';
-            buf[n + 1] = b'\n';
-            if resp3 {
-                out.extend_from_slice(b",");
-            } else if n < 10 {
-                out.extend_from_slice(&[b'$', b'0' + n as u8, b'\r', b'\n']);
-            } else {
-                let pair = n * 2;
-                out.extend_from_slice(&[
-                    b'$',
-                    DIGIT_PAIRS[pair],
-                    DIGIT_PAIRS[pair + 1],
-                    b'\r',
-                    b'\n',
-                ]);
-            }
-            out.extend_from_slice(&buf[..n + 2]);
-            return;
-        }
-        let body = &buf[..n];
-        if resp3 {
-            out.reserve(1 + n + 2);
-            out.push(b',');
-        } else {
-            out.reserve(1 + 2 + n + 2 + 2);
-            out.push(b'$');
-            push_usize(out, n);
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\r\n");
-        return;
-    }
-
-    // Fractional fallback: fpconv writes into `out`, so keep the format-then-
-    // frame path for these rarer values (unchanged, byte-exact).
-    if resp3 {
-        out.reserve(27);
-        out.extend_from_slice(b",");
-        push_redis_double_ascii(out, value);
-        out.extend_from_slice(b"\r\n");
-        return;
-    }
-
-    out.reserve(64);
-    let body_start = out.len();
-    push_redis_double_ascii(out, value);
-    let body_end = out.len();
-    let body_len = body_end - body_start;
-
-    let mut digits = [0u8; 20];
-    let digit_start = write_u64_digits(&mut digits, 20, body_len as u64);
-    let digit_len = 20 - digit_start;
-    let header_len = 1 + digit_len + 2;
-
-    out.resize(body_end + header_len + 2, 0);
-    out.copy_within(body_start..body_end, body_start + header_len);
-    out[body_start] = b'$';
-    out[body_start + 1..body_start + 1 + digit_len].copy_from_slice(&digits[digit_start..]);
-    out[body_start + 1 + digit_len..body_start + header_len].copy_from_slice(b"\r\n");
-    out[body_start + header_len + body_len..body_start + header_len + body_len + 2]
-        .copy_from_slice(b"\r\n");
-}
-
-// (frankenredis-e4fu8) Branchless decimal digit count via ilog10. These run on the
-// reply hot path: every integer reply's size + every bulk-string/array/map header's
-// reserve sizing. `ilog10` lowers to a leading-zeros + tiny-table sequence (a handful
-// of instructions), replacing a data-dependent div-by-10 loop where each `/= 10` is
-// ~20-40 cycles and a u64 takes up to 19 iterations. Byte-identical to the old loops
-// for every input, including 0 (the loop returned 1; ilog10 is undefined at 0 so we
-// special-case it). Verified exhaustively at the digit boundaries by the test below.
-#[inline]
-fn decimal_u64_len(n: u64) -> usize {
-    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
-}
-
-#[inline]
-fn decimal_usize_len(n: usize) -> usize {
-    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+    len
 }
 
 fn decimal_i64_len(n: i64) -> usize {
@@ -738,38 +127,7 @@ fn decimal_i64_len(n: i64) -> usize {
     }
 }
 
-#[inline]
 fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
-    push_inline_sanitized_impl::<true>(out, body);
-}
-
-#[inline(always)]
-fn push_inline_sanitized_impl<const BULK_RUNS: bool>(out: &mut Vec<u8>, body: &[u8]) {
-    if BULK_RUNS {
-        let Some(first_dirty) = body.iter().position(|&byte| byte == b'\r' || byte == b'\n')
-        else {
-            out.extend_from_slice(body);
-            return;
-        };
-
-        out.reserve(body.len());
-        out.extend_from_slice(&body[..first_dirty]);
-        out.push(b' ');
-
-        let scan_start = first_dirty + 1;
-        let mut clean_start = scan_start;
-        for (relative, &byte) in body[scan_start..].iter().enumerate() {
-            if byte == b'\r' || byte == b'\n' {
-                let dirty = scan_start + relative;
-                out.extend_from_slice(&body[clean_start..dirty]);
-                out.push(b' ');
-                clean_start = dirty + 1;
-            }
-        }
-        out.extend_from_slice(&body[clean_start..]);
-        return;
-    }
-
     let needs_sanitize = body.iter().any(|&b| b == b'\r' || b == b'\n');
     if !needs_sanitize {
         out.extend_from_slice(body);
@@ -783,24 +141,6 @@ fn push_inline_sanitized_impl<const BULK_RUNS: bool>(out: &mut Vec<u8>, body: &[
             out.push(b);
         }
     }
-}
-
-/// Bench-only entry point for the production inline-body sanitizer.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_push_inline_sanitized_candidate(out: &mut Vec<u8>, body: &[u8]) {
-    std::hint::black_box(0_u8);
-    push_inline_sanitized_impl::<true>(out, body);
-}
-
-/// Frozen pre-optimization inline-body sanitizer for same-binary proof.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_push_inline_sanitized_reference(out: &mut Vec<u8>, body: &[u8]) {
-    std::hint::black_box(1_u8);
-    push_inline_sanitized_impl::<false>(out, body);
 }
 
 impl RespFrame {
@@ -889,7 +229,11 @@ impl RespFrame {
                 push_inline_sanitized(out, s.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }
-            Self::Integer(n) => encode_integer_reply::<true>(*n, out),
+            Self::Integer(n) => {
+                out.extend_from_slice(b":");
+                push_i64(out, *n);
+                out.extend_from_slice(b"\r\n");
+            }
             Self::BulkString(None) => out.extend_from_slice(b"$-1\r\n"),
             Self::BulkString(Some(bytes)) => {
                 out.extend_from_slice(b"$");
@@ -983,13 +327,7 @@ impl RespFrame {
     /// [`encode_into`], so this only diverges on the null leaves.
     ///
     /// [`encode_into`]: Self::encode_into
-    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn encode_into_resp3(&self, out: &mut Vec<u8>) {
-        self.encode_into_resp3_impl::<true>(out);
-    }
-
-    #[inline(always)]
-    fn encode_into_resp3_impl<const DIRECT_SCALARS: bool>(&self, out: &mut Vec<u8>) {
         match self {
             Self::BulkString(None) | Self::Array(None) | Self::Map(None) | Self::Set(None) => {
                 out.extend_from_slice(b"_\r\n");
@@ -999,7 +337,7 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3(out);
                 }
             }
             Self::Map(Some(entries)) => {
@@ -1007,8 +345,8 @@ impl RespFrame {
                 push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
-                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
-                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    key.encode_into_resp3(out);
+                    value.encode_into_resp3(out);
                 }
             }
             Self::Attribute(entries) => {
@@ -1016,8 +354,8 @@ impl RespFrame {
                 push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
-                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
-                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    key.encode_into_resp3(out);
+                    value.encode_into_resp3(out);
                 }
             }
             Self::Set(Some(frames)) => {
@@ -1025,7 +363,7 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3(out);
                 }
             }
             Self::Push(frames) => {
@@ -1033,51 +371,13 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3(out);
                 }
             }
             Self::Sequence(frames) => {
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3(out);
                 }
-            }
-            Self::SimpleString(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"+");
-                push_inline_sanitized(out, s.as_bytes());
-                out.extend_from_slice(b"\r\n");
-            }
-            Self::Error(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"-");
-                push_inline_sanitized(out, s.as_bytes());
-                out.extend_from_slice(b"\r\n");
-            }
-            Self::Integer(n) if DIRECT_SCALARS => encode_integer_reply::<true>(*n, out),
-            Self::BulkString(Some(bytes)) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"$");
-                push_usize(out, bytes.len());
-                out.extend_from_slice(b"\r\n");
-                out.extend_from_slice(bytes);
-                out.extend_from_slice(b"\r\n");
-            }
-            Self::Double(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b",");
-                out.extend_from_slice(s.as_bytes());
-                out.extend_from_slice(b"\r\n");
-            }
-            Self::BigNumber(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"(");
-                out.extend_from_slice(s.as_bytes());
-                out.extend_from_slice(b"\r\n");
-            }
-            Self::Bool(value) if DIRECT_SCALARS => {
-                out.extend_from_slice(if *value { b"#t\r\n" } else { b"#f\r\n" });
-            }
-            Self::Verbatim(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"=");
-                push_usize(out, s.len() + 4);
-                out.extend_from_slice(b"\r\ntxt:");
-                out.extend_from_slice(s.as_bytes());
-                out.extend_from_slice(b"\r\n");
             }
             // Scalars (SimpleString/Error/Integer/Double/Verbatim/populated
             // BulkString) carry no nulls and encode identically.
@@ -1094,14 +394,6 @@ impl RespFrame {
     }
 }
 
-/// Frozen pre-optimization RESP3 encoder for same-binary proof.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_encode_into_resp3_reference(frame: &RespFrame, out: &mut Vec<u8>) {
-    frame.encode_into_resp3_impl::<false>(out);
-}
-
 /// Format an f64 exactly as vendored Redis 7.2.4 util.c::d2string does,
 /// the canonical conversion behind ZSCORE / ZADD INCR / GEODIST and the
 /// RESP3 Double type. d2string special-cases nan/inf/±0, fast-paths
@@ -1116,14 +408,35 @@ pub fn bench_encode_into_resp3_reference(frame: &RespFrame, out: &mut Vec<u8>) {
 pub fn format_redis_double(value: f64) -> String {
     // Faithful port of util.c::d2string (the path addReplyHumanLongDouble /
     // addReplyDouble take for RESP2 scores): special-case nan/inf/±0, take the
-    // exact-integer ll2string fast path ONLY inside the window upstream's
-    // util.c::double2ll uses — `(double)(±LLONG_MAX/2)`, which rounds to ±2^62
-    // (4611686018427387904), NOT ±2^52 — otherwise grisu2 via fpconv_dtoa.
-    // The bound matters: the oracle renders 1e16/1e18/4e18 as plain decimals and
-    // only goes scientific at 5e18 ("5e+18"). (frankenredis-sk4ss)
-    let mut out = Vec::with_capacity(24);
-    push_redis_double_ascii(&mut out, value);
-    String::from_utf8(out).expect("ascii")
+    // exact-integer ll2string fast path ONLY inside the ±2^52 window upstream
+    // uses, otherwise grisu2 via fpconv_dtoa. (frankenredis-sk4ss)
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+
+    // Exact-integer fast path — faithful port of util.c::double2ll: take it iff
+    // `value` is in the safe range `[-LLONG_MAX/2, LLONG_MAX/2]` (≈ ±2^62) AND
+    // is an exact integer (`(i64)v == v`). Every integer-valued double in that
+    // range is losslessly an i64, so ll2string prints it exactly; ABOVE that
+    // (e.g. 6.30082e18) upstream falls to fpconv_dtoa, whose shortest decimal
+    // can drop trailing digits of the exact integer. The window is ±2^62, NOT
+    // ±2^52 — narrowing it wrongly routes values like 1.37e18 through grisu2.
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if value >= lo && value <= hi {
+        let truncated = value as i64;
+        if truncated as f64 == value {
+            return truncated.to_string();
+        }
+    }
+
+    fpconv_dtoa(value)
 }
 
 // ───────────────────────── fpconv_dtoa (grisu2) ────────────────────────────
@@ -1173,92 +486,49 @@ const FPCONV_EXPMIN: i32 = -60;
 
 /// `(frac, exp)` cached powers of ten (87 entries), verbatim from fpconv_powers.h.
 const FPCONV_POWERS: [(u64, i32); 87] = [
-    (18054884314459144840, -1220),
-    (13451937075301367670, -1193),
-    (10022474136428063862, -1166),
-    (14934650266808366570, -1140),
-    (11127181549972568877, -1113),
-    (16580792590934885855, -1087),
-    (12353653155963782858, -1060),
-    (18408377700990114895, -1034),
-    (13715310171984221708, -1007),
-    (10218702384817765436, -980),
-    (15227053142812498563, -954),
-    (11345038669416679861, -927),
-    (16905424996341287883, -901),
-    (12595523146049147757, -874),
-    (9384396036005875287, -847),
-    (13983839803942852151, -821),
-    (10418772551374772303, -794),
-    (15525180923007089351, -768),
-    (11567161174868858868, -741),
-    (17236413322193710309, -715),
-    (12842128665889583758, -688),
-    (9568131466127621947, -661),
-    (14257626930069360058, -635),
-    (10622759856335341974, -608),
-    (15829145694278690180, -582),
-    (11793632577567316726, -555),
-    (17573882009934360870, -529),
-    (13093562431584567480, -502),
-    (9755464219737475723, -475),
-    (14536774485912137811, -449),
-    (10830740992659433045, -422),
-    (16139061738043178685, -396),
-    (12024538023802026127, -369),
-    (17917957937422433684, -343),
-    (13349918974505688015, -316),
-    (9946464728195732843, -289),
-    (14821387422376473014, -263),
-    (11042794154864902060, -236),
-    (16455045573212060422, -210),
-    (12259964326927110867, -183),
-    (18268770466636286478, -157),
-    (13611294676837538539, -130),
-    (10141204801825835212, -103),
-    (15111572745182864684, -77),
-    (11258999068426240000, -50),
-    (16777216000000000000, -24),
-    (12500000000000000000, 3),
-    (9313225746154785156, 30),
-    (13877787807814456755, 56),
-    (10339757656912845936, 83),
-    (15407439555097886824, 109),
-    (11479437019748901445, 136),
-    (17105694144590052135, 162),
-    (12744735289059618216, 189),
-    (9495567745759798747, 216),
-    (14149498560666738074, 242),
-    (10542197943230523224, 269),
-    (15709099088952724970, 295),
-    (11704190886730495818, 322),
-    (17440603504673385349, 348),
-    (12994262207056124023, 375),
-    (9681479787123295682, 402),
-    (14426529090290212157, 428),
-    (10748601772107342003, 455),
-    (16016664761464807395, 481),
-    (11933345169920330789, 508),
-    (17782069995880619868, 534),
-    (13248674568444952270, 561),
-    (9871031767461413346, 588),
-    (14708983551653345445, 614),
-    (10959046745042015199, 641),
-    (16330252207878254650, 667),
-    (12166986024289022870, 694),
-    (18130221999122236476, 720),
-    (13508068024458167312, 747),
-    (10064294952495520794, 774),
-    (14996968138956309548, 800),
-    (11173611982879273257, 827),
-    (16649979327439178909, 853),
-    (12405201291620119593, 880),
-    (9242595204427927429, 907),
-    (13772540099066387757, 933),
-    (10261342003245940623, 960),
-    (15290591125556738113, 986),
-    (11392378155556871081, 1013),
-    (16975966327722178521, 1039),
+    (18054884314459144840, -1220), (13451937075301367670, -1193),
+    (10022474136428063862, -1166), (14934650266808366570, -1140),
+    (11127181549972568877, -1113), (16580792590934885855, -1087),
+    (12353653155963782858, -1060), (18408377700990114895, -1034),
+    (13715310171984221708, -1007), (10218702384817765436, -980),
+    (15227053142812498563, -954), (11345038669416679861, -927),
+    (16905424996341287883, -901), (12595523146049147757, -874),
+    (9384396036005875287, -847), (13983839803942852151, -821),
+    (10418772551374772303, -794), (15525180923007089351, -768),
+    (11567161174868858868, -741), (17236413322193710309, -715),
+    (12842128665889583758, -688), (9568131466127621947, -661),
+    (14257626930069360058, -635), (10622759856335341974, -608),
+    (15829145694278690180, -582), (11793632577567316726, -555),
+    (17573882009934360870, -529), (13093562431584567480, -502),
+    (9755464219737475723, -475), (14536774485912137811, -449),
+    (10830740992659433045, -422), (16139061738043178685, -396),
+    (12024538023802026127, -369), (17917957937422433684, -343),
+    (13349918974505688015, -316), (9946464728195732843, -289),
+    (14821387422376473014, -263), (11042794154864902060, -236),
+    (16455045573212060422, -210), (12259964326927110867, -183),
+    (18268770466636286478, -157), (13611294676837538539, -130),
+    (10141204801825835212, -103), (15111572745182864684, -77),
+    (11258999068426240000, -50), (16777216000000000000, -24),
+    (12500000000000000000, 3), (9313225746154785156, 30),
+    (13877787807814456755, 56), (10339757656912845936, 83),
+    (15407439555097886824, 109), (11479437019748901445, 136),
+    (17105694144590052135, 162), (12744735289059618216, 189),
+    (9495567745759798747, 216), (14149498560666738074, 242),
+    (10542197943230523224, 269), (15709099088952724970, 295),
+    (11704190886730495818, 322), (17440603504673385349, 348),
+    (12994262207056124023, 375), (9681479787123295682, 402),
+    (14426529090290212157, 428), (10748601772107342003, 455),
+    (16016664761464807395, 481), (11933345169920330789, 508),
+    (17782069995880619868, 534), (13248674568444952270, 561),
+    (9871031767461413346, 588), (14708983551653345445, 614),
+    (10959046745042015199, 641), (16330252207878254650, 667),
+    (12166986024289022870, 694), (18130221999122236476, 720),
+    (13508068024458167312, 747), (10064294952495520794, 774),
+    (14996968138956309548, 800), (11173611982879273257, 827),
+    (16649979327439178909, 853), (12405201291620119593, 880),
+    (9242595204427927429, 907), (13772540099066387757, 933),
+    (10261342003245940623, 960), (15290591125556738113, 986),
+    (11392378155556871081, 1013), (16975966327722178521, 1039),
     (12648080533535911531, 1066),
 ];
 
@@ -1353,13 +623,7 @@ fn fpconv_round_digit(
     }
 }
 
-fn fpconv_generate_digits(
-    fp: &Fp,
-    upper: &Fp,
-    lower: &Fp,
-    digits: &mut [u8],
-    k: &mut i32,
-) -> usize {
+fn fpconv_generate_digits(fp: &Fp, upper: &Fp, lower: &Fp, digits: &mut [u8], k: &mut i32) -> usize {
     let wfrac = upper.frac.wrapping_sub(fp.frac);
     let mut delta = upper.frac.wrapping_sub(lower.frac);
 
@@ -1462,21 +726,15 @@ fn fpconv_grisu2(d: f64, digits: &mut [u8], k: &mut i32) -> usize {
     fpconv_generate_digits(&w, &upper, &lower, digits, k)
 }
 
-fn fpconv_emit_digits_into(
-    digits: &[u8],
-    mut ndigits: usize,
-    k: i32,
-    neg: bool,
-    out: &mut Vec<u8>,
-) {
-    let start_len = out.len();
+fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> String {
     let exp = (k + ndigits as i32 - 1).abs();
+    let mut out: Vec<u8> = Vec::with_capacity(24);
 
     // write plain integer
     if k >= 0 && exp < ndigits as i32 + 7 {
         out.extend_from_slice(&digits[..ndigits]);
-        out.resize(start_len + ndigits + k as usize, b'0');
-        return;
+        out.resize(ndigits + k as usize, b'0');
+        return String::from_utf8(out).expect("ascii");
     }
 
     // write decimal w/o scientific notation
@@ -1486,7 +744,7 @@ fn fpconv_emit_digits_into(
             let off = (-offset) as usize;
             out.push(b'0');
             out.push(b'.');
-            out.resize(start_len + 2 + off, b'0');
+            out.resize(2 + off, b'0');
             out.extend_from_slice(&digits[..ndigits]);
         } else {
             let off = offset as usize;
@@ -1494,7 +752,7 @@ fn fpconv_emit_digits_into(
             out.push(b'.');
             out.extend_from_slice(&digits[off..ndigits]);
         }
-        return;
+        return String::from_utf8(out).expect("ascii");
     }
 
     // write decimal w/ scientific notation
@@ -1505,11 +763,7 @@ fn fpconv_emit_digits_into(
         out.extend_from_slice(&digits[1..ndigits]);
     }
     out.push(b'e');
-    out.push(if k + ndigits as i32 - 1 < 0 {
-        b'-'
-    } else {
-        b'+'
-    });
+    out.push(if k + ndigits as i32 - 1 < 0 { b'-' } else { b'+' });
 
     let mut e = exp;
     let mut cent = 0i32;
@@ -1526,17 +780,24 @@ fn fpconv_emit_digits_into(
         out.push(b'0');
     }
     out.push(((e % 10) as u8) + b'0');
+    String::from_utf8(out).expect("ascii")
 }
 
-fn fpconv_dtoa_into(d: f64, out: &mut Vec<u8>) {
+/// `fpconv_dtoa` for a FINITE, NON-ZERO `d` (callers special-case nan/inf/0).
+fn fpconv_dtoa(d: f64) -> String {
     let neg = d.to_bits() & FPCONV_SIGNMASK != 0;
     let mut digits = [0u8; 24];
     let mut k = 0i32;
     let ndigits = fpconv_grisu2(d, &mut digits, &mut k);
+    let body = fpconv_emit_digits(&digits, ndigits, k, neg);
     if neg {
-        out.push(b'-');
+        let mut s = String::with_capacity(body.len() + 1);
+        s.push('-');
+        s.push_str(&body);
+        s
+    } else {
+        body
     }
-    fpconv_emit_digits_into(&digits, ndigits, k, neg, out);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1619,25 +880,6 @@ pub enum RespParseError {
     /// string. Carries the offending type byte for the upstream wording
     /// "expected '$', got 'X'".
     ExpectedBulk(u8),
-    /// An inline request exceeded `PROTO_INLINE_MAX_SIZE` (64 KiB) before a
-    /// terminating newline arrived. Upstream networking.c::processInlineBuffer
-    /// (line 2146) replies "Protocol error: too big inline request" and closes
-    /// the connection via setProtocolError.
-    InlineRequestTooBig,
-    /// An inline request had unbalanced quotes (sdssplitargs returned NULL).
-    /// Upstream networking.c::processInlineBuffer (line 2161) replies
-    /// "Protocol error: unbalanced quotes in request" and closes the connection
-    /// via setProtocolError — like every other inline/multibulk protocol error.
-    UnbalancedInlineQuotes,
-    /// A multibulk `*<count>` header line exceeded the line cap before its
-    /// terminator. Upstream networking.c::processMultibulkBuffer replies
-    /// "Protocol error: too big mbulk count string". This is the count-line
-    /// twin of the generic `LineTooLong`. (frankenredis-linetoolong-wording)
-    TooBigMbulkCount,
-    /// A bulk `$<len>` header line — or a multibulk element's header — exceeded
-    /// the line cap before its terminator. Upstream replies "Protocol error:
-    /// too big bulk count string". (frankenredis-linetoolong-wording)
-    TooBigBulkCount,
 }
 
 impl Display for RespParseError {
@@ -1661,22 +903,7 @@ impl Display for RespParseError {
             Self::RecursionLimitExceeded => write!(f, "nested array depth limit exceeded"),
             Self::LineTooLong => write!(f, "RESP line too long"),
             Self::ExpectedBulk(got) => write!(f, "expected '$', got '{}'", char::from(*got)),
-            Self::InlineRequestTooBig => write!(f, "too big inline request"),
-            Self::UnbalancedInlineQuotes => write!(f, "unbalanced quotes in request"),
-            Self::TooBigMbulkCount => write!(f, "too big mbulk count string"),
-            Self::TooBigBulkCount => write!(f, "too big bulk count string"),
         }
-    }
-}
-
-/// Map a `LineTooLong` from a command-input header read to the context-specific
-/// upstream wording ("too big mbulk/bulk count string"); pass any other error
-/// through unchanged. (frankenredis-linetoolong-wording)
-fn line_too_long_as(e: RespParseError, mapped: RespParseError) -> RespParseError {
-    if matches!(e, RespParseError::LineTooLong) {
-        mapped
-    } else {
-        e
     }
 }
 
@@ -1692,77 +919,6 @@ pub fn parse_frame_with_config(
 ) -> Result<ParseResult, RespParseError> {
     let (frame, consumed) = parse_frame_internal(input, 0, 0, 0, config)?;
     Ok(ParseResult { frame, consumed })
-}
-
-/// Bench-only entry point for profiling the unchanged live RESP3 Big Number parser before the
-/// candidate exists. Keeping this wrapper behind `bench-reference` leaves production codegen
-/// untouched while giving `perf` a stable call boundary.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_big_number_current(input: &[u8]) -> Result<ParseResult, RespParseError> {
-    std::hint::black_box(0_u8);
-    let config = ParserConfig {
-        allow_resp3: true,
-        ..ParserConfig::default()
-    };
-    parse_frame_with_config(input, &config)
-}
-
-/// Bench-only entry point for the production validated-body copy.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_big_number_candidate(line: &[u8]) -> Result<Vec<u8>, RespParseError> {
-    std::hint::black_box(0_u8);
-    parse_resp3_big_number_body::<true>(line)
-}
-
-/// Frozen pre-optimization validated-body copy, including its redundant UTF-8 scan.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_big_number_reference(line: &[u8]) -> Result<Vec<u8>, RespParseError> {
-    std::hint::black_box(1_u8);
-    parse_resp3_big_number_body::<false>(line)
-}
-
-/// Bench-only entry point for profiling the unchanged live RESP3 Boolean parser before the
-/// candidate exists.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_bool_current(input: &[u8]) -> Result<ParseResult, RespParseError> {
-    std::hint::black_box(0_u8);
-    let config = ParserConfig {
-        allow_resp3: true,
-        ..ParserConfig::default()
-    };
-    parse_frame_with_config(input, &config)
-}
-
-/// Bench-only entry point for the production RESP3 Boolean body parser.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_bool_candidate(
-    input: &[u8],
-    start: usize,
-) -> Result<(RespFrame, usize), RespParseError> {
-    std::hint::black_box(0_u8);
-    parse_resp3_bool_impl::<true>(input, start)
-}
-
-/// Frozen pre-optimization RESP3 Boolean body parser.
-#[cfg(feature = "bench-reference")]
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_resp3_bool_reference(
-    input: &[u8],
-    start: usize,
-) -> Result<(RespFrame, usize), RespParseError> {
-    std::hint::black_box(1_u8);
-    parse_resp3_bool_impl::<false>(input, start)
 }
 
 /// Parse a CLIENT → SERVER **command** frame. Unlike [`parse_frame_with_config`]
@@ -1781,7 +937,8 @@ pub fn parse_command_frame(
     if input.first() != Some(&b'*') {
         return parse_frame_with_config(input, config);
     }
-    let (len, mut cursor) = parse_multibulk_count::<true>(input, 1)?;
+    let (line, mut cursor) = read_line(input, 1)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     // (frankenredis-6dpyk) Upstream networking.c::processMultibulkBuffer consumes
     // ANY multibulk count <= 0 as a no-op (no command, no reply), not just the
     // canonical *-1 null array — `*-2`/`*-3` must NOT error. Surface every
@@ -1802,20 +959,7 @@ pub fn parse_command_frame(
         match input.get(cursor) {
             None => return Err(RespParseError::Incomplete),
             Some(&b'$') => {}
-            Some(&other) => {
-                // (frankenredis-mbulkdefer) Match upstream
-                // networking.c::processMultibulkBuffer, which locates the
-                // element's line terminator (strchr '\r') BEFORE checking the
-                // type byte: a malformed element whose line hasn't fully
-                // arrived must WAIT (Incomplete), not error early. read_line
-                // yields Incomplete (no `\r\n` yet, within the line cap),
-                // LineTooLong (over cap == upstream "too big bulk count
-                // string"), or Ok (line complete -> the type byte is
-                // definitively wrong -> ExpectedBulk).
-                read_line(input, cursor)
-                    .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
-                return Err(RespParseError::ExpectedBulk(other));
-            }
+            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
         }
         let (item, consumed) = parse_bulk(input, cursor + 1, config, false)?;
         // A `$-1` null bulk is a valid *reply* but never a command argument.
@@ -1882,62 +1026,6 @@ pub fn parse_command_args_borrowed_into<'a>(
     }
 }
 
-/// Parse the RESP multibulk count line `<digits>\r\n` at `start`, returning `(len, cursor)` where
-/// `cursor` is the index just past the CRLF. `FAST == true` (production) fuses the common
-/// `<nonzero-digit><digits...>\r\n` POSITIVE count — scan digits, accumulate the value, AND locate
-/// the CRLF in a SINGLE pass — instead of `read_line` (scan for CRLF) then `parse_i64_strict`
-/// (re-scan the digits). Leading `0`, negatives (`*-1` / `*-2`), non-digit, >18 digits, and any
-/// malformed/incomplete CRLF FALL THROUGH to the exact prior two-pass path — with the same
-/// `TooBigMbulkCount` / `InvalidMultibulkLength` mapping — so every `len` (incl. negative), error,
-/// and Incomplete boundary is byte-identical. `FAST == false` forces that slow path for the
-/// same-binary A/B in `benches/parse_multibulk_count_fastpath.rs`.
-#[inline]
-fn parse_multibulk_count<const FAST: bool>(
-    input: &[u8],
-    start: usize,
-) -> Result<(i64, usize), RespParseError> {
-    if FAST
-        && let Some(&first) = input.get(start)
-        && first.is_ascii_digit()
-        && first != b'0'
-    {
-        let mut val = (first - b'0') as u64;
-        let mut i = start + 1;
-        // 1..=18 nonzero-lead digits are always a positive count that fits i64; longer falls back.
-        let digit_limit = start + 18;
-        loop {
-            match input.get(i) {
-                Some(&b) if b.is_ascii_digit() => {
-                    if i >= digit_limit {
-                        break;
-                    }
-                    val = val * 10 + u64::from(b - b'0');
-                    i += 1;
-                }
-                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
-                    return Ok((val as i64, i + 2));
-                }
-                _ => break,
-            }
-        }
-    }
-    let (line, cursor) =
-        read_line(input, start).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
-    Ok((len, cursor))
-}
-
-/// Bench hook for the same-binary A/B in `benches/parse_multibulk_count_fastpath.rs`.
-/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_multibulk_count<const FAST: bool>(
-    input: &[u8],
-    start: usize,
-) -> Result<(i64, usize), RespParseError> {
-    parse_multibulk_count::<FAST>(input, start)
-}
-
 fn parse_command_args_borrowed_into_inner<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -1948,7 +1036,8 @@ fn parse_command_args_borrowed_into_inner<'a>(
         Some(&other) => return Err(RespParseError::InvalidPrefix(other)),
         None => return Err(RespParseError::Incomplete),
     }
-    let (len, mut cursor) = parse_multibulk_count::<true>(input, 1)?;
+    let (line, mut cursor) = read_line(input, 1)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     // (frankenredis-6dpyk) Any multibulk count <= 0 is a no-op upstream — `*-2`
     // must not error. Mirror parse_command_frame: every negative count becomes
     // the null-array no-op; `*0` falls through to the empty-args path.
@@ -1970,16 +1059,7 @@ fn parse_command_args_borrowed_into_inner<'a>(
         match input.get(cursor) {
             None => return Err(RespParseError::Incomplete),
             Some(&b'$') => {}
-            Some(&other) => {
-                // (frankenredis-mbulkdefer) Mirror upstream
-                // processMultibulkBuffer: find the element's line terminator
-                // before checking the type byte, so a malformed element whose
-                // line hasn't fully arrived WAITS (Incomplete) instead of
-                // erroring early. See the owned-parser twin above.
-                read_line(input, cursor)
-                    .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
-                return Err(RespParseError::ExpectedBulk(other));
-            }
+            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
         }
         let (arg, consumed) = parse_bulk_slice(input, cursor + 1, config)?;
         let Some(arg) = arg else {
@@ -2002,34 +1082,6 @@ fn parse_command_args_borrowed_into_inner<'a>(
 /// the Rust call stack linearly with M, regardless of the recursion-
 /// depth budget. (frankenredis-oafun)
 const RESP3_ATTRIBUTE_CHAIN_LIMIT: usize = 8;
-
-#[inline(always)]
-fn parse_resp3_big_number_body<const DIRECT_COPY: bool>(
-    line: &[u8],
-) -> Result<Vec<u8>, RespParseError> {
-    if line.is_empty() {
-        return Err(RespParseError::InvalidInteger);
-    }
-    let digits_start = match line[0] {
-        b'+' | b'-' => 1,
-        _ => 0,
-    };
-    if digits_start == line.len()
-        || line[digits_start..]
-            .iter()
-            .any(|byte| !byte.is_ascii_digit())
-    {
-        return Err(RespParseError::InvalidInteger);
-    }
-    if DIRECT_COPY {
-        // The validator above proves that every accepted byte is ASCII, hence valid UTF-8.
-        return Ok(line.to_vec());
-    }
-    let text = std::str::from_utf8(line)
-        .map_err(|_| RespParseError::InvalidUtf8)?
-        .to_string();
-    Ok(text.into_bytes())
-}
 
 fn parse_frame_internal(
     input: &[u8],
@@ -2098,8 +1150,22 @@ fn parse_frame_internal(
             // Empty / non-numeric payloads are malformed.
             // (frankenredis-u1xg5)
             let (line, consumed) = read_line(input, next)?;
-            let bytes = parse_resp3_big_number_body::<true>(line)?;
-            Ok((RespFrame::BulkString(Some(bytes)), consumed))
+            if line.is_empty() {
+                return Err(RespParseError::InvalidInteger);
+            }
+            let digits_start = match line[0] {
+                b'+' | b'-' => 1,
+                _ => 0,
+            };
+            if digits_start == line.len()
+                || line[digits_start..].iter().any(|b| !b.is_ascii_digit())
+            {
+                return Err(RespParseError::InvalidInteger);
+            }
+            let s = std::str::from_utf8(line)
+                .map_err(|_| RespParseError::InvalidUtf8)?
+                .to_string();
+            Ok((RespFrame::BulkString(Some(s.into_bytes())), consumed))
         }
         b'_' => {
             let (line, consumed) = read_line(input, next)?;
@@ -2132,8 +1198,8 @@ fn parse_resp3_map(
     depth: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (len, mut cursor) =
-        parse_frame_len_line::<true>(input, start, RespParseError::InvalidMultibulkLength)?;
+    let (line, mut cursor) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if len == -1 {
         return Ok((RespFrame::Array(None), cursor));
     }
@@ -2159,24 +1225,7 @@ fn parse_resp3_map(
     Ok((RespFrame::Array(Some(items)), cursor))
 }
 
-#[cfg_attr(feature = "bench-reference", inline(never))]
 fn parse_resp3_bool(input: &[u8], start: usize) -> Result<(RespFrame, usize), RespParseError> {
-    parse_resp3_bool_impl::<true>(input, start)
-}
-
-#[inline(always)]
-fn parse_resp3_bool_impl<const FIXED_WIDTH: bool>(
-    input: &[u8],
-    start: usize,
-) -> Result<(RespFrame, usize), RespParseError> {
-    if FIXED_WIDTH {
-        if input.get(start..).is_some_and(|tail| tail.starts_with(b"t\r\n")) {
-            return Ok((RespFrame::Integer(1), start + 3));
-        }
-        if input.get(start..).is_some_and(|tail| tail.starts_with(b"f\r\n")) {
-            return Ok((RespFrame::Integer(0), start + 3));
-        }
-    }
     let (line, consumed) = read_line(input, start)?;
     let flag = match line {
         b"t" => 1,
@@ -2191,8 +1240,8 @@ fn parse_resp3_verbatim(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (len, consumed) =
-        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len < 0 {
         return Err(RespParseError::InvalidBulkLength);
     }
@@ -2224,8 +1273,8 @@ fn parse_resp3_blob_error(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (len, consumed) =
-        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len < 0 {
         return Err(RespParseError::InvalidBulkLength);
     }
@@ -2249,70 +1298,14 @@ fn parse_resp3_blob_error(
     Ok((RespFrame::Error(text), end))
 }
 
-/// Parse a RESP frame count/length line `<digits>\r\n` at `start` for the owned-frame parsers
-/// (`parse_bulk`, `parse_array` — the `parse_frame` path used on the fr-runtime / fr-command /
-/// fr-server connection reads), returning `(len, cursor)` where `cursor` is just past the CRLF and
-/// `len` is the raw i64 (caller handles `-1`/negative). `FAST == true` (production) fuses the common
-/// `<nonzero-digit><digits...>\r\n` POSITIVE case into one scan+accumulate; leading `0`, negatives,
-/// non-digit, >18 digits, and any malformed/incomplete CRLF FALL THROUGH to the exact prior
-/// `read_line` + `parse_i64_strict` path (read_line errors propagate RAW, as these parsers do; a
-/// parse failure maps to `parse_err`). Byte-identical for the full `(len, cursor)` incl. negative
-/// len, every error, and Incomplete. `FAST == false` forces the slow path for the same-binary A/B
-/// in `benches/parse_frame_len_line_fastpath.rs`.
-#[inline]
-fn parse_frame_len_line<const FAST: bool>(
-    input: &[u8],
-    start: usize,
-    parse_err: RespParseError,
-) -> Result<(i64, usize), RespParseError> {
-    if FAST
-        && let Some(&first) = input.get(start)
-        && first.is_ascii_digit()
-        && first != b'0'
-    {
-        let mut val = (first - b'0') as u64;
-        let mut i = start + 1;
-        let digit_limit = start + 18;
-        loop {
-            match input.get(i) {
-                Some(&b) if b.is_ascii_digit() => {
-                    if i >= digit_limit {
-                        break;
-                    }
-                    val = val * 10 + u64::from(b - b'0');
-                    i += 1;
-                }
-                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
-                    return Ok((val as i64, i + 2));
-                }
-                _ => break,
-            }
-        }
-    }
-    let (line, cursor) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| parse_err)?;
-    Ok((len, cursor))
-}
-
-/// Bench hook for the same-binary A/B in `benches/parse_frame_len_line_fastpath.rs`.
-/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_frame_len_line<const FAST: bool>(
-    input: &[u8],
-    start: usize,
-) -> Result<(i64, usize), RespParseError> {
-    parse_frame_len_line::<FAST>(input, start, RespParseError::InvalidBulkLength)
-}
-
 fn parse_bulk(
     input: &[u8],
     start: usize,
     config: &ParserConfig,
     validate_terminator: bool,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (len, consumed) =
-        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len == -1 {
         return Ok((RespFrame::BulkString(None), consumed));
     }
@@ -2349,65 +1342,7 @@ fn parse_bulk_slice<'a>(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
-    parse_bulk_slice_impl::<true>(input, start, config)
-}
-
-/// `FAST == true` (production) fuses the header scan for the overwhelmingly common
-/// `<nonzero-digit><digits...>\r\n` bulk length — every command argument — into a SINGLE pass that
-/// accumulates the length AND locates the CRLF, instead of `read_line` (which scans for CRLF) then
-/// `parse_i64_strict` (which re-scans the same digits). Any deviation (leading `0`, `-1`/negative,
-/// non-digit, >18 digits, or a malformed/incomplete CRLF) FALLS THROUGH to the exact prior slow
-/// path, so every reply, error, and Incomplete boundary is byte-identical. `FAST == false` forces
-/// that slow path verbatim for the same-binary A/B in `benches/parse_bulk_slice_fastpath.rs`.
-#[inline]
-fn parse_bulk_slice_impl<'a, const FAST: bool>(
-    input: &'a [u8],
-    start: usize,
-    config: &ParserConfig,
-) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
-    if FAST
-        && let Some(&first) = input.get(start)
-        && first.is_ascii_digit()
-        && first != b'0'
-    {
-        let mut val = (first - b'0') as u64;
-        let mut i = start + 1;
-        // 18 digits keeps `val` far inside u64 and below any realistic proto-max-bulk-len; a
-        // longer (or overflowing) length is rare and falls back for exact handling.
-        let digit_limit = start + 18;
-        loop {
-            match input.get(i) {
-                Some(&b) if b.is_ascii_digit() => {
-                    if i >= digit_limit {
-                        break; // too many digits — fall back
-                    }
-                    val = val * 10 + u64::from(b - b'0');
-                    i += 1;
-                }
-                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
-                    let consumed = i + 2;
-                    let data_len = val as usize;
-                    if data_len > config.max_bulk_len {
-                        return Err(RespParseError::BulkLengthTooLarge);
-                    }
-                    let end = consumed
-                        .checked_add(data_len)
-                        .and_then(|idx| idx.checked_add(2))
-                        .ok_or(RespParseError::Incomplete)?;
-                    if input.len() < end {
-                        return Err(RespParseError::Incomplete);
-                    }
-                    // Command path: do NOT validate the trailing 2 bytes. (frankenredis-v4cl4)
-                    return Ok((Some(&input[consumed..consumed + data_len]), end));
-                }
-                _ => break, // non-digit / lone '\r' / incomplete CRLF — fall back
-            }
-        }
-    }
-
-    // Slow path — also the fast path's fallback; exact prior behavior.
-    let (line, consumed) = read_line(input, start)
-        .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
+    let (line, consumed) = read_line(input, start)?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len == -1 {
         return Ok((None, consumed));
@@ -2431,26 +1366,14 @@ fn parse_bulk_slice_impl<'a, const FAST: bool>(
     Ok((Some(&input[consumed..consumed + data_len]), end))
 }
 
-/// Bench hook for the same-binary A/B in `benches/parse_bulk_slice_fastpath.rs`.
-/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_bulk_slice<'a, const FAST: bool>(
-    input: &'a [u8],
-    start: usize,
-    config: &ParserConfig,
-) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
-    parse_bulk_slice_impl::<FAST>(input, start, config)
-}
-
 fn parse_array(
     input: &[u8],
     start: usize,
     depth: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (len, mut cursor) =
-        parse_frame_len_line::<true>(input, start, RespParseError::InvalidMultibulkLength)?;
+    let (line, mut cursor) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if len == -1 {
         return Ok((RespFrame::Array(None), cursor));
     }
@@ -2475,79 +1398,9 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<true, true, true, true>(input)
-}
-
-/// Bench hook for the same-binary A/B in `benches/parse_i64_fastpath.rs`.
-///
-/// `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks on every
-/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs,
-/// `TWO_DIGIT = false` retains the exact parser that production used before the fixed-width
-/// positive two-digit shortcut, and `THREE_DIGIT = false` retains the parser that production used
-/// before the fixed-width positive three-digit shortcut. No reference configuration is on a
-/// production path.
-#[doc(hidden)]
-#[inline(never)]
-pub fn bench_parse_i64_strict<
-    const FAST: bool,
-    const ONE_DIGIT: bool,
-    const TWO_DIGIT: bool,
-    const THREE_DIGIT: bool,
->(
-    input: &[u8],
-) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<FAST, ONE_DIGIT, TWO_DIGIT, THREE_DIGIT>(input)
-}
-
-fn parse_i64_strict_impl<
-    const FAST: bool,
-    const ONE_DIGIT: bool,
-    const TWO_DIGIT: bool,
-    const THREE_DIGIT: bool,
->(
-    input: &[u8],
-) -> Result<i64, RespParseError> {
     let slen = input.len();
     if slen == 0 || slen > 20 {
         return Err(RespParseError::InvalidInteger);
-    }
-    // The overwhelmingly common RESP length/count headers are one digit (`$3`, `*2`, ...).
-    // The previous `slen == 1 && input[0] == b'0'` check already paid the length branch, but only
-    // zero returned there; 1..=9 continued through sign detection, range checks, accumulator setup,
-    // and final i64 bounds. Return every valid one-digit integer directly. Multi-digit inputs take
-    // the same not-taken length branch as before, and the reference arm below retains the literal
-    // old path for the in-binary A/B.
-    if ONE_DIGIT && slen == 1 {
-        let digit = input[0].wrapping_sub(b'0');
-        return if digit <= 9 {
-            Ok(i64::from(digit))
-        } else {
-            Err(RespParseError::InvalidInteger)
-        };
-    }
-    // Bulk lengths and array counts commonly sit in 10..=99. Once the two bytes are known ASCII
-    // digits with a nonzero tens place, their value is fixed and cannot reach any sign or range
-    // edge. Return it before the general sign/accumulator/final-bounds path. Invalid, leading-zero,
-    // and signed two-byte inputs deliberately fall through to the literal prior parser below.
-    if TWO_DIGIT && slen == 2 {
-        let tens = input[0].wrapping_sub(b'0');
-        let ones = input[1].wrapping_sub(b'0');
-        if (1..=9).contains(&tens) && ones <= 9 {
-            return Ok(i64::from(tens * 10 + ones));
-        }
-    }
-    // Medium bulk lengths (`$100`..`$999`) — values a few hundred bytes long — are the common
-    // three-digit RESP header. Three ASCII digits with a nonzero hundreds place have a fixed value
-    // (max 999) that cannot reach any sign or i64 range edge, so return it before the general
-    // sign/accumulator/final-bounds path. Leading-zero, signed, and invalid three-byte inputs
-    // deliberately fall through to the literal prior parser below.
-    if THREE_DIGIT && slen == 3 {
-        let hundreds = input[0].wrapping_sub(b'0');
-        let tens = input[1].wrapping_sub(b'0');
-        let ones = input[2].wrapping_sub(b'0');
-        if (1..=9).contains(&hundreds) && tens <= 9 && ones <= 9 {
-            return Ok(i64::from(hundreds) * 100 + i64::from(tens) * 10 + i64::from(ones));
-        }
     }
     if slen == 1 && input[0] == b'0' {
         return Ok(0);
@@ -2565,45 +1418,21 @@ fn parse_i64_strict_impl<
     if input[p] >= b'1' && input[p] <= b'9' {
         let mut v: u64 = (input[p] - b'0') as u64;
         p += 1;
-        // (perf) A value with <= 19 decimal digits can never overflow u64 (max 19-digit
-        // ~1e19 < u64::MAX ~1.84e19), so the per-digit overflow guards below are dead code on
-        // that path — the common bulk-length / multibulk-count case. Take an unchecked
-        // accumulation loop then; only a 20-digit input (positive only — a negative caps at 19
-        // digits since `slen > 20` was already rejected) keeps the guarded loop. Byte-identical:
-        // the parsed `v` is the same (no overflow was possible) and the final i64-range check
-        // below is unchanged, so every result and error matches the guarded path.
-        // Gated on `p < slen` so a SINGLE-digit length (the hot `$3` / `*3` header) skips the
-        // digit-count computation + branch entirely and stays byte-for-byte the pre-change path
-        // (its loop ran zero times anyway) — Pareto-safe, faster only where there are 2+ digits.
-        if p < slen {
-            let digit_count = slen - usize::from(negative);
-            if FAST && digit_count <= 19 {
-                while p < slen {
-                    let b = input[p];
-                    if !b.is_ascii_digit() {
-                        return Err(RespParseError::InvalidInteger);
-                    }
-                    v = v * 10 + (b - b'0') as u64;
-                    p += 1;
+        while p < slen {
+            let b = input[p];
+            if b.is_ascii_digit() {
+                if v > (u64::MAX / 10) {
+                    return Err(RespParseError::InvalidInteger);
                 }
+                v *= 10;
+                let digit = (b - b'0') as u64;
+                if v > (u64::MAX - digit) {
+                    return Err(RespParseError::InvalidInteger);
+                }
+                v += digit;
+                p += 1;
             } else {
-                while p < slen {
-                    let b = input[p];
-                    if b.is_ascii_digit() {
-                        if v > (u64::MAX / 10) {
-                            return Err(RespParseError::InvalidInteger);
-                        }
-                        v *= 10;
-                        let digit = (b - b'0') as u64;
-                        if v > (u64::MAX - digit) {
-                            return Err(RespParseError::InvalidInteger);
-                        }
-                        v += digit;
-                        p += 1;
-                    } else {
-                        return Err(RespParseError::InvalidInteger);
-                    }
-                }
+                return Err(RespParseError::InvalidInteger);
             }
         }
 
@@ -2643,1008 +1472,12 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 }
 
 #[cfg(test)]
-mod d2string_edge_cases {
-    use super::{
-        ZsetScoreListpackEntry, format_redis_double, push_redis_double_ascii,
-        zset_score_listpack_entry,
-    };
-
-    /// `(f64 bit pattern, exact text)` — captured from **vendored redis 7.2.4** by running
-    /// `ZADD z <repr> m; ZSCORE z m` against a live server (2026-07-10). All 51 rows also had
-    /// byte-identical `DUMP` payloads between fr and the oracle.
-    ///
-    /// Keyed by bit pattern, not by literal, so subnormals survive the source round trip.
-    ///
-    /// These pin `d2string` (`util.c`) at the boundaries that actually bite:
-    ///   * the exact-integer `ll2string` window is `±(LLONG_MAX/2)` == 2^62, NOT 2^52 —
-    ///     `1e16`/`1e18`/`4e18`/`2^62` print as plain decimals, `5e18` prints as `"5e+18"`;
-    ///   * grisu2's plain-vs-scientific switch: `1e-5` -> `"0.00001"` but `1e-7` -> `"1e-7"`,
-    ///     and `123456789.12345679` -> `"1.2345678912345679e+8"` (scientific at ~1.2e8);
-    ///   * 17-significant-digit round trips (`0.1+0.2`, `1.2345678901234567`);
-    ///   * subnormals down to `5e-324`, and the normal/subnormal boundary;
-    ///   * `inf` / `-inf`.
-    ///
-    /// Regressing any row means a Redis client reading our RDB or `ZSCORE` sees different
-    /// score TEXT than upstream would emit.
-    const VENDORED: &[(u64, &str)] = &[
-        (0x0000000000000000, "0"),
-        (0x3FF0000000000000, "1"),
-        (0xBFF0000000000000, "-1"),
-        (0x405FC00000000000, "127"),
-        (0x4060000000000000, "128"),
-        (0x40B0000000000000, "4096"),
-        (0x40E0000000000000, "32768"),
-        (0x41E0000000000000, "2147483648"),
-        (0x4330000000000000, "4503599627370496"),  // 2^52
-        (0x4330000000000001, "4503599627370497"),  // 2^52 + 1
-        (0x4340000000000000, "9007199254740992"),  // 2^53
-        (0x430C6BF526340000, "1000000000000000"),  // 1e15
-        (0x4341C37937E08000, "10000000000000000"), // 1e16 — plain, NOT "1e+16"
-        (0x4376345785D8A000, "100000000000000000"),
-        (0x43ABC16D674EC800, "1000000000000000000"), // 1e18
-        (0x43BBC16D674EC800, "2000000000000000000"),
-        (0x43CBC16D674EC800, "4000000000000000000"),
-        (0x43D0000000000000, "4611686018427387904"), // 2^62 == double2ll's bound
-        (0x43D0000000000001, "4611686018427389000"), // just above the bound, still plain
-        (0x43D8000000000000, "6917529027641082000"), // grisu2 counterexample: plain + int-encodes
-        (0x43E0000000000000, "9223372036854776000"), // 2^63: plain, but overflows i64
-        (0x43D158E460913D00, "5e+18"),               // first round value that goes scientific
-        (0x43D8493FBA64EF00, "7e+18"),
-        (0x43E158E460913D00, "1e+19"),
-        (0x4415AF1D78B58C40, "1e+20"),
-        (0x444B1AE4D6E2EF50, "1e+21"),
-        (0x3FB999999999999A, "0.1"),
-        (0x3FC999999999999A, "0.2"),
-        (0x3FD3333333333333, "0.3"),
-        (0x3FD3333333333334, "0.30000000000000004"), // 0.1 + 0.2, 17 sig digits
-        (0x4004000000000000, "2.5"),
-        (0xC004000000000000, "-2.5"),
-        (0x40091EB851EB851F, "3.14"),
-        (0x3FD5555555555555, "0.3333333333333333"),
-        (0x3FF3C0CA428C59FB, "1.2345678901234567"),
-        (0x419D6F34547E6B75, "1.2345678912345679e+8"), // scientific at ~1.2e8
-        (0x3EE4F8B588E368F1, "0.00001"),               // 1e-5 stays fixed
-        (0x3EB0C6F7A0B5ED8D, "0.000001"),              // 1e-6 stays fixed
-        (0x3E7AD7F29ABCAF48, "1e-7"),                  // 1e-7 flips to scientific
-        (0x3DDB7CDFD9D7BDBB, "1e-10"),
-        (0x2B2BFF2EE48E0530, "1e-100"),
-        (0x0010000000000000, "2.2250738585072014e-308"), // smallest normal
-        (0x000FFFFFFFFFFFFF, "2.225073858507201e-308"),  // largest subnormal
-        (0x0000000000000001, "5e-324"),                  // smallest subnormal
-        (0x8000000000000001, "-5e-324"),
-        (0x7FEFFFFFFFFFFFFF, "1.7976931348623157e+308"), // f64::MAX
-        (0x7E41EB2D66005835, "1.5e+300"),
-        (0xFE41EB2D66005835, "-1.5e+300"),
-        (0x7FF0000000000000, "inf"),
-        (0xFFF0000000000000, "-inf"),
-    ];
-
-    #[test]
-    fn format_redis_double_matches_vendored_d2string() {
-        for (bits, want) in VENDORED {
-            let v = f64::from_bits(*bits);
-            assert_eq!(
-                format_redis_double(v),
-                *want,
-                "d2string(bits 0x{bits:016X}) diverged from vendored redis 7.2.4"
-            );
-            let mut out = Vec::new();
-            push_redis_double_ascii(&mut out, v);
-            assert_eq!(out, want.as_bytes(), "push_redis_double_ascii disagreed");
-        }
-    }
-
-    /// `-0.0` and `nan` never reach a stored score (`ZADD k -0` normalizes to `+0`; `ZADD k nan`
-    /// is rejected by both engines), so they cannot be captured from `ZSCORE`. Pin them from
-    /// `util.c::d2string`'s own special cases instead.
-    #[test]
-    fn format_redis_double_pins_unreachable_special_cases() {
-        assert_eq!(format_redis_double(-0.0), "-0");
-        assert_eq!(format_redis_double(0.0), "0");
-        assert_eq!(format_redis_double(f64::NAN), "nan");
-        assert_eq!(format_redis_double(-f64::NAN), "nan");
-    }
-
-    /// Every finite row must survive `text -> f64` unchanged: `d2string` is a shortest
-    /// round-trip representation, so re-parsing must land on the identical bit pattern.
-    #[test]
-    fn vendored_text_round_trips_to_the_same_bits() {
-        for (bits, text) in VENDORED {
-            let v = f64::from_bits(*bits);
-            if !v.is_finite() {
-                continue;
-            }
-            let back: f64 = text.parse().expect("d2string output must parse as f64");
-            assert_eq!(
-                back.to_bits(),
-                *bits,
-                "{text} did not round-trip (bits 0x{bits:016X})"
-            );
-        }
-    }
-
-    /// `lpStringToInt64`'s canonical-decimal rule, as `parse_listpack_integer` implements it in
-    /// fr-store / fr-persist. Duplicated here so this test needs no dependency on those crates.
-    fn canonical_i64(text: &str) -> Option<i64> {
-        let b = text.as_bytes();
-        if b.is_empty() || b.len() >= 21 {
-            return None;
-        }
-        let digits = if b[0] == b'-' { &b[1..] } else { b };
-        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        if digits[0] == b'0' && digits.len() > 1 {
-            return None;
-        }
-        if b[0] == b'-' && digits == b"0" {
-            return None;
-        }
-        text.parse::<i64>().ok()
-    }
-
-    /// The contract that makes `zset_score_listpack_entry` safe, checked against the SAME text
-    /// the vendored server emits: `Str` may skip the re-parse only if the render truly is not a
-    /// canonical i64, and `Int(n)` must equal what the re-parse would have produced.
-    #[test]
-    fn classifier_agrees_with_vendored_render() {
-        for (bits, text) in VENDORED {
-            let v = f64::from_bits(*bits);
-            match zset_score_listpack_entry(v) {
-                ZsetScoreListpackEntry::Int(n) => assert_eq!(
-                    canonical_i64(text),
-                    Some(n),
-                    "{text}: classified Int({n}) but the render says otherwise"
-                ),
-                ZsetScoreListpackEntry::Str => assert!(
-                    canonical_i64(text).is_none(),
-                    "{text}: classified Str, but its render re-parses as an integer — \
-                     skipping the re-parse would flip the listpack entry encoding"
-                ),
-                ZsetScoreListpackEntry::Reparse => assert!(
-                    v.is_finite() && v.fract() == 0.0 && v.abs() > (i64::MAX / 2) as f64,
-                    "{text}: Reparse is only for integral doubles outside double2ll's window"
-                ),
-            }
-        }
-        // -0.0 is the one Str case not reachable through ZADD.
-        assert!(matches!(
-            zset_score_listpack_entry(-0.0),
-            ZsetScoreListpackEntry::Str
-        ));
-        assert!(matches!(
-            zset_score_listpack_entry(f64::NAN),
-            ZsetScoreListpackEntry::Str
-        ));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_bulk_string_slice_small, bench_encode_integer,
-        bench_encode_redis_double, bench_parse_bulk_slice, bench_parse_frame_len_line,
-        bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
-        encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
-        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
+        RespParseError, format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
-        parse_resp3_big_number_body, push_i64, push_redis_double_ascii, push_usize,
     };
-
-    // The fused owned-frame count/length line fast path (parse_bulk / parse_array / parse_resp3_map)
-    // must be byte-identical to the prior read_line + parse_i64_strict two-pass path for the full
-    // result — every `len` (incl. negative), error, and Incomplete — across hand-picked edge cases
-    // plus an exhaustive enumeration over {digits, sign, CR, LF, junk} up to length 5.
-    #[test]
-    fn parse_frame_len_line_fast_matches_slow() {
-        let mut cases: Vec<Vec<u8>> = vec![
-            b"3\r\n".to_vec(),
-            b"0\r\n".to_vec(),
-            b"1\r\n".to_vec(),
-            b"128\r\n".to_vec(),
-            b"1000000\r\n".to_vec(),
-            b"-1\r\n".to_vec(),
-            b"-2\r\n".to_vec(),
-            b"\r\n".to_vec(),
-            b"-\r\n".to_vec(),
-            b"+3\r\n".to_vec(),
-            b" 3\r\n".to_vec(),
-            b"03\r\n".to_vec(),
-            b"3x\r\n".to_vec(),
-            b"3\rX\r\n".to_vec(),
-            b"3".to_vec(),
-            b"3\r".to_vec(),
-            b"".to_vec(),
-            b"1234567890123456789\r\n".to_vec(),
-            b"99999999999999999999\r\n".to_vec(),
-        ];
-        let alphabet = *b"0123\r\n-";
-        for len in 0..=5usize {
-            for mut idx in 0..7usize.pow(len as u32) {
-                let mut buf = Vec::with_capacity(len);
-                for _ in 0..len {
-                    buf.push(alphabet[idx % 7]);
-                    idx /= 7;
-                }
-                cases.push(buf);
-            }
-        }
-        for buf in &cases {
-            let fast = bench_parse_frame_len_line::<true>(buf, 0);
-            let slow = bench_parse_frame_len_line::<false>(buf, 0);
-            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
-        }
-    }
-
-    // The fused single-pass multibulk-count fast path must be byte-identical to the prior
-    // read_line + parse_i64_strict two-pass path for the full result — every `len` (incl. negative),
-    // error, and Incomplete boundary — across hand-picked edge cases plus an exhaustive enumeration
-    // over {digits, sign, CR, LF, junk} up to length 5.
-    #[test]
-    fn parse_multibulk_count_fast_matches_slow() {
-        let mut cases: Vec<Vec<u8>> = vec![
-            b"3\r\n".to_vec(),
-            b"0\r\n".to_vec(),
-            b"1\r\n".to_vec(),
-            b"128\r\n".to_vec(),
-            b"1000000\r\n".to_vec(),
-            b"-1\r\n".to_vec(),
-            b"-2\r\n".to_vec(),
-            b"\r\n".to_vec(),
-            b"-\r\n".to_vec(),
-            b"+3\r\n".to_vec(),
-            b" 3\r\n".to_vec(),
-            b"03\r\n".to_vec(),
-            b"007\r\n".to_vec(),
-            b"3x\r\n".to_vec(),
-            b"3\rX\r\n".to_vec(),
-            b"3".to_vec(),
-            b"3\r".to_vec(),
-            b"123".to_vec(),
-            b"".to_vec(),
-            b"1234567890123456789\r\n".to_vec(),
-            b"99999999999999999999\r\n".to_vec(),
-        ];
-        let alphabet = *b"0123\r\n-";
-        for len in 0..=5usize {
-            for mut idx in 0..7usize.pow(len as u32) {
-                let mut buf = Vec::with_capacity(len);
-                for _ in 0..len {
-                    buf.push(alphabet[idx % 7]);
-                    idx /= 7;
-                }
-                cases.push(buf);
-            }
-        }
-        for buf in &cases {
-            let fast = bench_parse_multibulk_count::<true>(buf, 0);
-            let slow = bench_parse_multibulk_count::<false>(buf, 0);
-            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
-        }
-    }
-
-    // The fused single-pass bulk-length fast path must be byte-identical to the prior
-    // read_line + parse_i64_strict two-pass path for the full result — including every error and
-    // Incomplete boundary — across hand-picked edge cases and a small exhaustive enumeration over
-    // {digits, sign, CR, LF, junk} at multiple lengths.
-    #[test]
-    fn parse_bulk_slice_fast_matches_slow() {
-        let config = ParserConfig::default();
-        let mut cases: Vec<Vec<u8>> = vec![
-            b"3\r\nfoo\r\n".to_vec(),
-            b"0\r\n\r\n".to_vec(),
-            b"5\r\nhello\r\n".to_vec(),
-            b"11\r\nhelloworldx\r\n".to_vec(),
-            b"128\r\n".to_vec(),
-            b"-1\r\n".to_vec(),
-            b"-2\r\n".to_vec(),
-            b"\r\n".to_vec(),
-            b"-\r\n".to_vec(),
-            b"+3\r\n".to_vec(),
-            b" 3\r\n".to_vec(),
-            b"07\r\n........\r\n".to_vec(),
-            b"007\r\n".to_vec(),
-            b"1a\r\n".to_vec(),
-            b"3\rX\r\n".to_vec(),
-            b"3".to_vec(),
-            b"3\r".to_vec(),
-            b"3\r\n".to_vec(),
-            b"3\r\nfo".to_vec(),
-            b"123".to_vec(),
-            b"".to_vec(),
-            b"1234567890123456789\r\n".to_vec(),
-            b"99999999999999999999\r\n".to_vec(),
-        ];
-        let alphabet = *b"0123\r\n-";
-        for len in 0..=5usize {
-            for mut idx in 0..7usize.pow(len as u32) {
-                let mut buf = Vec::with_capacity(len);
-                for _ in 0..len {
-                    buf.push(alphabet[idx % 7]);
-                    idx /= 7;
-                }
-                cases.push(buf);
-            }
-        }
-        for buf in &cases {
-            let fast = bench_parse_bulk_slice::<true>(buf, 0, &config);
-            let slow = bench_parse_bulk_slice::<false>(buf, 0, &config);
-            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
-        }
-    }
-
-    // (frankenredis-c47rl) The fused two-append simple-path double framing must be byte-identical
-    // to the prior five-append shape for every simple-path class (integers across the ±(i64::MAX/2)
-    // window, specials, signed zeros) AND for fractional fallbacks, in both RESP versions.
-    #[test]
-    fn fused_double_framing_matches_five_append() {
-        let mut values: Vec<f64> = vec![
-            0.0,
-            -0.0,
-            1.0,
-            -1.0,
-            9.0,
-            10.0,
-            99.0,
-            100.0,
-            1e15,
-            -1e15,
-            (i64::MAX / 2) as f64,
-            (-i64::MAX / 2) as f64,
-            ((i64::MAX / 2) as f64) * 2.0, // outside the int window -> fractional path
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::NAN,
-            3.5,
-            -0.125,
-            1.0e-3,
-            123456.789,
-        ];
-        for i in -3000_i32..=3000 {
-            values.push(f64::from(i));
-            values.push(f64::from(i) + 0.5);
-        }
-        for resp3 in [false, true] {
-            for &v in &values {
-                let mut fused = b"X".to_vec();
-                let mut old = b"X".to_vec();
-                bench_encode_redis_double::<true>(v, resp3, &mut fused);
-                bench_encode_redis_double::<false>(v, resp3, &mut old);
-                assert_eq!(fused, old, "double framing differs for {v} resp3={resp3}");
-            }
-        }
-        let mut out = Vec::new();
-        encode_redis_double(42.0, false, &mut out);
-        assert_eq!(out, b"$2\r\n42\r\n");
-        out.clear();
-        encode_redis_double(42.0, true, &mut out);
-        assert_eq!(out, b",42\r\n");
-    }
-
-    // (frankenredis-vlis9) The small-length const-size bulk header path must be byte-identical to
-    // the prior always-fused-header shape across a dense length scan spanning both fast-path
-    // boundaries (len < 10, len < 100) and the fallback, for both RESP versions and the None arms.
-    #[test]
-    fn small_len_bulk_header_matches_reference() {
-        let payload: Vec<u8> = (0..=1100_usize).map(|i| (i % 251) as u8).collect();
-        let mut lens: Vec<usize> = (0..=300).collect();
-        lens.extend_from_slice(&[301, 511, 512, 999, 1000, 1023, 1100]);
-        for resp3 in [false, true] {
-            for &len in &lens {
-                let mut fast = b"X".to_vec();
-                let mut slow = b"X".to_vec();
-                bench_encode_bulk_string_slice_small::<true>(
-                    Some(&payload[..len]),
-                    resp3,
-                    &mut fast,
-                );
-                bench_encode_bulk_string_slice_small::<false>(
-                    Some(&payload[..len]),
-                    resp3,
-                    &mut slow,
-                );
-                assert_eq!(fast, slow, "bulk slice differs len={len} resp3={resp3}");
-            }
-            let mut fast = Vec::new();
-            let mut slow = Vec::new();
-            bench_encode_bulk_string_slice_small::<true>(None, resp3, &mut fast);
-            bench_encode_bulk_string_slice_small::<false>(None, resp3, &mut slow);
-            assert_eq!(fast, slow, "nil bulk differs resp3={resp3}");
-        }
-        // Known literals pin the wire format at each width.
-        let mut out = Vec::new();
-        encode_bulk_string_slice(Some(b""), false, &mut out);
-        assert_eq!(out, b"$0\r\n\r\n");
-        out.clear();
-        encode_bulk_string_slice(Some(b"123456789"), false, &mut out);
-        assert_eq!(out, b"$9\r\n123456789\r\n");
-        out.clear();
-        encode_bulk_string_slice(Some(b"0123456789"), false, &mut out);
-        assert_eq!(out, b"$10\r\n0123456789\r\n");
-        out.clear();
-        encode_bulk_string_slice(Some(&[b'a'; 100]), false, &mut out);
-        assert!(out.starts_with(b"$100\r\n") && out.ends_with(b"\r\n") && out.len() == 108);
-    }
-
-    // The fused single-buffer length header (`<prefix><n>\r\n` in one extend_from_slice) must be
-    // byte-identical to the prior `extend(prefix) + push_usize + extend("\r\n")` shape across every
-    // RESP prefix and a dense scan of small lengths plus the digit-width boundaries and u64 edge.
-    // Also pins the three borrow-encode helpers that now front the reply path.
-    #[test]
-    fn fused_len_header_matches_three_call_and_helpers() {
-        let mut sample: Vec<u64> = vec![
-            0,
-            9,
-            10,
-            99,
-            100,
-            999,
-            1000,
-            65_535,
-            1_000_000,
-            u64::from(u32::MAX),
-            u64::MAX - 1,
-            u64::MAX,
-        ];
-        for n in 0_u64..=5000 {
-            sample.push(n);
-        }
-        for &prefix in b"$*~%>|=" {
-            for &n in &sample {
-                let mut fused = Vec::new();
-                let mut old = Vec::new();
-                bench_push_len_header::<true>(&mut fused, prefix, n);
-                bench_push_len_header::<false>(&mut old, prefix, n);
-                assert_eq!(fused, old, "fused vs three-call differ for {prefix:?} n={n}");
-                assert_eq!(fused[0], prefix);
-                assert_eq!(&fused[fused.len() - 2..], b"\r\n");
-            }
-        }
-        // Non-empty destination appends, never overwrites.
-        let mut buf = b"X".to_vec();
-        bench_push_len_header::<true>(&mut buf, b'$', 128);
-        assert_eq!(buf, b"X$128\r\n");
-
-        // The borrow-encode helpers stay byte-identical to their documented wire form.
-        let mut b = Vec::new();
-        encode_bulk_string_slice(Some(b"hello"), false, &mut b);
-        assert_eq!(b, b"$5\r\nhello\r\n");
-        let mut a = Vec::new();
-        encode_aggregate_header(3, false, &mut a);
-        assert_eq!(a, b"*3\r\n");
-        let mut s = Vec::new();
-        encode_aggregate_header(2, true, &mut s);
-        assert_eq!(s, b"~2\r\n");
-        let mut m3 = Vec::new();
-        encode_map_header(2, true, &mut m3);
-        assert_eq!(m3, b"%2\r\n");
-        let mut m2 = Vec::new();
-        encode_map_header(2, false, &mut m2);
-        assert_eq!(m2, b"*4\r\n");
-    }
-
-    // The fused single-buffer integer reply (`:<n>\r\n` in one extend_from_slice) must be
-    // byte-identical to both the prior three-extend path and the canonical RespFrame encoder,
-    // for every boundary plus a dense scan around zero and the ±small ranges that dominate real
-    // counter/length replies.
-    #[test]
-    fn fused_integer_reply_matches_three_extend_and_frame() {
-        let mut sample: Vec<i64> = vec![
-            i64::MIN,
-            i64::MIN + 1,
-            i64::MAX,
-            i64::MAX - 1,
-            -1000000000000,
-            -999,
-            -100,
-            -99,
-            -10,
-            0,
-            i64::from(i32::MIN),
-            i64::from(i32::MAX),
-        ];
-        for n in -5000_i64..=5000 {
-            sample.push(n);
-        }
-        for &n in &sample {
-            let mut fused = Vec::new();
-            let mut old = Vec::new();
-            let mut frame = Vec::new();
-            bench_encode_integer::<true>(n, &mut fused);
-            bench_encode_integer::<false>(n, &mut old);
-            RespFrame::Integer(n).encode_into(&mut frame);
-            assert_eq!(fused, old, "fused vs three-extend differ for n={n}");
-            assert_eq!(fused, frame, "fused vs frame differ for n={n}");
-            // Sanity: the bytes are exactly `:<decimal>\r\n`.
-            assert_eq!(fused[0], b':');
-            assert_eq!(&fused[fused.len() - 2..], b"\r\n");
-        }
-        // Non-empty destination: the reply appends, never overwrites.
-        let mut buf = b"PRE".to_vec();
-        bench_encode_integer::<true>(42, &mut buf);
-        assert_eq!(buf, b"PRE:42\r\n");
-    }
-
-    // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original
-    #[test]
-    fn parse_i64_strict_fast_path_matches_guarded_ref() {
-        // Reference: the pre-fast-path parser that runs the per-digit u64-overflow guards on EVERY
-        // input. Production `parse_i64_strict`'s <=19-digit fast path skips only guards that were
-        // provably dead, so it must return the byte-identical `Result` for every input.
-        fn ref_guarded(input: &[u8]) -> Result<i64, RespParseError> {
-            let slen = input.len();
-            if slen == 0 || slen > 20 {
-                return Err(RespParseError::InvalidInteger);
-            }
-            if slen == 1 && input[0] == b'0' {
-                return Ok(0);
-            }
-            let mut p = 0;
-            let negative = input[0] == b'-';
-            if negative {
-                p += 1;
-                if p == slen {
-                    return Err(RespParseError::InvalidInteger);
-                }
-            }
-            if input[p] >= b'1' && input[p] <= b'9' {
-                let mut v: u64 = (input[p] - b'0') as u64;
-                p += 1;
-                while p < slen {
-                    let b = input[p];
-                    if b.is_ascii_digit() {
-                        if v > (u64::MAX / 10) {
-                            return Err(RespParseError::InvalidInteger);
-                        }
-                        v *= 10;
-                        let digit = (b - b'0') as u64;
-                        if v > (u64::MAX - digit) {
-                            return Err(RespParseError::InvalidInteger);
-                        }
-                        v += digit;
-                        p += 1;
-                    } else {
-                        return Err(RespParseError::InvalidInteger);
-                    }
-                }
-                if negative {
-                    let limit = (i64::MIN as u64).wrapping_neg();
-                    if v > limit {
-                        return Err(RespParseError::InvalidInteger);
-                    }
-                    return Ok(v.wrapping_neg() as i64);
-                }
-                if v > i64::MAX as u64 {
-                    return Err(RespParseError::InvalidInteger);
-                }
-                return Ok(v as i64);
-            }
-            Err(RespParseError::InvalidInteger)
-        }
-
-        // The one-digit production shortcut must match the literal pre-shortcut path for every
-        // possible input byte, not only valid ASCII digits. This pins invalid signs, high bytes,
-        // and punctuation to the exact same error.
-        for byte in 0_u8..=u8::MAX {
-            let input = [byte];
-            assert_eq!(
-                super::parse_i64_strict(&input),
-                super::parse_i64_strict_impl::<true, false, false, false>(&input),
-                "one-byte input={byte:#04x}"
-            );
-        }
-
-        // The positive two-digit return must match the exact immediately-prior parser for all
-        // 65,536 possible byte pairs, including signs, leading zeros, punctuation, and high bytes.
-        for first in 0_u8..=u8::MAX {
-            for second in 0_u8..=u8::MAX {
-                let input = [first, second];
-                assert_eq!(
-                    super::parse_i64_strict(&input),
-                    super::parse_i64_strict_impl::<true, true, false, false>(&input),
-                    "two-byte input=[{first:#04x}, {second:#04x}]"
-                );
-            }
-        }
-
-        // The new positive three-digit return must match the exact immediately-prior parser (with
-        // the two-digit shortcut still on) for all 16,777,216 possible byte triples, including
-        // signs, leading zeros, punctuation, and high bytes.
-        for first in 0_u8..=u8::MAX {
-            for second in 0_u8..=u8::MAX {
-                for third in 0_u8..=u8::MAX {
-                    let input = [first, second, third];
-                    assert_eq!(
-                        super::parse_i64_strict(&input),
-                        super::parse_i64_strict_impl::<true, true, true, false>(&input),
-                        "three-byte input=[{first:#04x}, {second:#04x}, {third:#04x}]"
-                    );
-                }
-            }
-        }
-
-        // Exhaustive over {digits, sign, non-digit} up to length 5 (leading zeros, signs, junk).
-        let alphabet = *b"0129-x";
-        for len in 0..=5usize {
-            for mut idx in 0..6usize.pow(len as u32) {
-                let mut buf = Vec::with_capacity(len);
-                for _ in 0..len {
-                    buf.push(alphabet[idx % 6]);
-                    idx /= 6;
-                }
-                assert_eq!(
-                    super::parse_i64_strict(&buf),
-                    ref_guarded(&buf),
-                    "input={:?}",
-                    String::from_utf8_lossy(&buf)
-                );
-            }
-        }
-        // 18-20-digit + i64/u64-boundary strings (the fast/slow-path seam and overflow edges).
-        let boundaries: &[&[u8]] = &[
-            b"9223372036854775807",
-            b"9223372036854775808",
-            b"-9223372036854775808",
-            b"-9223372036854775809",
-            b"18446744073709551615",
-            b"18446744073709551616",
-            b"99999999999999999999",
-            b"9999999999999999999",
-            b"1000000000000000000",
-            b"-1000000000000000000",
-            b"12345678901234567890",
-        ];
-        for b in boundaries {
-            assert_eq!(
-                super::parse_i64_strict(b),
-                ref_guarded(b),
-                "boundary={:?}",
-                String::from_utf8_lossy(b)
-            );
-        }
-    }
-
-    // div-by-10 reference for every input that crosses a digit boundary, plus extremes.
-    #[test]
-    fn decimal_len_matches_div_loop_reference() {
-        fn reference(mut n: u64) -> usize {
-            let mut len = 1;
-            while n >= 10 {
-                n /= 10;
-                len += 1;
-            }
-            len
-        }
-        let mut probes: Vec<u64> = vec![0, 1, 9, 10, 11, 99, 100, 101, u64::MAX, u64::MAX - 1];
-        // every power-of-ten boundary and its neighbours
-        let mut p: u64 = 1;
-        loop {
-            probes.push(p.saturating_sub(1));
-            probes.push(p);
-            probes.push(p.saturating_add(1));
-            match p.checked_mul(10) {
-                Some(next) => p = next,
-                None => break,
-            }
-        }
-        for &n in &probes {
-            assert_eq!(decimal_u64_len(n), reference(n), "u64 digit count for {n}");
-            if let Ok(u) = usize::try_from(n) {
-                assert_eq!(
-                    decimal_usize_len(u),
-                    reference(n),
-                    "usize digit count for {u}"
-                );
-            }
-        }
-    }
-
-    // (frankenredis-432l0) Golden contract for how `parse_frame` NORMALIZES the
-    // RESP3 reply wire types into the RESP2-shaped `RespFrame` the rest of fr
-    // consumes. This is a reply-NORMALIZER, not a symmetric codec: the RESP3
-    // scalar types collapse to their RESP2-equivalent carrier, and the
-    // aggregate-ish types fold per upstream client semantics. Pinning each one
-    // here guards the HELLO-3 reply path (frankenredis-ozcx) against regressions
-    // that the request-side fuzzers never exercise. Each case is a COMPLETE
-    // frame, so `consumed` must equal the encoded length.
-    #[test]
-    fn resp3_reply_parse_normalization_golden_432l0() {
-        let cases: &[(&str, &[u8], RespFrame)] = &[
-            // Double (`,`) -> BulkString carrying the numeric string verbatim.
-            (
-                "double",
-                b",3.14\r\n",
-                RespFrame::BulkString(Some(b"3.14".to_vec())),
-            ),
-            (
-                "double_neg",
-                b",-1.5\r\n",
-                RespFrame::BulkString(Some(b"-1.5".to_vec())),
-            ),
-            (
-                "double_inf",
-                b",inf\r\n",
-                RespFrame::BulkString(Some(b"inf".to_vec())),
-            ),
-            // Big number (`(`) -> BulkString carrying the base-10 integer string.
-            (
-                "bignumber",
-                b"(12345678901234567890\r\n",
-                RespFrame::BulkString(Some(b"12345678901234567890".to_vec())),
-            ),
-            (
-                "bignumber_neg",
-                b"(-31337\r\n",
-                RespFrame::BulkString(Some(b"-31337".to_vec())),
-            ),
-            // Boolean (`#`) -> Integer 1/0 (upstream addReplyBool under RESP2).
-            ("bool_true", b"#t\r\n", RespFrame::Integer(1)),
-            ("bool_false", b"#f\r\n", RespFrame::Integer(0)),
-            // Null (`_`) -> the canonical null bulk string.
-            ("null", b"_\r\n", RespFrame::BulkString(None)),
-            // Verbatim (`=`) -> BulkString of the payload AFTER the 4-char
-            // `<3-type>:` prefix is stripped.
-            (
-                "verbatim_txt",
-                b"=15\r\ntxt:Some string\r\n",
-                RespFrame::BulkString(Some(b"Some string".to_vec())),
-            ),
-            // Map (`%`) -> flat Array of 2N field/value frames (recursively
-            // normalized), matching upstream RESP3->RESP2 map downgrade.
-            (
-                "map_flattened",
-                b"%2\r\n+a\r\n:1\r\n$1\r\nb\r\n:2\r\n",
-                RespFrame::Array(Some(vec![
-                    RespFrame::SimpleString("a".to_string()),
-                    RespFrame::Integer(1),
-                    RespFrame::BulkString(Some(b"b".to_vec())),
-                    RespFrame::Integer(2),
-                ])),
-            ),
-            // Set (`~`) -> folds to Array (fr has no distinct Set reply carrier).
-            (
-                "set_as_array",
-                b"~2\r\n:1\r\n:2\r\n",
-                RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)])),
-            ),
-            // Push (`>`) -> folds to Array.
-            (
-                "push_as_array",
-                b">2\r\n+pubsub\r\n+msg\r\n",
-                RespFrame::Array(Some(vec![
-                    RespFrame::SimpleString("pubsub".to_string()),
-                    RespFrame::SimpleString("msg".to_string()),
-                ])),
-            ),
-            // Attribute (`|`) -> the metadata map is parsed and DISCARDED; the
-            // following real frame is returned, and `consumed` spans both.
-            (
-                "attribute_discarded",
-                b"|1\r\n+k\r\n+v\r\n:42\r\n",
-                RespFrame::Integer(42),
-            ),
-            // Blob error (`!`) -> Error carrying the body text.
-            (
-                "blob_error",
-                b"!21\r\nSYNTAX invalid syntax\r\n",
-                RespFrame::Error("SYNTAX invalid syntax".to_string()),
-            ),
-        ];
-        // RESP3 reply parsing is opt-in (the default fail-closed config rejects
-        // these prefixes); trusted reply readers flip `allow_resp3`.
-        let config = ParserConfig {
-            allow_resp3: true,
-            ..ParserConfig::default()
-        };
-        for (name, wire, expected) in cases {
-            let parsed = parse_frame_with_config(wire, &config)
-                .expect("RESP3 golden reply case must parse under allow_resp3");
-            assert_eq!(&parsed.frame, expected, "{name}: normalized frame mismatch");
-            assert_eq!(
-                parsed.consumed,
-                wire.len(),
-                "{name}: must consume the whole frame"
-            );
-        }
-    }
-
-    // (frankenredis-itoa2) Two-digit-LUT integer formatter: isomorphism vs the
-    // std `to_string()` reference (the ground truth) over exhaustive small
-    // values, every power-of-ten / carry boundary, and i64 extremes; plus an
-    // honest Score microbench of the old digit-at-a-time div loop vs the new
-    // two-digit-per-step formatter on a realistic reply-integer mix.
-    #[test]
-    fn push_int_two_digit_lut_isomorphic_and_faster_itoa2() {
-        let i64_ref = |n: i64| {
-            let mut v = Vec::new();
-            push_i64(&mut v, n);
-            assert_eq!(v, n.to_string().into_bytes(), "push_i64 wrong for {n}");
-        };
-        let usize_ref = |n: usize| {
-            let mut v = Vec::new();
-            push_usize(&mut v, n);
-            assert_eq!(v, n.to_string().into_bytes(), "push_usize wrong for {n}");
-        };
-
-        // Exhaustive small range (covers 0, single, two, three digits + carries).
-        for n in 0..=20_000i64 {
-            i64_ref(n);
-            i64_ref(-n);
-            usize_ref(n as usize);
-        }
-        // Power-of-ten and 9.. boundaries where 2-digit chunking changes parity.
-        let mut p: u64 = 1;
-        for _ in 0..19 {
-            for d in [p.wrapping_sub(1), p, p.wrapping_add(1)] {
-                usize_ref(d as usize);
-                if d <= i64::MAX as u64 {
-                    i64_ref(d as i64);
-                    i64_ref(-(d as i64));
-                }
-            }
-            p = p.saturating_mul(10);
-        }
-        // i64 / u64 / usize extremes.
-        i64_ref(i64::MAX);
-        i64_ref(i64::MIN);
-        usize_ref(usize::MAX);
-        usize_ref(u64::MAX as usize);
-
-        // Deterministic random sweep.
-        let mut s: u64 = 0xD1B54A32D192ED03;
-        let mut next = || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            s
-        };
-        for _ in 0..200_000 {
-            let r = next();
-            usize_ref(r as usize);
-            i64_ref(r as i64);
-        }
-
-        if cfg!(debug_assertions) {
-            return;
-        }
-        // ---- Score: old digit-at-a-time div loop vs new two-digit LUT ----
-        fn old_push_usize(out: &mut Vec<u8>, n: usize) {
-            if n == 0 {
-                out.push(b'0');
-                return;
-            }
-            let mut val = n;
-            let mut buf = [0u8; 20];
-            let mut pos = 20;
-            while val > 0 {
-                pos -= 1;
-                buf[pos] = b'0' + (val % 10) as u8;
-                val /= 10;
-            }
-            out.extend_from_slice(&buf[pos..]);
-        }
-        // Realistic reply-integer mix: ~half small length-headers (0..10000),
-        // ~half full-range values (counters, large LLEN/SCARD/INCR results).
-        let mut s2: u64 = 0x9E3779B97F4A7C15;
-        let mut nx = || {
-            s2 ^= s2 << 13;
-            s2 ^= s2 >> 7;
-            s2 ^= s2 << 17;
-            s2
-        };
-        let nums: Vec<usize> = (0..4096)
-            .map(|i| {
-                let r = nx();
-                if i % 2 == 0 {
-                    (r % 10_000) as usize
-                } else {
-                    r as usize
-                }
-            })
-            .collect();
-        let reps = 20_000;
-        let mut sink = Vec::with_capacity(64);
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
-        for _ in 0..reps {
-            for &n in &nums {
-                sink.clear();
-                old_push_usize(&mut sink, n);
-                acc = acc.wrapping_add(sink.len());
-            }
-        }
-        let old_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc);
-        let t1 = std::time::Instant::now();
-        let mut acc2 = 0usize;
-        for _ in 0..reps {
-            for &n in &nums {
-                sink.clear();
-                push_usize(&mut sink, n);
-                acc2 = acc2.wrapping_add(sink.len());
-            }
-        }
-        let new_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "old/new total digit length disagree");
-        let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ITOA2 reply-int mix: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        // Measured ~1.58x real-world (format-into-Vec; the common extend cost
-        // caps the kernel speedup per Amdahl). This is a regression floor, not a
-        // 2.0 extreme-opt claim — guards that the two-digit LUT stays a net win.
-        assert!(
-            score >= 1.25,
-            "two-digit LUT itoa regressed below floor; got {score:.2}x"
-        );
-    }
-
-    // (frankenredis-e4fu8) Bench guard for the branchless ilog10 digit-count vs the
-    // original div-by-10 loop, on the same realistic reply-integer mix. Correctness is
-    // covered by decimal_len_matches_div_loop_reference; this asserts ilog10 stays a net
-    // win (conservative floor — timing-noise tolerant, real ratio in the eprintln). The
-    // batch release run records the true score; this only catches a real regression.
-    #[test]
-    fn decimal_len_ilog10_not_slower_than_div_loop() {
-        if cfg!(debug_assertions) {
-            return;
-        }
-        fn old_decimal_usize_len(mut n: usize) -> usize {
-            let mut len = 1;
-            while n >= 10 {
-                n /= 10;
-                len += 1;
-            }
-            len
-        }
-        let mut s: u64 = 0x2545F4914F6CDD1D;
-        let mut nx = || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            s
-        };
-        let nums: Vec<usize> = (0..4096)
-            .map(|i| {
-                let r = nx();
-                if i % 2 == 0 {
-                    (r % 10_000) as usize
-                } else {
-                    r as usize
-                }
-            })
-            .collect();
-        let reps = 50_000;
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
-        for _ in 0..reps {
-            for &n in &nums {
-                acc = acc.wrapping_add(old_decimal_usize_len(n));
-            }
-        }
-        let old_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc);
-        let t1 = std::time::Instant::now();
-        let mut acc2 = 0usize;
-        for _ in 0..reps {
-            for &n in &nums {
-                acc2 = acc2.wrapping_add(decimal_usize_len(n));
-            }
-        }
-        let new_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "old/new digit-count disagree");
-        let score = old_ns as f64 / new_ns as f64;
-        eprintln!(
-            "ILOG10 decimal-len reply-int mix: old={old_ns}ns new={new_ns}ns score={score:.2}x"
-        );
-        // Conservative regression floor (not a speedup claim — ilog10 is reasoned-faster;
-        // the real ratio is in the eprintln). 0.85 only trips on a true regression.
-        assert!(
-            score >= 0.85,
-            "ilog10 decimal-len regressed; got {score:.2}x"
-        );
-    }
 
     #[test]
     fn parse_command_frame_requires_bulk_elements() {
@@ -3748,77 +1581,6 @@ mod tests {
                 parse_command_frame_borrowed(input, &cfg).unwrap_err(),
                 expected,
                 "input {input:?}"
-            );
-            assert_eq!(
-                parse_command_frame(input, &cfg).unwrap_err(),
-                expected,
-                "owned input {input:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn oversized_header_lines_use_context_specific_wording() {
-        // (frankenredis-linetoolong-wording) Upstream emits context-specific
-        // "too big mbulk/bulk count string" for an over-cap command header line,
-        // not the generic LineTooLong. Build a >MAX_LINE_LENGTH line with no
-        // terminator at each header position.
-        let cfg = ParserConfig::default();
-        let big = vec![b'9'; MAX_LINE_LENGTH + 16];
-        // *<count> line too long.
-        let mut count_line = vec![b'*'];
-        count_line.extend_from_slice(&big);
-        assert_eq!(
-            parse_command_args_borrowed_into(&count_line, &cfg, &mut Vec::new()).unwrap_err(),
-            RespParseError::TooBigMbulkCount
-        );
-        assert_eq!(
-            parse_command_frame(&count_line, &cfg).unwrap_err(),
-            RespParseError::TooBigMbulkCount
-        );
-        // $<len> element-header line too long.
-        let mut bulk_hdr = b"*1\r\n$".to_vec();
-        bulk_hdr.extend_from_slice(&big);
-        assert_eq!(
-            parse_command_args_borrowed_into(&bulk_hdr, &cfg, &mut Vec::new()).unwrap_err(),
-            RespParseError::TooBigBulkCount
-        );
-        // Non-`$` element line too long.
-        let mut bad_elem = b"*1\r\n".to_vec();
-        bad_elem.extend_from_slice(&vec![b'Z'; MAX_LINE_LENGTH + 16]);
-        assert_eq!(
-            parse_command_args_borrowed_into(&bad_elem, &cfg, &mut Vec::new()).unwrap_err(),
-            RespParseError::TooBigBulkCount
-        );
-    }
-
-    #[test]
-    fn multibulk_bad_element_defers_error_until_line_complete() {
-        // (frankenredis-mbulkdefer) Upstream processMultibulkBuffer locates an
-        // element's line terminator BEFORE checking its type byte: a malformed
-        // (non-`$`) element whose line hasn't fully arrived must return
-        // Incomplete (wait), and only error once the `\r\n` is present — both
-        // for the borrowed (live) and owned parsers.
-        let cfg = ParserConfig::default();
-        let cases = [
-            // (input, expected): no terminator yet -> Incomplete (wait); with the
-            // `\r\n` present -> the type-byte error stands.
-            (&b"*1\r\nPING"[..], RespParseError::Incomplete),
-            (
-                &b"*2\r\n$4\r\nPING\r\nGARBAGE"[..],
-                RespParseError::Incomplete,
-            ),
-            (&b"*1\r\nPING\r\n"[..], RespParseError::ExpectedBulk(b'P')),
-            (
-                &b"*2\r\n$4\r\nPING\r\nGARBAGE\r\n"[..],
-                RespParseError::ExpectedBulk(b'G'),
-            ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                parse_command_frame_borrowed(input, &cfg).unwrap_err(),
-                expected,
-                "borrowed input {input:?}"
             );
             assert_eq!(
                 parse_command_frame(input, &cfg).unwrap_err(),
@@ -4151,23 +1913,6 @@ mod tests {
             "parity_ok",
         );
         event.assert_schema_contract();
-    }
-
-    #[test]
-    fn resp_inline_parser_sanitizes_lone_cr_lf_and_preserves_utf8() {
-        let simple = parse_frame("+é\ra\n東京\r\n".as_bytes())
-            .expect("simple string with lone CR/LF should parse");
-        assert_eq!(
-            simple.frame,
-            RespFrame::SimpleString("é a 東京".to_string())
-        );
-
-        let error = parse_frame("-ERR é\r東京\n🙂\r\n".as_bytes())
-            .expect("error with lone CR/LF should parse");
-        assert_eq!(
-            error.frame,
-            RespFrame::Error("ERR é 東京 🙂".to_string())
-        );
     }
 
     #[test]
@@ -4845,46 +2590,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_redis_double_encoding_matches_existing_frames() {
-        let cases: &[(f64, &str)] = &[
-            (0.0, "0"),
-            (-0.0, "-0"),
-            (f64::INFINITY, "inf"),
-            (f64::NEG_INFINITY, "-inf"),
-            (3.0, "3"),
-            (-42.0, "-42"),
-            (2.75, "2.75"),
-            (123.456, "123.456"),
-            (1e20, "1e+20"),
-            (1e-10, "1e-10"),
-            (6300820258065050624.0, "6300820258065051000"),
-            (9223372036854775807.0, "9223372036854776000"),
-        ];
-
-        for (value, expected) in cases {
-            let mut ascii = Vec::new();
-            push_redis_double_ascii(&mut ascii, *value);
-            assert_eq!(ascii, expected.as_bytes(), "ascii {value:?}");
-
-            let mut resp2 = Vec::new();
-            encode_redis_double(*value, false, &mut resp2);
-            assert_eq!(
-                resp2,
-                RespFrame::BulkString(Some(expected.as_bytes().to_vec())).to_bytes(),
-                "resp2 {value:?}"
-            );
-
-            let mut resp3 = Vec::new();
-            encode_redis_double(*value, true, &mut resp3);
-            assert_eq!(
-                resp3,
-                RespFrame::Double((*expected).to_string()).to_bytes(),
-                "resp3 {value:?}"
-            );
-        }
-    }
-
-    #[test]
     fn resp3_double_rejects_empty_and_non_numeric_payloads() {
         // (frankenredis-u1xg5) Continuing ny5fu's RESP3 strictness
         // pass for the ',' (double) prefix. Empty / garbage payloads
@@ -4979,43 +2684,6 @@ mod tests {
                 "canonical big number {ok:?} should parse"
             );
         }
-    }
-
-    #[test]
-    fn resp3_big_number_direct_copy_matches_utf8_reference() {
-        let mut long = vec![b'7'; 65_536];
-        let mut signed_long = Vec::with_capacity(258);
-        signed_long.push(b'-');
-        signed_long.extend(std::iter::repeat_n(b'9', 257));
-        let invalid_utf8 = [b'1', 0xff];
-        let cases: Vec<&[u8]> = vec![
-            b"0",
-            b"+1",
-            b"-42",
-            b"9999999999999999999999999999999999999",
-            &signed_long,
-            &long,
-            b"",
-            b"+",
-            b"-",
-            b"12.5",
-            b"123abc",
-            b"1 2",
-            &invalid_utf8,
-        ];
-        for body in cases {
-            assert_eq!(
-                parse_resp3_big_number_body::<true>(body),
-                parse_resp3_big_number_body::<false>(body),
-                "direct copy differs for body length {}",
-                body.len()
-            );
-        }
-        long[32_768] = 0xff;
-        assert_eq!(
-            parse_resp3_big_number_body::<true>(&long),
-            parse_resp3_big_number_body::<false>(&long)
-        );
     }
 
     #[test]
@@ -5458,28 +3126,6 @@ mod tests {
                 golden,
                 "Binary bulk string encoding changed"
             );
-        }
-
-        #[test]
-        fn borrowed_bulk_slice_encoder_matches_frame_encoder() {
-            let payload = b"hello\r\nbinary\0";
-
-            let mut borrowed_resp2 = Vec::new();
-            crate::encode_bulk_string_slice(Some(payload), false, &mut borrowed_resp2);
-            assert_eq!(
-                borrowed_resp2,
-                RespFrame::BulkString(Some(payload.to_vec())).to_bytes()
-            );
-
-            let mut null_resp2 = Vec::new();
-            crate::encode_bulk_string_slice(None, false, &mut null_resp2);
-            assert_eq!(null_resp2, RespFrame::BulkString(None).to_bytes());
-
-            let mut null_resp3 = Vec::new();
-            crate::encode_bulk_string_slice(None, true, &mut null_resp3);
-            let mut frame_resp3 = Vec::new();
-            RespFrame::BulkString(None).encode_into_resp3(&mut frame_resp3);
-            assert_eq!(null_resp3, frame_resp3);
         }
 
         #[test]
