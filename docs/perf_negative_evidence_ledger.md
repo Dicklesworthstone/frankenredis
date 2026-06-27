@@ -1714,3 +1714,35 @@ loop, so even the bulk path doesn't presize.
 Decision: **profiled + root-caused; no source change** (the safe lever is niche,
 the impactful ones are storage-risky/multi-day). RESTORE is not a hot command;
 this documents the real gap (1.4–5x, not 0.36x) and the exact lever ladder.
+
+## 2026-06-27 AmberRiver: zset RDB-load profiled — structural (BTreeMap sort), dedup-skip not worth it
+
+Completes the RESTORE-gap dig (hash + set presize WINS landed `d6968e84d` /
+`146821877`; this is the zset arm). zset RDB-load already bulk-builds: `zadd`'s
+fresh-key path (`lib.rs`) dedups via a pre-sized HashMap then calls the existing
+presized `SortedSet::from_unique_pairs_with_limits` (IndexMap dict pre-sized;
+BTreeMap bulk-built via std `FromIterator`). So there is no missing-presize lever
+here. `perf` flat self-time of a 20 000-member zset DEBUG RELOAD:
+
+| % | site | role |
+|---:|---|---|
+| ~23 | `BTreeMap<ScoreMember,()>::from_iter` stable **quicksort** | sorting the 20k fat `ScoreMember`s when building the ordered tree |
+| 5.2 | `IndexMap::insert_full` | dict build |
+| ~4 | `zadd` dedup HashMap (`hash_one` + `insert`) | last-wins ZADD dedup, wasted on unique RDB input |
+
+**Root cause = structural** (`uybhq`): the ordered set is a `BTreeMap<ScoreMember>`
+(+ `IndexMap` dict + `Arc<[u8]>` shared members). Building it sorts all members;
+std `BTreeMap::from_iter` re-sorts internally, so a manual `sort_unstable` pre-pass
+can't avoid it, and there is no stable `from_sorted_iter` API. Redis builds a
+skiplist incrementally (pointer updates, no fat-struct swaps). This is the cost
+side of the dual-structure RAM design, not a missing optimization.
+
+The only non-structural slice is the `zadd` dedup HashMap (~4%), redundant on the
+guaranteed-unique RDB loader path. REJECTED as a lever: ~4% on a non-hot command
+is not worth duplicating/refactoring `zadd`'s exact byte-exact fresh-key build
+(encoding-flag / digest / dirty / modification-count must match) — high risk,
+sub-noise reward.
+
+Decision: **no source change** (presize vein exhausted: hash✓ set✓ shipped, zset
+already bulk+presized, residual structural). list RDB-load 2.80x remains the
+`ChunkedList` `99fwc` structural lever. RESTORE-gap dig complete.
