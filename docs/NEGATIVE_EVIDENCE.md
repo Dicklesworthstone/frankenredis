@@ -5937,3 +5937,12 @@ LMPOP2 cand/ctrl 2.267/2.691/2.570 mean 2.510, cand/redis 0.720 (up from 0.282x)
 RIGHT, both-missing nil (*-1), wrong-type-k1, wrong-type-k2-after-empty cand==ctrl==redis. 26 dispatch commits, ~68 cmds
 closed. PEER-COORD: built around peer's just-committed fr-store DUMP-cache (3cb405c2e, zset/HLL/dump — NOT lists, doesn't
 affect LMPOP); committed ONLY my fr-runtime+fr-server files. conformance pending.
+
+### 2026-06-27 (part 162) WIN: ZMPOP 2-key new fast-path 2.09x + ZMPOP 1-key hoist 1.22x (cc/BlackThrush)
+Zset analog of part-161 LMPOP. (1) execute_plain_zmpop2_borrowed: `ZMPOP 2 z1 z2 MIN|MAX` (no COUNT) — loop-probe z1 then z2
+via zcard_no_stat, pop one min/max from first non-empty -> [key, [[member, score]]] (RESP3 Double / RESP2 bulk score);
+both empty -> nil; first wrong-type -> WRONGTYPE. Reuses store.zcard_no_stat/zpopmin/zpopmax (NO new store code) + key_arg3.
+(2) hoisted zmpop1 (existing 1-key fast-path dispatched late @6703, like LMPOP-1key part-157). A/B (cand vs ctrl=committed-
+LMPOP-no-ZMPOP): ZMPOP2 cand/ctrl 2.101/2.250/1.928 mean 2.093 (0.384->0.833 redis), ZMPOP1 mean 1.220 (0.664->0.837).
+BYTE-EXACT: 2-key MIN/MAX/skip-empty/both-nil/wrong-type, 1-key, RESP3 nested score cand==ctrl==redis. 27 dispatch commits,
+~70 cmds. (Peer BlueFalcon committed their PFADD docs note meanwhile; my commit is my-files-only.)

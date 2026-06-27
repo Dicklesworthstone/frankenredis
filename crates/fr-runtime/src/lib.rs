@@ -19514,6 +19514,109 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed WRITE fast path for `ZMPOP 2 z1 z2 MIN|MAX` (no COUNT, count=1).
+    /// Mirrors fr-command::zmpop: probe z1 then z2 via zcard_no_stat (no keyspace bump),
+    /// pop one min/max from the first non-empty zset -> [key, [[member, score]]] (score
+    /// RESP3 Double / RESP2 bulk); both empty/missing -> nil; first wrong-type -> WRONGTYPE.
+    /// COUNT form + >2 keys fall to generic.
+    pub fn execute_plain_zmpop2_borrowed(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"ZMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || z1.len() > self.policy.gate.max_bulk_len
+            || z2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let use_min = if dir_arg.eq_ignore_ascii_case(b"MIN") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"MAX") {
+            false
+        } else {
+            return None;
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zmpop",
+            b"ZMPOP".len() + numkeys_arg.len() + z1.len() + z2.len() + dir_arg.len(),
+            now_ms,
+        );
+        let resp_v = self.session.resp_protocol_version;
+        let score_frame = |score: f64| -> RespFrame {
+            if resp_v == 3 {
+                RespFrame::double_from_f64(score)
+            } else {
+                RespFrame::BulkString(Some(fr_store::redis_score_to_string(score).into_bytes()))
+            }
+        };
+        let st = self.chained_command_start();
+        let mut reply = RespFrame::Array(None);
+        for k in [z1, z2] {
+            match self.server.store.zcard_no_stat(k, now_ms) {
+                Ok(n) if n > 0 => {
+                    let popped = if use_min {
+                        self.server.store.zpopmin(k, now_ms)
+                    } else {
+                        self.server.store.zpopmax(k, now_ms)
+                    };
+                    reply = match popped {
+                        Ok(Some((member, score))) => RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(k.to_vec())),
+                            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                                RespFrame::BulkString(Some(member)),
+                                score_frame(score),
+                            ]))])),
+                        ])),
+                        Ok(None) => RespFrame::Array(None),
+                        Err(err) => CommandError::Store(err).to_resp(),
+                    };
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    reply = CommandError::Store(err).to_resp();
+                    break;
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zmpop",
+            "ZMPOP",
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    z1.to_vec(),
+                    z2.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// (frankenredis-setstore2fast) Borrowed WRITE fast path for the common 2-source
     /// forms `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src1 src2`. Mirrors fr-command
     /// EXACTLY: record_source_key_lookups([src1, src2]) (upstream's source key
