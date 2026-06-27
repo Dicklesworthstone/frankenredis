@@ -2834,6 +2834,29 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_set_opt_get_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
                 {
@@ -16401,6 +16424,49 @@ fn parse_borrowed_plain_set_relexpire_get_packet<'a>(
             end: time,
         },
     ))
+}
+
+// (frankenredis-setoptget) `SET key value OPT GET` (*5) where OPT ∈ {NX, XX,
+// KEEPTTL} — conditional/keep-ttl set that also returns the old value. Slot-3 must
+// be a literal NX/XX/KEEPTTL and slot-4 a literal GET; the runtime reads the old
+// value, applies the option, and replies the old value. EX/PX/EXAT/PXAT+GET, the
+// GET-first order, and 2-option forms fall through to the generic. Reuses
+// BorrowedPlainKeyRangePacket (start=value, end=the OPT token).
+fn parse_borrowed_plain_set_opt_get_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (opt, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !(opt.eq_ignore_ascii_case(b"NX")
+        || opt.eq_ignore_ascii_case(b"XX")
+        || opt.eq_ignore_ascii_case(b"KEEPTTL"))
+    {
+        return None;
+    }
+    let (get_tok, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !get_tok.eq_ignore_ascii_case(b"GET") {
+        return None;
+    }
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start: value,
+        end: opt,
+    })
 }
 
 // (frankenredis-setatfast) Byte-prefix fast path for `SET key value EXAT|PXAT ts`

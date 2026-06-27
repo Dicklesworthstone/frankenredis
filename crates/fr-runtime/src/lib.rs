@@ -7562,6 +7562,156 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-setoptget) Borrowed WRITE fast path for `SET key value OPT GET`
+    /// where OPT ∈ {NX, XX, KEEPTTL} (*5). Plain SET-GET is fast, but GET combined
+    /// with one option fell to the generic argv path (measured NX+GET 0.50x, XX+GET
+    /// 0.62x, KEEPTTL+GET 0.71x). Like the generic setGenericCommand with OBJ_SET_GET:
+    /// read the old value FIRST (records the hit/miss, surfaces WRONGTYPE on a
+    /// non-string key WITHOUT writing), then apply the option's set/abort:
+    ///   NX      -> set only when the key is absent (old.is_none())
+    ///   XX      -> set only when the key already exists (old.is_some())
+    ///   KEEPTTL -> always set, preserving the existing absolute expiry
+    /// and reply the old value (nil if absent). Reuses store.get / set_plain_borrowed
+    /// / get_expires_at_ms / set_with_abs_expiry (NO new store code). `opt` is the
+    /// exact NX/XX/KEEPTTL token (already validated by the parser).
+    pub fn execute_plain_set_opt_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let is_nx = opt.eq_ignore_ascii_case(b"NX");
+        let is_xx = opt.eq_ignore_ascii_case(b"XX");
+        let is_keepttl = opt.eq_ignore_ascii_case(b"KEEPTTL");
+        if !(is_nx || is_xx || is_keepttl) {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum =
+            b"SET".len() + key.len() + value.len() + opt.len() + b"GET".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Read old value first (records hit/miss + WRONGTYPE); only write per the option.
+        let reply = match self.server.store.get(key, now_ms) {
+            Ok(old) => {
+                if is_keepttl {
+                    let existing_expiry = self.server.store.get_expires_at_ms(key, now_ms);
+                    self.server.store.set_with_abs_expiry(
+                        key.to_vec(),
+                        value.to_vec(),
+                        existing_expiry,
+                        now_ms,
+                    );
+                } else if (is_nx && old.is_none()) || (is_xx && old.is_some()) {
+                    self.server.store.set_plain_borrowed(key, value, now_ms);
+                }
+                RespFrame::BulkString(old)
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_set_opt_get_borrowed_metrics(
+            opt, key, value, failed, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_set_opt_get_borrowed_metrics(
+        &mut self,
+        opt: &[u8],
+        key: &[u8],
+        value: &[u8],
+        failed: bool,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || {
+            vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                value.to_vec(),
+                opt.to_vec(),
+                b"GET".to_vec(),
+            ]
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("set", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SET' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::BulkString(None),
+            });
+        }
+    }
+
     /// (frankenredis-setexfast) Conservative borrowed WRITE fast path for the
     /// no-flag `SET key value EX seconds` form (the dominant set-with-TTL). Mirrors
     /// the generic set() for that exact option set: validate `seconds` as the

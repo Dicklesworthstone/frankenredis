@@ -6133,3 +6133,17 @@ through to the generic (exact errors / not-yet-accelerated). A/B (cand vs ctrl=H
 BEATS redis, up from 0.42-0.67x). BYTE-EXACT (cand==ctrl==redis, reply + GET value + PTTL band): EX/PX GET on existing-str
 /absent/wrong-type, EX 0/-5/abc/PX 0/overflow errors, GET-first order, RESP2+RESP3. fr-runtime + fr-server (my files only).
 Residual GET-combos still on generic (NX/XX/KEEPTTL/EXAT/PXAT + GET, 0.50-0.71x) = next siblings if pursued. 30 dispatch commits.
+
+### 2026-06-27 (part 167) WIN: SET ... {NX|XX|KEEPTTL} GET new fast-path — cand/ctrl ~2.2x, byte-exact (cc/BlackThrush)
+The part-166 named siblings. ONE executor execute_plain_set_opt_get_borrowed handles `SET key val OPT GET` (*5) for OPT ∈
+{NX,XX,KEEPTTL}: read old value FIRST via store.get (records hit/miss, WRONGTYPE on non-string WITHOUT writing) — exactly
+redis setGenericCommand's OBJ_SET_GET arm — then apply NX (set iff old.is_none()) / XX (set iff old.is_some(), via
+set_plain_borrowed) / KEEPTTL (always set, preserving existing abs-expiry via get_expires_at_ms + set_with_abs_expiry),
+reply = old value. NO new store code. parse_borrowed_plain_set_opt_get_packet (`*5 $3 SET key val NX|XX|KEEPTTL GET`, slot-3
+validated) dispatched after set_relexpire_get; EX/PX/EXAT/PXAT+GET, GET-first, 2-option forms fall through. A/B (cand vs ctrl,
+BOTH local-built same-rustc — rch fleet degraded, routed to a worker missing .rchignore'd legacy_redis_code, so local build
+is the fallback; pipe=300 trials=9, 3 runs, load 6-22): NX_GET 2.14-2.50x, XX_GET 1.78-2.42x, KEEPTTL_GET 1.98-2.34x, NX_miss
+1.89-2.29x — **~2.2x** (cand/redis 0.92-1.39, parity-to-beats, up from 0.50-0.71x). BYTE-EXACT (cand==ctrl==redis, reply +
+GET value + PTTL preservation): NX/XX/KEEPTTL on absent/string/string-with-ttl/list-wrongtype, lowercase opt+get, RESP2+RESP3.
+fr-runtime + fr-server (my files only). SET-GET vein now: plain + EX/PX + NX/XX/KEEPTTL all fast; residual = EXAT/PXAT+GET
+(absolute, less common) + 2-option (EX+NX+GET) forms. 31 dispatch commits.
