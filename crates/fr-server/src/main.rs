@@ -4305,6 +4305,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zadd_incr_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_decr_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts) {
@@ -11978,6 +12001,37 @@ fn parse_borrowed_plain_lrange_packet<'a>(
 
 // (frankenredis-au36f) GETRANGE key start end (4-element); start/end bulks passed
 // as bytes — execute_plain_getrange_borrowed parses/clamps them.
+fn parse_borrowed_plain_zadd_incr_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"ZADD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZADD"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (flag, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !flag.eq_ignore_ascii_case(b"INCR") {
+        return None;
+    }
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
 fn parse_borrowed_plain_getrange_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,

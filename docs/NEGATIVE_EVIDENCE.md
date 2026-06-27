@@ -5676,3 +5676,20 @@ absolute-value, PERSIST 0/1 cand==ctrl==redis. Smaller wins (moderate position) 
 new-fp), ~39 commands closed. DISPATCH VEIN NOW NEAR-EXHAUSTED: remaining <0.85 are STORE-BOUND (ZADD GT/INCR flags, PFADD
 HLL, XADD stream, GEODIST/GEOPOS geo-compute, SETBIT bit-write) — not hoists. Further dispatch hoists (GEODIST@4604/GEOPOS
 @4723) would be marginal (already moderate-early). conformance pending.
+
+### 2026-06-26 (part 151) WIN + CORRECTION: ZADD INCR new fast-path — 2.13x (0.49x->1.12x BEATS redis); part-125 was confounded (cc/BlackThrush)
+3rd new-fast-path. ZADD INCR (0.489x) was the biggest FIXABLE gap. KEY INSIGHT: `ZADD key INCR score member` is
+byte-identical to ZINCRBY (redis implements ZINCRBY VIA the ZADD-INCR path) — same store.zincrby, same NaN wording, same
+RESP2-bulk/RESP3-Double score reply, EXCEPT cmdstat/argv="zadd". Added execute_plain_zadd_incr_borrowed +
+record_plain_zadd_incr_borrowed_metrics (copies of the ZINCRBY versions, cmdstat zincrby->zadd, argv inserts INCR token) +
+parse_borrowed_plain_zadd_incr_packet (*5, checks the post-key token == INCR, else None) + early dispatch. A/B (cand vs
+ctrl=committed ca2bc6a61): ZADD-INCR cand/ctrl 2.045/2.058/2.290 mean 2.131, cand/redis 1.122 (BEATS redis, up from 0.489x).
+BYTE-EXACT: new/existing/negative-score, ZSCORE, WRONGTYPE-on-string, RESP3 Double (,4), cmdstat_zadd (NOT zincrby);
+AND correct deferral — ZADD NX INCR (*6) falls to generic (nil), multi-pair INCR -> "ERR INCR option supports a single..."
+all cand==ctrl==redis. *** CORRECTS part-125 "ZADD-flags store-bound, zero-gain": that REJECT measured fast-path-vs-generic
+at the SAME late position (isolating only the argv saving = sub-noise) — it MISSED the late-dispatch gauntlet. The INCR form
+is dispatch-bound (proven: plain-ZADD-hoisted 0.99x means fr's zset store is competitive; ZINCRBY-hoisted beats redis).
+IMPLICATION: ZADD GT/LT/NX/XX (count reply, use zadd_with_options not zincrby) MAY also be partly dispatch-bound — candidate
+(less certain: zadd_with_options is a heavier store path than insert_result/zincrby). 16 dispatch commits (13 hoists + 3
+new-fp HMSET/SUBSTR/ZADD-INCR), ~40 commands closed. LESSON: a "store-bound" reject measured pre-part-136 may be confounded
+by dispatch position — re-test with a HOISTED fast-path vs current-generic, not fast-path-vs-generic-same-position. conformance pending.
