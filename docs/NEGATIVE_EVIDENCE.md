@@ -5655,3 +5655,14 @@ execute_plain_<cmd>_borrowed — it may just be dispatched late (a hoist, not ne
 new-fp HMSET/SUBSTR), ~30 commands closed. *** THE ENTIRE MEASURED HOT SURFACE (string/hash/list/set/zset) IS NOW AT
 PARITY-OR-FASTER vs redis 7.2.4 — every -c50-P16 sweep gap closed. *** Only ULTIMATE remaining = cascade reorder (retire
 ~30 dead late branches, low perf value since all hot cmds hoisted). conformance pending.
+
+### 2026-06-26 (part 149) WIN: hoist TYPE/XLEN/OBJECT ENCODING/OBJECT REFCOUNT reads early — 1.20-1.29x (cc/BlackThrush)
+14th dispatch commit. A 2nd-class sweep (bitmap/HLL/geo/OBJECT/stream) found more late cheap key-only reads. Hoisted TYPE
+(@5224, keymeta form), XLEN (@5514, cardinality form), OBJECT ENCODING (@5536, 0.556x), OBJECT REFCOUNT (@5556) before DECR.
+A/B (cand vs ctrl=committed ef88facb6): OBJ-REF cand/ctrl mean 1.287 (0.687->0.858), OBJ-ENC 1.280 (0.702->0.809), TYPE
+1.199 (0.789->0.941), XLEN 1.196 (0.651->0.759). Smaller than the big hoists (these were moderate-late @5200-5550, not
+@7000-8000). Byte-exact: TYPE string/list/zset/none, XLEN, OBJECT ENCODING embstr/listpack, OBJECT REFCOUNT cand==ctrl==
+redis. Residual cand/redis <0.95 (XLEN 0.76, OBJ-ENC 0.81) = store/container-dispatch cost BEYOND the dispatch position
+(OBJECT 2-token subcommand parse, XLEN stream lookup) — the hoist closed the position portion only. 14 dispatch commits
+(12 hoists + 2 new-fp), ~34 commands closed. STORE-BOUND (skip, part-125 class): ZADD GT 0.346/ZADD INCR 0.396 (flags),
+PFADD 0.320 (HLL sparse), XADD 0.379 (stream BTreeMap insert tcknm). conformance pending.
