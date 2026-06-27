@@ -5632,3 +5632,14 @@ cmdstat_hmset (NOT cmdstat_hset) matching redis (verified via CONFIG RESETSTAT +
 (any_replica_ever_connected=false) makes propagation a no-op so HMSET-vs-HSET propagation difference is moot. 11 dispatch
 commits (10 hoists + 1 new-fp), ~27 commands closed. REMAINING new-fp: SUBSTR 0.381 (=GETRANGE alias), ZMSCORE 0.482.
 conformance pending.
+
+### 2026-06-26 (part 147) WIN: SUBSTR NEW fast-path — 2.31x (0.42x->1.08x, BEATS redis), byte-exact incl cmdstat (cc/BlackThrush)
+2nd new-fast-path. SUBSTR (=GETRANGE alias) was the biggest remaining gap (0.381-0.421x, no fast-path). REUSED
+can_execute_plain_getrange_borrowed + store.getrange (both command-agnostic); added execute_plain_substr_borrowed +
+record_plain_substr_borrowed_metrics + plain_substr_owned_argv (isolated copies, only cmdstat/command-name "substr"/"SUBSTR"
+differ; reply path IDENTICAL to GETRANGE) + parse_borrowed_plain_substr_packet (*4 $6 SUBSTR, reuses BorrowedPlainKeyRange
+Packet) + early dispatch. A/B (cand vs ctrl=committed 30600cb10): SUBSTR cand/ctrl 2.333/2.405/2.178 mean 2.305, cand/redis
+1.076 (BEATS redis, up from ctrl/redis 0.421x). BYTE-EXACT: SUBSTR 0..4/-3..-1/6..10/nokey-empty/WRONGTYPE-on-hash
+cand==ctrl==redis; cmdstat_substr recorded (NOT cmdstat_getrange) matching redis. 12 dispatch commits (10 hoists + 2 new-fp
+HMSET/SUBSTR), ~28 commands closed. REMAINING: ZMSCORE 0.482 (variadic multi-member ZSCORE — bigger lift). The string/hash/
+list/set/zset hot surface is now COMPREHENSIVELY parity-or-faster vs redis 7.2.4. conformance pending.
