@@ -4115,6 +4115,33 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zmscore_multi_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zmscore_borrowed_into(
+                            packet.key,
+                            &packet.fields[..packet.len],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_type_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_keymeta_borrowed(
@@ -9274,6 +9301,33 @@ fn process_buffered_frames(
                         .execute_plain_zmscore_borrowed_into(
                             packet.key,
                             &[packet.f1, packet.f2, packet.f3],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zmscore_multi_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zmscore_borrowed_into(
+                            packet.key,
+                            &packet.fields[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
@@ -14916,7 +14970,7 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
     ))
 }
 
-// (frankenredis-ken99) single-value LPUSH/RPUSH/SADD/HDEL/SREM
+// (frankenredis-ken99) single-value LPUSH/RPUSH/PFADD/SADD/HDEL/SREM
 // (`*3 $len CMD key value`), reusing the verified-live
 // execute_plain_keyed_values_write_borrowed with a 1-element value slice.
 // Multi-value forms (arity > 3) fall through to the generic path.
@@ -14935,6 +14989,8 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
             (PlainKeyedValuesCmd::Lpush, 5usize)
         } else if name.eq_ignore_ascii_case(b"RPUSH") {
             (PlainKeyedValuesCmd::Rpush, 5)
+        } else if name.eq_ignore_ascii_case(b"PFADD") {
+            (PlainKeyedValuesCmd::Pfadd, 5)
         } else {
             return None;
         }
@@ -15953,6 +16009,65 @@ fn parse_borrowed_plain_zmscore3_packet<'a>(
         f1,
         f2,
         f3,
+    })
+}
+
+// (frankenredis-zmscoremulti) ZMSCORE key m1..mN for 4-8 members (*6..*10) — common
+// batch score lookups. Reuses the variadic execute_plain_zmscore_borrowed_into (the
+// store skiplist read is cheap, so this is dispatch-bound like the LMPOP/ZMPOP 2-key
+// paths); zmscore2/zmscore3 already cover 2-3, only 4+ fell to the generic argv path.
+// 9+ members fall through to the generic. Mirrors parse_borrowed_plain_hmget_multi_packet;
+// `fields[..len]` holds the borrowed member bulks.
+fn parse_borrowed_plain_zmscore_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHmgetMultiPacket<'a>> {
+    if config.max_bulk_len < b"ZMSCORE".len() {
+        return None;
+    }
+    let zmscore_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..7)
+                .filter(|c| c.eq_ignore_ascii_case(b"ZMSCORE"))
+                .map(|_| input.len() - rest.len() + 7)
+        })
+    };
+    // nmembers = array_count - 2 (ZMSCORE + key). 1-3 members use dedicated paths.
+    let (mut cursor, nmembers, arr_len) = if let Some(c) = zmscore_at(b"*6\r\n$7\r\n") {
+        (c, 4usize, 6)
+    } else if let Some(c) = zmscore_at(b"*7\r\n$7\r\n") {
+        (c, 5usize, 7)
+    } else if let Some(c) = zmscore_at(b"*8\r\n$7\r\n") {
+        (c, 6usize, 8)
+    } else if let Some(c) = zmscore_at(b"*9\r\n$7\r\n") {
+        (c, 7usize, 9)
+    } else if let Some(c) = zmscore_at(b"*10\r\n$7\r\n") {
+        (c, 8usize, 10)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arr_len {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut fields = [empty; 8];
+    let mut consumed = next;
+    for slot in fields.iter_mut().take(nmembers) {
+        let (m, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = m;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainHmgetMultiPacket {
+        consumed,
+        key,
+        fields,
+        len: nmembers,
     })
 }
 
@@ -21422,6 +21537,15 @@ mod tests {
         assert_eq!(cmd, crate::PlainKeyedValuesCmd::Hdel);
         assert_eq!(parsed.key, b"h");
         assert_eq!(parsed.member, b"f");
+
+        let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values1_packet(
+            b"*3\r\n$5\r\npFaDd\r\n$3\r\nhll\r\n$1\r\nx\r\n",
+            &ParserConfig::default(),
+        )
+        .expect("canonical single-element PFADD packet should parse");
+        assert_eq!(cmd, crate::PlainKeyedValuesCmd::Pfadd);
+        assert_eq!(parsed.key, b"hll");
+        assert_eq!(parsed.member, b"x");
 
         let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values4_packet(
             b"*6\r\n$4\r\nsReM\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",

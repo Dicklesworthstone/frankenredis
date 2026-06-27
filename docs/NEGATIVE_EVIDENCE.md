@@ -5984,3 +5984,17 @@ both empty -> nil; first wrong-type -> WRONGTYPE. Reuses store.zcard_no_stat/zpo
 LMPOP-no-ZMPOP): ZMPOP2 cand/ctrl 2.101/2.250/1.928 mean 2.093 (0.384->0.833 redis), ZMPOP1 mean 1.220 (0.664->0.837).
 BYTE-EXACT: 2-key MIN/MAX/skip-empty/both-nil/wrong-type, 1-key, RESP3 nested score cand==ctrl==redis. 27 dispatch commits,
 ~70 cmds. (Peer BlueFalcon committed their PFADD docs note meanwhile; my commit is my-files-only.)
+
+### 2026-06-27 (part 163) WIN: ZMSCORE 4-8 member new fast-path — cand/ctrl 1.10-1.28x, byte-exact (cc/BlackThrush)
+The ledger's named-remaining clean new-code item (ZMSCORE-4+). ZMSCORE had dedicated borrowed fast-paths only for 2/3
+members (zmscore2/zmscore3); 4+ fell to the generic argv-allocating multibulk path (HMGET already covered 4-8 via
+hmget_multi). parse_borrowed_plain_zmscore_multi_packet mirrors parse_borrowed_plain_hmget_multi_packet exactly: matches
+`*6..*10 $7 ZMSCORE` (4-8 members), borrows key+members into the reused BorrowedPlainHmgetMultiPacket, and feeds
+`&fields[..len]` to the EXISTING variadic execute_plain_zmscore_borrowed_into (NO runtime/store change — the skiplist read
+is cheap so this is purely dispatch-bound). Wired into BOTH dispatch chains right after the zmscore3 branch; 9+ members and
+non-`*N$7ZMSCORE` shapes fall through to the generic path unchanged. A/B (cand=cc target vs ctrl=committed HEAD bc254370b,
+pipe=500 trials=9, both fr-vs-redis; load avg ~130): cand/ctrl 4m 1.200/1.284, 5m 1.098/1.267, 6m 1.216/1.203, 8m
+1.104/1.163 across two runs — consistently 1.10-1.28x faster than the generic-path control (cand/redis 0.81-1.04x, up from
+the generic baseline). BYTE-EXACT (cand==ctrl==redis): 4/5/6/8-member incl missing-member nils + all-missing + wrong-type,
+RESP2 + RESP3 Double, 9-member generic fallthrough, missing-key all-nil, lowercase cmd. zset differs all green
+(score_emit/tiebreak/4000-iter fuzz). Single-file change (fr-server/src/main.rs). 28 dispatch commits, ~71 cmds.
