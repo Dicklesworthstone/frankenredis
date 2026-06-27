@@ -5880,3 +5880,14 @@ HOIST VEIN NOW EXHAUSTED: simple km/k3/key_arg2 shipped-but-late all hoisted; re
 COUNT/getex-options/lmove-4arg, all ~1.05x marginal) or niche new-code (LMPOP-2key/ZADD-flag-multipair/ZMSCORE-4+) or the
 big hash-dispatch refactor (multi-day). The dispatch campaign (parts 136-160, 25 commits, ~67 cmds) is COMPLETE for
 per-turn value. conformance pending.
+
+### 2026-06-27 (part 161) WIN: LMPOP 2-key NEW fast-path — 2.51x (0.28x->0.72x), byte-exact (cc/BlackThrush)
+Biggest in-domain remaining gap. execute_plain_lmpop2_borrowed mirrors fr-command::lmpop for `LMPOP 2 k1 k2 LEFT|RIGHT`
+(no COUNT): loop-probe k1 then k2 via llen_no_stat (no keyspace bump), pop one from the first non-empty -> [key,[elem]];
+both empty/missing -> nil; first wrong-type key -> WRONGTYPE. Reuses store.llen_no_stat/lpop/rpop (NO new store code) +
+generic parse_borrowed_plain_key_arg3_packet (b"*5\\r\\n$5\\r\\n"+LMPOP: key=numkeys,a=k1,b=k2,c=dir). COUNT/>2-key fall to
+generic. A/B (cand vs ctrl BOTH built from 3cb405c2e via stash-dance = peer fr-store DUMP-cache WIP constant -> isolated):
+LMPOP2 cand/ctrl 2.267/2.691/2.570 mean 2.510, cand/redis 0.720 (up from 0.282x). BYTE-EXACT: pop-k1, skip-empty-pop-k2,
+RIGHT, both-missing nil (*-1), wrong-type-k1, wrong-type-k2-after-empty cand==ctrl==redis. 26 dispatch commits, ~68 cmds
+closed. PEER-COORD: built around peer's just-committed fr-store DUMP-cache (3cb405c2e, zset/HLL/dump — NOT lists, doesn't
+affect LMPOP); committed ONLY my fr-runtime+fr-server files. conformance pending.

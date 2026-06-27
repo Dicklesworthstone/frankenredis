@@ -19326,6 +19326,97 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed WRITE fast path for `LMPOP 2 k1 k2 LEFT|RIGHT` (no COUNT, count=1).
+    /// Mirrors fr-command::lmpop: probe k1 then k2 (llen_no_stat, no keyspace bump),
+    /// pop one from the first non-empty list -> [key, [elem]]; both empty/missing -> nil;
+    /// first wrong-type key -> WRONGTYPE error. COUNT form + >2 keys fall to generic.
+    pub fn execute_plain_lmpop2_borrowed(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len() + numkeys_arg.len() + k1.len() + k2.len() + dir_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let mut reply = RespFrame::Array(None);
+        for k in [k1, k2] {
+            match self.server.store.llen_no_stat(k, now_ms) {
+                Ok(n) if n > 0 => {
+                    let val = if left {
+                        self.server.store.lpop(k, now_ms)
+                    } else {
+                        self.server.store.rpop(k, now_ms)
+                    };
+                    reply = match val {
+                        Ok(Some(v)) => RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(k.to_vec())),
+                            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
+                        ])),
+                        Ok(None) => RespFrame::Array(None),
+                        Err(err) => CommandError::Store(err).to_resp(),
+                    };
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    reply = CommandError::Store(err).to_resp();
+                    break;
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// (frankenredis-zmpop1fast) Borrowed WRITE fast path for the common 1-key,
     /// no-COUNT form `ZMPOP 1 key MIN|MAX` (count defaults to 1). Mirrors
     /// fr-command::zmpop for that shape: zcard_no_stat probe (no keyspace bump),
