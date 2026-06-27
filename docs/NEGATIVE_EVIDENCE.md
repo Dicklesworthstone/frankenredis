@@ -6147,3 +6147,19 @@ is the fallback; pipe=300 trials=9, 3 runs, load 6-22): NX_GET 2.14-2.50x, XX_GE
 GET value + PTTL preservation): NX/XX/KEEPTTL on absent/string/string-with-ttl/list-wrongtype, lowercase opt+get, RESP2+RESP3.
 fr-runtime + fr-server (my files only). SET-GET vein now: plain + EX/PX + NX/XX/KEEPTTL all fast; residual = EXAT/PXAT+GET
 (absolute, less common) + 2-option (EX+NX+GET) forms. 31 dispatch commits.
+
+### 2026-06-27 (part 168) WIN: EXPIRE-family NX|XX|GT|LT hoist into first cascade — cand/ctrl ~1.5-1.9x, byte-exact (cc/BlackThrush)
+A broad probe flagged EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT + NX|XX|GT|LT at 0.5-0.62x. NOT a missing fast-path (the
+execute_plain_<cmd>_cond_borrowed executors AND their parse_borrowed_plain_key_arg2_packet dispatch already exist) and NOT
+degenerate — root cause: process_buffered_frames has TWO dispatch cascades; the cond branches lived ONLY in the later one
+(~8967) while the no-flag siblings are in BOTH (~3684 + ~9060). A pipelined EXPIRE-flag hit the FIRST cascade, which lacked
+cond, so it ran the full strip_prefix gauntlet and fell to the generic argv path. FIX = pure-fr-server HOIST: copy the 4
+cond `else if` branches (EXPIRE *4$6 / PEXPIRE *4$7 / EXPIREAT *4$8 / PEXPIREAT *4$9 -> execute_plain_*_cond_borrowed) into
+the FIRST cascade right after the no-flag EXPIRE branch. ZERO logic change (same parser + executor) so byte-exact by
+construction. A/B (cand=HEAD+hoist vs ctrl=HEAD, both local-built — rch fleet still degraded/missing legacy_redis_code;
+pipe=300 trials=9, 3 runs, load 20): EXPIRE_NX 1.70-1.77x, EXPIRE_GT 1.50-2.26x, PEXPIRE_XX 1.69-2.31x, EXPIREAT_LT
+1.21-2.03x — **~1.5-1.9x** (cand/redis 0.76-1.35, up from 0.50x). BYTE-EXACT cand==ctrl==redis: 4 cmds x {NX,XX,GT,LT} x
+{ttl-500, ttl-5000, no-ttl, missing-key} replies + cand==ctrl PTTL (absolute-PTTL cross-process compare needs a jitter band
+— off-by-1ms is wall-clock now() skew, not divergence) + invalid-flag errors + RESP2/3. conformance 194/0 GREEN. fr-server
+only. LESSON: a fast-path present in ONE of the two process_buffered_frames cascades but not the other reads as a 0.5x
+"missing fast-path" gap — grep BOTH cascade positions; the fix is a hoist not new code. 32 dispatch commits.
