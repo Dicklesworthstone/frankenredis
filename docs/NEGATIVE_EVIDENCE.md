@@ -4,6 +4,48 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver BITFIELD SET u8 aligned store fast-path rejected
+
+Land-or-dig found one unlanded, *unbenched* source candidate sitting dirty in
+the shared working tree (BlueFalcon's `bitfield-u8` WIP): a specialized
+`Store::bitfield_set_aligned_u8` primitive plus a runtime route so that
+`BITFIELD key SET u8 <byte-aligned-offset> <value>` (already on the
+`can_execute_plain_bitfield_set_borrowed` path) skips the per-bit
+`bitfield_read`/`bitfield_write` loops and the post-write reread, doing a single
+direct byte get/set instead.
+
+Correctness was solid — a new lib unit test
+(`bitfield_set_aligned_u8_matches_generic_for_existing_and_missing_strings`,
+5 initial strings × 4 offsets × 4 values) asserts old-value, full-bytes, and
+`dirty` parity against the generic `bitfield_set`, and it passes:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cc rch exec --
+cargo test -p fr-store --lib bitfield_set_aligned_u8` → `1 passed`.
+
+But the win is **below the noise floor**. Candidate and a clean `main`
+(`0de3fdcff`) control binary were built per-crate
+(`cargo build --profile release -p fr-server --bin frankenredis`) and benched
+head-to-head against Redis 7.2.4 with
+`redis-benchmark -n 2000000 -P 16 -c 50 -q BITFIELD bf SET u8 5 200`
+(existing-key hot path, `connected_slaves:0` on all three, host load ~47).
+
+| measurement | candidate | control (main `0de3fdcff`) | Redis 7.2.4 | cand/ctrl | cand/Redis |
+|---|---:|---:|---:|---:|---:|
+| non-interleaved best-of-3 | `515.5 Krps` | `472.7 Krps` | `802.9 Krps` | `1.090x` | `0.642x` |
+| **interleaved best-of-6 (drift-canceled)** | `539.4 Krps` | `553.4 Krps` | — | **`0.975x`** | — |
+
+The non-interleaved pass *looked* like a ~9% candidate win, but that was load
+drift: interleaving candidate/control round-by-round (the bias-canceling
+methodology) flipped it — control led 5 of 6 rounds and won best-of-6 (`0.975x`).
+The change is parity-within-noise. The saved work (~16 bit-ops + one extra
+`bitfield_read`) is a vanishingly small fraction of total per-command server
+work (dispatch + active-expire + keyspace + reply encoding), consistent with the
+already-exhausted dispatch/micro vein.
+
+Decision: **REJECT / source reverted** (preserved as a labeled backup stash for
+BlueFalcon, not dropped). Adds code + a test for no measurable throughput gain.
+Future BITFIELD work should target a structurally different cost, not another
+hot-path byte-loop micro-hunk.
+
 ## 2026-06-27 BlackThrush PFADD register-cache encoding skip rejected
 
 Land-or-dig found no measured unlanded source win in bench worktrees. Current
