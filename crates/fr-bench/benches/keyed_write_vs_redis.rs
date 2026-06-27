@@ -14,6 +14,7 @@ const HOST: &str = "127.0.0.1";
 const COMMANDS_PER_ITER: usize = 64;
 const ARITIES: [usize; 6] = [1, 4, 5, 8, 12, 16];
 const COMMANDS: [&str; 4] = ["LPUSH", "RPUSH", "SADD", "PFADD"];
+const SMISMEMBER_ARITIES: [usize; 2] = [2, 3];
 const REMOVE_COMMANDS: [RemoveCommand; 2] = [
     RemoveCommand {
         remove: "HDEL",
@@ -458,6 +459,35 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     }
 
     set_get_group.finish();
+
+    let mut smismember_group = c.benchmark_group("smismember_vs_redis");
+    smismember_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let smismember_prefill = smismember_prefill_packet();
+    for arity in SMISMEMBER_ARITIES {
+        let smismember = pipelined_smismember_packet(arity, COMMANDS_PER_ITER);
+        for engine in engines {
+            smismember_group.bench_with_input(
+                BenchmarkId::new(format!("SMISMEMBER_{arity}v"), engine.name),
+                &engine,
+                |b, engine| {
+                    let mut client = Client::connect(engine.port);
+                    b.iter_custom(|iters| {
+                        client.flushall();
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iters {
+                            client.run_packet(&smismember_prefill, 1);
+                            let start = Instant::now();
+                            client.run_resp_packet(&smismember, COMMANDS_PER_ITER);
+                            elapsed += start.elapsed();
+                        }
+                        client.flushall();
+                        elapsed
+                    });
+                },
+            );
+        }
+    }
+    smismember_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -734,6 +764,23 @@ fn pipelined_set_get_packet(count: usize) -> Vec<u8> {
         let key = format!("sg{index:03}");
         let value = format!("new{index:03}");
         packet.extend_from_slice(&encode_command(&["SET", &key, &value, "GET"]));
+    }
+    packet
+}
+
+fn smismember_prefill_packet() -> Vec<u8> {
+    encode_command(&["SADD", "s", "a", "b", "c", "d", "e", "f"])
+}
+
+fn pipelined_smismember_packet(arity: usize, count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * (48 + arity * 8));
+    for index in 0..count {
+        let miss = format!("miss{index:03}");
+        match arity {
+            2 => packet.extend_from_slice(&encode_command(&["SMISMEMBER", "s", "a", &miss])),
+            3 => packet.extend_from_slice(&encode_command(&["SMISMEMBER", "s", "a", &miss, "c"])),
+            _ => unreachable!("benchmark arity is fixed"),
+        }
     }
     packet
 }
