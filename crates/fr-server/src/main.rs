@@ -4055,6 +4055,24 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_dump_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -11446,6 +11464,30 @@ fn parse_borrowed_plain_llen_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainLlenPacket { consumed, key })
+}
+
+// (frankenredis-dumpfast) `DUMP key` (*2 $4) — read returning the RDB payload bulk
+// string (nil on a missing key). No fast path existed, so per-command DUMP fell to
+// the generic argv path (measured 0.66x). Reuses execute_plain_dump_borrowed +
+// store.dump_key (payload cache + keyspace accounting) -> byte-identical.
+fn parse_borrowed_plain_dump_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"DUMP".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"DUMP"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 struct BorrowedPlainGetdelPacket<'a> {

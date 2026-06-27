@@ -6218,3 +6218,18 @@ parsers, cheap-cmd-late clusters) are SHIPPED (parts 161-171, ~10 this session);
 lever is the hash/(arity,cmd) dispatch refactor (replaces the ~150-branch linear cascade with O(1) lookup — multi-day,
 all-or-nothing). Bench discipline reaffirmed: degenerate (no-op/drain) + ±15-50% load noise manufacture false 0.5-0.8x gaps;
 require non-mutating workload + 3-run stability + an unaffected control before trusting a dispatch gap. No code change.
+
+### 2026-06-27 (part 173) WIN + MYTH-BUST: DUMP borrowed fast-path ~1.5-2x; the "RESTORE-decode 0.37x" is per-command overhead, NOT bulk-decode (cc/BlackThrush)
+Pivoted off the saturated dispatch surface to the RDB/reload surface (collection_reload_headtohead). MYTH-BUST: the long-held
+"collection RESTORE-decode 0.37x = dominant gap needing the structural keep-listpack rewrite" is MISATTRIBUTED. Per-type
+DEBUG RELOAD (BULK save+load) is parity-or-FASTER for EVERY type (hash 1.02x, set_str 1.50x, set_int 3.09x, zset 0.93x, list
+1.81x). The script's 0.37x RESTORE / 0.66x DUMP halves are PIPELINED PER-COMMAND DUMP/RESTORE (one cmd per key) dominated by
+per-command dispatch overhead, NOT the bulk decode/encode (which is fine). So the keep-listpack multi-day rewrite targets a
+gap that doesn't exist in bulk loading — DON'T pursue it for RDB-load/replication speed. The real per-command lever: DUMP had
+NO borrowed fast path (parse/execute_plain_dump absent) -> `DUMP key` (*2 $4) fell to generic. Added parse_borrowed_plain_dump_
+packet + execute_plain_dump_borrowed (mirrors strlen read path; reuses store.dump_key which already does keyspace accounting +
+modification-count payload cache) hoisted into the early read cluster. A/B (cand=HEAD+fast vs ctrl=HEAD, both local-built,
+pipe=400 trials=13, 3 runs): DUMP_hash 1.40-1.53x, DUMP_str 1.78-2.10x, DUMP_zset 1.61-1.80x (~1.5-2x). BYTE-EXACT
+cand==ctrl==REDIS (RDB payload incl version+CRC footer): string/list/set-str/set-int/hash/zset + nil-on-missing, fresh conn.
+conformance GREEN. fr-runtime + fr-server. (RESTORE itself has a binary payload -> harder to borrowed-parse; left for later.)
+36 dispatch commits.
