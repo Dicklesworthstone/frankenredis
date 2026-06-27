@@ -5693,3 +5693,17 @@ IMPLICATION: ZADD GT/LT/NX/XX (count reply, use zadd_with_options not zincrby) M
 (less certain: zadd_with_options is a heavier store path than insert_result/zincrby). 16 dispatch commits (13 hoists + 3
 new-fp HMSET/SUBSTR/ZADD-INCR), ~40 commands closed. LESSON: a "store-bound" reject measured pre-part-136 may be confounded
 by dispatch position — re-test with a HOISTED fast-path vs current-generic, not fast-path-vs-generic-same-position. conformance pending.
+
+### 2026-06-26 (part 152) WIN: ZADD GT/LT/NX/XX new fast-path — 2.08x (0.41x->0.87-0.94x); DEFINITIVELY corrects part-125 (cc/BlackThrush)
+4th new-fast-path, biggest remaining gap. *5 single-flag form `ZADD key <NX|XX|GT|LT> score member` → execute_plain_zadd_
+flag_borrowed maps the flag to ZaddOptions, calls store.zadd_with_options(key, [(score,member)], opts), replies Integer
+(added); cmdstat "zadd". New BorrowedPlainZaddFlagPacket + parser (checks post-key token in {NX,XX,GT,LT}, else None so
+CH/INCR/combos/*6 fall to generic). A/B (cand vs ctrl=committed 585a23a11): ZADD-GT cand/ctrl mean 2.086 (cand/redis 0.867,
+up from 0.408x), ZADD-NX mean 2.080 (cand/redis 0.942, up from 0.465x). BYTE-EXACT (exhaustive conditional semantics):
+GT-updates-only-if-higher, LT-only-if-lower, NX-blocks-existing, XX-blocks-missing — scores verified via ZSCORE; WRONGTYPE;
+cmdstat_zadd; ZADD GT CH (*6) defers to generic; all cand==ctrl==redis. *** DEFINITIVELY CORRECTS part-125 "ZADD-flags
+store-bound zero-gain": the ENTIRE ZADD-flag class (INCR part-151 + NX/XX/GT/LT here) is DISPATCH-bound; part-125's reject
+measured fast-path-vs-generic at the same late position, missing the gauntlet. zadd_with_options is only marginally heavier
+than insert_result (GT 0.867 slightly below NX 0.942 = the GT compare), NOT the bottleneck. *** 17 dispatch commits (13
+hoists + 4 new-fp HMSET/SUBSTR/ZADD-INCR/ZADD-flags), ~44 commands closed. The re-audit-old-rejects lesson is DOUBLY proven.
+conformance pending.
