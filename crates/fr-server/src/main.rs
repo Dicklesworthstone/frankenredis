@@ -4072,6 +4072,81 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                // (frankenredis-keyonlyfast) Single-key DEL/EXISTS/TOUCH — top-frequency
+                // commands whose only fast paths were the *3+ multi-key forms dispatched
+                // very late (~7874/9756), and the *2 single-key form had NONE -> they fell
+                // to generic (measured 0.39-0.45x). Give the single-key forms an early
+                // fast path via the generic key-only parser + the existing variadic
+                // executors. Byte-exact (same executors, 1-key slice).
+                } else if let Some(packet) = parse_borrowed_plain_key_only_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*2\r\n$3\r\n",
+                    b"DEL",
+                ) {
+                    if let Some(response) =
+                        runtime.execute_plain_del_borrowed(&[packet.key], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_only_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*2\r\n$6\r\n",
+                    b"EXISTS",
+                ) {
+                    if runtime
+                        .execute_plain_exists_borrowed_into(&[packet.key], ts, &mut conn.write_buf)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_only_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*2\r\n$5\r\n",
+                    b"TOUCH",
+                ) {
+                    if let Some(response) =
+                        runtime.execute_plain_touch_borrowed(&[packet.key], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
@@ -13717,6 +13792,33 @@ fn parse_borrowed_plain_key_arg1_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (arg, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainKeyArg1Packet { consumed, key, arg })
+}
+
+// (frankenredis-keyonlyfast) Generic *2 `CMD key` parser (key only). `prefix` is the
+// literal `*2\r\n$<len>\r\n` header and `cmd` the case-insensitive verb. Used to give
+// the single-key forms of DEL/EXISTS/TOUCH an early fast path (their multi-key forms
+// were dispatched very late and the single-key form had none). Reuses
+// BorrowedPlainGetPacket (key only).
+fn parse_borrowed_plain_key_only_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    prefix: &[u8],
+    cmd: &[u8],
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < cmd.len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+        rest.get(..cmd.len())
+            .filter(|c| c.eq_ignore_ascii_case(cmd))
+            .map(|_| input.len() - rest.len() + cmd.len())
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 // (frankenredis-zremrangefast) Generic *4 `CMD key arg1 arg2` parser used by the

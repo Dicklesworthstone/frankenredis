@@ -6233,3 +6233,15 @@ pipe=400 trials=13, 3 runs): DUMP_hash 1.40-1.53x, DUMP_str 1.78-2.10x, DUMP_zse
 cand==ctrl==REDIS (RDB payload incl version+CRC footer): string/list/set-str/set-int/hash/zset + nil-on-missing, fresh conn.
 conformance GREEN. fr-runtime + fr-server. (RESTORE itself has a binary payload -> harder to borrowed-parse; left for later.)
 36 dispatch commits.
+
+### 2026-06-27 (part 174) WIN: single-key DEL/EXISTS/TOUCH fast path — ~2x, byte-exact (cc/BlackThrush)
+Audited common commands for missing/late borrowed fast paths (the DUMP-part-173 method). Found three TOP-FREQUENCY commands
+crippled: DEL/EXISTS/TOUCH had fast paths ONLY for the *3+ multi-key forms, dispatched VERY late (~7874/9756, cascade
+position ~150), and the *2 SINGLE-key form (the dominant usage) had NONE -> fell to generic. Measured (non-mutating probes:
+DEL/MOVE on missing key, EXISTS/TOUCH reads): EXISTS 0.41x, DEL 0.39x, TOUCH 0.45x, MOVE 0.40x, RANDOMKEY 0.36x, OBJECT
+IDLETIME 0.65x, TYPE 0.73x. Added generic parse_borrowed_plain_key_only_packet(prefix, cmd) (*2 CMD key, key-only) + early
+dispatch for `DEL key` / `EXISTS key` / `TOUCH key` reusing the existing variadic execute_plain_del/exists_into/touch_borrowed
+with a 1-key slice. Byte-exact by construction. A/B (cand=HEAD+fast vs ctrl=HEAD, both local-built, pipe=400 trials=13, 3
+runs): EXISTS 1.90-2.05x, TOUCH 2.19-2.32x, DEL 1.86-2.24x (~2x). BYTE-EXACT cand==ctrl==REDIS: hit/miss/wrong-type reply +
+resulting EXISTS state (DEL mutates -> reset per case), fresh conn. conformance GREEN. fr-server only. STILL-UNCOVERED (next):
+MOVE 0.40x / RANDOMKEY 0.36x / OBJECT IDLETIME 0.65x (no fast path). 37 dispatch commits.
