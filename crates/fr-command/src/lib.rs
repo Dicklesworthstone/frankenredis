@@ -4640,7 +4640,11 @@ fn looks_like_decimal_underflow_to_zero(text: &str, val: f64) -> bool {
     mantissa.bytes().any(|b| b.is_ascii_digit() && b != b'0')
 }
 
-fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
+/// Parse a ZADD/ZINCRBY score argument with upstream `string2d` semantics
+/// (rejects ERANGE decimal underflow-to-zero). Exposed so the fr-runtime
+/// borrowed ZADD fast path validates scores identically to this generic
+/// handler. (frankenredis-ev067)
+pub fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let val = parse_f64_arg(arg)?;
     // ZADD/ZINCRBY callsites use upstream's `string2d` path, which
     // rejects ERANGE underflow (1e-1000 → 0 → "value is not a valid
@@ -11325,7 +11329,10 @@ fn zrangestore_cmd(
         // Delete dst if it exists
         store.del(std::slice::from_ref(dst), now_ms);
     } else {
-        store.zstore_from_pairs(dst.clone(), pairs, now_ms);
+        // (frankenredis-t8rma) BYSCORE / BYLEX destinations are always created
+        // skiplist-encoded upstream (zsetTypeCreate(-1, 0)); rank mode sizes by
+        // the exact count and derives its encoding naturally.
+        store.zstore_from_pairs(dst.clone(), pairs, byscore || bylex, now_ms);
     }
     Ok(RespFrame::Integer(count))
 }
@@ -13957,10 +13964,17 @@ fn module_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError
 
 fn sentinel_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     let args = argv.iter().skip(1).map(Vec::as_slice).collect::<Vec<_>>();
-    Ok(fr_sentinel::commands::dispatch_sentinel_command(
-        &mut store.sentinel_state,
-        &args,
-    ))
+    let reply = fr_sentinel::commands::dispatch_sentinel_command(&mut store.sentinel_state, &args);
+    // SENTINEL MASTER(S)/SLAVES/SENTINELS build per-instance info as RESP3
+    // maps. Upstream's addReplyMapLen emits a flat 2N array on a RESP2
+    // connection, so downconvert the map(s) when the client isn't RESP3 —
+    // otherwise a RESP2 client receives an unparseable `%` frame.
+    // (frankenredis-sentmap)
+    if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        Ok(reply)
+    } else {
+        Ok(lua_eval::downconvert_lua_reply_to_resp2(reply))
+    }
 }
 
 fn bytes_to_lossy_string(bytes: &[u8]) -> String {
@@ -16787,6 +16801,44 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
     Ok(())
 }
 
+/// Like [`check_command_arity`] but also enforces the arity of a resolved
+/// container *subcommand* (e.g. `CONFIG GET`, `OBJECT ENCODING`).
+///
+/// Upstream `server.c::processCommand` resolves the subcommand and checks its
+/// arity at the same point as the parent's (server.c:3787) — before the
+/// CMD_PROTECTED and pub/sub-context gates — so a *known* subcommand invoked
+/// with the wrong argc must surface its own "wrong number of arguments for
+/// 'parent|sub'" error rather than a later gate's wording (e.g. the subscribe-
+/// context message). Returns `Ok(())` when the parent arity and, when a known
+/// subcommand is present, the subcommand arity both pass; `Err(name)` with the
+/// failing canonical name otherwise. An *unknown* subcommand is deliberately
+/// NOT treated as an arity failure here — dispatch handles unknown-subcommand
+/// errors separately. (frankenredis-7tpx0)
+#[must_use = "callers gate on the arity result"]
+pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
+    let Some(name) = argv.first() else {
+        return Err("");
+    };
+    check_command_arity(name, argv.len())?;
+    if argv.len() >= 2 {
+        let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
+        if command_acl_parent_has_subcommands(&parent) {
+            let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
+            let key = format!("{parent}|{sub}");
+            if let Some(&(cmd_name, arity, ..)) =
+                SUBCOMMAND_TABLE.iter().find(|entry| entry.0 == key.as_str())
+            {
+                let argc = argv.len() as i64;
+                let ok = if arity > 0 { argc == arity } else { argc >= -arity };
+                if !ok {
+                    return Err(cmd_name);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Return the flags string for a given command name.
 #[must_use]
 pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
@@ -16794,6 +16846,31 @@ pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
         return Some(HGET_COMMAND_FLAGS);
     }
     command_table_index(name).map(|idx| COMMAND_TABLE[idx].2)
+}
+
+/// Effective command flags for a full argv, descending into the
+/// `<parent>|<sub>` SUBCOMMAND_TABLE entry for container commands. Upstream
+/// dispatches `CONFIG GET` to the config|get subcommand before testing
+/// CMD_ADMIN / CMD_SKIP_MONITOR, so the container's own (flag-less) entry is
+/// the wrong source for e.g. MONITOR visibility: `CONFIG GET` is admin (hidden)
+/// while `ACL WHOAMI` is not (shown), even though both parents carry no flags.
+/// Falls back to the top-level [`get_command_flags`] when there is no matching
+/// subcommand row. (frankenredis-e8f9q)
+pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
+    let cmd = argv.first()?;
+    if let Some(sub) = argv.get(1) {
+        let mut key = Vec::with_capacity(cmd.len() + 1 + sub.len());
+        key.extend(cmd.iter().map(u8::to_ascii_lowercase));
+        key.push(b'|');
+        key.extend(sub.iter().map(u8::to_ascii_lowercase));
+        if let Some(entry) = SUBCOMMAND_TABLE
+            .iter()
+            .find(|entry| entry.0.as_bytes() == key.as_slice())
+        {
+            return Some(entry.2);
+        }
+    }
+    get_command_flags(cmd)
 }
 
 fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
@@ -17125,6 +17202,30 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
     command_acl_parent_has_subcommands(parent)
 }
 
+/// (frankenredis-k6ei4) The canonical lowercase command name upstream uses for
+/// `c->cmd->fullname`: `parent|sub` for a real container command
+/// (`CONFIG GET` -> `config|get`) and the bare command otherwise. DEBUG is NOT a
+/// container — its `SLEEP`/`JMAP`/`OBJECT`/… are plain arguments, not registered
+/// subcommands — so `DEBUG SLEEP` -> `debug`, matching redis's INFO commandstats /
+/// latencystats keys and the subscribe-context error wording. This is the single
+/// source of truth (delegating to [`command_acl_parent_has_subcommands`]);
+/// fr-runtime previously carried a divergent hardcoded list that wrongly
+/// namespaced DEBUG as `debug|sub`.
+#[must_use]
+pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
+    let parent =
+        String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b"")).to_ascii_lowercase();
+    if command_acl_parent_has_subcommands(&parent)
+        && let Some(sub) = argv.get(1)
+    {
+        return format!(
+            "{parent}|{}",
+            String::from_utf8_lossy(sub).to_ascii_lowercase()
+        );
+    }
+    parent
+}
+
 fn command_acl_parent_has_subcommands(parent: &str) -> bool {
     parent.eq_ignore_ascii_case("acl")
         || parent.eq_ignore_ascii_case("client")
@@ -17418,15 +17519,18 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
 
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
-        // COMMAND with no sub-command: return full command info for all commands.
-        // (frankenredis-99to6) Upstream server.c::commandCommand walks
-        // both the top-level commands dict AND each container's
-        // subcommand_dict, so the reply contains both groups.
+        // COMMAND with no sub-command: full command info for the top-level
+        // commands only. (frankenredis-d309r) Upstream
+        // server.c::commandCommand iterates `server.commands` (241 top-level
+        // entries); container subcommands are NOT listed at the top level — they
+        // are nested inside each parent's reply (the subcommands field, emitted
+        // by command_info_entry). So this must NOT chain SUBCOMMAND_TABLE, or the
+        // reply inflates to 370 and disagrees with COMMAND COUNT (241).
+        // COMMAND LIST (a flat name list) DOES include subcommands — see below.
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-            .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, arity, flags, first_key, last_key, step)| {
                 let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                 if resp3 {
@@ -17533,12 +17637,13 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
     } else if sub.eq_ignore_ascii_case("INFO") {
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         if argv.len() < 3 {
-            // (frankenredis-99to6) Bare COMMAND INFO mirrors the
-            // top-level + subcommand walk.
+            // (frankenredis-d309r) Bare COMMAND INFO mirrors COMMAND: only
+            // the 241 top-level entries (subcommands nested), NOT the flat
+            // parent+sub walk — matching vendored 7.2.4's `*241`. An explicit
+            // `COMMAND INFO client|kill` still resolves the subcommand below.
             let entries: Vec<RespFrame> = COMMAND_TABLE
                 .iter()
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                .chain(SUBCOMMAND_TABLE.iter())
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
                     let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                     if resp3 {
@@ -20049,7 +20154,9 @@ const CONFIG_STATIC_DEFAULTS: &[(&str, &str)] = &[
     ("notify-keyspace-events", ""),
     ("hz", "10"),
     ("dynamic-hz", "yes"),
-    ("active-expire-enabled", "yes"),
+    // redis 7.2.4 has no `active-expire-enabled` config (active expiry is a
+    // DEBUG SET-ACTIVE-EXPIRE toggle only); keeping it here leaked an fr-only
+    // param into CONFIG GET / accepted it in CONFIG SET. (frankenredis-cfgactexp)
     ("lfu-log-factor", "10"),
     ("lfu-decay-time", "1"),
     ("lazyfree-lazy-eviction", "no"),
@@ -22138,11 +22245,21 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 RespFrame::Integer(v),
             ]
         }
-        fn pair_double(k: &str, v: f64) -> [RespFrame; 2] {
-            [
-                RespFrame::BulkString(Some(k.as_bytes().to_vec())),
-                RespFrame::BulkString(Some(format!("{v}").into_bytes())),
-            ]
+        // (frankenredis-ta2i2) Upstream object.c::memoryCommand emits the
+        // percentage/ratio fields via addReplyDouble, which under RESP3 is the
+        // Double type (`,<value>\r\n`) — not a bulk string. fr previously always
+        // emitted a bulk string, so a RESP3 client parsing MEMORY STATS as a map
+        // got a string where it expects a double. Match upstream: Double under
+        // HELLO 3, bulk string under RESP2 (where addReplyDouble formats a bulk
+        // string). The integer counters keep using `pair`.
+        let resp3_stats = store.dispatch_client_ctx.resp_protocol_version == 3;
+        fn pair_double(k: &str, v: f64, resp3: bool) -> [RespFrame; 2] {
+            let value = if resp3 {
+                RespFrame::double_from_f64(v)
+            } else {
+                RespFrame::BulkString(Some(format!("{v}").into_bytes()))
+            };
+            [RespFrame::BulkString(Some(k.as_bytes().to_vec())), value]
         }
         let mut items = Vec::with_capacity(60);
         // (frankenredis-wkglo) Track overhead components as we emit them
@@ -22293,8 +22410,8 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             0.0
         };
         for kv in [
-            pair_double("dataset.percentage", dataset_percentage),
-            pair_double("peak.percentage", peak_percentage),
+            pair_double("dataset.percentage", dataset_percentage, resp3_stats),
+            pair_double("peak.percentage", peak_percentage, resp3_stats),
         ] {
             items.extend(kv);
         }
@@ -22306,13 +22423,13 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             items.extend(kv);
         }
         for kv in [
-            pair_double("allocator-fragmentation.ratio", 1.0),
+            pair_double("allocator-fragmentation.ratio", 1.0, resp3_stats),
             pair("allocator-fragmentation.bytes", 0),
-            pair_double("allocator-rss.ratio", 1.0),
+            pair_double("allocator-rss.ratio", 1.0, resp3_stats),
             pair("allocator-rss.bytes", 0),
-            pair_double("rss-overhead.ratio", 1.0),
+            pair_double("rss-overhead.ratio", 1.0, resp3_stats),
             pair("rss-overhead.bytes", 0),
-            pair_double("fragmentation", 1.0),
+            pair_double("fragmentation", 1.0, resp3_stats),
             pair("fragmentation.bytes", 0),
         ] {
             items.extend(kv);
@@ -24131,61 +24248,116 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let type_name =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let lower = type_name.to_ascii_lowercase();
+        // (frankenredis-nxw4z) Upstream debug.c::debugCommand emits the
+        // genuine RESP3 type (Double/Set/Map/Verbatim/Bool/BigNumber/Push) when
+        // the caller is on HELLO 3 and degrades to the RESP2 shape otherwise. fr
+        // previously emitted the RESP2 shape unconditionally, so every typed
+        // reply was wrong for RESP3 clients. Branch on the caller's protocol.
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
+        let ints = || {
+            vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]
+        };
         match lower.as_str() {
             "string" => Ok(RespFrame::BulkString(Some(b"Hello World".to_vec()))),
             "integer" => Ok(RespFrame::Integer(12345)),
-            // RESP2 emits double as a BulkString with the numeric body.
-            // Upstream addReplyDouble for RESP2 formats with %.17Lg-ish
-            // precision but the literal 3.141 round-trips exactly to
-            // the 4-character text "3.141".
-            "double" => Ok(RespFrame::BulkString(Some(b"3.141".to_vec()))),
-            "bignum" => Ok(RespFrame::BulkString(Some(
-                b"1234567999999999999999999999999999999".to_vec(),
-            ))),
+            // The literal 3.141 round-trips exactly to "3.141"; RESP3 is a
+            // Double (`,3.141`), RESP2 the bulk-string body.
+            "double" => Ok(if resp3 {
+                RespFrame::Double("3.141".to_string())
+            } else {
+                RespFrame::BulkString(Some(b"3.141".to_vec()))
+            }),
+            "bignum" => {
+                let digits = "1234567999999999999999999999999999999";
+                Ok(if resp3 {
+                    RespFrame::BigNumber(digits.to_string())
+                } else {
+                    RespFrame::BulkString(Some(digits.as_bytes().to_vec()))
+                })
+            }
             "null" => Ok(RespFrame::BulkString(None)),
-            "true" => Ok(RespFrame::Integer(1)),
-            "false" => Ok(RespFrame::Integer(0)),
-            "array" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-            ]))),
-            // Upstream emits a Set frame in RESP3; in RESP2 it
-            // degrades to an Array of the same elements (the wire
-            // type for an unordered collection).
-            "set" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-            ]))),
-            // Upstream emits a Map frame in RESP3 with three (k, v)
-            // pairs where k is the index (0,1,2) and v is the bool
-            // (k == 1). RESP2 flattens to a 6-element Array
-            // [0, false=0, 1, true=1, 2, false=0].
-            "map" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-                RespFrame::Integer(0),
-            ]))),
-            // Upstream wraps with an attribute frame in RESP3; RESP2
-            // sees only the trailing real reply.
-            "attrib" => Ok(RespFrame::BulkString(Some(
-                b"Some real reply following the attribute".to_vec(),
-            ))),
-            // Push frames have no RESP2 representation; upstream
-            // returns a hard error rather than degrading.
-            "push" => Ok(RespFrame::Error(
-                "ERR RESP2 is not supported by this command".to_string(),
-            )),
-            // Upstream's verbatim emits a Verbatim frame in RESP3
-            // ("=...txt:..."); RESP2 collapses to a plain BulkString
+            "true" => Ok(if resp3 {
+                RespFrame::Bool(true)
+            } else {
+                RespFrame::Integer(1)
+            }),
+            "false" => Ok(if resp3 {
+                RespFrame::Bool(false)
+            } else {
+                RespFrame::Integer(0)
+            }),
+            "array" => Ok(RespFrame::Array(Some(ints()))),
+            // RESP3 Set frame; RESP2 degrades to an Array of the same elements.
+            "set" => Ok(if resp3 {
+                RespFrame::Set(Some(ints()))
+            } else {
+                RespFrame::Array(Some(ints()))
+            }),
+            // RESP3 Map of three (index, bool=index==1) pairs; RESP2 flattens to
+            // a 6-element Array [0, 0, 1, 1, 2, 0].
+            "map" => Ok(if resp3 {
+                RespFrame::Map(Some(vec![
+                    (RespFrame::Integer(0), RespFrame::Bool(false)),
+                    (RespFrame::Integer(1), RespFrame::Bool(true)),
+                    (RespFrame::Integer(2), RespFrame::Bool(false)),
+                ]))
+            } else {
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(2),
+                    RespFrame::Integer(0),
+                ]))
+            }),
+            // RESP3 prefixes the real reply with an attribute frame
+            // (`|1` key-popularity -> [key:123, 90]); RESP2 sees only the bare
+            // reply. (frankenredis-01weh)
+            "attrib" => {
+                let reply =
+                    RespFrame::BulkString(Some(b"Some real reply following the attribute".to_vec()));
+                Ok(if resp3 {
+                    RespFrame::Sequence(vec![
+                        RespFrame::Attribute(vec![(
+                            RespFrame::BulkString(Some(b"key-popularity".to_vec())),
+                            RespFrame::Array(Some(vec![
+                                RespFrame::BulkString(Some(b"key:123".to_vec())),
+                                RespFrame::Integer(90),
+                            ])),
+                        )]),
+                        reply,
+                    ])
+                } else {
+                    reply
+                })
+            }
+            // RESP3 emits a bulk reply followed by an out-of-band Push frame;
+            // RESP2 has no push representation, so upstream hard-errors.
+            "push" => Ok(if resp3 {
+                RespFrame::Sequence(vec![
+                    RespFrame::BulkString(Some(
+                        b"Some real reply following the push reply".to_vec(),
+                    )),
+                    RespFrame::Push(vec![
+                        RespFrame::BulkString(Some(b"server-cpu-usage".to_vec())),
+                        RespFrame::Integer(42),
+                    ]),
+                ])
+            } else {
+                RespFrame::Error("ERR RESP2 is not supported by this command".to_string())
+            }),
+            // RESP3 Verbatim (`=…\r\ntxt:…`); RESP2 collapses to a bulk string
             // of the body without the format tag.
-            "verbatim" => Ok(RespFrame::BulkString(Some(
-                b"This is a verbatim\nstring".to_vec(),
-            ))),
+            "verbatim" => Ok(if resp3 {
+                RespFrame::Verbatim("This is a verbatim\nstring".to_string())
+            } else {
+                RespFrame::BulkString(Some(b"This is a verbatim\nstring".to_vec()))
+            }),
             _ => Ok(RespFrame::Error(
                 "ERR Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false".to_string(),
             )),
@@ -26757,7 +26929,8 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
-        check_command_arity, classify_command, client_wrong_subcommand_arity,
+        canonical_command_fullname, check_command_arity, check_full_command_arity, classify_command,
+        client_wrong_subcommand_arity,
         cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
         command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
         command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
@@ -44594,7 +44767,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel master' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|master' command".to_string()
             )
         );
     }
@@ -44629,7 +44802,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel failover' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|failover' command".to_string()
             )
         );
     }
@@ -44647,7 +44820,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel help' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|help' command".to_string()
             )
         );
     }
@@ -44665,7 +44838,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel masters' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|masters' command".to_string()
             )
         );
     }
@@ -45823,6 +45996,60 @@ mod tests {
             keys_first_3[2],
             &RespFrame::BulkString(Some(b"startup.allocated".to_vec()))
         );
+    }
+
+    #[test]
+    fn memory_stats_ratio_fields_are_resp3_doubles_resp2_bulkstrings_ta2i2() {
+        // (frankenredis-ta2i2) Upstream emits the percentage/ratio fields via
+        // addReplyDouble: a RESP3 Double (`,`) under HELLO 3, a bulk string under
+        // RESP2. Pin both protocols.
+        const RATIO_KEYS: &[&[u8]] = &[
+            b"dataset.percentage",
+            b"peak.percentage",
+            b"allocator-fragmentation.ratio",
+            b"allocator-rss.ratio",
+            b"rss-overhead.ratio",
+            b"fragmentation",
+        ];
+        // RESP3: every ratio field's value frame is a Double.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 0)
+            .expect("memory stats");
+        let RespFrame::Map(Some(entries)) = out else {
+            panic!("RESP3 MEMORY STATS must be a Map, got {out:?}"); // ubs:ignore — AI triage
+        };
+        for key in RATIO_KEYS {
+            let (_, value) = entries
+                .iter()
+                .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
+                .unwrap_or_else(|| panic!("RESP3 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+            assert!(
+                matches!(value, RespFrame::Double(_)),
+                "RESP3 {} must be a Double, got {value:?}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        // RESP2: the same fields flatten to a bulk-string value.
+        let mut store2 = Store::new();
+        store2.dispatch_client_ctx.resp_protocol_version = 2;
+        let out2 = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store2, 0)
+            .expect("memory stats");
+        let RespFrame::Array(Some(items)) = out2 else {
+            panic!("RESP2 MEMORY STATS must be a flat Array, got {out2:?}"); // ubs:ignore — AI triage
+        };
+        for key in RATIO_KEYS {
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
+                .unwrap_or_else(|| panic!("RESP2 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+            assert!(
+                matches!(items[pos + 1], RespFrame::BulkString(Some(_))),
+                "RESP2 {} must be a bulk string, got {:?}",
+                String::from_utf8_lossy(key),
+                items[pos + 1]
+            );
+        }
     }
 
     #[test]
@@ -51239,6 +51466,79 @@ mod tests {
             matches!(&arity_err, CommandError::Custom(s) if s.contains("PROTOCOL")),
             "wrong-arity must surface envelope error, got {arity_err:?}"
         );
+    }
+
+    #[test]
+    fn debug_protocol_emits_resp3_typed_frames_under_hello3_nxw4z() {
+        // (frankenredis-nxw4z) Under HELLO 3 every typed DEBUG PROTOCOL
+        // reply must use its real RESP3 frame, matching vendored 7.2.4 byte-for-
+        // byte (verified live: ,3.141 / (digits / ~set / %map-of-bools / =verbatim
+        // / #t / #f / bulk+>push). attrib still degrades (needs an Attribute
+        // frame — frankenredis-01weh).
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let proto = |store: &mut Store, t: &str| {
+            dispatch_argv(
+                &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec(), t.as_bytes().to_vec()],
+                store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("DEBUG PROTOCOL {t}"))
+        };
+        assert_eq!(proto(&mut store, "double"), RespFrame::Double("3.141".to_string()));
+        assert_eq!(
+            proto(&mut store, "bignum"),
+            RespFrame::BigNumber("1234567999999999999999999999999999999".to_string())
+        );
+        assert_eq!(proto(&mut store, "true"), RespFrame::Bool(true));
+        assert_eq!(proto(&mut store, "false"), RespFrame::Bool(false));
+        assert_eq!(
+            proto(&mut store, "set"),
+            RespFrame::Set(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]))
+        );
+        assert_eq!(
+            proto(&mut store, "map"),
+            RespFrame::Map(Some(vec![
+                (RespFrame::Integer(0), RespFrame::Bool(false)),
+                (RespFrame::Integer(1), RespFrame::Bool(true)),
+                (RespFrame::Integer(2), RespFrame::Bool(false)),
+            ]))
+        );
+        assert_eq!(
+            proto(&mut store, "verbatim"),
+            RespFrame::Verbatim("This is a verbatim\nstring".to_string())
+        );
+        assert_eq!(
+            proto(&mut store, "push"),
+            RespFrame::Sequence(vec![
+                RespFrame::BulkString(Some(b"Some real reply following the push reply".to_vec())),
+                RespFrame::Push(vec![
+                    RespFrame::BulkString(Some(b"server-cpu-usage".to_vec())),
+                    RespFrame::Integer(42),
+                ]),
+            ])
+        );
+        // attrib: an Attribute frame prefixing the bare reply. (01weh)
+        assert_eq!(
+            proto(&mut store, "attrib"),
+            RespFrame::Sequence(vec![
+                RespFrame::Attribute(vec![(
+                    RespFrame::BulkString(Some(b"key-popularity".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"key:123".to_vec())),
+                        RespFrame::Integer(90),
+                    ])),
+                )]),
+                RespFrame::BulkString(Some(b"Some real reply following the attribute".to_vec())),
+            ])
+        );
+        // Untyped scalars are protocol-agnostic.
+        assert_eq!(proto(&mut store, "integer"), RespFrame::Integer(12345));
+        assert_eq!(proto(&mut store, "null"), RespFrame::BulkString(None));
     }
 
     #[test]
@@ -61392,6 +61692,69 @@ mod tests {
     }
 
     #[test]
+    fn canonical_command_fullname_excludes_debug_as_container_k6ei4() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // Real containers namespace as parent|sub (matches c->cmd->fullname).
+        assert_eq!(canonical_command_fullname(&argv(&["CONFIG", "GET"])), "config|get");
+        assert_eq!(canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])), "client|kill");
+        assert_eq!(canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])), "object|encoding");
+        // Case-insensitive, bare parent when no subcommand arg.
+        assert_eq!(canonical_command_fullname(&argv(&["Config"])), "config");
+        // DEBUG is NOT a container: its args are not registered subcommands, so
+        // upstream's fullname is the bare "debug" (drives INFO commandstats /
+        // latencystats keys + the subscribe-context error).
+        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])), "debug");
+        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "JMAP"])), "debug");
+        // Plain commands are unchanged.
+        assert_eq!(canonical_command_fullname(&argv(&["GET", "k"])), "get");
+        assert_eq!(canonical_command_fullname(&argv(&[])), "");
+    }
+
+    #[test]
+    fn check_full_command_arity_enforces_container_subcommand_arity_7tpx0() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // Parent arity is still enforced (delegates to check_command_arity).
+        assert!(check_full_command_arity(&argv(&["GET"])).is_err());
+        assert!(check_full_command_arity(&argv(&["GET", "k"])).is_ok());
+        assert_eq!(check_full_command_arity(&argv(&["CONFIG"])), Err("config"));
+
+        // Known container subcommand with the WRONG argc fails with the
+        // "parent|sub" canonical name (upstream resolves the subcommand's arity
+        // before the protected / pub-sub-context gates).
+        assert_eq!(
+            check_full_command_arity(&argv(&["CONFIG", "GET"])),
+            Err("config|get")
+        );
+        assert_eq!(
+            check_full_command_arity(&argv(&["OBJECT", "ENCODING"])),
+            Err("object|encoding")
+        );
+        // Case-insensitive parent + subcommand resolution.
+        assert_eq!(
+            check_full_command_arity(&argv(&["object", "encoding"])),
+            Err("object|encoding")
+        );
+
+        // Known container subcommand with VALID argc passes.
+        assert!(check_full_command_arity(&argv(&["CONFIG", "GET", "maxmemory"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["OBJECT", "ENCODING", "k"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["XINFO", "STREAM", "s"])).is_ok());
+
+        // Unknown subcommand is NOT an arity failure here — dispatch handles the
+        // unknown-subcommand error separately (parent arity governs).
+        assert!(check_full_command_arity(&argv(&["CONFIG", "BOGUSSUB"])).is_ok());
+
+        // Non-container parents never trigger a subcommand lookup, so trailing
+        // args are governed solely by the parent arity (e.g. PING is -1).
+        assert!(check_full_command_arity(&argv(&["PING", "a", "b"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["GET", "k", "extra"])).is_err());
+    }
+
+    #[test]
     fn command_key_indexes_georadius_skips_fixed_args_before_store_scan() {
         // (frankenredis-u48rd) STORE/STOREDIST options only follow the fixed
         // positional args, so the option scan must skip them — otherwise a
@@ -66490,7 +66853,7 @@ mod tests {
                         if pairs.is_empty() {
                             refs.del(std::slice::from_ref(&dst_key), 0);
                         } else {
-                            refs.zstore_from_pairs(dst_key, pairs, 0);
+                            refs.zstore_from_pairs(dst_key, pairs, true, 0);
                         }
 
                         let ctx = format!("rev={rev} a3={a3} a4={a4} off={offset} cnt={count}");
@@ -73751,6 +74114,47 @@ mod tests {
             "client|* should match the 18 client subcommands"
         );
         assert!(pattern_names.iter().all(|n| n.starts_with("client|")));
+    }
+
+    #[test]
+    fn command_and_command_info_list_top_level_only_d309r() {
+        // (frankenredis-d309r) Upstream COMMAND / bare COMMAND INFO iterate
+        // `server.commands` (top-level only); container subcommands are NESTED in
+        // each parent, never listed at the top level. fr previously chained
+        // SUBCOMMAND_TABLE here, inflating the reply to 370 (and disagreeing with
+        // COMMAND COUNT = 241). COMMAND LIST is the flat-name listing that DOES
+        // include subcommands — verified separately above.
+        let mut store = Store::new();
+        let expected = COMMAND_TABLE
+            .iter()
+            .filter(|&&(name, ..)| crate::command_table_row_is_visible(name, &store))
+            .count();
+        for argv in [
+            vec![b"COMMAND".to_vec()],
+            vec![b"COMMAND".to_vec(), b"INFO".to_vec()],
+        ] {
+            let out = dispatch_argv(&argv, &mut store, 0).expect("command");
+            let RespFrame::Array(Some(items)) = out else {
+                panic!("expected Array for {argv:?}");
+            };
+            assert_eq!(
+                items.len(),
+                expected,
+                "{argv:?} must list only the {expected} top-level commands"
+            );
+            // No top-level entry is a `parent|sub` row.
+            for it in &items {
+                if let RespFrame::Array(Some(fields)) = it
+                    && let Some(RespFrame::BulkString(Some(name))) = fields.first()
+                {
+                    assert!(
+                        !name.contains(&b'|'),
+                        "subcommand {:?} must not appear at top level",
+                        String::from_utf8_lossy(name)
+                    );
+                }
+            }
+        }
     }
 
     mod metamorphic {

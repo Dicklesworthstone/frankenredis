@@ -58,6 +58,18 @@ fn next_userdata_identity() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Encode a dotted `major.minor.patch` version as upstream's
+/// `REDIS_VERSION_NUM`: `(major << 16) | (minor << 8) | patch`. Missing or
+/// non-numeric components are treated as 0, mirroring the C macro on a
+/// well-formed version string. (frankenredis-luaver)
+fn redis_version_num(version: &str) -> u32 {
+    let mut parts = version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major << 16) | (minor << 8) | patch
+}
+
 impl std::hash::Hash for LuaUserdata {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
@@ -2439,6 +2451,14 @@ pub struct LuaState<'a> {
     /// applied to the globals table after init, plus the
     /// luaProtectedTableError __index handler.
     globals_locked: bool,
+    /// (frankenredis-vr8rg) RESP version the script's `redis.call` /
+    /// `redis.pcall` use to materialize replies, toggled by `redis.setresp`.
+    /// Defaults to 2 (every script starts in RESP2 regardless of the client's
+    /// HELLO version) and is reset at the top of `execute()`. Under 3, the
+    /// dispatched command produces RESP3 frames (Double/Map/Set/Null/BigNumber)
+    /// which `resp_to_lua` then converts with upstream's RESP3 Lua mapping
+    /// (`{double=…}` / `{map=…}` / `{set=…}` / nil / `{big_number=…}`).
+    resp_version: i64,
     call_depth: usize,
     /// (frankenredis-0k259) Per-frame kind stack used to satisfy Lua 5.1's
     /// `luaL_where(L, level)` semantics from `error()` / `assert()`. Each
@@ -2977,6 +2997,7 @@ impl<'a> LuaState<'a> {
             now_ms,
             globals,
             globals_locked: false,
+            resp_version: 2,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             iterations: 0,
@@ -3092,6 +3113,19 @@ impl<'a> LuaState<'a> {
             LuaValue::Number(2.0),
         );
         redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
+        // (frankenredis-luaver) Upstream script_lua.c exposes the server
+        // version to scripts: redis.REDIS_VERSION (string) and
+        // redis.REDIS_VERSION_NUM ((major<<16)|(minor<<8)|patch). For 7.2.4
+        // that is 0x070204 = 459268. Derived from REDIS_COMPAT_VERSION so the
+        // two stay in lock-step if the compat target ever moves.
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION".to_vec()),
+            LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
+            LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
+        );
         self.globals
             .insert("redis".to_string(), LuaValue::Table(redis_table));
 
@@ -3140,6 +3174,9 @@ impl<'a> LuaState<'a> {
         // `_G._G` self-references so scripts can detect the table.
         self.install_g_table();
         self.globals_locked = true;
+        // (frankenredis-vr8rg) Every script starts in RESP2 for redis.call,
+        // independent of the client's HELLO version.
+        self.resp_version = 2;
         let mut env = Env::new();
         let mut varargs = Vec::new();
         // (frankenredis-0k259) The script top-level chunk is a Lua function
@@ -5202,10 +5239,10 @@ impl<'a> LuaState<'a> {
                 if v != 2 && v != 3 {
                     return Err("ERR RESP version must be 2 or 3.".to_string());
                 }
-                // fr's per-script RESP propagation isn't tracked on
-                // the LuaState today; the command's effect on reply
-                // shape is a no-op for now but the validation matches
-                // upstream so client error wording is correct.
+                // (frankenredis-vr8rg) Record the version so subsequent
+                // redis.call/redis.pcall dispatch with it and materialize
+                // replies via the matching RESP2/RESP3 Lua conversion.
+                self.resp_version = v;
                 Ok(vec![LuaValue::Nil])
             }
             "redis.acl_check_cmd" => {
@@ -8137,6 +8174,12 @@ impl<'a> LuaState<'a> {
         }
 
         let dirty_before = self.store.dirty;
+        // (frankenredis-vr8rg) Dispatch the command with the script's RESP
+        // version so handlers materialize RESP3 frames (Double/Map/Set/Null/
+        // BigNumber) under `redis.setresp(3)`; restore the client's version
+        // afterward so the script's own reply to the client is unaffected.
+        let saved_resp_version = self.store.dispatch_client_ctx.resp_protocol_version;
+        self.store.dispatch_client_ctx.resp_protocol_version = self.resp_version;
         let command_result = if let Some(intercepted) = script_command_intercept(&argv) {
             intercepted
         } else {
@@ -8171,9 +8214,16 @@ impl<'a> LuaState<'a> {
                 }
             }
         };
+        self.store.dispatch_client_ctx.resp_protocol_version = saved_resp_version;
 
         match command_result {
             Ok(frame) => {
+                // (frankenredis-ax9ox) Mirror this inner command to MONITOR with
+                // the `lua` address, like upstream call(). Recorded here (the
+                // post-exec point, matching redis) and drained by the runtime
+                // after the EVAL command's own monitor line; no-op when no
+                // MONITOR clients are attached.
+                self.store.record_script_monitor(&argv);
                 let dirty_after = self.store.dirty;
                 if dirty_after > dirty_before || command_may_propagate_from_script(&argv) {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so
@@ -8189,7 +8239,11 @@ impl<'a> LuaState<'a> {
                     .unwrap_or_else(|| argv.clone());
                     self.store.record_script_propagation(&effect);
                 }
-                Ok(vec![resp_to_lua_command_result(&argv, &frame)])
+                Ok(vec![resp_to_lua_command_result(
+                    &argv,
+                    &frame,
+                    self.resp_version == 3,
+                )])
             }
             Err(err_msg) => {
                 if is_pcall {
@@ -9202,13 +9256,13 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
 
 // ── Type conversions ────────────────────────────────────────────────────
 
-fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: &RespFrame) -> LuaValue {
+fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: &RespFrame, resp3: bool) -> LuaValue {
     if config_get_returns_map_in_lua(argv)
-        && let Some(table) = config_get_resp_to_lua_map(frame)
+        && let Some(table) = config_get_resp_to_lua_map(frame, resp3)
     {
         return LuaValue::Table(table);
     }
-    resp_to_lua(frame)
+    resp_to_lua(frame, resp3)
 }
 
 fn config_get_returns_map_in_lua(argv: &[Vec<u8>]) -> bool {
@@ -9217,7 +9271,7 @@ fn config_get_returns_map_in_lua(argv: &[Vec<u8>]) -> bool {
         && argv[1].eq_ignore_ascii_case(b"GET")
 }
 
-fn config_get_resp_to_lua_map(frame: &RespFrame) -> Option<LuaTable> {
+fn config_get_resp_to_lua_map(frame: &RespFrame, resp3: bool) -> Option<LuaTable> {
     let items = match frame {
         RespFrame::Array(Some(items)) | RespFrame::Sequence(items) => items,
         RespFrame::Array(None) => return Some(LuaTable::new()),
@@ -9235,14 +9289,35 @@ fn config_get_resp_to_lua_map(frame: &RespFrame) -> Option<LuaTable> {
             RespFrame::SimpleString(text) => text.as_bytes().to_vec(),
             _ => return None,
         };
-        table.set(LuaValue::Str(key), resp_to_lua(&chunk[1]));
+        table.set(LuaValue::Str(key), resp_to_lua(&chunk[1], resp3));
     }
 
     Some(table)
 }
 
-fn resp_to_lua(frame: &RespFrame) -> LuaValue {
+/// Convert a `redis.call` reply frame to a Lua value, mirroring upstream
+/// script_lua.c::redisProtocolToLuaType. `resp3` selects the conversion table:
+/// it is `true` only after `redis.setresp(3)`, where the dispatched command also
+/// materializes RESP3 frames. The RESP2 path (default) keeps the historical
+/// behavior — a null is Lua `false`, and any RESP3 frame that slips through is
+/// rendered in its flattened RESP2-callsite form.
+fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
+    // Null sentinel: RESP2 → Lua false; RESP3 → Lua nil. (frankenredis-vr8rg)
+    let null = || {
+        if resp3 {
+            LuaValue::Nil
+        } else {
+            LuaValue::Bool(false)
+        }
+    };
     match frame {
+        // RESP3 Boolean → Lua boolean (upstream redisProtocolToLuaType_Bool).
+        // (frankenredis-0gz4g)
+        RespFrame::Bool(b) => LuaValue::Bool(*b),
+        // RESP3 Attribute → its metadata pairs as a table, mirroring the Map
+        // conversion. No 7.2 command returns an attribute reply through
+        // redis.call, so this is a defensive arm. (frankenredis-01weh)
+        RespFrame::Attribute(pairs) => resp_to_lua(&RespFrame::Map(Some(pairs.clone())), resp3),
         RespFrame::SimpleString(s) => {
             let t = LuaTable::new();
             t.set(
@@ -9260,45 +9335,76 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
             LuaValue::Table(t)
         }
         RespFrame::Integer(n) => LuaValue::Number(*n as f64),
-        RespFrame::BulkString(None) => LuaValue::Bool(false),
+        RespFrame::BulkString(None) => null(),
         RespFrame::BulkString(Some(data)) => LuaValue::Str(data.clone()),
-        RespFrame::Array(None) => LuaValue::Bool(false),
+        RespFrame::Array(None) => null(),
         RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Sequence(items) => {
             let t = LuaTable::new();
             for (i, item) in items.iter().enumerate() {
-                t.set(LuaValue::Number((i + 1) as f64), resp_to_lua(item));
+                t.set(LuaValue::Number((i + 1) as f64), resp_to_lua(item, resp3));
             }
             LuaValue::Table(t)
         }
-        // RESP3 Map: Lua scripts have no native map type, so we
-        // flatten as a key-value alternating array, mirroring how
-        // upstream's redis-server materializes a RESP3 map for a
-        // RESP2 Lua callsite. (br-frankenredis-r80v / r72v)
-        RespFrame::Map(None) => LuaValue::Bool(false),
+        RespFrame::Map(None) => null(),
         RespFrame::Map(Some(pairs)) => {
-            let t = LuaTable::new();
-            for (i, (k, v)) in pairs.iter().enumerate() {
-                t.set(LuaValue::Number((2 * i + 1) as f64), resp_to_lua(k));
-                t.set(LuaValue::Number((2 * i + 2) as f64), resp_to_lua(v));
+            if resp3 {
+                // Upstream redisProtocolToLuaType_Map wraps the map in a
+                // `{map = {k = v, …}}` table under RESP3. (frankenredis-vr8rg)
+                let inner = LuaTable::new();
+                for (k, v) in pairs.iter() {
+                    inner.set(resp_to_lua(k, resp3), resp_to_lua(v, resp3));
+                }
+                let outer = LuaTable::new();
+                outer.set(LuaValue::Str(b"map".to_vec()), LuaValue::Table(inner));
+                LuaValue::Table(outer)
+            } else {
+                // RESP2 Lua callsite: flatten to an alternating k/v array.
+                // (br-frankenredis-r80v / r72v)
+                let t = LuaTable::new();
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    t.set(LuaValue::Number((2 * i + 1) as f64), resp_to_lua(k, resp3));
+                    t.set(LuaValue::Number((2 * i + 2) as f64), resp_to_lua(v, resp3));
+                }
+                LuaValue::Table(t)
             }
-            LuaValue::Table(t)
         }
-        // RESP3 Double: parse as f64 number
-        RespFrame::Double(s) => LuaValue::Number(s.parse::<f64>().unwrap_or(f64::NAN)),
-        // RESP3 Set: treat like array
-        RespFrame::Set(None) => LuaValue::Bool(false),
+        RespFrame::Double(s) => {
+            let n = s.parse::<f64>().unwrap_or(f64::NAN);
+            if resp3 {
+                // Upstream redisProtocolToLuaType_Double → `{double = n}`.
+                // (frankenredis-vr8rg)
+                let t = LuaTable::new();
+                t.set(LuaValue::Str(b"double".to_vec()), LuaValue::Number(n));
+                LuaValue::Table(t)
+            } else {
+                LuaValue::Number(n)
+            }
+        }
+        RespFrame::Set(None) => null(),
         RespFrame::Set(Some(items)) => {
-            let t = LuaTable::new();
-            for (i, item) in items.iter().enumerate() {
-                t.set(LuaValue::Number((i + 1) as f64), resp_to_lua(item));
+            if resp3 {
+                // Upstream redisProtocolToLuaType_Set → `{set = {member = true, …}}`.
+                // (frankenredis-vr8rg)
+                let inner = LuaTable::new();
+                for item in items.iter() {
+                    inner.set(resp_to_lua(item, resp3), LuaValue::Bool(true));
+                }
+                let outer = LuaTable::new();
+                outer.set(LuaValue::Str(b"set".to_vec()), LuaValue::Table(inner));
+                LuaValue::Table(outer)
+            } else {
+                let t = LuaTable::new();
+                for (i, item) in items.iter().enumerate() {
+                    t.set(LuaValue::Number((i + 1) as f64), resp_to_lua(item, resp3));
+                }
+                LuaValue::Table(t)
             }
-            LuaValue::Table(t)
         }
-        // RESP3 Verbatim: treat like string (strip the txt: prefix for Lua)
+        // RESP3 Verbatim: Lua sees the body as a plain string (the "txt:"
+        // format tag is not surfaced — minor residual vs upstream's
+        // `{format=…, string=…}` table).
         RespFrame::Verbatim(s) => LuaValue::Str(s.as_bytes().to_vec()),
-        // RESP3 Big Number: upstream script_lua.c::
-        // redisProtocolToLuaType_BigNumber materializes a
-        // `{big_number = "<digits>"}` table. (frankenredis-h2uga)
+        // RESP3 Big Number → `{big_number = "<digits>"}`. (frankenredis-h2uga)
         RespFrame::BigNumber(s) => {
             let t = LuaTable::new();
             t.set(
@@ -9310,9 +9416,16 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
     }
 }
 
-pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
+pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
     match val {
         LuaValue::Nil => RespFrame::BulkString(None),
+        // (frankenredis-0gz4g) Upstream luaReplyToRedisReply uses addReplyBool
+        // for a Lua boolean once the script is on RESP3 (redis.setresp(3)) — a
+        // RESP3 `#t`/`#f` that downgrades to `:1`/`:0` for a RESP2 client. In the
+        // default RESP2 script the historical mapping holds: true -> :1, false ->
+        // nil. The RespFrame::Bool RESP2 downgrade happens in
+        // downconvert_lua_reply_to_resp2.
+        LuaValue::Bool(b) if resp3 => RespFrame::Bool(*b),
         LuaValue::Bool(true) => RespFrame::Integer(1),
         LuaValue::Bool(false) => RespFrame::BulkString(None),
         LuaValue::Number(n) => {
@@ -9365,7 +9478,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             // entire group, so map / set / double / big_number /
             // verbatim_string hint tables were all serialized as
             // empty arrays (no integer keys at top level).
-            // (frankenredis-luaresp3hint)
+            // (frankenredis-vr8rghint)
 
             // {map = t}: emit a Map frame whose entries are the hash
             // pairs of the inner table. The fr-protocol layer flattens
@@ -9376,7 +9489,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 let pairs = inner
                     .hash_pairs()
                     .into_iter()
-                    .map(|(k, v)| (lua_to_resp(&k), lua_to_resp(&v)))
+                    .map(|(k, v)| (lua_to_resp(&k, resp3), lua_to_resp(&v, resp3)))
                     .collect();
                 return RespFrame::Map(Some(pairs));
             }
@@ -9409,7 +9522,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 }
                 // Other-hash keys (numeric non-array, boolean, …).
                 for (k, _) in &inner_borrow.other_hash {
-                    items.push(lua_to_resp(k));
+                    items.push(lua_to_resp(k, resp3));
                 }
                 return RespFrame::Array(Some(items));
             }
@@ -9466,7 +9579,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 if matches!(item, LuaValue::Nil) {
                     break;
                 }
-                items.push(lua_to_resp(&item));
+                items.push(lua_to_resp(&item, resp3));
             }
             RespFrame::Array(Some(items))
         }
@@ -11646,7 +11759,7 @@ pub fn eval_script(
             return Err(err);
         }
     };
-    let frame = lua_to_resp(&result);
+    let frame = lua_to_resp(&result, state.resp_version == 3);
     // Drop state explicitly to release the mutable borrow of store before
     // accessing store.dispatch_client_ctx below.
     drop(state);
@@ -11671,7 +11784,10 @@ pub fn eval_script(
 /// RESP2 equivalents (Map → flat 2N Array). Applied to Lua reply
 /// frames before they leave eval_script when the calling client is on
 /// RESP2. (frankenredis-luaresp2map)
-fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
+///
+/// General RESP3→RESP2 downconverter — also reused for SENTINEL replies,
+/// which upstream builds with `addReplyMapLen` (a flat array in RESP2).
+pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
     match frame {
         RespFrame::Map(Some(entries)) => {
             let mut flat = Vec::with_capacity(entries.len() * 2);
@@ -11701,6 +11817,9 @@ fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         // RESP2 has no Big Number type; upstream emits the digits as a bulk
         // string. (frankenredis-h2uga)
         RespFrame::BigNumber(s) => RespFrame::BulkString(Some(s.into_bytes())),
+        // RESP2 has no Boolean type; upstream addReplyBool downgrades to the
+        // integer `:1` / `:0`. (frankenredis-0gz4g)
+        RespFrame::Bool(b) => RespFrame::Integer(i64::from(b)),
         other => other,
     }
 }
@@ -11746,6 +11865,100 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn redis_setresp3_drives_resp3_call_reply_conversion_vr8rg() {
+        // (frankenredis-vr8rg) redis.setresp(3) makes redis.call materialize
+        // RESP3 frames and convert them via upstream's RESP3 Lua mapping:
+        // null->nil, Double->{double=n}, Map->{map=…}, Set->{set={m=true}}.
+        // The default (RESP2) path is unchanged (null->false, etc.).
+        let bulk = |s: &str| RespFrame::BulkString(Some(s.as_bytes().to_vec()));
+        let mut store = Store::new();
+        eval_script(
+            b"redis.call('zadd','z','1.5','m'); redis.call('hset','h','f','v'); \
+              redis.call('sadd','s','a','b'); return 1",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let run = |store: &mut Store, src: &[u8]| eval_script(src, &[], &[], store, 0).unwrap();
+
+        // RESP3: null -> nil; RESP2 (default): null -> false (a boolean).
+        assert_eq!(
+            run(&mut store, b"redis.setresp(3); return type(redis.call('get','nokey'))"),
+            bulk("nil")
+        );
+        assert_eq!(
+            run(&mut store, b"return type(redis.call('get','nokey'))"),
+            bulk("boolean")
+        );
+        // RESP3 Double -> {double = n}.
+        assert_eq!(
+            run(&mut store, b"redis.setresp(3); return tostring(redis.call('zscore','z','m').double)"),
+            bulk("1.5")
+        );
+        // RESP3 Map -> {map = {k = v}}.
+        assert_eq!(
+            run(&mut store, b"redis.setresp(3); return redis.call('hgetall','h').map.f"),
+            bulk("v")
+        );
+        // RESP3 Set -> {set = {member = true}}.
+        assert_eq!(
+            run(
+                &mut store,
+                b"redis.setresp(3); return redis.call('smembers','s').set.a == true and 'Y' or 'N'"
+            ),
+            bulk("Y")
+        );
+        // RESP2 default: ZSCORE is a plain string, HGETALL has no `.map` field.
+        assert_eq!(
+            run(&mut store, b"return type(redis.call('zscore','z','m'))"),
+            bulk("string")
+        );
+        assert_eq!(
+            run(&mut store, b"return redis.call('hgetall','h').map and 'Y' or 'N'"),
+            bulk("N")
+        );
+        // setresp is per-script: a later script defaults back to RESP2.
+        assert_eq!(
+            run(&mut store, b"return type(redis.call('get','nokey'))"),
+            bulk("boolean")
+        );
+    }
+
+    #[test]
+    fn lua_boolean_return_uses_resp3_under_setresp3_0gz4g() {
+        // (frankenredis-0gz4g) Upstream luaReplyToRedisReply uses addReplyBool
+        // for a Lua boolean once the script is on RESP3: a `#t`/`#f` Bool frame
+        // for a RESP3 caller, downgraded to `:1`/`:0` for RESP2. Without
+        // setresp(3) the historical mapping holds (true->:1, false->nil).
+        let eval = |resp: i64, src: &[u8]| {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = resp;
+            eval_script(src, &[], &[], &mut store, 0).unwrap()
+        };
+        // RESP3 caller + setresp(3): real Bool frame.
+        assert_eq!(eval(3, b"redis.setresp(3); return true"), RespFrame::Bool(true));
+        assert_eq!(eval(3, b"redis.setresp(3); return false"), RespFrame::Bool(false));
+        // RESP2 caller + setresp(3): Bool downgrades to :1 / :0.
+        assert_eq!(eval(2, b"redis.setresp(3); return true"), RespFrame::Integer(1));
+        assert_eq!(eval(2, b"redis.setresp(3); return false"), RespFrame::Integer(0));
+        // Default (no setresp): true -> :1, false -> nil, on both protocols.
+        assert_eq!(eval(2, b"return true"), RespFrame::Integer(1));
+        assert_eq!(eval(2, b"return false"), RespFrame::BulkString(None));
+        assert_eq!(eval(3, b"return false"), RespFrame::BulkString(None));
+        // Nested booleans convert recursively under setresp(3).
+        assert_eq!(
+            eval(3, b"redis.setresp(3); return {true, false, 1}"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Bool(true),
+                RespFrame::Bool(false),
+                RespFrame::Integer(1),
+            ]))
+        );
+    }
 
     #[test]
     fn eval_set_hint_emits_keys_not_values_e6ffo() {
@@ -13893,7 +14106,7 @@ mod tests {
 
     #[test]
     fn lua_to_resp_recognises_resp3_type_hint_tables() {
-        // Pins frankenredis-luaresp3hint. Upstream src/script_lua.c::
+        // Pins frankenredis-vr8rghint. Upstream src/script_lua.c::
         // luaReplyToRedisReply checks for {map=...}, {set=...},
         // {double=...}, {big_number=...}, {verbatim_string=...} hint
         // tables AFTER ok/err but before the array-iteration fallback.
@@ -16947,6 +17160,33 @@ mod tests {
         let ok = eval_script(b"return redis.status_reply('OK')", &[], &[], &mut store, 0)
             .expect("status_reply ok");
         assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn redis_version_globals_match_upstream_luaver() {
+        // (frankenredis-luaver) Upstream script_lua.c exposes
+        // redis.REDIS_VERSION (string) and redis.REDIS_VERSION_NUM =
+        // (major<<16)|(minor<<8)|patch. For the 7.2.4 compat target that is
+        // 0x070204 = 459268. fr previously exposed neither (scripts saw nil).
+        let mut store = Store::new();
+        let ver = eval_script(b"return redis.REDIS_VERSION", &[], &[], &mut store, 0)
+            .expect("REDIS_VERSION");
+        assert_eq!(
+            ver,
+            RespFrame::BulkString(Some(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()))
+        );
+        let num = eval_script(b"return redis.REDIS_VERSION_NUM", &[], &[], &mut store, 0)
+            .expect("REDIS_VERSION_NUM");
+        assert_eq!(num, RespFrame::Integer(459_268));
+        let ty = eval_script(
+            b"return type(redis.REDIS_VERSION_NUM)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("type");
+        assert_eq!(ty, RespFrame::BulkString(Some(b"number".to_vec())));
     }
 
     #[test]
