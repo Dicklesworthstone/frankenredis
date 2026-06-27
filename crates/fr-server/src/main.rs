@@ -3982,6 +3982,78 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                // (frankenredis-smismemberfix) SMISMEMBER 2/3-member fast paths had a
+                // dead $9 length literal (never matched -> always generic); fixed to
+                // $10 + added a 4-8 member multi parser, all hoisted here from their
+                // late (~9543) dispatch. Reuse the variadic execute_plain_smismember_
+                // borrowed -> byte-exact (validated cand==ctrl==redis since this
+                // activates the previously-dormant borrowed path).
+                } else if let Some(packet) =
+                    parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_smismember_multi_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
+                        packet.key,
+                        &packet.fields[..packet.len],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {
@@ -16333,10 +16405,12 @@ fn parse_borrowed_plain_smismember2_packet<'a>(
     if config.max_array_len < 4 || config.max_bulk_len < b"SMISMEMBER".len() {
         return None;
     }
-    let mut cursor = input.strip_prefix(b"*4\r\n$9\r\n").and_then(|rest| {
-        rest.get(..9)
+    // SMISMEMBER is 10 bytes -> `$10`, not `$9` (the original literal never matched,
+    // leaving this fast path dead and SMISMEMBER falling to the generic argv path).
+    let mut cursor = input.strip_prefix(b"*4\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
             .filter(|command| command.eq_ignore_ascii_case(b"SMISMEMBER"))
-            .map(|_| input.len() - rest.len() + 9)
+            .map(|_| input.len() - rest.len() + 10)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
@@ -16360,10 +16434,11 @@ fn parse_borrowed_plain_smismember3_packet<'a>(
     if config.max_array_len < 5 || config.max_bulk_len < b"SMISMEMBER".len() {
         return None;
     }
-    let mut cursor = input.strip_prefix(b"*5\r\n$9\r\n").and_then(|rest| {
-        rest.get(..9)
+    // SMISMEMBER is 10 bytes -> `$10` (the original `$9` never matched).
+    let mut cursor = input.strip_prefix(b"*5\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
             .filter(|command| command.eq_ignore_ascii_case(b"SMISMEMBER"))
-            .map(|_| input.len() - rest.len() + 9)
+            .map(|_| input.len() - rest.len() + 10)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
@@ -16379,6 +16454,64 @@ fn parse_borrowed_plain_smismember3_packet<'a>(
         f1,
         f2,
         f3,
+    })
+}
+
+// (frankenredis-smismembermulti) SMISMEMBER key m1..mN for 4-8 members (*6..*10).
+// Reuses the variadic execute_plain_smismember_borrowed (the store is_member loop is
+// cheap, so this is dispatch-bound); only the parser was capped at 3. 9+ members fall
+// to the generic. Mirrors parse_borrowed_plain_zmscore_multi_packet; `fields[..len]`
+// holds the borrowed member bulks.
+fn parse_borrowed_plain_smismember_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHmgetMultiPacket<'a>> {
+    if config.max_bulk_len < b"SMISMEMBER".len() {
+        return None;
+    }
+    let smismember_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..10)
+                .filter(|c| c.eq_ignore_ascii_case(b"SMISMEMBER"))
+                .map(|_| input.len() - rest.len() + 10)
+        })
+    };
+    // nmembers = array_count - 2 (SMISMEMBER + key). 1-3 members use dedicated paths.
+    let (mut cursor, nmembers, arr_len) = if let Some(c) = smismember_at(b"*6\r\n$10\r\n") {
+        (c, 4usize, 6)
+    } else if let Some(c) = smismember_at(b"*7\r\n$10\r\n") {
+        (c, 5usize, 7)
+    } else if let Some(c) = smismember_at(b"*8\r\n$10\r\n") {
+        (c, 6usize, 8)
+    } else if let Some(c) = smismember_at(b"*9\r\n$10\r\n") {
+        (c, 7usize, 9)
+    } else if let Some(c) = smismember_at(b"*10\r\n$10\r\n") {
+        (c, 8usize, 10)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arr_len {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut fields = [empty; 8];
+    let mut consumed = next;
+    for slot in fields.iter_mut().take(nmembers) {
+        let (m, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = m;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainHmgetMultiPacket {
+        consumed,
+        key,
+        fields,
+        len: nmembers,
     })
 }
 

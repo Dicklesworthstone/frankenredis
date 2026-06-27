@@ -6188,3 +6188,17 @@ consistently above the GET-control noise floor (GET unaffected/before-insertion 
 DISPLACED commands net-neutral (ZSCORE 1.05-1.23x = no regression; displacing ~40 less-common branches by 5 checks is dwarfed
 by the gain on these 5 hot cmds). BYTE-EXACT cand==ctrl==redis (fresh-conn): hit/missing-key 0/empty/WRONGTYPE on all 5.
 conformance GREEN. fr-server only. Position-gradient hoist vein continues; TYPE/TTL (0.85x, pos~55) marginal. 34 dispatch commits.
+
+### 2026-06-27 (part 171) WIN+BUGFIX: SMISMEMBER fast path was DEAD ($9 for a 10-byte cmd) — fix+multi+hoist ~1.3-1.4x (cc/BlackThrush)
+broad_command_headtohead flagged smismember 0.84x; per-member-count re-measure showed SMISMEMBER uniformly 0.70-0.81x for
+ALL counts INCLUDING 2/3 (which supposedly had fast paths). Root cause: a LATENT PERF BUG — parse_borrowed_plain_smismember2/3
+used `*N\r\n$9\r\n` + `rest.get(..9)` compared to b"SMISMEMBER" (10 bytes), so the strip_prefix never matched a real
+`$10\r\nSMISMEMBER` packet -> the borrowed fast path was DEAD CODE since written (no unit test exercised it; generic produced
+correct output so it went unnoticed). Fix: `$9`->`$10`, `..9`->`..10`, `+9`->`+10` in both parsers; added parse_borrowed_plain_
+smismember_multi_packet (4-8 members, *6..*10 $10) reusing the already-variadic execute_plain_smismember_borrowed; hoisted all
+three from the dead late dispatch (~9543) into the early read cluster. A/B (cand=HEAD+fix vs ctrl=HEAD, both local-built,
+pipe=300 trials=13, 2 runs): n=2 1.28/1.61, n=3 1.39/1.33, n=4 1.58/1.36, n=6 1.18/1.56, n=8 1.21/1.17 (~1.3-1.4x). BYTE-EXACT
+cand==ctrl==redis — CRITICAL here since this ACTIVATES previously-dormant borrowed code: 2-8 members mixed present/absent,
+missing-key, WRONGTYPE-on-string, RESP2/3 (fresh conn per cmd). conformance GREEN. fr-server only. LESSON: a "shipped" fast
+path with a wrong bulk-length literal silently NEVER engages (dead code, no correctness symptom) — per-variant micro-bench
+that finds even the supposedly-fast arity is slow is the tell; grep `$<len>` vs actual cmd length. 35 dispatch commits.
