@@ -5597,3 +5597,14 @@ REINFORCED: always measure dispatch-position gaps under -c50-P16, never single-c
 commands closed. REMAINING new-sweep gaps: HMSET 0.383x (NO fast-path, needs new parser — peer added SMISMEMBER+? bench
 rows, may be on hash cmds), HINCRBY 0.782 (@4545 already early = store-floor), COPY 0.813 (@4634 early), OBJECT ENCODING
 0.735. ULTIMATE = reorder whole cascade by frequency. conformance pending.
+
+### 2026-06-26 (part 144) WIN: hoist SISMEMBER/LPOS/ZRANK/LRANGE/ZSCORE reads early — 1.32-1.82x (cc/BlackThrush)
+9th dispatch-ordering commit. Broad -c50-P16 sweep found 5 more late hot READS. Hoisted SISMEMBER (@5444), LPOS (@7081,
+key/member), ZRANK (@8119 very late, PlainRankCmd::Zrank form), LRANGE (@7326, _into FastEncodedReply), ZSCORE (@5464,
+_into + RESP3-aware) before DECR. A/B (cand vs ctrl=committed d90f6ef1d): ZRANK cand/ctrl mean 1.823 (cand/redis 1.018
+BEATS redis, up from 0.538x), LRANGE mean 1.634 (cand/redis 1.109 BEATS redis, up from 0.625x), LPOS mean 1.608 (cand/redis
+0.940, up from 0.578x), ZSCORE mean 1.328 (cand/redis 1.029 BEATS redis, up from 0.706x), SISMEMBER mean 1.318 (cand/redis
+0.976, up from 0.738x). Byte-exact: all hit/miss + LRANGE arrays + ZSCORE RESP2 bulk AND RESP3 Double (,3) cand==ctrl==
+redis. Confirmed the _into (FastEncodedReply) branch form hoists cleanly too. 9 dispatch-ordering commits, ~24 commands
+closed. REMAINING no-fast-path (need NEW parser, not hoist): HMSET 0.383, SUBSTR 0.381 (GETRANGE alias), ZMSCORE 0.482,
+ZRANGEBYSCORE-variants. ULTIMATE = reorder whole cascade by frequency (retire ~24 dead late branches). conformance pending.
