@@ -4,6 +4,43 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlueFalcon OBJECT IDLETIME/FREQ first-cascade hoist kept
+
+Targeted the remaining uncovered `OBJECT IDLETIME/FREQ` dispatch gap named after
+the `RANDOMKEY`/`MOVE` fast-path passes. The parser and runtime executor already
+existed and were byte-equivalence tested, but unlike `OBJECT ENCODING` and
+`OBJECT REFCOUNT`, `parse_borrowed_plain_object_stat_packet` was absent from the
+first `process_buffered_frames` cascade and only appeared in later cascades. The
+lever is therefore a pure `fr-server` hoist: dispatch the existing
+`execute_plain_object_stat_borrowed` branch beside the other `OBJECT` metadata
+reads.
+
+Benchmark source was extended with `exists_vs_redis/object_idletime_hit`
+(`OBJECT IDLETIME k0`, integer reply) so the row is measurable through the
+requested per-crate Criterion gate. The literal requested spelling
+`rch exec -- cargo bench --release -p fr-bench --bench exists_vs_redis --
+object_idletime_hit --noplot` was attempted and failed because this Cargo rejects
+`--release` for `cargo bench`; measured runs used `--profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`. RCH fell open
+locally (`no admissible workers`) for the release build and bench; one remote
+`cargo check` attempt on `hz2` failed before codegen because that worker lacked
+the `.rchignore`-excluded `legacy_redis_code` command metadata.
+
+Same-host Criterion evidence against vendored Redis 7.2.4:
+
+| gate | Redis 7.2.4 median | FrankenRedis median | fr/Redis throughput | direct candidate/control |
+|---|---:|---:|---:|---:|
+| control `origin/main` (`961e71f68`) + same bench row | `84.617 us`, `1.5127 Melem/s` | `222.81 us`, `574.49 Kelem/s` | `0.380x` | n/a |
+| candidate confirmation, `OBJECT IDLETIME` first-cascade hoist | `96.415 us`, `1.3276 Melem/s` | `144.82 us`, `883.87 Kelem/s` | `0.666x` | `1.54x` faster |
+
+Validation while applied: `cargo test -p fr-server
+borrowed_plain_object_stat_packet_parser -- --nocapture` (2 parser tests) and
+`cargo test -p fr-runtime plain_object_stat_borrowed_matches_generic --
+--nocapture` are green. Decision: KEEP. Redis remains faster on this row, so the
+residual is no longer the missing first-cascade dispatch branch; future work
+needs either the global hash/arity dispatch refactor or a deeper `OBJECT`
+metadata/accounting primitive.
+
 ## 2026-06-27 AmberRiver dig: ZCOUNT 0.65x root-caused to rank-treap warm threshold (RAM tradeoff for CoralOx)
 
 Broad-command sweep (`scripts/broad_command_headtohead.py`, current `main` binary

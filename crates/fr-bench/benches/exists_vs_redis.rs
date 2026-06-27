@@ -214,6 +214,21 @@ fn exists_vs_redis(c: &mut Criterion) {
         });
     }
 
+    let object_idletime_hit_packet = object_idletime_hit_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        let id = BenchmarkId::new("object_idletime_hit", engine.name);
+        group.bench_with_input(id, &engine, |b, engine| {
+            let mut client = Client::connect(engine.port);
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    client.run_packet(&object_idletime_hit_packet, COMMANDS_PER_ITER);
+                }
+                start.elapsed()
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -245,6 +260,18 @@ fn move_missing_packet(count: usize) -> Vec<u8> {
             b"MOVE".as_slice(),
             b"missing".as_slice(),
             b"1".as_slice(),
+        ]));
+    }
+    packet
+}
+
+fn object_idletime_hit_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for _ in 0..count {
+        packet.extend_from_slice(&encode_command(&[
+            b"OBJECT".as_slice(),
+            b"IDLETIME".as_slice(),
+            b"k0".as_slice(),
         ]));
     }
     packet
