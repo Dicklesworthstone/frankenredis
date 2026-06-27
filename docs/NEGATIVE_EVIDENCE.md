@@ -5575,3 +5575,13 @@ Candidate early fixed-arity hoist:
 
 Verdict: reject/reverted. SMISMEMBER remains a ~0.39-0.41x Redis gap after parser-order hoisting, so the next lever should
 not be a simple dispatch move; it needs response encoding/store-membership work or a broader table-dispatch replacement.
+
+### 2026-06-26 (part 142) WIN: hoist EXPIREAT/PEXPIREAT/SETRANGE dispatch early — 1.59-1.83x (cc/BlackThrush)
+7th dispatch-ordering commit. Hoisted the remaining late expire-family + SETRANGE (dispatch@7843/7863/7883) before DECR.
+A/B (cand vs ctrl=committed 633588104): EXPIREAT cand/ctrl mean 1.591 (cand/redis 1.019 BEATS redis, up from 0.615x),
+PEXPIREAT mean 1.622 (cand/redis 0.838, up from 0.480x), SETRANGE mean 1.832 (cand/redis 0.966 near-parity, up from 0.552x).
+Byte-exact: EXPIREAT/EXPIREAT-XX/PEXPIREAT :1, SETRANGE :11 + GET-result cand==ctrl==redis (the TTL "diff" in the probe was
+the time-dependent remaining-seconds of an absolute expiry differing ~1s across the 3 sequential calls — NOT a divergence;
+EXPIREAT reply itself matches). 7 dispatch-ordering commits, ~16 commands closed to near-parity-or-faster. REMAINING:
+SMISMEMBER 0.419x = needs a NEW fast-path (no parser exists, dispatch@NONE), not a hoist. ULTIMATE = reorder whole cascade
+by frequency. conformance pending.
