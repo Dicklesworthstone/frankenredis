@@ -4,6 +4,48 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlueFalcon compact-zset DUMP cache confirmation
+
+Independent land-or-dig pass found the compact-zset DUMP payload cache already
+present on local `main` (`3cb405c2`, with evidence commit `aca0cc3e0`). The
+same target gap was still `dump@p128` versus Redis 7.2.4, so the pass treated
+the landed cache as the candidate and rechecked it against a clean detached
+control worktree at
+`/data/projects/.scratch/frankenredis-bluefalcon-dumpcache-control-20260627T0520`
+(`37c012433`). The control worktree needed a local `legacy_redis_code` symlink
+to the shared oracle checkout so `fr-command` build metadata could resolve.
+
+Release binaries were built with `AGENT_NAME=BlueFalcon`. Candidate used the
+requested target dir
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`; control used
+`/data/projects/.rch-targets/frankenredis-cod-b-control` so both binaries could
+coexist for direct A/B. The exact requested
+`cargo bench --release -p fr-bench --no-run` form was attempted through `rch
+exec` and failed before measurement because this Cargo does not accept
+`--release` for `cargo bench`; DUMP evidence therefore used the release
+`fr-bench` client binary directly.
+
+Same-host DUMP@p128 evidence:
+
+| run | Redis 7.2.4 ops/sec | control ops/sec | candidate ops/sec | control/Redis | candidate/Redis | candidate/control |
+|---|---:|---:|---:|---:|---:|---:|
+| 200k requests, 5 trials | `272161.17` | `98288.70` | `264552.48` | `0.361x` | `0.972x` | `2.692x` |
+| 500k requests, 3 trials | `241989.43` | `88018.94` | `273477.95` | `0.364x` | `1.130x` | `3.107x` |
+
+Both runs were noisy under shared host load, but the magnitude and direction
+repeated. Decision: **KEEP / already landed on main**. The residual work is to
+profile cold first-DUMP/listpack encode cost and avoid retrying shallow
+score-formatting levers already rejected elsewhere in this ledger.
+
+Gates: RCH/local `cargo check --workspace --all-targets` passed; RCH
+`cargo clippy -p fr-store --all-targets -- -D warnings` passed; local
+`cargo fmt -p fr-store -- --check` passed; focused
+`cargo test -p fr-store dump_compact_zset_cache_tracks_modification_count_codb_uhthd -- --nocapture`
+passed; full `cargo test -p fr-conformance -- --nocapture` passed on rerun
+(`194` library tests, conformance bins, `99` smoke tests, doctests). Workspace
+`cargo fmt --check` and workspace clippy are still blocked by unrelated dirty
+`fr-runtime`/`fr-server` edits in the shared checkout.
+
 ## 2026-06-27 BlackThrush compact-zset DUMP payload cache kept
 
 Land-or-dig found no unmerged measured-win bench worktree: the only non-main
