@@ -4,6 +4,46 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlackThrush PFADD register-cache encoding skip rejected
+
+Land-or-dig found no measured unlanded source win in bench worktrees. Current
+`main` already contains the prior PFADD/HLL, pubsub, zset-DUMP, and dispatch
+keeps; the only worktree head not reachable from `main` was the old docs-only
+ZADD guard-loss note. The largest current short-ledger per-crate loss remained
+`PFADD_16v` versus Redis 7.2.4 after parser-admission and no-op-batch-cache
+rejects.
+
+The tested alien-graveyard / artifact-coding lever targeted the cached duplicate
+PFADD path without retrying either rejected idea: carry the validated
+`HllEncoding` inside `HllRegisterCache`, so cache-hit duplicate PFADD can skip
+the per-command `hll_parse_encoding` header walk and go straight to the
+hash/register comparison loop. Focused proof while applied:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo test -p fr-store pfadd_ -- --nocapture` passed (`10` PFADD
+unit tests, `2` HLL metamorphic tests, plus filtered integration targets).
+
+The exact requested bench spelling,
+`rch exec -- cargo bench --release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`, was attempted and rejected by Cargo because this toolchain
+does not accept `--release` for `cargo bench`. The measured per-crate bench used
+the supported release-profile spelling:
+`rch exec -- cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`, with
+`FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis`.
+
+PFADD_16v evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| recent clean main control (`234126b72`, same short ledger) | `515.43 Kelem/s` | `266.00 Kelem/s` | `0.516x` | baseline | target gap |
+| register-cache encoding skip candidate | `549.99 Kelem/s` | `224.28 Kelem/s` | `0.408x` | `0.843x` vs control | reject |
+
+Decision: **REJECT / source reverted**. The header-parse skip is below the noise
+floor and loses against the adjacent ledger control. Remaining PFADD_16v work
+should avoid another cache-metadata micro-hunk and instead target the dominant
+hash/register loop or add a lower-noise dense/sparse-specific PFADD bench before
+changing HLL payload mutation again.
+
 ## 2026-06-27 BlueFalcon PFADD_16v parser admission rejected
 
 Land-or-dig found no measured unlanded source win in bench worktrees: the only
