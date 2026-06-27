@@ -1746,3 +1746,38 @@ sub-noise reward.
 Decision: **no source change** (presize vein exhausted: hash✓ set✓ shipped, zset
 already bulk+presized, residual structural). list RDB-load 2.80x remains the
 `ChunkedList` `99fwc` structural lever. RESTORE-gap dig complete.
+
+## 2026-06-27 AmberRiver: list RDB-load `rpush_owned` (avoid redundant clone) — MEASURED ~0-gain, REVERTED
+
+Profiled a 40 000-element quicklist DEBUG RELOAD (the last RESTORE arm). Flat
+self-time: `lzf_compress_with_scratch` 16% (parity with redis, do not chase),
+listpack re-synthesis from Owned chunks ~13% (99fwc structural encode), memmove
+11.7%, then the rebuild — `push_back_with_fill` 6%, `rpush` 2.8%, `mi_free` 4.85%.
+
+Found a real redundancy: the fr-persist loader's `ListQuicklist2Packed` arm
+(`fr-runtime:37268`) decodes node spans into owned `Vec<u8>` items (alloc #1)
+then `rpush(&items)` re-`to_vec`s every element into the list (alloc #2). Added
+`Store::rpush_owned(Vec<Vec<u8>>)` that **moves** the owned buffers into
+`push_back` (drops alloc #2 + its copy + free per element) and wired the packed
+loader arm to it. Byte-exact: same `push_back` sequence / chunk layout; live
+`DEBUG DIGEST-VALUE` identical (`58704d70…`); 659 fr-store lib tests green. (The
+plain `RdbValue::List` arm borrows from `&entry.value`, so it keeps `rpush`.)
+
+A/B DEBUG RELOAD, candidate vs current-main control `7b35a7d11`:
+
+| run | metric | cand | ctrl | ctrl/cand | cand win-rate |
+|---|---|---:|---:|---:|---|
+| best-of-12 | min | `4.50 ms` | `4.83 ms` | `1.073x` | 8/12 |
+| best-of-20 | mean | `5.99 ms` | `6.53 ms` | `1.090x` | **9/20** |
+
+Favorable means but a **45% head-to-head win-rate** = within noise. Root cause of
+the non-result: my change only touches the DECODE half of DEBUG RELOAD, which the
+unchanged LZF/re-synthesis ENCODE half dilutes, and mimalloc absorbs the small
+per-element `to_vec` allocs (the recurring `feedback_mimalloc` pattern — also seen
+on the SET `drop_if_expired` guard). Cleanly isolating the ~5% decode win would
+need a load-only per-crate micro-bench, not worth it for a non-hot path.
+
+Decision: **REVERT ~0-gain** (preserved as a labeled stash). The list RDB-load
+gap is structural (LZF parity + 99fwc Owned-chunk re-synthesis); per-element
+clone-elision is sub-noise. RESTORE dig fully closed: hash✓ set✓ shipped, zset +
+list structural.
