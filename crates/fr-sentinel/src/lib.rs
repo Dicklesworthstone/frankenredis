@@ -401,13 +401,49 @@ impl Default for SentinelState {
     }
 }
 
+/// Generate a unique 40-char lowercase-hex run id for this sentinel instance,
+/// the analogue of redis's `server.runid` (getRandomHexChars). It must differ
+/// between instances: sentinels identify peers by run id, and a sentinel drops
+/// its OWN hello messages by matching `hello.sentinel_runid == myid`
+/// (discovery.rs) — a shared constant id would make every sentinel treat its
+/// peers' hellos as its own and break multi-sentinel discovery/consensus.
+/// (frankenredis-pkdgs)
+///
+/// Pure safe std: a SplitMix64 stream seeded from the wall-clock nanosecond
+/// counter mixed with a process-global sequence counter, so two instances
+/// constructed in the same process (or the same nanosecond) still diverge.
+#[must_use]
+pub fn generate_run_id() -> [u8; 40] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0u64, |d| d.as_nanos() as u64);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut state = nanos
+        ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ 0xD1B5_4A32_D192_ED03;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 40];
+    // 40 hex nibbles = 3 SplitMix64 words (16 + 16 + 8 nibbles).
+    for chunk in out.chunks_mut(16) {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        for (i, b) in chunk.iter_mut().enumerate() {
+            *b = HEX[((z >> (i * 4)) & 0xf) as usize];
+        }
+    }
+    out
+}
+
 impl SentinelState {
     #[must_use]
     pub fn new() -> Self {
-        let mut myid = [0u8; 40];
-        for (i, b) in myid.iter_mut().enumerate() {
-            *b = b"0123456789abcdef"[i % 16];
-        }
+        let myid = generate_run_id();
         Self {
             myid,
             current_epoch: 0,
@@ -608,6 +644,26 @@ mod tests {
     #[test]
     fn failover_state_default() {
         assert_eq!(FailoverState::default(), FailoverState::None);
+    }
+
+    #[test]
+    fn myid_is_unique_well_formed_run_id_pkdgs() {
+        // (frankenredis-pkdgs) Every sentinel instance must get a DISTINCT
+        // 40-char lowercase-hex run id (not the old shared constant), else
+        // self-hello filtering in discovery.rs collapses all peers into "self".
+        let a = SentinelState::new();
+        let b = SentinelState::new();
+        assert_eq!(a.myid.len(), 40);
+        assert!(
+            a.myid.iter().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "run id must be lowercase hex: {:?}",
+            a.myid_hex()
+        );
+        assert_ne!(a.myid, b.myid, "two instances must not share a run id");
+        // Stable within an instance.
+        assert_eq!(a.myid_hex(), a.myid_hex());
+        // Not the old deterministic placeholder.
+        assert_ne!(a.myid_hex(), "0123456789abcdef0123456789abcdef01234567");
     }
 
     #[test]

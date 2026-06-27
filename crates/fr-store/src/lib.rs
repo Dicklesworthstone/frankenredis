@@ -107,6 +107,9 @@ pub const NOTIFY_EVICTED: u32 = 1 << 9; // e
 pub const NOTIFY_STREAM: u32 = 1 << 10; // t
 pub const NOTIFY_KEY_MISS: u32 = 1 << 11; // m
 pub const NOTIFY_NEW: u32 = 1 << 12; // n
+pub const NOTIFY_MODULE: u32 = 1 << 13; // d (module key-type notification)
+// Upstream server.h: the `A` alias covers every class EXCEPT key-miss (m)
+// and new-key (n) — and DOES include the module class (d). (frankenredis-nkednfix)
 pub const NOTIFY_ALL: u32 = NOTIFY_GENERIC
     | NOTIFY_STRING
     | NOTIFY_LIST
@@ -115,7 +118,8 @@ pub const NOTIFY_ALL: u32 = NOTIFY_GENERIC
     | NOTIFY_ZSET
     | NOTIFY_EXPIRED
     | NOTIFY_EVICTED
-    | NOTIFY_STREAM;
+    | NOTIFY_STREAM
+    | NOTIFY_MODULE;
 
 /// Parse a notify-keyspace-events configuration string into flags.
 /// Returns None if the string contains invalid characters.
@@ -138,24 +142,27 @@ pub fn keyspace_events_parse(classes: &str) -> Option<u32> {
             't' => flags |= NOTIFY_STREAM,
             'm' => flags |= NOTIFY_KEY_MISS,
             'n' => flags |= NOTIFY_NEW,
+            'd' => flags |= NOTIFY_MODULE,
             _ => return None,
         }
     }
-    // Redis requires at least K or E to be set for notifications to fire.
-    // If event types are specified but neither K nor E is set, disable all.
-    if flags != 0 && (flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT)) == 0 {
-        flags = 0;
-    }
+    // Upstream keeps the class flags in the config regardless of K/E: the
+    // K/E requirement only gates whether an event actually *fires*
+    // (notify_keyspace_event checks NOTIFY_KEYSPACE / NOTIFY_KEYEVENT at
+    // emit time), so e.g. `CONFIG SET notify-keyspace-events g` round-trips
+    // back as `g`. fr previously zeroed everything when K/E were absent,
+    // dropping the class flags from CONFIG GET. (frankenredis-nkednfix)
     Some(flags)
 }
 
 /// Convert notification flags back to a configuration string.
 ///
 /// Mirrors upstream `notify.c::keyspaceEventsFlagsToString`: canonical
-/// order is A | g $ l s h z x e t n | K E m, where the `n` (NOTIFY_NEW)
-/// bit only appears when `A` is NOT set (upstream lists `n` inside the
-/// per-class else branch). This matters for CONFIG GET parity:
-/// `CONFIG SET notify-keyspace-events KEA` must echo back `AKE`,
+/// order is A | g $ l s h z x e t d n | K E m, where the per-class chars
+/// (incl. `d` NOTIFY_MODULE and `n` NOTIFY_NEW) only appear when `A` is
+/// NOT set (upstream lists them inside the per-class else branch), while
+/// `m` (NOTIFY_KEY_MISS) is emitted after K/E. This matters for CONFIG GET
+/// parity: `CONFIG SET notify-keyspace-events KEA` must echo back `AKE`,
 /// not `KEA`. (br-frankenredis-xmev)
 #[must_use]
 pub fn keyspace_events_to_string(flags: u32) -> String {
@@ -189,6 +196,9 @@ pub fn keyspace_events_to_string(flags: u32) -> String {
         }
         if flags & NOTIFY_STREAM != 0 {
             s.push('t');
+        }
+        if flags & NOTIFY_MODULE != 0 {
+            s.push('d');
         }
         if flags & NOTIFY_NEW != 0 {
             s.push('n');
@@ -2611,6 +2621,11 @@ pub struct DispatchClientContext {
     /// nested script calls leave this false so dispatch_argv still enforces ACL.
     pub acl_checked_by_runtime: bool,
     pub acl_permissions: Option<DispatchAclPermissions>,
+    /// (frankenredis-ax9ox) True when MONITOR clients are attached, mirrored by
+    /// the runtime per dispatch. Lets nested script (`redis.call`) execution
+    /// cheaply gate recording each inner command for the MONITOR `lua` feed —
+    /// no per-call clone when nobody is monitoring.
+    pub monitors_active: bool,
 }
 
 impl Default for DispatchClientContext {
@@ -2643,6 +2658,7 @@ impl Default for DispatchClientContext {
             client_no_touch: false,
             acl_checked_by_runtime: false,
             acl_permissions: None,
+            monitors_active: false,
         }
     }
 }
@@ -2744,7 +2760,21 @@ pub struct Store {
     /// each candidate's real `expires_at_ms`, so a stale entry only costs a
     /// wasted sample and a missing entry only defers a key to lazy expiry —
     /// never an incorrect result. (frankenredis-yvg7h)
+    ///
+    /// The sorted set is maintained lazily: deadline counts stay exact on every
+    /// write, while this key-ordered view is rebuilt only once an expiry
+    /// consumer observes that the earliest deadline is due. Long-TTL write-heavy
+    /// workloads therefore avoid a global `BTreeSet<Vec<u8>>` insertion on
+    /// every SETEX/PSETEX, but due-key sampling still uses the same sorted order.
     volatile_keys: BTreeSet<Vec<u8>>,
+    volatile_keys_dirty: bool,
+    /// Counts of absolute key-expiry deadlines, keyed by deadline ms.
+    ///
+    /// `volatile_keys` preserves deterministic key-order sampling once a key is
+    /// due. This sidecar answers the cheaper question first: can any key expire
+    /// at `now_ms`? Long-TTL write-heavy workloads can then skip the BTree key
+    /// walk until the earliest deadline arrives.
+    expiry_deadline_counts: BTreeMap<u64, usize>,
     running_digest: u64,
     digest_mutations: u64,
     digest_stale: bool,
@@ -2872,6 +2902,11 @@ pub struct Store {
     pub script_propagation_mode: u8,
     /// Commands emitted by the active Lua script together with their propagation masks.
     pub script_propagation_records: Vec<ScriptPropagationRecord>,
+    /// (frankenredis-ax9ox) Original argv of each `redis.call` the active script
+    /// ran, for the MONITOR `lua`-addressed feed. Only populated when MONITOR
+    /// clients are attached (gated by dispatch_client_ctx.monitors_active);
+    /// drained + fed by the runtime after the EVAL command itself is mirrored.
+    pub script_monitor_records: Vec<Vec<Vec<u8>>>,
 
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
@@ -3186,6 +3221,8 @@ impl Default for Store {
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
             random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
+            volatile_keys_dirty: false,
+            expiry_deadline_counts: BTreeMap::new(),
             running_digest: 0,
             digest_mutations: 0,
             digest_stale: false,
@@ -3256,6 +3293,7 @@ impl Default for Store {
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),
+            script_monitor_records: Vec::new(),
             expires_count: 0,
             cached_memory_usage_bytes: std::cell::Cell::new(0),
             cached_memory_usage_dirty: std::cell::Cell::new(0),
@@ -3379,6 +3417,104 @@ impl Store {
         Self::default()
     }
 
+    /// (frankenredis-pkdgs) Advance the sentinel clock at the start of a
+    /// monitoring tick (tilt detection + `previous_time`, which every SENTINEL
+    /// MASTER/SLAVES render uses as "now" for its `*-ms-ago` delta fields — left
+    /// at 0 it pins last-ok-ping-reply / info-refresh to 0).
+    pub fn sentinel_begin_tick(&mut self, now_ms: u64) {
+        self.sentinel_state.check_tilt(now_ms);
+    }
+
+    /// (frankenredis-pkdgs) Announce this sentinel at `port` in its hello
+    /// messages (upstream defaults announce-port to the listening port). Only
+    /// fills it when no explicit announce-port is configured.
+    pub fn set_sentinel_announce_port(&mut self, port: u16) {
+        if self.sentinel_state.announce_port.is_none() {
+            self.sentinel_state.announce_port = Some(port);
+        }
+    }
+
+    /// (frankenredis-pkdgs) Ingest a `__sentinel__:hello` payload received from a
+    /// master's pub/sub channel: parse it and fold via process_hello_message +
+    /// apply_discovery_action so this sentinel discovers its peers (the receive
+    /// half of gossip — the publish half is sentinel_take_hello_to_publish).
+    pub fn sentinel_process_hello(&mut self, payload: &str, now_ms: u64) {
+        let Some(hello) = fr_sentinel::discovery::HelloMessage::parse(payload) else {
+            return;
+        };
+        let action =
+            fr_sentinel::discovery::process_hello_message(&self.sentinel_state, &hello, now_ms);
+        fr_sentinel::discovery::apply_discovery_action(&mut self.sentinel_state, action, now_ms);
+    }
+
+    /// (frankenredis-pkdgs) If it is time to gossip (every PUBLISH_PERIOD_MS),
+    /// return the encoded hello payload for `PUBLISH __sentinel__:hello` and
+    /// stamp last_pub_time; else None. Lets other sentinels (incl. real
+    /// redis-sentinels) discover this instance via the master's hello channel.
+    pub fn sentinel_take_hello_to_publish(&mut self, name: &str, now_ms: u64) -> Option<String> {
+        let master = self.sentinel_state.masters.get(name)?;
+        if !fr_sentinel::discovery::should_publish_hello(master, now_ms) {
+            return None;
+        }
+        let msg = fr_sentinel::discovery::create_hello_message(&self.sentinel_state, master).encode();
+        if let Some(m) = self.sentinel_state.masters.get_mut(name) {
+            m.last_pub_time = now_ms;
+        }
+        Some(msg)
+    }
+
+    /// (frankenredis-pkdgs) The monitored masters' (name, ip, port) for the
+    /// fr-server Sentinel monitoring tick to PING/INFO. Snapshotted so the
+    /// blocking probes hold no borrow of the sentinel state.
+    #[must_use]
+    pub fn sentinel_monitor_targets(&self) -> Vec<(String, String, u16)> {
+        self.sentinel_state
+            .masters
+            .iter()
+            .map(|(name, m)| (name.clone(), m.addr.ip.clone(), m.addr.port))
+            .collect()
+    }
+
+    /// (frankenredis-pkdgs) Fold one master's probe outcome into the sentinel
+    /// state: `Some(info)` = the master answered PING + INFO (refresh link
+    /// liveness, runid/role via INFO, and discovered replicas); `None` = the
+    /// probe failed (mark the link disconnected). Delegates to the already
+    /// unit-tested fr-sentinel health/discovery primitives.
+    pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
+        let Some(master) = self.sentinel_state.masters.get_mut(name) else {
+            return;
+        };
+        fr_sentinel::health::record_ping_sent(&mut master.link, now_ms);
+        match info {
+            Some(info) => {
+                fr_sentinel::health::record_pong(&mut master.link, now_ms);
+                fr_sentinel::health::record_reconnect(&mut master.link, now_ms);
+                fr_sentinel::health::record_info_response(master, info, now_ms);
+                let replicas = fr_sentinel::discovery::parse_replica_info_from_master(info);
+                fr_sentinel::discovery::discover_replicas_from_info(master, &replicas, now_ms);
+            }
+            None => {
+                fr_sentinel::health::record_disconnect(&mut master.link);
+            }
+        }
+        // (frankenredis-pkdgs) Evaluate subjective-down: a master unreachable
+        // longer than down-after-milliseconds gets the S_DOWN flag (rendered as
+        // "s_down" in SENTINEL MASTER flags), and a recovered one clears it.
+        // Without this fr showed only "master,disconnected" where redis-sentinel
+        // shows "s_down,master,disconnected".
+        let health = fr_sentinel::health::evaluate_instance_health(master, now_ms);
+        fr_sentinel::health::apply_health_result(master, &health, now_ms);
+        // (frankenredis-pkdgs) Then objective-down: O_DOWN when S_DOWN AND the
+        // count of sentinels reporting it down (this one always votes, +1 from
+        // is_s_down) meets the configured quorum. With a single sentinel and
+        // quorum=1 the self-vote alone flips O_DOWN; higher quorums stay S_DOWN
+        // until peer votes arrive (sentinel-to-sentinel gossip not yet wired, so
+        // no external votes here). Matches redis-sentinel's
+        // 's_down,o_down,master,disconnected'.
+        let odown = fr_sentinel::consensus::evaluate_o_down(master, &[], now_ms);
+        fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
+    }
+
     fn ordered_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
         if db == 0 {
             return self
@@ -3467,6 +3603,22 @@ impl Store {
                 argv: argv.to_vec(),
                 targets: self.script_propagation_mode,
             });
+    }
+
+    /// (frankenredis-ax9ox) Record a `redis.call` argv for the MONITOR `lua`
+    /// feed, but only when MONITOR clients are attached — so script-heavy
+    /// workloads pay nothing when nobody is monitoring.
+    pub fn record_script_monitor(&mut self, argv: &[Vec<u8>]) {
+        if self.dispatch_client_ctx.monitors_active {
+            self.script_monitor_records.push(argv.to_vec());
+        }
+    }
+
+    /// (frankenredis-ax9ox) Drain the script's recorded `redis.call` argvs for
+    /// the runtime to mirror to MONITOR with the `lua` address.
+    #[must_use]
+    pub fn take_script_monitor_records(&mut self) -> Vec<Vec<Vec<u8>>> {
+        std::mem::take(&mut self.script_monitor_records)
     }
 
     pub fn observe_memory_sample(&mut self, used_memory_rss: usize) {
@@ -4248,6 +4400,7 @@ impl Store {
 
         let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
         let mut added_expiry = false;
         if self
             .with_mutated_entry(key, |entry| {
@@ -4263,8 +4416,10 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
-            // The key now carries a TTL — track it for active-expire sampling.
-            self.volatile_keys.insert(key.to_vec());
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -4298,6 +4453,7 @@ impl Store {
         }
 
         let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
+        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
         let mut added_expiry = false;
         if self
             .with_mutated_entry(key, |entry| {
@@ -4313,8 +4469,10 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
-            // The key now carries a TTL — track it for active-expire sampling.
-            self.volatile_keys.insert(key.to_vec());
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -4569,6 +4727,7 @@ impl Store {
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
         self.dirty = self.dirty.saturating_add(1);
+        self.adjust_cached_memory_usage_after_remove(key, &entry);
         match entry.value {
             Value::String(v) => Ok(Some(v.into_vec())),
             Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
@@ -5270,20 +5429,14 @@ impl Store {
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
         self.drop_if_expired(key, now_ms);
-        let Some(had_expiry) = self
-            .entries
-            .get(key)
-            .map(|entry| entry.expires_at_ms.is_some())
-        else {
+        let Some(old_expiry) = self.entries.get(key).and_then(Entry::expiry_ms) else {
             return false;
         };
-        if !had_expiry {
-            return false;
-        }
         self.with_mutated_entry(key, |entry| {
             entry.expires_at_ms = None;
         });
-        self.volatile_keys.remove(key);
+        self.forget_volatile_key(key);
+        self.update_expiry_deadline(Some(old_expiry), None);
         self.expires_count = self.expires_count.saturating_sub(1);
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         if db < self.database_count {
@@ -5901,6 +6054,36 @@ impl Store {
         }
     }
 
+    fn mark_volatile_keys_dirty(&mut self) {
+        self.volatile_keys_dirty = true;
+    }
+
+    fn forget_volatile_key(&mut self, key: &[u8]) {
+        if self.volatile_keys_dirty {
+            return;
+        }
+        self.volatile_keys.remove(key);
+    }
+
+    fn rebuild_volatile_keys_if_dirty(&mut self) {
+        if !self.volatile_keys_dirty {
+            return;
+        }
+        self.volatile_keys.clear();
+        self.volatile_keys.extend(
+            self.entries
+                .iter()
+                .filter(|(_, entry)| entry.expiry_ms().is_some())
+                .map(|(key, _)| key.clone()),
+        );
+        self.volatile_keys_dirty = false;
+    }
+
+    fn has_expiry_due(&self, now_ms: u64) -> bool {
+        self.earliest_expiry_deadline_ms()
+            .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+    }
+
     fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
         if db == 0 {
             return self
@@ -5919,7 +6102,44 @@ impl Store {
             .collect()
     }
 
+    fn track_expiry_deadline(&mut self, deadline_ms: u64) {
+        *self.expiry_deadline_counts.entry(deadline_ms).or_insert(0) += 1;
+    }
+
+    fn untrack_expiry_deadline(&mut self, deadline_ms: u64) {
+        let Some(count) = self.expiry_deadline_counts.get_mut(&deadline_ms) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            self.expiry_deadline_counts.remove(&deadline_ms);
+        }
+    }
+
+    fn update_expiry_deadline(&mut self, old: Option<u64>, new: Option<u64>) {
+        if old == new {
+            return;
+        }
+        if let Some(deadline_ms) = old {
+            self.untrack_expiry_deadline(deadline_ms);
+        }
+        if let Some(deadline_ms) = new {
+            self.track_expiry_deadline(deadline_ms);
+        }
+    }
+
+    fn earliest_expiry_deadline_ms(&self) -> Option<u64> {
+        self.expiry_deadline_counts
+            .first_key_value()
+            .map(|(&deadline_ms, _)| deadline_ms)
+    }
+
     fn expire_volatile_keys_in_db(&mut self, db: usize, now_ms: u64) {
+        if !self.has_expiry_due(now_ms) {
+            return;
+        }
+        self.rebuild_volatile_keys_if_dirty();
         let volatile = self.volatile_physical_keys_in_db(db);
         for key in &volatile {
             self.drop_if_expired(key, now_ms);
@@ -5929,6 +6149,8 @@ impl Store {
     fn internal_entries_insert(&mut self, key: Vec<u8>, mut entry: Entry) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(&key);
+        let old_expiry = self.entries.get(&key).and_then(Entry::expiry_ms);
+        let new_expiry = entry.expiry_ms();
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
         if let Some(old_entry) = self.entries.get(&key) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
@@ -5945,15 +6167,16 @@ impl Store {
             self.ordered_keys.insert(key.clone());
             self.random_key_index_insert(db, &key);
         }
-        // Keep the volatile-key sampling set in sync: the stored key is volatile
-        // iff the entry replacing it carries a TTL (an overwrite that drops the
-        // TTL must drop it from the set too). (frankenredis-yvg7h)
+        // Keep the volatile-key sampling set in sync lazily: deadline counts
+        // remain exact, and the sorted key view is rebuilt only when a due
+        // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
         if new_has_expiry {
-            self.volatile_keys.insert(key.clone());
+            self.mark_volatile_keys_dirty();
         } else {
-            self.volatile_keys.remove(&key);
+            self.forget_volatile_key(&key);
         }
         let old_entry = self.entries.insert(key.clone(), entry);
+        self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
@@ -5981,7 +6204,8 @@ impl Store {
         if let Some(entry) = self.entries.remove(key) {
             self.ordered_keys.remove(key);
             self.random_key_index_remove(key);
-            self.volatile_keys.remove(key);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(entry.expiry_ms(), None);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
@@ -6284,7 +6508,26 @@ impl Store {
         // keyspace. With no volatile keys there is nothing to reap, so the
         // cycle is O(1) instead of sampling persistent keys in vain.
         // (frankenredis-yvg7h)
-        if sample_limit == 0 || self.volatile_keys.is_empty() {
+        if sample_limit == 0 || self.expiry_deadline_counts.is_empty() {
+            return ActiveExpireCycleResult {
+                sampled_keys: 0,
+                evicted_keys: 0,
+                next_cursor: None,
+                evicted_db_keys: Vec::new(),
+            };
+        }
+        if let Some(deadline_ms) = self.earliest_expiry_deadline_ms()
+            && now_ms < deadline_ms
+        {
+            return ActiveExpireCycleResult {
+                sampled_keys: 0,
+                evicted_keys: 0,
+                next_cursor: start_cursor,
+                evicted_db_keys: Vec::new(),
+            };
+        }
+        self.rebuild_volatile_keys_if_dirty();
+        if self.volatile_keys.is_empty() {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
@@ -6372,6 +6615,8 @@ impl Store {
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
         self.volatile_keys.clear();
+        self.volatile_keys_dirty = false;
+        self.expiry_deadline_counts.clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -10143,7 +10388,13 @@ impl Store {
     }
 
     /// Create or overwrite a sorted set from member-score pairs.
-    pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
+    pub fn zstore_from_pairs(
+        &mut self,
+        key: Vec<u8>,
+        pairs: Vec<(Vec<u8>, f64)>,
+        force_skiplist: bool,
+        now_ms: u64,
+    ) {
         let mut zs = SortedSet::new();
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
@@ -10152,10 +10403,19 @@ impl Store {
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        self.internal_entries_insert(
-            key,
-            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
-        );
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+        // (frankenredis-t8rma) Upstream ZRANGESTORE pre-creates the destination
+        // via zsetTypeCreate(length, 0). For BYSCORE / BYLEX the result count is
+        // unknown so upstream passes length = -1, which as size_t is SIZE_MAX and
+        // always exceeds zset_max_listpack_entries — so the destination is created
+        // (and stays) skiplist-encoded regardless of how few members actually
+        // match. Rank mode passes the exact count, so its encoding derives
+        // naturally (handled by the live OBJECT ENCODING derivation). Mirror the
+        // forced-skiplist sizing here so OBJECT ENCODING matches byte-for-byte.
+        if force_skiplist {
+            entry.force_zset_skiplist_encoding = true;
+        }
+        self.internal_entries_insert(key, entry);
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -13591,6 +13851,7 @@ impl Store {
                 Some((db, lk)) => (db, lk.to_vec()),
                 None => (0, key.to_vec()),
             };
+            let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
             match exp {
                 Some(deadline) if deadline <= now_ms => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
@@ -13612,20 +13873,18 @@ impl Store {
                                 self.db_expires_counts[db].saturating_add(1);
                         }
                     }
-                    self.volatile_keys.insert(key.to_vec());
+                    self.mark_volatile_keys_dirty();
+                    self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
                     self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
                 }
                 None => {
-                    let had_expiry = self
-                        .entries
-                        .get(key)
-                        .is_some_and(|entry| entry.expires_at_ms.is_some());
-                    if had_expiry {
+                    if old_expiry.is_some() {
                         self.with_mutated_entry(key, |entry| {
                             entry.expires_at_ms = None;
                         });
-                        self.volatile_keys.remove(key);
+                        self.forget_volatile_key(key);
+                        self.update_expiry_deadline(old_expiry, None);
                         self.expires_count = self.expires_count.saturating_sub(1);
                         if db < self.database_count {
                             self.db_expires_counts[db] =
@@ -14159,9 +14418,12 @@ impl Store {
         // but allocates O(volatile) instead of O(dbsize) per call (the prior
         // `entries.keys().cloned().collect()` cloned every key in the database
         // on every RANDOMKEY). (clone-storm elimination)
-        let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
-        for key in &volatile {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) {
+            self.rebuild_volatile_keys_if_dirty();
+            let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+            for key in &volatile {
+                self.drop_if_expired(key, now_ms);
+            }
         }
 
         let matching: Vec<Vec<u8>> = self
@@ -14871,6 +15133,25 @@ impl Store {
         self.cached_memory_usage_bytes.set(usage);
         self.cached_memory_usage_dirty.set(mutations);
         usage
+    }
+
+    fn adjust_cached_memory_usage_after_remove(&self, key: &[u8], entry: &Entry) {
+        let cached_bytes = self.cached_memory_usage_bytes.get();
+        if cached_bytes == 0 {
+            return;
+        }
+        let cached_dirty = self.cached_memory_usage_dirty.get();
+        let mutations = self
+            .dirty
+            .saturating_add(self.stat_evicted_keys)
+            .saturating_add(self.stat_expired_keys);
+        if cached_dirty.saturating_add(1) != mutations {
+            return;
+        }
+        let removed_bytes = estimate_entry_memory_usage_bytes(key, entry);
+        self.cached_memory_usage_bytes
+            .set(cached_bytes.saturating_sub(removed_bytes));
+        self.cached_memory_usage_dirty.set(mutations);
     }
 
     fn sampled_eviction_candidate_keys(
@@ -16083,7 +16364,12 @@ impl Store {
             return Err(StoreError::BusyKey);
         }
 
-        if payload.len() < DUMP_TRAILER_LEN + 1 {
+        // Upstream cluster.c::verifyDumpPayload requires only the 10-byte
+        // footer (2-byte RDB version + 8-byte CRC64). It does NOT require a
+        // separate type byte: for a 10-byte payload the type byte (read from
+        // the front by rdbLoadObjectType) overlaps the footer's version low
+        // byte, exactly as it does here. (frankenredis-b19ln)
+        if payload.len() < DUMP_TRAILER_LEN {
             return Err(StoreError::InvalidDumpPayload);
         }
         let version_offset = payload.len() - DUMP_TRAILER_LEN;
@@ -16109,8 +16395,14 @@ impl Store {
         }
         let type_byte = payload[0];
         let mut cursor = 1;
-        // Data boundary: exclude trailer (2-byte version + 8-byte CRC64).
-        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        // Upstream restoreCommand parses the object straight off the front of
+        // the buffer (rioInitWithBuffer over the WHOLE payload, footer
+        // included) and simply stops when the object is complete — any bytes
+        // after that, including the version+CRC footer, are never read. So the
+        // body's read bound is the full payload length, NOT len-10: a short
+        // payload whose object legitimately overlaps the footer region still
+        // decodes. (frankenredis-b19ln)
+        let data_end = payload.len();
         let mut restored_stream_last_id = None;
         let mut restored_stream_entries_added = None;
         let mut restored_stream_max_deleted_id = None;
@@ -16383,9 +16675,13 @@ impl Store {
             }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
-        if cursor != data_end {
-            return Err(StoreError::InvalidDumpPayload);
-        }
+        // No "object must consume the buffer exactly" check: upstream ignores
+        // trailing bytes after a complete object (it never validates that the
+        // body abuts the footer). A truncated/short object still fails because
+        // the per-element decoders error when they read past `data_end`.
+        // `cursor` marks where the object ended; nothing past it is read.
+        // (frankenredis-b19ln)
+        let _ = cursor;
         let expires_at_ms = if ttl_ms > 0 {
             Some(now_ms.saturating_add(ttl_ms))
         } else {
@@ -16441,6 +16737,10 @@ impl Store {
     /// expiry path, preserving notifications, stats, dirty tracking, and
     /// propagation records.
     pub fn expire_snapshot_volatile_keys(&mut self, now_ms: u64) {
+        if !self.has_expiry_due(now_ms) {
+            return;
+        }
+        self.rebuild_volatile_keys_if_dirty();
         let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
         for key in &volatile_keys {
             self.drop_if_expired(key, now_ms);
@@ -20771,6 +21071,52 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_probe_result_marks_then_clears_s_down_and_o_down() {
+        // (frankenredis-pkdgs) A monitored master unreachable longer than
+        // down-after-milliseconds must transition to S_DOWN — and, with quorum=1,
+        // the sentinel's own vote meets quorum so it also becomes O_DOWN — both
+        // clearing on the next successful probe. Driven by the monitoring tick.
+        let mut store = Store::new();
+        store
+            .sentinel_state
+            .monitor("mymaster", "127.0.0.1", 6379, 1)
+            .unwrap();
+        store
+            .sentinel_state
+            .masters
+            .get_mut("mymaster")
+            .unwrap()
+            .down_after_period = 100;
+
+        // First failed probe arms the disconnect; not yet down.
+        store.apply_sentinel_probe_result("mymaster", 1000, None);
+        assert!(!store.sentinel_state.masters["mymaster"].is_s_down());
+        assert!(!store.sentinel_state.masters["mymaster"].is_o_down());
+        // A second failure past down-after-period flips S_DOWN, and with quorum=1
+        // the self-vote flips O_DOWN too.
+        store.apply_sentinel_probe_result("mymaster", 1500, None);
+        assert!(
+            store.sentinel_state.masters["mymaster"].is_s_down(),
+            "master should be S_DOWN after down-after-period elapsed while unreachable"
+        );
+        assert!(
+            store.sentinel_state.masters["mymaster"].is_o_down(),
+            "quorum=1: the self S_DOWN vote alone must flip O_DOWN"
+        );
+        // A successful PING+INFO probe clears both.
+        let info = "# Server\r\nrun_id:abc\r\n# Replication\r\nrole:master\r\n";
+        store.apply_sentinel_probe_result("mymaster", 1600, Some(info));
+        assert!(
+            !store.sentinel_state.masters["mymaster"].is_s_down(),
+            "S_DOWN must clear once the master answers again"
+        );
+        assert!(
+            !store.sentinel_state.masters["mymaster"].is_o_down(),
+            "O_DOWN must clear once the master answers again"
+        );
+    }
+
+    #[test]
     fn keyspace_hit_and_miss_counters_follow_store_lookup_paths() {
         let mut store = Store::new();
         store.set(b"s".to_vec(), b"v".to_vec(), None, 0);
@@ -21772,32 +22118,44 @@ mod tests {
         let mut store = Store::new();
         store.set(b"p".to_vec(), b"v".to_vec(), None, 0); // persistent
         store.set(b"v".to_vec(), b"x".to_vec(), Some(5_000), 0); // volatile
+        store.rebuild_volatile_keys_if_dirty();
         assert!(!store.volatile_keys.contains(b"p".as_slice()));
         assert!(store.volatile_keys.contains(b"v".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(5_000));
 
         // PERSIST drops the TTL -> leaves the volatile set.
         assert!(store.persist(b"v", 0));
         assert!(!store.volatile_keys.contains(b"v".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // EXPIREAT adds a TTL to a persistent key -> enters the set.
         assert!(store.expire_at_milliseconds(b"p", 9_999, 0));
+        store.rebuild_volatile_keys_if_dirty();
         assert!(store.volatile_keys.contains(b"p".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(9_999));
 
         // Overwriting with a TTL-less SET clears it again.
         store.set(b"p".to_vec(), b"y".to_vec(), None, 0);
         assert!(!store.volatile_keys.contains(b"p".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // DEL of a volatile key removes it from the set.
         store.set(b"d".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        store.rebuild_volatile_keys_if_dirty();
         assert!(store.volatile_keys.contains(b"d".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(1_000));
         store.del(&[b"d".to_vec()], 0);
         assert!(!store.volatile_keys.contains(b"d".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // FLUSHDB clears the set.
         store.set(b"f".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        store.rebuild_volatile_keys_if_dirty();
         assert!(!store.volatile_keys.is_empty());
+        assert!(!store.expiry_deadline_counts.is_empty());
         store.flushdb();
         assert!(store.volatile_keys.is_empty());
+        assert!(store.expiry_deadline_counts.is_empty());
     }
 
     #[test]
@@ -21838,15 +22196,61 @@ mod tests {
     #[test]
     fn active_expire_cycle_wraparound_samples_each_key_once() {
         let mut store = Store::new();
-        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(1), 0);
         store.set(b"b".to_vec(), b"2".to_vec(), Some(10_000), 0);
         store.set(b"c".to_vec(), b"3".to_vec(), Some(10_000), 0);
 
         let result = store.run_active_expire_cycle(1, Some(b"b".to_vec()), 5);
 
         assert_eq!(result.sampled_keys, 3);
-        assert_eq!(result.evicted_keys, 0);
+        assert_eq!(result.evicted_keys, 1);
         assert_eq!(result.next_cursor, None);
+        assert!(!store.entries.contains_key(b"a".as_slice()));
+        assert!(store.entries.contains_key(b"b".as_slice()));
+        assert!(store.entries.contains_key(b"c".as_slice()));
+    }
+
+    #[test]
+    fn active_expire_cycle_skips_until_earliest_deadline_is_due() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(20_000), 0);
+
+        let early = store.run_active_expire_cycle(9_999, Some(b"a".to_vec()), 5);
+        assert_eq!(early.sampled_keys, 0);
+        assert_eq!(early.evicted_keys, 0);
+        assert_eq!(early.next_cursor, Some(b"a".to_vec()));
+        assert_eq!(store.dbsize_in_db(0), 2);
+
+        let due = store.run_active_expire_cycle(10_000, None, 5);
+        assert_eq!(due.sampled_keys, 2);
+        assert_eq!(due.evicted_keys, 1);
+        assert_eq!(store.dbsize_in_db(0), 1);
+        assert!(!store.entries.contains_key(b"a".as_slice()));
+        assert!(store.entries.contains_key(b"b".as_slice()));
+    }
+
+    #[test]
+    fn volatile_key_sort_is_lazy_until_a_deadline_is_due() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(20_000), 0);
+
+        assert!(store.volatile_keys_dirty);
+        assert!(store.volatile_keys.is_empty());
+
+        let early = store.run_active_expire_cycle(9_999, None, 10);
+        assert_eq!(early.sampled_keys, 0);
+        assert_eq!(early.evicted_keys, 0);
+        assert!(store.volatile_keys_dirty);
+        assert!(store.volatile_keys.is_empty());
+
+        let due = store.run_active_expire_cycle(10_000, None, 10);
+        assert_eq!(due.sampled_keys, 2);
+        assert_eq!(due.evicted_keys, 1);
+        assert!(!store.volatile_keys_dirty);
+        assert!(!store.volatile_keys.contains(b"a".as_slice()));
+        assert!(store.volatile_keys.contains(b"b".as_slice()));
     }
 
     #[test]
@@ -24286,9 +24690,22 @@ mod tests {
         // notifications (all gate on the dirty counter changing).
         let mut store = Store::new();
         let before = store.dirty;
-        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
+        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
         assert_eq!(store.dirty, before + 1);
         assert!(store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zstore_from_pairs_force_skiplist_marks_encoding() {
+        // (frankenredis-t8rma) Upstream ZRANGESTORE BYSCORE/BYLEX pre-creates the
+        // destination via zsetTypeCreate(-1, 0), which is always skiplist; a tiny
+        // result must therefore report OBJECT ENCODING skiplist, while rank-mode
+        // (force_skiplist = false) derives listpack naturally.
+        let mut store = Store::new();
+        store.zstore_from_pairs(b"byscore".to_vec(), vec![(b"a".to_vec(), 1.0)], true, 0);
+        assert_eq!(store.object_encoding(b"byscore", 0), Some("skiplist"));
+        store.zstore_from_pairs(b"byrank".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
+        assert_eq!(store.object_encoding(b"byrank", 0), Some("listpack"));
     }
 
     #[test]
@@ -29450,6 +29867,28 @@ mod tests {
         assert_eq!(store.get(b"k", 0).unwrap(), None);
     }
 
+    #[test]
+    fn getdel_keeps_exact_memory_cache_incremental_after_remove() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"alpha".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"bravo".to_vec(), None, 0);
+
+        let before = store.estimate_memory_usage_bytes();
+        let cached_dirty_before = store.cached_memory_usage_dirty.get();
+        let removed = store.memory_usage_for_key(b"a", 0).unwrap();
+        let remaining = store.memory_usage_for_key(b"b", 0).unwrap();
+        assert_eq!(before, removed.saturating_add(remaining));
+
+        assert_eq!(store.getdel(b"a", 1).unwrap(), Some(b"alpha".to_vec()));
+
+        assert_eq!(store.cached_memory_usage_bytes.get(), remaining);
+        assert_eq!(
+            store.cached_memory_usage_dirty.get(),
+            cached_dirty_before.saturating_add(1)
+        );
+        assert_eq!(store.estimate_memory_usage_bytes(), remaining);
+    }
+
     /// (frankenredis listpack DUMP LZF parity) Upstream rdbSaveObject persists a
     /// listpack/intset blob via rdbSaveRawString, which LZF-compresses it once it
     /// is large enough to beat the wire overhead. fr emitted these blobs raw, so
@@ -32080,6 +32519,48 @@ mod tests {
             Ok(Some(value)) if value.is_empty() => Ok(()),
             _ => Err("empty string restore produced the wrong value"),
         }
+    }
+
+    #[test]
+    fn restore_accepts_short_and_trailing_payloads_like_upstream_b19ln() {
+        // Upstream verifyDumpPayload requires only the 10-byte footer; the
+        // object is parsed off the FRONT and any trailing bytes (including the
+        // footer itself) are ignored. So an all-zeros payload of length >= 10
+        // decodes as type 0 (string) with a zero-length body — redis returns
+        // +OK — while a payload shorter than the footer is rejected.
+        // (frankenredis-b19ln)
+        for len in [10usize, 11, 13, 20] {
+            let mut store = Store::new();
+            let payload = vec![0u8; len];
+            store
+                .restore_key(b"z", 0, &payload, true, 100)
+                .unwrap_or_else(|_| panic!("all-zeros len {len} should restore like redis"));
+            assert!(
+                matches!(store.get(b"z", 100), Ok(Some(v)) if v.is_empty()),
+                "all-zeros len {len} should decode to an empty string"
+            );
+        }
+
+        // Fewer bytes than the 10-byte footer -> nothing to validate, rejected
+        // (matches redis verifyDumpPayload `len < 10`).
+        let mut store = Store::new();
+        assert!(
+            store.restore_key(b"z", 0, &[0u8; 9], true, 100).is_err(),
+            "payload shorter than the footer must be rejected"
+        );
+
+        // A complete object followed by trailing garbage (re-CRC'd over the
+        // whole body) is accepted; the trailing bytes are ignored, exactly as
+        // upstream rioInitWithBuffer reads only what the object needs.
+        let mut body = vec![RDB_TYPE_STRING];
+        append_raw_dump_bulk(&mut body, b"hi");
+        body.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        store
+            .restore_key(b"t", 0, &payload, true, 100)
+            .expect("trailing garbage after a complete object must be ignored");
+        assert!(matches!(store.get(b"t", 100), Ok(Some(v)) if v.as_slice() == b"hi"));
     }
 
     #[test]
@@ -35645,6 +36126,39 @@ mod tests {
             let flags = keyspace_events_parse("Kgn").expect("valid notify-keyspace-events");
             assert_eq!(keyspace_events_to_string(flags), "gnK");
         }
+
+        #[test]
+        fn keyspace_events_module_flag_and_keless_classes_match_upstream_nkednfix() {
+            // 'd' (NOTIFY_MODULE) is a valid event class in redis 7.2.4 — fr
+            // used to reject it ("Invalid event class character") even though
+            // its own error string lists 'd'.
+            let d = keyspace_events_parse("KEd").expect("'d' must be a valid class");
+            assert_eq!(keyspace_events_to_string(d), "dKE");
+            // 'A' covers the module class, so it round-trips as 'A'.
+            assert_eq!(
+                keyspace_events_to_string(keyspace_events_parse("A").expect("A")),
+                "A"
+            );
+            // The all-classes-but-no-d string is NOT 'A' (d is part of A).
+            assert_eq!(
+                keyspace_events_to_string(keyspace_events_parse("g$lshzxet").expect("classes")),
+                "g$lshzxet"
+            );
+            // Canonical class order places 'd' before 'n' (upstream order).
+            assert_eq!(
+                keyspace_events_to_string(keyspace_events_parse("gnd").expect("gnd")),
+                "gdn"
+            );
+            // Class flags WITHOUT K/E are preserved in the config (upstream
+            // gates firing at emit time, not at parse), where fr used to drop
+            // them to "".
+            for (input, want) in [("g", "g"), ("n", "n"), ("m", "m"), ("t", "t"), ("d", "d")] {
+                let flags =
+                    keyspace_events_parse(input).unwrap_or_else(|| panic!("'{input}' must parse"));
+                assert_ne!(flags, 0, "'{input}' must not collapse to 0");
+                assert_eq!(keyspace_events_to_string(flags), want);
+            }
+        }
     }
 
     // ── Metamorphic property tests ──────────────────────────────────────────
@@ -35744,6 +36258,7 @@ mod tests {
                 Just('t'),
                 Just('m'),
                 Just('n'),
+                Just('d'),
             ]
         }
 
@@ -35761,6 +36276,7 @@ mod tests {
                 Just('t'),
                 Just('m'),
                 Just('n'),
+                Just('d'),
             ]
         }
 
@@ -36642,14 +37158,25 @@ mod tests {
             }
 
             #[test]
-            fn mr_keyspace_events_k_or_e_free_classes_collapse_to_zero(
+            fn mr_keyspace_events_k_or_e_free_classes_are_preserved(
                 classes in prop::collection::vec(event_only_keyspace_char(), 1..24)
             ) {
+                // Upstream keeps the per-class flags in the config regardless
+                // of K/E — the K/E requirement only gates whether an event
+                // *fires* (notify_keyspace_event checks K/E at emit time), so a
+                // K/E-free class string parses to a NON-ZERO mask. fr used to
+                // collapse it to 0, dropping the flags from CONFIG GET.
+                // (frankenredis-nkednfix)
                 let input: String = classes.iter().copied().collect();
-                let reversed: String = classes.iter().rev().copied().collect();
-
-                prop_assert_eq!(keyspace_events_parse(&input), Some(0));
-                prop_assert_eq!(keyspace_events_parse(&reversed), Some(0));
+                let flags = keyspace_events_parse(&input).expect("class chars must parse");
+                prop_assert_ne!(flags, 0);
+                // Canonical form converges (the A-shorthand drops 'n' once, as
+                // upstream does — assert stability, not exact preservation).
+                let canonical = keyspace_events_to_string(flags);
+                let recanonical = keyspace_events_to_string(
+                    keyspace_events_parse(&canonical).expect("canonical parses"),
+                );
+                prop_assert_eq!(recanonical, canonical);
             }
 
             #[test]
