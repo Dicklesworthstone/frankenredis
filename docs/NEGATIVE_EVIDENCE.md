@@ -5751,3 +5751,13 @@ cand==ctrl==redis. 21 dispatch commits (16 hoists / 5 new-fp), ~52 commands clos
 1/2, multi 3-8, INCR, NX/XX/GT/LT, CH, 2-flag combos). GOTCHA: anchor "command 'ZADD' took"+Integer(0) matches BOTH plain-
 zadd + flag record fns (2x) — anchor on the zadd_incr record's BulkString(None) output (unique). REMAINING niche: flag+
 multipair (*6+ flag with >1 pair), LMPOP-2key, ZMSCORE-4+. conformance pending.
+
+### 2026-06-27 (part 157) WIN: hoist LMPOP 1-key dispatch early — 1.47x (0.58x->0.78x) (cc/BlackThrush)
+22nd dispatch commit. Broad sweep found LMPOP 1-key at 0.577-0.600x despite a SHIPPED fast-path (part ed577d3f7) — it was
+dispatched LATE @6373 (uses the generic parse_borrowed_plain_key_arg2_packet with b"*4\\r\\n$5\\r\\n"+LMPOP). Hoisted the
+branch before DECR. A/B (cand vs ctrl=committed d621002a1): LMPOP1 cand/ctrl 1.700/1.380/1.333 mean 1.471 (cand/redis 0.780,
+up from 0.577x). Byte-exact: LMPOP LEFT/RIGHT/COUNT pop ([key,[elems]]), nokey nil (*-1), WRONGTYPE-on-string cand==ctrl==
+redis. (LMPOP benchmark drains the list so it mostly measures the nil-dispatch path — hoisting helps that too.) Residual
+cand/redis 0.78 = numkeys-parse + pop machinery beyond position. ANOTHER shipped-but-late fast-path (like ZMSCORE part-148)
+— sweep finds them. 22 dispatch commits (17 hoists / 5 new-fp), ~53 commands closed. REMAINING niche: LMPOP-2key (no fast-
+path, multikey), ZADD flag+multipair (*7+ arity-ambiguous), ZMSCORE-4+. conformance pending.
