@@ -4,6 +4,44 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlackThrush PFADD exact no-op batch cache rejected
+
+Land-or-dig found no unmerged measured-win bench worktree ahead of `main`; the
+only detached non-main head was an old docs-only ZADD guard-loss note. The new
+lever targeted the remaining `PFADD_16v` gap versus Redis 7.2.4. The candidate
+added an exact per-key no-op PFADD batch cache, keyed by HLL entry
+`modification_count` plus the full element vector, so repeated duplicate
+PFADD batches could skip hashing/register comparisons after the existing
+register-cache hit. It also validated the HLL header before any no-op return.
+The source hunk regressed the adjacent control and is fully reverted.
+
+Focused proof used `AGENT_NAME=BlackThrush` and
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. RCH
+`cargo test -p fr-store pfadd_ -- --nocapture` passed on `vmi1227854` for the
+candidate before rejection (`11` matching unit tests plus the filtered HLL
+metamorphic tests). The literal requested `cargo bench --release` spelling was
+attempted earlier and rejected by Cargo; the valid per-crate bench spelling is
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_16v --noplot`. RCH selected `hz2` for the adjacent candidate rerun, but
+that worker lacks
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`, so the
+comparable adjacent A/B below used the local Redis oracle path after the RCH
+failure.
+
+Same-host adjacent PFADD_16v evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean main control (`234126b72`) | `515.43 Kelem/s` | `266.00 Kelem/s` | `0.516x` | baseline | target gap |
+| exact no-op PFADD batch cache candidate | `496.89 Kelem/s` | `222.32 Kelem/s` | `0.447x` | `0.836x` vs control | reject |
+
+Earlier candidate-only routing looked superficially better relative to its own
+Redis sample (`241.12 / 430.47 = 0.560x`), but the adjacent clean-main control
+was faster in absolute FrankenRedis throughput. Decision: **REJECT / revert**.
+Do not retry full-element no-op PFADD memoization without first proving that
+cache lookup and element-vector equality are cheaper than the register-cache
+hash loop for the target batch shape.
+
 ## 2026-06-27 BlueFalcon PFADD dense in-place mutation rejected
 
 Land-or-dig found no unmerged measured source win in the bench worktrees; the
