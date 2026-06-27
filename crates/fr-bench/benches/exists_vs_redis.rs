@@ -199,6 +199,21 @@ fn exists_vs_redis(c: &mut Criterion) {
         }
     }
 
+    let move_missing_packet = move_missing_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        let id = BenchmarkId::new("move_missing", engine.name);
+        group.bench_with_input(id, &engine, |b, engine| {
+            let mut client = Client::connect(engine.port);
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    client.run_packet(&move_missing_packet, COMMANDS_PER_ITER);
+                }
+                start.elapsed()
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -219,6 +234,18 @@ fn exists_packet(keys: &[&[u8]; 8], count: usize) -> Vec<u8> {
         args.push(b"EXISTS".as_slice());
         args.extend_from_slice(keys);
         packet.extend_from_slice(&encode_command(&args));
+    }
+    packet
+}
+
+fn move_missing_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for _ in 0..count {
+        packet.extend_from_slice(&encode_command(&[
+            b"MOVE".as_slice(),
+            b"missing".as_slice(),
+            b"1".as_slice(),
+        ]));
     }
     packet
 }

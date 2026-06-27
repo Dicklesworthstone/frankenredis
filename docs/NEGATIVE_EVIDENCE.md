@@ -93,6 +93,50 @@ run. Do not retry HLL hash tail packing without a profile naming it; remaining
 PFADD_16v work should target a materially different cost in the register update
 loop or use a lower-noise HLL microbench before touching the production path.
 
+## 2026-06-27 BlueFalcon MOVE missing-key borrowed fast path kept
+
+Targeted the freshest named uncovered dispatch gap after the `RANDOMKEY`
+fast-path commit: `MOVE key db` measured as a remaining no-fast-path loss
+(`MOVE missing` class, previously around `0.40x` vs Redis 7.2.4 in the broad
+command sweep). The new lever adds an exact borrowed runtime/server path for
+canonical `*3 MOVE key db` packets under the plain write gate. It preserves the
+generic runtime ordering: cluster-mode rejection before DB parsing, Redis'
+i32/range DB-index errors, same-DB error before key lookup, no-stat
+source/destination probes, and the single-dirty-count normalization on
+successful copy+delete.
+
+Benchmark source was extended with `exists_vs_redis/move_missing` so the target
+shape is measured through the requested per-crate Criterion gate. The literal
+`rch exec -- cargo bench --release -p fr-bench --bench exists_vs_redis --
+move_missing --noplot` spelling was attempted and failed with this Cargo's
+`unexpected argument '--release'`; measurement used the accepted
+`--profile release` form with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`. RCH fell open
+locally (`no admissible workers`) for the release build and bench.
+
+Same-host Criterion evidence, vendored Redis 7.2.4:
+
+| gate | Redis 7.2.4 median | FrankenRedis median | fr/Redis throughput | direct candidate/control |
+|---|---:|---:|---:|---:|
+| control `origin/main` + same bench row, `move_missing` | `76.055 us`, `1.6830 Melem/s` | `412.45 us`, `310.34 Kelem/s` | `0.184x` | n/a |
+| candidate MOVE borrowed fast path, `move_missing` | `78.553 us`, `1.6295 Melem/s` | `120.77 us`, `1.0599 Melem/s` | `0.650x` | `3.42x` faster |
+
+Validation: touched-crate `cargo check -p fr-runtime -p fr-server -p fr-bench
+--all-targets`, focused `fr-runtime` fast-vs-generic MOVE test, per-crate
+release builds for `fr-server`/`fr-bench`, and `cargo test -p fr-conformance
+-- --nocapture` are green (194 lib tests, all conformance binaries, 99 smoke
+tests, doctests). `cargo clippy -p fr-runtime -p fr-server -p fr-bench
+--all-targets -- -D warnings` is still blocked by pre-existing
+`chunks_exact_to_as_chunks` / `too_many_arguments` lints in untouched regions
+(`fr-persist`, `fr-runtime`, `fr-server`); `fr-bench` no-deps clippy and
+`cargo fmt -p fr-bench --check` passed.
+
+Decision: KEEP. This is a clear source win even though Redis remains faster on
+this cell; the residual gap is no longer generic argv allocation and likely
+comes from the MOVE implementation's cross-DB copy/delete/store bookkeeping.
+Do not repeat another simple parser-only MOVE hunk; future MOVE work needs a
+deeper transfer primitive or a hash-dispatch refactor shared across commands.
+
 ## 2026-06-27 AmberRiver BITFIELD SET u8 aligned store fast-path rejected
 
 Land-or-dig found one unlanded, *unbenched* source candidate sitting dirty in

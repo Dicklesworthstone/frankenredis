@@ -12734,6 +12734,101 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (BlueFalcon) Borrowed WRITE fast path for `MOVE key db`. Mirrors the
+    /// generic runtime handler exactly under the plain write gate: cluster mode is
+    /// rejected before DB parsing, DB-index errors keep Redis' i32/range wording,
+    /// same-DB errors happen before key lookup, source/destination probes are
+    /// no-stat, and successful copy+delete normalizes `dirty` to one increment.
+    pub fn execute_plain_move_borrowed(
+        &mut self,
+        key: &[u8],
+        db_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"MOVE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || db_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_write_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("move");
+        self.session.last_argv_len_sum = b"MOVE".len() + key.len() + db_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = if self.server.store.cluster_enabled {
+            RespFrame::Error("ERR MOVE is not allowed in cluster mode".to_string())
+        } else {
+            match parse_db_index_arg(
+                db_arg,
+                "ERR DB index is out of range",
+                self.server.store.database_count,
+            ) {
+                Ok(target_db) if target_db == self.session.selected_db => RespFrame::Error(
+                    "ERR source and destination objects are the same".to_string(),
+                ),
+                Ok(target_db) => {
+                    let source = encode_db_key(self.session.selected_db, key);
+                    let destination = encode_db_key(target_db, key);
+                    if !self.server.store.exists_no_stat(&source, now_ms)
+                        || self.server.store.exists_no_stat(&destination, now_ms)
+                    {
+                        RespFrame::Integer(0)
+                    } else {
+                        let dirty_before = self.server.store.dirty;
+                        match self
+                            .server
+                            .store
+                            .copy_no_stat(&source, &destination, false, now_ms)
+                        {
+                            Ok(_) => {
+                                self.server.store.del(&[source], now_ms);
+                                self.server.store.dirty = dirty_before.saturating_add(1);
+                                RespFrame::Integer(1)
+                            }
+                            Err(err) => CommandError::Store(err).to_resp(),
+                        }
+                    }
+                }
+                Err(RespFrame::Error(message)) => RespFrame::Error(message),
+                Err(_) => CommandError::InvalidInteger.to_resp(),
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+        let key_owned = key.to_vec();
+        let db_owned = db_arg.to_vec();
+
+        self.record_plain_zremrange_borrowed_metrics(
+            "move",
+            "MOVE",
+            || vec![b"MOVE".to_vec(), key_owned.clone(), db_owned.clone()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+
+        Some(reply)
+    }
+
     fn record_plain_randomkey_borrowed_metrics(
         &mut self,
         elapsed_us: u64,
@@ -44574,6 +44669,84 @@ mod tests {
             rt.execute_frame(command(&[b"MOVE", b"k", b"1"]), 2),
             RespFrame::Error("ERR MOVE is not allowed in cluster mode".to_string())
         );
+    }
+
+    #[test]
+    fn plain_move_borrowed_matches_generic_runtime_path() {
+        fn prepare(rt: &mut Runtime) {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"present", b"value"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"1"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"occupied", b"dst"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"0"]), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"occupied", b"src"]), 4),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"present", b"1"),
+            (b"missing", b"1"),
+            (b"occupied", b"1"),
+            (b"present", b"0"),
+            (b"present", b"99999999999"),
+            (b"present", b"99"),
+        ];
+
+        for (key, db) in cases {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            prepare(&mut direct);
+            prepare(&mut generic);
+
+            let fast = direct
+                .execute_plain_move_borrowed(key, db, 10)
+                .expect("MOVE fast path should engage in plain db0 mode");
+            let slow = generic.execute_frame(command(&[b"MOVE", key, db]), 10);
+            assert_eq!(fast, slow, "MOVE {key:?} {db:?} reply");
+
+            for db_index in [0_u8, 1] {
+                assert_eq!(
+                    direct.execute_frame(command(&[b"SELECT", &[b'0' + db_index]]), 20),
+                    generic.execute_frame(command(&[b"SELECT", &[b'0' + db_index]]), 20),
+                    "SELECT {db_index}"
+                );
+                for probe in [b"present".as_slice(), b"missing", b"occupied"] {
+                    assert_eq!(
+                        direct.execute_frame(command(&[b"GET", probe]), 21),
+                        generic.execute_frame(command(&[b"GET", probe]), 21),
+                        "db={db_index} key={probe:?}"
+                    );
+                }
+            }
+
+            assert_eq!(
+                direct.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits,
+                "keyspace hits for {key:?} {db:?}"
+            );
+            assert_eq!(
+                direct.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses,
+                "keyspace misses for {key:?} {db:?}"
+            );
+            assert_eq!(
+                direct.server.store.dirty, generic.server.store.dirty,
+                "dirty counter for {key:?} {db:?}"
+            );
+        }
     }
 
     #[test]
