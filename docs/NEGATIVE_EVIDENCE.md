@@ -6202,3 +6202,19 @@ cand==ctrl==redis — CRITICAL here since this ACTIVATES previously-dormant borr
 missing-key, WRONGTYPE-on-string, RESP2/3 (fresh conn per cmd). conformance GREEN. fr-server only. LESSON: a "shipped" fast
 path with a wrong bulk-length literal silently NEVER engages (dead code, no correctness symptom) — per-variant micro-bench
 that finds even the supposedly-fast arity is slow is the tell; grep `$<len>` vs actual cmd length. 35 dispatch commits.
+
+### 2026-06-27 (part 172) NO-SHIP/SURFACE: length-audit CLEAN + remaining dispatch "gaps" are degenerate/noise (cc/BlackThrush)
+Followed the part-171 dead-fast-path hunt. AUDIT (3 python passes over crates/fr-server/src/main.rs): every
+`strip_prefix(b"*N\r\n$M\r\n")` + `eq_ignore_ascii_case(b"CMD")`, every generic-parser `(prefix, cmd)` arg pair, and every
+`_at`-closure `rest.get(..N)` — checked M/N == len(cmd). **ZERO mismatches: SMISMEMBER was the ONLY dead-$len bug; that vein
+is exhausted.** Then probed ~20 option-variant/cheap cmds: the apparent losses ALL dissolve under scrutiny —
+(a) DEGENERATE no-op paths: HSETNX 0.81x (field-exists -> 0 after first set), COPY 0.69x (dest-exists -> 0; COPY REPLACE is
+1.05x because it does real work), LPOP/SPOP-count-class drains; (b) NOISE: HINCRBYFLOAT "0.68x" re-measured 0.68-1.23x mean
+~1.0 (±50% single-run swing under load); HINCRBY/LSET/SETEX 0.85-1.04x within the ±15% floor. Compute-heavy surface
+parity-or-faster (SINTERCARD 1.76x, set/zset algebra 1.2-4.4x); only zcount 0.71x persists (already O(log n) rank-diff,
+micro/peer-locked). CONCLUSION: the borrowed-dispatch cascade is SATURATED — the clear wins (dead paths, missing multi
+parsers, cheap-cmd-late clusters) are SHIPPED (parts 161-171, ~10 this session); further cheap-cmd hoists are net-zero-sum
+(each early-hoist adds a strip_prefix check to the ~40 cmds it jumps, eroding as the early zone crowds). The remaining real
+lever is the hash/(arity,cmd) dispatch refactor (replaces the ~150-branch linear cascade with O(1) lookup — multi-day,
+all-or-nothing). Bench discipline reaffirmed: degenerate (no-op/drain) + ±15-50% load noise manufacture false 0.5-0.8x gaps;
+require non-mutating workload + 3-run stability + an unaffected control before trusting a dispatch gap. No code change.
