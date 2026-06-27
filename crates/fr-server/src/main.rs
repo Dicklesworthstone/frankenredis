@@ -10457,6 +10457,15 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
+                        if let Some((key, pairs)) = borrowed_plain_hmset_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hmset_borrowed(key, pairs, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                         if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
                             && let Some(response) =
                                 runtime.execute_plain_hget_borrowed(key, field, ts)
@@ -18499,6 +18508,22 @@ fn borrowed_plain_hset_args<'a>(
         return None;
     };
     if !command.eq_ignore_ascii_case(b"HSET") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    Some((*key, pairs))
+}
+
+/// `HMSET key f v [f v ...]` borrowed-arg matcher (twin of
+/// [`borrowed_plain_hset_args`]) so a large multi-field HMSET reaches the
+/// one-keyspace-setup bulk runtime path instead of the per-field generic
+/// handler (whose per-field `refresh_hash_encoding_flag` is O(n^2)).
+fn borrowed_plain_hmset_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    let [command, key, pairs @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"HMSET") || pairs.is_empty() || pairs.len() % 2 != 0 {
         return None;
     }
     Some((*key, pairs))

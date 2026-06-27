@@ -10032,16 +10032,24 @@ impl Runtime {
 
         let start = self.chained_command_start();
         let mut error: Option<RespFrame> = None;
-        for pair in pairs.chunks_exact(2) {
-            match self
-                .server
-                .store
-                .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    error = Some(CommandError::Store(err).to_resp());
-                    break;
+        // (frankenredis-hsetcmdbulk) Same O(n^2)-per-field-refresh fix as HSET:
+        // route multi-field HMSET through the one-setup bulk build.
+        if pairs.len() >= 8 {
+            if let Err(err) = self.server.store.hset_borrowed_many(key, pairs, now_ms) {
+                error = Some(CommandError::Store(err).to_resp());
+            }
+        } else {
+            for pair in pairs.chunks_exact(2) {
+                match self
+                    .server
+                    .store
+                    .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        error = Some(CommandError::Store(err).to_resp());
+                        break;
+                    }
                 }
             }
         }

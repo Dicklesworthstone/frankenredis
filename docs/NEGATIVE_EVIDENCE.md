@@ -36,6 +36,28 @@ the quicklist-specific gate, likely because extra validation/span retention and
 node-level store installation do not amortize better than the existing flattened
 decode for this RDB codec workload. No source or bench changes landed; this row
 is ledger-only negative evidence.
+## 2026-06-27 AmberRiver: LANDED multi-field HMSET bulk path — O(n²)→O(n), 17.3x vs main / 8.6x faster than Redis
+
+Follow-up to the HSET win below: large `HMSET key f v [f v …]` had the SAME
+O(n²)-per-field gap (was 2.17x slower than Redis 7.2.4) but the HSET fix did NOT
+cover it — HMSET's borrowed fast-path parser caps at 8 pairs, so a 200-field
+HMSET fell through to the generic per-field handler (the generic-argv dispatch
+routed large HSET to `execute_plain_hset_borrowed` but had no HMSET branch).
+Fix: route the multi-field HMSET fast path through `hset_borrowed_many` (the
+one-setup bulk build), and add a `borrowed_plain_hmset_args` matcher + dispatch
+branch (`fr-server`) so any-size HMSET reaches `execute_plain_hmset_borrowed`.
+
+Measured (`HMSET key <200 fields>` fresh, pipelined DEL+HMSET ×400, best-of-10
+interleaved):
+
+| | candidate | main control | Redis 7.2.4 |
+|---|---:|---:|---:|
+| best | **`7.00 ms`** | `121.0 ms` | `60.6 ms` |
+
+→ **17.3x faster than main**, and **fr/Redis flips from 2.17x slower to
+0.116x = 8.6x FASTER**. Byte-exact: live `DEBUG DIGEST-VALUE` identical to control
+across fresh-200 and duplicate-field-fallback; **51** fr-server + **659** fr-store
+lib tests green.
 
 ## 2026-06-27 AmberRiver: LANDED multi-field HSET bulk path — O(n²)→O(n), 15.5x vs main / 8.4x faster than Redis
 
