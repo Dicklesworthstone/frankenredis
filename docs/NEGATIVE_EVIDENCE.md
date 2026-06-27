@@ -5643,3 +5643,15 @@ Packet) + early dispatch. A/B (cand vs ctrl=committed 30600cb10): SUBSTR cand/ct
 cand==ctrl==redis; cmdstat_substr recorded (NOT cmdstat_getrange) matching redis. 12 dispatch commits (10 hoists + 2 new-fp
 HMSET/SUBSTR), ~28 commands closed. REMAINING: ZMSCORE 0.482 (variadic multi-member ZSCORE — bigger lift). The string/hash/
 list/set/zset hot surface is now COMPREHENSIVELY parity-or-faster vs redis 7.2.4. conformance pending.
+
+### 2026-06-26 (part 148) WIN: ZMSCORE2/3 dispatch-hoist — 1.70x (0.53x->0.95-1.04x); was a HOIST not new code (cc/BlackThrush)
+13th dispatch commit, closes the LAST measured gap. ALMOST built a new ZMSCORE fast-path, but reading fr-runtime first
+revealed execute_plain_zmscore_borrowed_into + zmscore2/zmscore3 parsers ALREADY EXIST — just dispatched LATE at main.rs:
+8413/8440 (the _into FastEncodedReply form). Hoisted both before DECR. A/B (cand vs ctrl=committed 6b27f6fe2): ZMSCORE2
+cand/ctrl mean 1.703 (cand/redis 0.950 near-parity, up from 0.525x), ZMSCORE3 mean 1.717 (cand/redis 1.044 BEATS redis, up
+from 0.624x). Byte-exact: 2/3-member, nil-member, nokey-all-nil, WRONGTYPE-on-string, AND RESP3 Double (,1.5 / ,2)
+cand==ctrl==redis. LESSON (echoes part-138/HGET): before building a NEW fast-path, grep fr-runtime for an existing
+execute_plain_<cmd>_borrowed — it may just be dispatched late (a hoist, not new code). 13 dispatch commits (11 hoists + 2
+new-fp HMSET/SUBSTR), ~30 commands closed. *** THE ENTIRE MEASURED HOT SURFACE (string/hash/list/set/zset) IS NOW AT
+PARITY-OR-FASTER vs redis 7.2.4 — every -c50-P16 sweep gap closed. *** Only ULTIMATE remaining = cascade reorder (retire
+~30 dead late branches, low perf value since all hot cmds hoisted). conformance pending.
