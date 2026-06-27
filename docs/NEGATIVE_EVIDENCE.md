@@ -5487,3 +5487,57 @@ data structures are fine; the dispatch cascade position was the entire gap. The 
 throughput. *** 4 dispatch-ordering wins: INCRBY 1.78x, GETRANGE 1.69x, ZADD 1.72x, SADD/LPUSH/RPUSH 1.8-2.0x — all from
 proper-load -c50-P16 sweep + hoisting late branches. NEXT: hoist keyed_values 2/3-value (multi-value SADD/LPUSH), GETSET
 4443, APPEND 5259, and ultimately reorder the whole cascade by frequency. conformance pending.
+
+### 2026-06-26 (part 140) MEASURED WIN: 4-value keyed-write dispatch hoist 1.6-2.3x; LPUSH/SADD beat Redis 7.2.4 (codex/BlackThrush)
+Land-or-dig worktree scan found no unmerged measured code win: the only non-ancestor worktree head was the old docs-only
+ZADD guard-loss entry (`a4b709e`), and dirty bench worktrees were stale/already-rejected or already-landed surfaces. Dug
+the fresh dispatch-ordering vein from parts 136-139 with alien-graveyard/optimization discipline: measured failure
+signature first, then one flat-cascade reorder lever. The graveyard "constants kill you" lesson applies directly here:
+the asymptotic data-structure story was misleading; hundreds of failed parser checks were the dominant constant.
+
+Lever: hoist the existing `parse_borrowed_plain_keyed_values4_packet` branch from the late keyed-values cascade into the
+early dispatch block immediately after the already-hoisted 1-value keyed-write branch. No parser or runtime semantics
+changed; the late branch remains as a dead fallback for exact 4-value packets, matching the prior hoist landing pattern.
+Isomorphism: same parser, same `execute_plain_keyed_values_write_borrowed`, same reply/event/propagation path.
+
+Per-crate warm-target commands:
+- Build: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- cargo build --profile release -p fr-server`
+- Baseline and candidate: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a rch exec -- env FR_SERVER_BIN=/data/projects/.rch-targets/frankenredis-cod-a/release/frankenredis REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- 'LPUSH_4v|RPUSH_4v|SADD_4v' --noplot`
+
+RCH fell open locally for build/bench because no admissible workers were available; both runs used the same warm target dir.
+Baseline current main vs Redis 7.2.4:
+- `LPUSH_4v`: FrankenRedis `409.31 Kelem/s`, Redis `725.24 Kelem/s`, ratio `0.564x`.
+- `RPUSH_4v`: FrankenRedis `442.65 Kelem/s`, Redis `867.12 Kelem/s`, ratio `0.510x`.
+- `SADD_4v`: FrankenRedis `438.27 Kelem/s`, Redis `905.70 Kelem/s`, ratio `0.484x`.
+
+Candidate:
+- `LPUSH_4v`: FrankenRedis `741.33 Kelem/s`, Redis `677.67 Kelem/s`, ratio `1.094x`; candidate/control `1.811x`;
+  Criterion `+83.285%`, `p=0.00`.
+- `RPUSH_4v`: FrankenRedis `714.28 Kelem/s`, Redis `790.75 Kelem/s`, ratio `0.903x`; candidate/control `1.614x`;
+  Criterion `+57.909%`, `p=0.00`.
+- `SADD_4v`: FrankenRedis `989.31 Kelem/s`, Redis `808.70 Kelem/s`, ratio `1.223x`; candidate/control `2.257x`;
+  Criterion `+106.41%`, `p=0.00`.
+
+Required-target recheck on `/data/projects/.rch-targets/frankenredis-cod-a` after Codex resume:
+- `LPUSH_4v`: FrankenRedis `822.69 Kelem/s`, Redis `742.93 Kelem/s`, ratio `1.107x`.
+- `RPUSH_4v`: FrankenRedis `830.02 Kelem/s`, Redis `775.01 Kelem/s`, ratio `1.071x`.
+- `SADD_4v`: FrankenRedis `1.0706 Melem/s`, Redis `864.48 Kelem/s`, ratio `1.238x`.
+
+Validation before commit: `cargo fmt --check -p fr-server`; `rch exec -- cargo test -p fr-server borrowed_plain_keyed_values4_packet_parser -- --nocapture`;
+`cargo check -p fr-server --all-targets`; `cargo clippy -p fr-server --all-targets -- -D warnings`;
+`cargo test -p fr-conformance -- --nocapture` (`194 passed`, smoke `99 passed`, doctests `0 passed`). RCH remote
+`cargo check -p fr-server --all-targets` failed only because worker `hz2` lacked `legacy_redis_code/redis/src/commands`,
+so the check/clippy/conformance gates were run locally with the same warm `CARGO_TARGET_DIR`. Next dispatch-ordering
+candidates: keyed_values2/3, GETSET, APPEND, and eventually a table/frequency-ordered dispatch replacement once the
+per-branch vein is mined.
+
+### 2026-06-26 (part 140) WIN: batch-hoist multi-value SADD/LPUSH (keyed_values2/3) + EXPIRE — 1.7-1.85x (cc/BlackThrush)
+5th dispatch-ordering commit. Post-sweep biggest remaining gaps were all late-dispatch: EXPIRE 0.506x (main.rs:7634),
+multi-value SADD/LPUSH 0.62x (keyed_values3 3-value + keyed_values2 2-value, ~7472-7495 — last turn only hoisted the
+1-value keyed_values1). Batch-hoisted all three before DECR. A/B (python pipelined cand vs ctrl=committed 960f6e51c):
+SADD3 cand/ctrl 1.601/1.781/1.732 mean 1.705 (cand/redis 1.145 BEATS redis, up from 0.597x); LPUSH2 mean 1.728 (cand/redis
+0.917, up from 0.492x); EXPIRE mean 1.848 (cand/redis 0.929, up from 0.542x). Byte-exact: SADD multi/dup, LPUSH/RPUSH,
+EXPIRE/EXPIRE-XX/TTL cand==ctrl==redis. 5 dispatch-ordering commits now (INCRBY/GETRANGE/ZADD/SADD-LPUSH-RPUSH-1val/
+multi-val+EXPIRE), every measured hot-write gap closed to near-parity-or-faster. NEXT remaining late gaps: SETRANGE 0.617
+(7714), LINDEX 0.655 (6766), GETSET 0.801 (4533), APPEND 0.837 (5349), PEXPIRE/EXPIREAT family, SMISMEMBER 0.419 (NO
+fast-path = needs one, not just a hoist). ULTIMATE = reorder whole cascade by frequency. conformance pending.
