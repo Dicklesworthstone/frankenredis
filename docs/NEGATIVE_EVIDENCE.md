@@ -43,6 +43,16 @@ retry fresh-SADD duplicate-table removal without a profile showing the de-dup
 table dominates; the remaining large-set path is already at/above Redis on this
 fresh-key row.
 
+BlackThrush independent confirmation while resolving the concurrent ledger
+conflict: focused store proof
+`cargo test -p fr-store generic_set_from_str_members_dedup_matches_unique_bulk_saddbulk -- --nocapture`
+passed on `hz2`; per-crate `fr-bench` rerun with the same temporary
+`SADD_200v_fresh` row measured control `50.458 Kelem/s` vs candidate
+`53.275 Kelem/s`, only `1.056x` and Criterion "no change" (`p = 0.36`).
+The literal `cargo bench --release` spelling was again rejected by Cargo, so the
+measured rerun used `cargo bench --profile release`. Source and bench edits were
+again reverted before commit.
+
 ## 2026-06-27 BlackThrush: REJECTED retain QUICKLIST_2 nodes through whole-RDB decode/load — 0.915x vs ORIG
 
 Dig target: RDB-load quicklist/listpack retained representation. The attempted
