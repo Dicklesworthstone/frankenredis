@@ -3878,6 +3878,110 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                // (frankenredis-cardinalityhoist) STRLEN/LLEN/SCARD/HLEN/ZCARD are
+                // cheap O(1) single-key length/cardinality reads whose only dispatch
+                // sites sat ~position 85 in the cascade (lines ~5150-5490), measuring
+                // a consistent 0.66-0.73x (vs GET ~1.2x at the front). Hoist the cluster
+                // up next to the other early reads. Same parsers + executors ->
+                // byte-exact by construction (late dup branches go dead).
+                } else if let Some(packet) =
+                    parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_llen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_scard_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                        PlainCardinalityCmd::Hlen,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                        PlainCardinalityCmd::Zcard,
+                        packet.key,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 {

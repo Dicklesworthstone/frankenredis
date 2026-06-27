@@ -6175,3 +6175,16 @@ HEXISTS cand/ctrl 1.59-2.21x, HSTRLEN 1.86-2.13x (~1.8-2.1x). BYTE-EXACT cand==c
 conn across RESP2/3 + WRONGTYPE error replies desyncs the test reader, false :52/:4): missing-key :0, hit, missing-field :0,
 WRONGTYPE, RESP2/3. conformance GREEN. fr-server only. Cheap-cmd-late is a real hoist vein; HLEN/LLEN (0.72-0.80x) are
 milder mid-cascade candidates. The deep fix remains the hash/(arity,cmd) dispatch refactor (multi-day). 33 dispatch commits.
+
+### 2026-06-27 (part 170) WIN: hoist STRLEN/LLEN/SCARD/HLEN/ZCARD cardinality cluster — cand/ctrl ~1.25x, byte-exact (cc/BlackThrush)
+Stable 3-run fr-vs-redis re-measure (the part-169 "scard 1.05x fast" was NOISE): the cheap O(1) single-key length/cardinality
+reads at cascade position ~85 (lines ~5150-5490) are ALL consistently dispatch-bound — STRLEN/LLEN/SCARD 0.72x, HLEN 0.66x,
+ZCARD 0.68x — vs GET ~1.2x at the front (clear position gradient: pos5=1.2x, pos55 TYPE/TTL=0.85x, pos85=0.70x). Hoisted the
+5-command cluster up next to the early reads (after the part-169 HEXISTS/HSTRLEN hoist, ~line 3835). PURE reorder (same
+parsers + execute_plain_strlen/llen/scard_borrowed + execute_plain_cardinality_borrowed Hlen/Zcard) -> byte-exact by
+construction; late dup branches go dead. A/B (cand=HEAD+hoist vs ctrl=HEAD, both local-built, pipe=500 trials=15, 3 runs,
+load 11-21): STRLEN 1.28-1.37x, LLEN 1.25-1.35x, SCARD 1.09-1.32x, HLEN 1.15-1.74x, ZCARD 1.17-1.38x (~1.25x mean), ALL
+consistently above the GET-control noise floor (GET unaffected/before-insertion swings 0.83-1.15 = ±15% noise band).
+DISPLACED commands net-neutral (ZSCORE 1.05-1.23x = no regression; displacing ~40 less-common branches by 5 checks is dwarfed
+by the gain on these 5 hot cmds). BYTE-EXACT cand==ctrl==redis (fresh-conn): hit/missing-key 0/empty/WRONGTYPE on all 5.
+conformance GREEN. fr-server only. Position-gradient hoist vein continues; TYPE/TTL (0.85x, pos~55) marginal. 34 dispatch commits.
