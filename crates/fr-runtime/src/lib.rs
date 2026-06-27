@@ -9861,17 +9861,29 @@ impl Runtime {
         let start = self.chained_command_start();
         let mut added = 0_usize;
         let mut error: Option<RespFrame> = None;
-        for pair in pairs.chunks_exact(2) {
-            match self
-                .server
-                .store
-                .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
-            {
-                Ok(true) => added += 1,
-                Ok(false) => {}
-                Err(err) => {
-                    error = Some(CommandError::Store(err).to_resp());
-                    break;
+        // (frankenredis-hsetcmdbulk) For a multi-field HSET, do ONE keyspace
+        // setup + (fresh+unique) pre-sized bulk build instead of re-paying the
+        // per-field keyspace probes and incremental rehashes. Small HSETs keep
+        // the direct per-field path (the bulk path's fixed overhead would not
+        // pay off). Byte-identical result + reply.
+        if pairs.len() >= 8 {
+            match self.server.store.hset_borrowed_many(key, pairs, now_ms) {
+                Ok(n) => added = n,
+                Err(err) => error = Some(CommandError::Store(err).to_resp()),
+            }
+        } else {
+            for pair in pairs.chunks_exact(2) {
+                match self
+                    .server
+                    .store
+                    .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
+                {
+                    Ok(true) => added += 1,
+                    Ok(false) => {}
+                    Err(err) => {
+                        error = Some(CommandError::Store(err).to_resp());
+                        break;
+                    }
                 }
             }
         }

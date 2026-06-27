@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 AmberRiver: LANDED multi-field HSET bulk path — O(n²)→O(n), 15.5x vs main / 8.4x faster than Redis
+
+Biggest fresh measured gap found: a large fresh-key `HSET key f v [f v …]`
+command was **1.83x SLOWER than Redis 7.2.4**. Root cause: the command fast path
+(`fr-runtime`) loops `hset_borrowed` per field, and each per-field write re-pays
+the keyspace setup AND calls `refresh_hash_encoding_flag`, which scans the whole
+hash until the 128-entry short-circuit — i.e. O(1)+O(2)+…+O(128) ≈ **O(n²)** for
+the first 128 fields, plus N redundant keyspace probes.
+
+Fix: `Store::hset_borrowed_many` (new, `fr-store`) does ONE keyspace setup and,
+for a fresh+unique hash, one pre-sized O(n) `from_unique_pairs_borrowed` build
+(zero-copy borrowed fields, no rehash, ONE encoding refresh). A non-empty target
+or any duplicate field falls back to the same incremental inserts. The command
+fast path routes `pairs.len() >= 8` (≥4 fields) to it; small HSETs keep the
+direct per-field path.
+
+Measured (`HSET key <200 fields>` on a fresh key, pipelined DEL+HSET ×400,
+best-of-12 interleaved, host load ~50), per-batch wall-clock:
+
+| | candidate | main control `b5a9959c5` | Redis 7.2.4 |
+|---|---:|---:|---:|
+| best | **`6.55 ms`** | `101.63 ms` | `55.28 ms` |
+
+→ **15.5x faster than main** (cand won 6/6), and **fr/Redis flips from 1.84x
+slower to 0.118x = 8.4x FASTER**. Byte-exact: live `DEBUG DIGEST-VALUE` identical
+to control across fresh-200, duplicate-field-fallback, small (<4 field), and
+existing-key-overwrite scenarios; **659** `fr-store` lib tests green. (Open
+follow-up: large fresh SADD is also `1.42x` slower — same per-member
+`refresh_set_encoding_flag` O(n²) shape, candidate for the next turn.)
+
 ## 2026-06-27 AmberRiver: LANDED CompactStrSet presize — large-set RDB load ~1.2-1.44x faster
 
 Extends the CompactFieldMap presize win (entry below) to the **set** bulk path.

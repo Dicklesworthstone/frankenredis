@@ -9998,6 +9998,85 @@ impl Store {
         Ok(())
     }
 
+    /// (frankenredis-hsetcmdbulk) Borrowed-input bulk HSET for the COMMAND path
+    /// (`HSET key f v [f v ...]`), returning the number of NEW fields (the HSET
+    /// reply). The per-field command loop re-pays the keyspace setup
+    /// (`drop_if_expired` + LFU probe + `internal_entry`) and an incrementally
+    /// rehashing insert for EVERY field; this does that setup ONCE and, when the
+    /// hash is fresh and the fields are unique, builds it in one pre-sized O(n)
+    /// pass via `from_unique_pairs_borrowed` (one copy into the arena, no rehash).
+    /// `pairs` is the flat `[f0, v0, f1, v1, …]` borrowed slice (even length).
+    /// Byte-identical to the per-field `hset_borrowed` loop: the bulk branch only
+    /// triggers on a fresh+unique hash where insertion order == the loop's, and a
+    /// non-empty target or any duplicate field falls back to the same incremental
+    /// inserts. Under an LFU policy each field's PRNG/freq advance is observable,
+    /// so that case delegates field-by-field.
+    pub fn hset_borrowed_many(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if pairs.len() < 2 {
+            return Ok(0);
+        }
+        if self.lfu_tracking_enabled() {
+            let mut added = 0_usize;
+            for pair in pairs.chunks_exact(2) {
+                if self.hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)? {
+                    added += 1;
+                }
+            }
+            return Ok(added);
+        }
+        self.drop_if_expired(key, now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let count = (pairs.len() / 2) as u64;
+        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let added: usize;
+        if m.is_empty() {
+            let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+                std::collections::HashSet::with_capacity_and_hasher(
+                    count as usize,
+                    foldhash::quality::RandomState::default(),
+                );
+            let unique = pairs.chunks_exact(2).all(|p| seen.insert(p[0]));
+            drop(seen);
+            if unique {
+                let borrowed: Vec<(&[u8], &[u8])> =
+                    pairs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+                **m = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
+                added = count as usize;
+            } else {
+                let mut a = 0_usize;
+                for p in pairs.chunks_exact(2) {
+                    if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
+                        a += 1;
+                    }
+                }
+                added = a;
+            }
+        } else {
+            let mut a = 0_usize;
+            for p in pairs.chunks_exact(2) {
+                if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
+                    a += 1;
+                }
+            }
+            added = a;
+        }
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(added)
+    }
+
     /// (frankenredis-hsetfast) Borrowed-field variant of [`Self::hset`]. Result
     /// and final state are byte-identical to `hset(key, field.to_vec(), value, ..)`
     /// for every input, but no owned field key is allocated when the field already
