@@ -5761,3 +5761,13 @@ redis. (LMPOP benchmark drains the list so it mostly measures the nil-dispatch p
 cand/redis 0.78 = numkeys-parse + pop machinery beyond position. ANOTHER shipped-but-late fast-path (like ZMSCORE part-148)
 — sweep finds them. 22 dispatch commits (17 hoists / 5 new-fp), ~53 commands closed. REMAINING niche: LMPOP-2key (no fast-
 path, multikey), ZADD flag+multipair (*7+ arity-ambiguous), ZMSCORE-4+. conformance pending.
+
+### 2026-06-27 (part 158) WIN: hoist 5 shipped-but-late commands (SETNX/INCRBYFLOAT/RENAMENX/ZCOUNT/ZLEXCOUNT) — 1.05-1.20x (cc/BlackThrush)
+23rd dispatch commit, mining the shipped-but-late vein (grep all execute_plain_*_borrowed dispatch positions). These 5 had
+working fast-paths dispatched at moderate-late @4947-5508. Hoisted before DECR (setnx/incrbyfloat/renamenx = key,member;
+zcount/zlexcount = key,min,max). A/B (cand vs ctrl=committed cc179014a): SETNX cand/ctrl mean 1.203 (0.650->0.850),
+INCRBYFLOAT 1.086 (0.929->1.026 beats redis), ZCOUNT 1.107 (noisy), ZLEXCOUNT 1.052 (noisy/marginal). Byte-exact: SETNX
+0/1, INCRBYFLOAT grow/negative, ZCOUNT range/inf, ZLEXCOUNT lex-range, RENAMENX success/no-such-key cand==ctrl==redis.
+SMALLER wins than deep hoists (these are moderate-late @4900-5500 not @7000-8000 — win-size-by-position law). 23 dispatch
+commits, ~58 commands closed. REMAINING shipped-but-late (multi-arg, next batch): hsetnx/lset/smove/setex/psetex/hincrby/
+hincrbyfloat/lmove/getex-variants/hmget/xrange — all @5000-6100. conformance pending.
