@@ -5771,3 +5771,13 @@ INCRBYFLOAT 1.086 (0.929->1.026 beats redis), ZCOUNT 1.107 (noisy), ZLEXCOUNT 1.
 SMALLER wins than deep hoists (these are moderate-late @4900-5500 not @7000-8000 — win-size-by-position law). 23 dispatch
 commits, ~58 commands closed. REMAINING shipped-but-late (multi-arg, next batch): hsetnx/lset/smove/setex/psetex/hincrby/
 hincrbyfloat/lmove/getex-variants/hmget/xrange — all @5000-6100. conformance pending.
+
+### 2026-06-27 (part 159) WIN: hoist 7 common shipped-but-late 3-arg cmds (SETEX/PSETEX/HSETNX/LSET/HINCRBY/HINCRBYFLOAT/SMOVE) — 1.05-1.19x (cc/BlackThrush)
+24th dispatch commit, finishing the common shipped-but-late vein. 7 commands w/ (key,start,end) fast-paths dispatched
+@5252-5413. Hoisted before DECR. A/B (cand vs ctrl=committed f39c7649e): HSETNX cand/ctrl mean 1.187 (0.667->0.740), SETEX
+1.146 (0.781->0.904), HINCRBY 1.049/SMOVE 1.046 (noisy/marginal). Byte-exact: SETEX/PSETEX +OK+TTL, HSETNX 1/0, LSET+LINDEX,
+HINCRBY, HINCRBYFLOAT, SMOVE 1/0+SMEMBERS cand==ctrl==redis. SMALL wins (moderate-late @5252-5413). 24 dispatch commits,
+~65 commands closed. *** DISPATCH VEIN AT GENUINE DIMINISHING RETURNS: hot/common surface ALL parity-or-faster; remaining =
+small moderate-late hoists (1.05-1.19x, lmove/getex-variants/hmget/xrange @5400-6100) or niche new-code (LMPOP-2key/ZADD-
+flag+multipair/ZMSCORE-4+). The big structural lever left = convert the linear strip_prefix cascade to a hash/(arity,cmd)
+dispatch (eliminates the gauntlet for ALL cmds at once) — multi-day refactor, the true remaining win. conformance pending.
