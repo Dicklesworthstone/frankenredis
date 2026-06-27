@@ -1549,3 +1549,44 @@ so the eventual 99fwc implementer starts at `packed_set.rs:2410/2438` instead of
 rediscovering the explode-to-`Owned` obstacle. Shallow borrowed-helper / byte-slice
 attempts are exhausted (this entry + the three `uhthd` entries above); do not
 repeat them.
+
+## 2026-06-27 AmberRiver land-or-dig: clean-crate lever surface exhausted + agent-mail blocker surfaced
+
+**Land check:** no measured win sits in any `.scratch`/`.worktrees` worktree ahead
+of `origin/main` (only `a4b709ea5`, a stale 06-20 docs commit). Nothing to land.
+
+**Dig — clean per-turn lever surface verified EXHAUSTED (no re-measure, code-read):**
+- Hottest path already optimal: `Store::get_string_bytes` collapses to ONE
+  `entries.get_mut` on the default LRU/no-TTL path
+  (`frankenredis-get-single-lookup`, `crates/fr-store/src/lib.rs:6400`) — the
+  prior "GET double keyspace lookup" lever is DONE.
+- Dispatch borrowed fast-paths saturated (68+, incl. BlueFalcon's new MOVE
+  `413e12c7a`); hot writes parity-or-faster (ZADD 1.109x / SADD 1.017x, prior
+  turn); broad `broad_command_headtohead.py` sweep = fr dominates the long tail
+  (sunionstore 3.91x, bitcount 2.57x, lpos 2.40x …).
+- The ONLY remaining measured gaps are owner-gated STRUCTURAL levers, each with a
+  documented exact entry point in this ledger / `docs/NEGATIVE_EVIDENCE.md`:
+  list-push `99fwc` (`packed_set.rs:2410/2438` explode-to-Owned),
+  ZCOUNT warm-threshold `4096` (`lib.rs:693`, RAM tradeoff),
+  collection RESTORE-decode keep-listpack, keyspace-RAM `uhthd` SCAN-reversal.
+  All are multi-day fr-store-core, needing CoralOx sign-off on RAM/semantics
+  tradeoffs — NOT a per-turn all-safe lever.
+
+**BLOCKER surfaced (needs operator/supervisor, not an agent):** agent-mail
+coordination is degraded — `am doctor health` reports the mailbox SQLite
+(`~/.mcp_agent_mail_git_mailbox_repo/storage.sqlite3`) is corrupt ("needs
+reconstruct"). `am doctor reconstruct --dry-run` confirms a CLEAN, zero-loss
+recovery is available from the git archive (17 projects / 66 agents / 2245
+messages / 876 thread digests). But `am doctor drain` reports `safe_to_mutate:
+false` — a live owner (PID 2093388) holds the storage/sqlite locks, so the
+documented protocol requires a GRACEFUL supervisor restart
+(`am service restart` / `systemctl --user stop mcp-agent-mail`, never a hard
+kill) BEFORE `am doctor reconstruct`. That is an operator action with swarm-wide
+impact (66 agents, peers actively committing), so it is intentionally NOT done
+here. Consequence: cross-agent flags (e.g. the ZCOUNT RAM-tradeoff hand-off to
+CoralOx) ride in this ledger instead of mail until an operator runs the
+reconstruct.
+
+Decision: **no source change** (clean surface exhausted; structural levers are
+owner-gated multi-day work) + **blocker surfaced** for operator action. Conformance
+untouched (docs-only).
