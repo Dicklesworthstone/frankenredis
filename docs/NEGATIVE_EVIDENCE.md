@@ -5739,3 +5739,15 @@ correct for CH; only opts.ch=true needed. A/B (cand vs ctrl=committed f09071f1b)
 GT-CH combo (*6) defers to generic, cmdstat_zadd; cand==ctrl==redis. 20 dispatch commits, ~51 commands closed. ZADD single-
 pair surface now COMPLETE (plain 1/2 + multi 3-8 + INCR + NX/XX/GT/LT + CH). REMAINING ZADD: *6 two-flag combos (GT CH etc.)
 + flag+multipair = niche. The whole ZADD-flag-class "store-bound" reject (part-125) is now FULLY overturned. conformance pending.
+
+### 2026-06-26 (part 156) WIN: ZADD *6 two-flag combos (GT CH etc.) — 2.31x (0.37x->0.84x) (cc/BlackThrush)
+21st dispatch commit. ZADD GT CH (common leaderboard pattern, 0.330-0.371x) + all valid 2-flag combos. execute_plain_zadd_
+flag2_borrowed builds ZaddOptions from BOTH flags ({NX,XX,GT,LT,CH}), DEFERS conflicts (NX+XX/NX+GT/NX+LT/GT+LT, dup) to
+generic, replies Integer(count) (CH-adjusted). New BorrowedPlainZaddFlag2Packet + *6 parser (both post-key tokens must be
+flags). A/B (cand vs ctrl=committed 0d731ce54): ZADD-GTCH cand/ctrl 2.231/2.395/2.295 mean 2.307, cand/redis 0.836 (up from
+0.371x). BYTE-EXACT: GT-CH/CH-LT/NX-CH/XX-CH/XX-GT valid semantics (scores via ZSCORE), conflicts GT-LT/NX-XX/NX-GT defer to
+generic emitting EXACT errors ("ERR GT, LT, and/or NX options...", "ERR XX and NX options..."), WRONGTYPE, cmdstat_zadd;
+cand==ctrl==redis. 21 dispatch commits (16 hoists / 5 new-fp), ~52 commands closed. ZADD SINGLE-PAIR FULLY COMPLETE (plain
+1/2, multi 3-8, INCR, NX/XX/GT/LT, CH, 2-flag combos). GOTCHA: anchor "command 'ZADD' took"+Integer(0) matches BOTH plain-
+zadd + flag record fns (2x) — anchor on the zadd_incr record's BulkString(None) output (unique). REMAINING niche: flag+
+multipair (*6+ flag with >1 pair), LMPOP-2key, ZMSCORE-4+. conformance pending.
