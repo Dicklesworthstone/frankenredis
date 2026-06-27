@@ -17453,6 +17453,24 @@ impl Store {
         elements: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.pfadd_impl(key, elements, now_ms)
+    }
+
+    pub fn pfadd_borrowed(
+        &mut self,
+        key: &[u8],
+        elements: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.pfadd_impl(key, elements, now_ms)
+    }
+
+    fn pfadd_impl<T: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        elements: &[T],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         if !self.entries.contains_key(key)
@@ -17491,7 +17509,7 @@ impl Store {
                     let mut registers = None;
                     let mut register_updates = 0_u64;
                     for element in elements {
-                        let hash = hll_hash(element);
+                        let hash = hll_hash(element.as_ref());
                         let index = (hash as usize) & (HLL_REGISTERS - 1);
                         let count = hll_rho(hash >> HLL_P);
                         let current = registers
@@ -17527,7 +17545,7 @@ impl Store {
         let mut register_updates = cached_register_updates.unwrap_or(0);
         if cached_register_updates.is_none() {
             for element in elements {
-                let hash = hll_hash(element);
+                let hash = hll_hash(element.as_ref());
                 let index = (hash as usize) & (HLL_REGISTERS - 1);
                 let w = hash >> HLL_P;
                 let count = hll_rho(w);
@@ -25464,8 +25482,8 @@ fn hll_merge_registers(merged: &mut [u8], registers: &[u8]) {
     }
 }
 
-fn hll_encode_sparse_create_from_pfadd(
-    elements: &[Vec<u8>],
+fn hll_encode_sparse_create_from_pfadd<T: AsRef<[u8]>>(
+    elements: &[T],
     max_sparse_bytes: usize,
 ) -> Option<(Vec<u8>, u64)> {
     if elements.len() > HLL_DIRECT_SPARSE_PFADD_MAX_ELEMENTS {
@@ -25475,7 +25493,7 @@ fn hll_encode_sparse_create_from_pfadd(
     let mut updates: Vec<(usize, u8)> = Vec::with_capacity(elements.len());
     let mut register_updates = 0_u64;
     for element in elements {
-        let hash = hll_hash(element);
+        let hash = hll_hash(element.as_ref());
         let index = (hash as usize) & (HLL_REGISTERS - 1);
         let count = hll_rho(hash >> HLL_P);
         if count > HLL_SPARSE_VAL_MAX_VALUE {

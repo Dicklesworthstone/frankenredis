@@ -408,6 +408,7 @@ pub enum PlainKeyedValuesCmd {
     Sadd,
     Lpush,
     Rpush,
+    Pfadd,
     // (frankenredis-n8ct0) Variadic DELETE siblings — `CMD key member [member ...]`
     // -> Integer(count removed). Same wire shape + reply as SADD, so they share
     // this borrowed fast path; routed to store.hdel/store.srem which own all
@@ -438,6 +439,7 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Sadd => "SADD",
             PlainKeyedValuesCmd::Lpush => "LPUSH",
             PlainKeyedValuesCmd::Rpush => "RPUSH",
+            PlainKeyedValuesCmd::Pfadd => "PFADD",
             PlainKeyedValuesCmd::Hdel => "HDEL",
             PlainKeyedValuesCmd::Srem => "SREM",
             PlainKeyedValuesCmd::Zrem => "ZREM",
@@ -453,6 +455,7 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Sadd => "sadd",
             PlainKeyedValuesCmd::Lpush => "lpush",
             PlainKeyedValuesCmd::Rpush => "rpush",
+            PlainKeyedValuesCmd::Pfadd => "pfadd",
             PlainKeyedValuesCmd::Hdel => "hdel",
             PlainKeyedValuesCmd::Srem => "srem",
             PlainKeyedValuesCmd::Zrem => "zrem",
@@ -9342,6 +9345,11 @@ impl Runtime {
                 .store
                 .rpush(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Pfadd => self
+                .server
+                .store
+                .pfadd_borrowed(key, values, now_ms)
+                .map(i64::from),
             // (frankenredis-n8ct0) store.hdel/srem own type-check, keyspace
             // hit/miss accounting, dirty tracking, and empty-key autodelete —
             // identical to the generic path which calls the same methods.

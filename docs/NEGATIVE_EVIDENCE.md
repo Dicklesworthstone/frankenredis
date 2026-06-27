@@ -4,6 +4,43 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-27 BlackThrush PFADD_1v borrowed keyed-values fast path kept
+
+Land-or-dig found no clear measured unlanded source win in bench worktrees.
+The largest live measured gap was still `PFADD_1v` versus Redis 7.2.4 after the
+prior dense-HLL mutation and exact no-op batch-cache rejects. The kept lever is
+the narrow command/dispatch path the prior note routed toward: add `PFADD` to
+the existing single-value borrowed keyed-values parser and execute it through a
+borrowed-element `Store::pfadd_borrowed`, avoiding the generic `argv[2..].to_vec()`
+element copy for the measured `*3 PFADD key value` packet shape. Multi-element
+`PFADD` remains on the generic path.
+
+Proof used `AGENT_NAME=BlackThrush`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`, and the
+Redis 7.2.4 oracle at
+`/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`. The
+literal requested `cargo bench --release` spelling was attempted through `rch`
+and rejected by Cargo; the valid per-crate bench command was
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis --
+PFADD_1v --noplot`. RCH had no admissible worker slots for the control and
+first candidate runs. A final clean-worktree rerun briefly selected `ovh-a`, but
+remote sync timed out and RCH fell back to local execution.
+
+Same-target PFADD_1v evidence:
+
+| gate | Redis 7.2.4 throughput | FrankenRedis throughput | FR/Redis | direct ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| clean main control (`bc254370b`) | `469.21 Kelem/s` | `73.100 Kelem/s` | `0.156x` | baseline | target gap |
+| borrowed PFADD_1v candidate, run 1 | `478.11 Kelem/s` | `153.58 Kelem/s` | `0.321x` | `2.10x` vs control | keep |
+| borrowed PFADD_1v candidate, rerun | `676.50 Kelem/s` | `707.91 Kelem/s` | `1.046x` | `9.68x` vs control | keep |
+| clean-worktree candidate rerun | `324.01 Kelem/s` | `240.18 Kelem/s` | `0.741x` | `3.29x` vs control | keep |
+
+The final clean-worktree rerun is slower than the noisiest local candidate pass,
+but it still clears the adjacent control by enough margin to keep the lever.
+This does not retry the rejected HLL payload/cache ideas; it only removes
+generic command allocation and dispatch overhead for the exact measured
+one-element PFADD lane.
+
 ## 2026-06-27 BlackThrush PFADD exact no-op batch cache rejected
 
 Land-or-dig found no unmerged measured-win bench worktree ahead of `main`; the
