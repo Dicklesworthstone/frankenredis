@@ -5716,3 +5716,15 @@ redis), SADD8 1.560 (0.619->0.988), LPUSH6 1.467 (0.770->1.133 BEATS redis). Byt
 SCARD, SMEMBERS cand==ctrl==redis. 18 dispatch commits (14 hoists + 4 new-fp), ~48 commands closed. STILL-OPEN confounded-
 reject candidates (need NEW code not hoist): ZADD CH 0.290 (extend flag fast-path: reply added+changed), ZADD multi-pair
 0.375 (zadd3+ parser, part-74 reject was confounded), ZADD GT-CH combo 0.353 (*6 two-flag). conformance pending.
+
+### 2026-06-26 (part 154) WIN: ZADD multi-pair (3-8) fast-path — 1.5-1.58x (0.56x->0.84-0.96x); corrects part-74 (cc/BlackThrush)
+19th dispatch commit, 5th confounded-reject correction. Plain ZADD with 3-8 pairs fell to generic (only zadd1/zadd2
+fast-pathed). LEAN: added parse_borrowed_plain_zadd_multi_packet (mirrors hset_multi, ZADD $4, *8..*18) reusing
+BorrowedPlainHsetMultiPacket + dispatch to the EXISTING execute_plain_zadd_borrowed (handles any pair count) — NO new
+execute. A/B (cand vs ctrl=committed a84ea02b6): ZADD3 cand/ctrl 1.577 (0.560->0.838), ZADD4 1.507 (0.582->0.963
+near-parity). Byte-exact: 3/4-pair count, ZSCORE, dup-member (ZADD z 9 a 9 a -> 0, score 9), WRONGTYPE, ZRANGE WITHSCORES
+cand==ctrl==redis. *** CORRECTS part-74 "ZADD3 (*8) ~0-gain, ZADD store-side": that reject was ALSO confounded by dispatch
+position (pre-part-136). The plain multi-pair path uses insert_result (the same lean path plain ZADD 0.99x uses) = dispatch-
+bound. *** 5 confounded-reject corrections now (parts 138/143/151/152/154). 19 dispatch commits (15 hoists+fp / 4 new-fp),
+~50 commands closed. REMAINING ZADD: CH form 0.290 (extend execute_plain_zadd_flag_borrowed ch branch), GT-CH/*6 combos,
+flag+multipair. conformance pending.

@@ -4444,6 +4444,28 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                        packet.key,
+                        &packet.pairs[..packet.len],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_decr_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts) {
@@ -12158,6 +12180,63 @@ fn parse_borrowed_plain_zadd_flag_packet<'a>(
         flag,
         score,
         member,
+    })
+}
+
+fn parse_borrowed_plain_zadd_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHsetMultiPacket<'a>> {
+    if config.max_bulk_len < b"ZADD".len() {
+        return None;
+    }
+    let zadd_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..4)
+                .filter(|c| c.eq_ignore_ascii_case(b"ZADD"))
+                .map(|_| input.len() - rest.len() + 4)
+        })
+    };
+    // Plain ZADD with 3..8 score/member pairs (*8..*18); 1-2 pairs use the dedicated
+    // zadd/zadd2 paths, flag forms (NX/XX/GT/LT/CH/INCR) start with a non-numeric token
+    // and fall to the flag/generic paths. npairs_x2 = array_count - 2.
+    let (mut cursor, npairs_x2, arr_len) = if let Some(c) = zadd_at(b"*8\r\n$4\r\n") {
+        (c, 6usize, 8)
+    } else if let Some(c) = zadd_at(b"*10\r\n$4\r\n") {
+        (c, 8usize, 10)
+    } else if let Some(c) = zadd_at(b"*12\r\n$4\r\n") {
+        (c, 10usize, 12)
+    } else if let Some(c) = zadd_at(b"*14\r\n$4\r\n") {
+        (c, 12usize, 14)
+    } else if let Some(c) = zadd_at(b"*16\r\n$4\r\n") {
+        (c, 14usize, 16)
+    } else if let Some(c) = zadd_at(b"*18\r\n$4\r\n") {
+        (c, 16usize, 18)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arr_len {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut pairs = [empty; 16];
+    let mut consumed = next;
+    for slot in pairs.iter_mut().take(npairs_x2) {
+        let (bulk, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = bulk;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainHsetMultiPacket {
+        consumed,
+        key,
+        pairs,
+        len: npairs_x2,
     })
 }
 
