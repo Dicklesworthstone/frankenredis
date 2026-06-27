@@ -6035,3 +6035,20 @@ pipe=500 trials=9, both fr-vs-redis; load avg ~130): cand/ctrl 4m 1.200/1.284, 5
 the generic baseline). BYTE-EXACT (cand==ctrl==redis): 4/5/6/8-member incl missing-member nils + all-missing + wrong-type,
 RESP2 + RESP3 Double, 9-member generic fallthrough, missing-key all-nil, lowercase cmd. zset differs all green
 (score_emit/tiebreak/4000-iter fuzz). Single-file change (fr-server/src/main.rs). 28 dispatch commits, ~71 cmds.
+
+### 2026-06-27 (part 164) WIN: ZADD flag+multipair new fast-path — cand/ctrl 1.2-1.9x (parity-1.9x), byte-exact (cc/BlackThrush)
+Empirical: broad_command_headtohead found the command surface parity-or-faster EXCEPT zcount 0.72x (already O(log n)
+rank-diff i5896 — micro residual, prior compact-count rejected, peer-locked → dead end). A focused probe then surfaced the
+real loss: `ZADD key FLAG [FLAG2] s1 m1 s2 m2 ...` (1-2 flags NX/XX/GT/LT/CH + MULTIPLE pairs) ran 0.58-0.63x vs redis —
+the flagless-multipair (zadd_multi) and single-pair-flag (zadd_flag/flag2) forms were already fast, but flag+multipair fell
+to the generic argv path. NEW execute_plain_zadd_flag_multi_borrowed combines the flag-parse/validation of
+execute_plain_zadd_flag2_borrowed with the pairs handling of execute_plain_zadd_borrowed, reusing store.zadd_with_options
+(NO new store code). NEW parse_borrowed_plain_zadd_flag_multi_packet matches `*7..*14 $4 ZADD` (1-2 leading flag tokens then
+2-6 pair bulks); dispatched BEFORE zadd_multi so flagless even-arity shapes (first post-key token is a score, not a flag)
+return None and defer to zadd_multi. Any invalid combo (NX+GT/GT+LT/NX+XX/dup-flag), INCR, bad score, or >6 pairs returns
+None → generic path emits the exact error. A/B (cand=cc HEAD+ZADD vs ctrl=HEAD binary, pipe=300 trials=9, 3 runs, load
+~50-130): NX_3pair 1.89/1.19/1.26, GT_2pair 1.84/1.51/1.43, GT_CH_5pair 1.50/1.33/1.60 (all clear wins); GT_CH_4pair
+0.95/0.94/1.07 (parity, not a regression — heavier per-pair GT+CH store work dilutes the dispatch saving). BYTE-EXACT
+(cand==ctrl==redis, reply AND resulting ZRANGE WITHSCORES state): GT/LT/NX/XX/CH × 2-5 pairs, float scores, all 4 invalid
+combos, bad-score-in-pair, wrong-type, RESP2 + RESP3, both protocols. zset differs (score_emit/tiebreak/4000-iter fuzz)
+green. fr-runtime + fr-server (my files only; built atop peer's just-landed PFADD commit 4787e9386). 29 dispatch commits.

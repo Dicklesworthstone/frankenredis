@@ -4471,6 +4471,29 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zadd_flag_multi_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed(
+                        packet.key,
+                        &packet.flags[..packet.nflags],
+                        &packet.pairs[..packet.npairs_bulks],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_zadd_borrowed(
@@ -12713,6 +12736,117 @@ fn parse_borrowed_plain_zadd_flag_packet<'a>(
         flag,
         score,
         member,
+    })
+}
+
+// (frankenredis-zaddflagmulti) ZADD with 1-2 flags (NX/XX/GT/LT/CH) + 2-6
+// score/member pairs — `ZADD key FLAG [FLAG2] s1 m1 s2 m2 ...`. The flagless
+// multipair (zadd_multi) and single-pair flag (zadd_flag/flag2) forms were fast;
+// flag+multipair fell to the generic argv path (measured 0.58-0.63x). Must be
+// dispatched BEFORE zadd_multi: for a flagless even-arity shape the leading token
+// after key is a score (not a flag) so this returns None and zadd_multi handles
+// it. `flags[..nflags]` + `pairs[..npairs_bulks]` are borrowed; the runtime
+// validates flag combos/scores and defers any invalid form to the generic path.
+struct BorrowedPlainZaddFlagMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    flags: [&'a [u8]; 2],
+    nflags: usize,
+    pairs: [&'a [u8]; 12],
+    npairs_bulks: usize,
+}
+
+fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZaddFlagMultiPacket<'a>> {
+    if config.max_bulk_len < b"ZADD".len() {
+        return None;
+    }
+    let zadd_at = |pfx: &[u8]| {
+        input.strip_prefix(pfx).and_then(|rest| {
+            rest.get(..4)
+                .filter(|c| c.eq_ignore_ascii_case(b"ZADD"))
+                .map(|_| input.len() - rest.len() + 4)
+        })
+    };
+    // arr_len = ZADD + key + flags(1-2) + pairs(2*N). Support 7..=14 (1-2 flags,
+    // 2-6 pair bulks). zadd_multi (flagless) also matches even arr 8/10/12/14 but
+    // is dispatched AFTER this; odd arr (7/9/11/13) is exclusively a 1-flag form.
+    let (mut cursor, arr_len) = if let Some(c) = zadd_at(b"*7\r\n$4\r\n") {
+        (c, 7usize)
+    } else if let Some(c) = zadd_at(b"*8\r\n$4\r\n") {
+        (c, 8)
+    } else if let Some(c) = zadd_at(b"*9\r\n$4\r\n") {
+        (c, 9)
+    } else if let Some(c) = zadd_at(b"*10\r\n$4\r\n") {
+        (c, 10)
+    } else if let Some(c) = zadd_at(b"*11\r\n$4\r\n") {
+        (c, 11)
+    } else if let Some(c) = zadd_at(b"*12\r\n$4\r\n") {
+        (c, 12)
+    } else if let Some(c) = zadd_at(b"*13\r\n$4\r\n") {
+        (c, 13)
+    } else if let Some(c) = zadd_at(b"*14\r\n$4\r\n") {
+        (c, 14)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arr_len {
+        return None;
+    }
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let is_flag = |f: &[u8]| {
+        f.eq_ignore_ascii_case(b"NX")
+            || f.eq_ignore_ascii_case(b"XX")
+            || f.eq_ignore_ascii_case(b"GT")
+            || f.eq_ignore_ascii_case(b"LT")
+            || f.eq_ignore_ascii_case(b"CH")
+    };
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let empty: &[u8] = &[];
+    let mut flags = [empty; 2];
+    let mut pairs = [empty; 12];
+    // First token after key MUST be a flag, else this is a flagless form -> defer.
+    let (t1, n1) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !is_flag(t1) {
+        return None;
+    }
+    flags[0] = t1;
+    let mut nflags = 1usize;
+    let mut np = 0usize;
+    let (t2, n2) = parse_borrowed_plain_set_bulk(input, n1, config.max_bulk_len)?;
+    let mut next = if is_flag(t2) {
+        flags[1] = t2;
+        nflags = 2;
+        n2
+    } else {
+        pairs[0] = t2;
+        np = 1;
+        n2
+    };
+    let npairs_bulks = arr_len.checked_sub(2 + nflags)?;
+    if npairs_bulks < 4 || npairs_bulks % 2 != 0 || npairs_bulks > pairs.len() {
+        return None;
+    }
+    let mut consumed = next;
+    while np < npairs_bulks {
+        let (b, n) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        pairs[np] = b;
+        np += 1;
+        next = n;
+        consumed = n;
+    }
+    Some(BorrowedPlainZaddFlagMultiPacket {
+        consumed,
+        key,
+        flags,
+        nflags,
+        pairs,
+        npairs_bulks,
     })
 }
 
