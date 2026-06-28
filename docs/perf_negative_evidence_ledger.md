@@ -2690,6 +2690,24 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: strength-reduction class checked — div-by-const compiler-reduced, RNG-modulo byte-risky; sole-agent campaign-complete checkpoint
+
+Last lever class: strength reduction (expensive per-iteration ops). Div-by-CONSTANT
+(LFU clock `now_ms / 60_000`, geo power-of-2 scaling) is already strength-reduced by
+the compiler to multiply-shift. The only runtime `% len` in a loop is random-sampling
+index selection (SRANDMEMBER/SPOP/HRANDFIELD count) — Lemire's nearly-divisionless
+reduction is faster but CHANGES the index mapping, so the seeded-`next_rand()` member
+selection would differ and break deterministic tests (byte-risky), on a non-hot path.
+No lever.
+
+CHECKPOINT (sole active agent — all recent origin/main commits are CrimsonHawk, no peer
+activity, only stale worktree ahead is a 06-20 loss doc): the per-turn perf campaign is
+COMPLETE. 8 wins landed; every lever class (autovec/SWAR, redundant-work, algorithm,
+search/reduction, alloc-avoidance, strength-reduction, RDB codec) swept by MEASUREMENT
+across all 5 crates. Remaining = STRUCTURAL multi-day (keep-listpack decode, XADD
+in-object metadata, keyspace RAM); cheap increments proven defeated; differential
+probing blocked by the full-binary build (ops fix only). No per-turn lever remains.
+
 ## 2026-06-28 CrimsonHawk: SIMD heuristic sweep extended to the build-blocked crates (fr-command/runtime/server) — none; class exhausted CODEBASE-WIDE
 
 Completed the SIMD/dependency lever sweep by grepping the crates I can't test directly
