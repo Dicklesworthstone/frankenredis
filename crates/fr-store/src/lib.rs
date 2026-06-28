@@ -13751,6 +13751,51 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        // (frankenredis-zaddchbulk) On a FRESH key with default/CH semantics
+        // (no NX/GT/LT; XX already returned above), every member is added and
+        // an intra-batch repeat is last-wins with a CH/changed bump — exactly
+        // what the flagless bulk `zadd` does. The per-member option loop below
+        // instead builds the zset one insert at a time, which is O(n^2) in the
+        // PackedZSet sorted-Vec phase. Route to the one-shot bulk build (sort
+        // once) and report the same (added, changed). Byte-identical final set.
+        if !opts.nx && !opts.gt && !opts.lt && !self.entries.contains_key(key) {
+            let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+                HashMap::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for (score, member) in &members {
+                let score = canonicalize_zero_score(*score);
+                match latest.insert(member.clone(), score) {
+                    Some(old_score) => {
+                        if !old_score.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                    }
+                    None => added += 1,
+                }
+            }
+            if added == 0 {
+                return Ok((0, 0));
+            }
+            let zs = SortedSet::from_unique_pairs_with_limits(
+                latest.into_iter().collect(),
+                zset_max_entries,
+                zset_max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            if opts.ch {
+                return Ok((added + changed, changed));
+            }
+            return Ok((added, changed));
+        }
         let (added, changed, is_empty, touched) = {
             let entry =
                 self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);

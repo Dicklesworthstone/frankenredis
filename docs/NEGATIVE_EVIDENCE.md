@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-28 AmberRiver: LANDED flagged ZADD (CH) fresh-key bulk path — O(n²)→O(n), 4.23x vs main / 1.9x faster than Redis
+
+Sweep found a big gap: `ZADD key CH score member …` (and any flagged ZADD) on a
+fresh key was **2.22x SLOWER than Redis 7.2.4**. Flagless ZADD already bulk-builds
+on a fresh key, but the flag path `zadd_with_options` runs a per-member loop, and
+the profile showed ~70% in `PackedZSet::insert_result/contains/get_score` — the
+sorted-Vec listpack phase is **O(n²)** (binary_search + shift per insert).
+
+Fix: on a FRESH key with default/CH semantics (XX already early-returns; NX/GT/LT
+have order-dependent semantics so they keep the per-member loop), route to the
+same one-shot bulk build as flagless ZADD (`from_unique_pairs_with_limits`, sort
+once), with the identical last-wins de-dup + CH/changed accounting. Returns
+`(added+changed, changed)` for CH, `(added, changed)` otherwise.
+
+Measured (`ZADD key CH <200 members>` fresh, DEL+ZADD ×200, best-of-12, load ~45):
+
+| | candidate | main control | Redis 7.2.4 |
+|---|---:|---:|---:|
+| best | **`7.89 ms`** | `33.37 ms` | `15.04 ms` |
+
+→ **4.23x faster than main**; fr/Redis flips from `2.219` slower to **`0.525` =
+1.9x FASTER**. Byte-exact: live `DEBUG DIGEST-VALUE` identical to control across
+fresh-CH-200, fresh-CH intra-batch-dup (`a=3`), existing-key GT-CH, and fresh-NX
+first-wins; **659** fr-store lib tests green (incl. the
+`zadd_repeated_member_processes_pairs_sequentially` sequential-semantics test).
+
 ## 2026-06-28 BlackThrush: REJECTED PFADD short-element Murmur64 path — 0.790x vs ORIG
 
 Land-or-dig scan: local `main` first fast-forwarded to `origin/main`
