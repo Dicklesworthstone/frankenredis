@@ -2690,6 +2690,25 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: autovectorization/SWAR class SWEPT — codebase already extensively SWAR-optimized; HLL was the last 2 misses
+
+Swept every element-wise array loop (`.zip` / `iter_mut().zip` / `chunks_exact` /
+conditional min-max store) in fr-store + fr-persist for autovectorization/dependency
+levers. Findings — the team had ALREADY applied these heuristics broadly:
+- `common_prefix_len` (lzf match-tail) — already SWAR XOR+trailing_zeros, with the
+  EXACT note "LLVM does not reliably vectorize the take_while early-exit" (g9h0v) —
+  same insight class as my HLL merge, already done.
+- BITOP / BITPOS / BITCOUNT — already SWAR word-at-a-time (each with a SWAR A/B gate).
+- HLL dense 6-bit codec — already 4-register/3-byte word grouping (kgsni).
+- command-name lowercase — ≤40-byte stack-buffer loop, tiny (not worth vectorizing).
+- remaining `.zip` loops (fr-persist 6379/6791) are TEST round-trip assertions.
+
+The ONLY two element-wise loops that had slipped the team's SWAR pass were the HLL
+histogram (memory-RAW, multi-accumulator, -53.5%) and HLL merge (conditional-store→
+`.max()`/pmaxub, -93.9%) — both now LANDED. **Autovectorization/SWAR lever class is
+EXHAUSTED** (codebase pre-optimized + the 2 HLL fixes). Don't re-grep `.zip`/
+conditional-store loops — they're covered. No source change.
+
 ## 2026-06-28 CrimsonHawk: REJECT uppercase-match command dispatch (+19.7%) — eq_ignore_ascii_case chain already optimal; dispatch is ~3.5 ns, not a cheap lever
 
 Measured the long-tail per-command dispatch overhead the ledger repeatedly cites as
