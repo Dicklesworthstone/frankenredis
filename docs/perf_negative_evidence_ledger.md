@@ -2641,6 +2641,28 @@ single loop turn. Recommend the loop pivot to a dedicated keep-listpack session,
 to differential correctness probing vs vendored redis 7.2.4 (historically the
 highest-yield review pattern when the perf surface is saturated).
 
+## 2026-06-28 CrimsonHawk: the per-turn approach to the keep-listpack decode gap is DEFEATED by LZF — confirming it's truly multi-day
+
+Probed the obvious cheap increment toward the #1 structural lever (collection decode
+is per-element-allocation-bound): the listpack decode arms call `rdb_decode_string`
+(which `to_vec`-copies the whole listpack blob into an owned Vec) then
+`decode_listpack(&blob)`. Idea: return a borrowed `Cow::Borrowed(&data[..])` for the
+raw-string case so decode reads the RDB buffer in place, skipping the blob copy.
+
+DEAD END: `rdb_encode_string` LZF-compresses any string > 20 bytes whenever the
+compressed form is smaller (upstream-faithful `rdbSaveRawString`). A 40-field hash /
+40-member zset/set listpack is ~200 B of repetitive `f0v0f1v1…` and DOES compress, so
+it is stored as `0xC3` LZF — and `rdb_decode_string` then takes the LZF branch where
+`lzf_decompress` already returns a FRESH OWNED buffer. There is no blob copy to
+borrow away for compressed listpacks (the common case for any collection big enough
+to matter); the `Cow` would only help ≤20 B or incompressible blobs. So the
+intermediate copy is NOT the decode cost — the per-element `Vec<u8>` allocs (one per
+member, inherent to producing `RdbValue::Hash/Set/SortedSet(Vec<Vec<u8>>)`) ARE, and
+the ONLY way to avoid them is to not element-decode at all = the full keep-listpack
+`RdbValue` variant + the fr-store side that stores it. Cross-crate, contract-changing,
+multi-day. Confirms the #1 lever cannot be salami-sliced into a per-turn win. No
+source change.
+
 The repeatable win pattern this session — *pure parity-with-Redis function + a
 common-case fast path / better-impl, measured with an isolated in-process A/B that
 beats shared-worker noise* — has now harvested glob (4 shapes), CRC64, and 2 RDB
