@@ -2712,7 +2712,31 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
-## 2026-06-28 CrimsonHawk: the encode_aof_stream -67.6% win ALSO speeds the master→replica command feed (broader than AOF rewrite); to_resp_frame vein otherwise one-time
+## 2026-06-28 CrimsonHawk: collection-reply RespFrame::Array materialization vein — ~10+ probable reply-encode wins (AOF pattern) BLOCKED by unbuildable fr-runtime
+
+The AOF win (encode_aof_stream −67.6%) was the borrow-encode-direct-vs-RespFrame-
+materialize pattern. Auditing the codebase for siblings found a VEIN in fr-runtime
+command handlers: ~10+ collection-reply commands build `RespFrame::Array(Some(
+members.map(|m| RespFrame::BulkString(Some(m))).collect()))` (lib.rs 18377/18548/18621/
+19127/13498/13746/13895/…) — i.e. SMEMBERS/SINTER/SUNION/SDIFF/SPOP-count/SRANDMEMBER-
+count/ZADD-score-arrays/etc. — materializing a `Vec<RespFrame>` of N BulkStrings then
+2-pass-encoding it, instead of direct borrow-encode (`encode_aggregate_header` +
+`encode_bulk_string_slice` per member). Confirmed NOT bypassed: fr-server uses the
+borrow-encode helpers ZERO times and has no `parse_borrowed_plain_smembers/sinter/lrange`
+fast path — so these go through the materializing fr-runtime handler.
+
+PROBABLE WINS by analogy to the measured AOF case (the members are MOVED not cloned
+here, so likely < AOF's 3x but real — the `Vec<RespFrame>` alloc + enum-wrap + 2-pass).
+**BLOCKED**: fr-runtime depends on fr-command, whose build.rs reads the gitignored
+`legacy_redis_code/redis/src/commands`, so fr-runtime CANNOT be built/tested on rch
+(same blocker as the full binary) — I can't measure or even compile-verify a change.
+
+SIGNIFICANCE: the ops build-block now gates TWO concrete high-value veins, not one —
+(a) differential correctness probing, and (b) this ~10+-command reply-encode vein
+(SMEMBERS/LRANGE/ZRANGE etc. are HOT production commands). The build-fix EV is higher
+than the "differential only" framing. For a builder WITH a working fr-runtime: convert
+these handlers to the borrow-encode direct-multibulk path (the proven AOF pattern).
+(Unmeasured — pattern-inferred; flagged because it's a real sized backlog.) No source.
 
 Follow-up on the encode_aof_stream win (9c7f4387c): traced its callers. It is NOT just
 AOF rewrite — `Store::encoded_aof_stream()` (fr-runtime 5720) = `encode_aof_stream
