@@ -2712,7 +2712,22 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
-## 2026-06-28 CrimsonHawk: LANDED encode_aof_stream direct multibulk encode — -67.6% (3.1x); 9th win, OVERTURNS the "practical optimum" claim
+## 2026-06-28 CrimsonHawk: the encode_aof_stream -67.6% win ALSO speeds the master→replica command feed (broader than AOF rewrite); to_resp_frame vein otherwise one-time
+
+Follow-up on the encode_aof_stream win (9c7f4387c): traced its callers. It is NOT just
+AOF rewrite — `Store::encoded_aof_stream()` (fr-runtime 5720) = `encode_aof_stream
+(&self.server.aof_records)`, and `encoded_aof_stream_from_offset` (5724) is the
+MASTER→REPLICA command feed (offset-sliced for replica catch-up). So the -67.6% (3.1x)
+also accelerates the master's replica-feed encode — a HOTTER production path than AOF
+rewrite (replication is common; AOF default-off). The win is broader than first noted.
+
+Audited the rest of the `to_resp_frame().to_bytes()` / `.to_bytes()`-then-write vein
+for sibling wins: the fr-server sites (replica_handshake_frame, SimpleString OK/PONG/
+CONTINUE) are ONE-TIME handshake / sentinel setup — no loop, no multiplication, not
+hot. encode_aof_stream was the unique high-multiplicity instance (a loop over all
+records). Vein harvested. The lesson stands: AOF/replication encode was a real 3x win
+hiding behind a path I'd dismissed by inspection — measure newly-examined paths. No
+source change.
 
 `encode_aof_stream` (AOF rewrite serialization) did
 `out.extend_from_slice(&record.to_resp_frame().to_bytes())` PER record — which (a)
