@@ -2690,6 +2690,28 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: REJECT uppercase-match command dispatch (+19.7%) — eq_ignore_ascii_case chain already optimal; dispatch is ~3.5 ns, not a cheap lever
+
+Measured the long-tail per-command dispatch overhead the ledger repeatedly cites as
+"the biggest-reach lever". fr's `classify_*` dispatch via a length-bucketed sequential
+`name.eq_ignore_ascii_case(b"CMD")` chain. Tested the obvious cheap alternative:
+uppercase the name once into a stack buffer, then `match` on exact bytes (LLVM →
+u64-word decision tree). Modeled a realistic length-6 bucket (10 cmds), mix of hits +
+misses, isolated A/B.
+
+MEASURED uppercase-match **+19.7% SLOWER** (3.538 → 4.236 ns/classify). The
+`eq_ignore_ascii_case` chain wins: LLVM already lowers each compare to word-wise
+case-folded ops, and the uppercase pre-pass (loop + stack write) costs more than it
+saves. Byte-identical (parity incl. mixed-case + misses). Reverted, test-only.
+
+TWO findings: (1) the cheap dispatch rewrite is a LOSS — the real name-hash lever needs
+a genuinely different design (compile-time perfect hash / PHF), which is the
+multi-day core-owned item, NOT salvageable by uppercase-match. (2) per-command
+classify is only ~3.5 ns — the "per-command-overhead dominates the long tail" gap is
+NOT in the name match; it's the framing/dispatch bookkeeping around it
+([[project_generic_dispatch_clock_chaining]]). Dispatch-name-match question CLOSED by
+measurement. No source change.
+
 ## 2026-06-28 CrimsonHawk: HLL primitive fully harvested — dense 6-bit codec already 4-at-a-time; 2 wins + 3 verified-optimal ops
 
 Closing the HLL sweep. The dense register codec (`hll_encode/decode_dense_registers`,
