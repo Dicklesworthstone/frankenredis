@@ -2728,6 +2728,26 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: keyspace RAM gap is VALUE-SIZE-DEPENDENT — 2.687x@tiny → 1.673x@100B; realistic workloads ~1.5-1.7x, further lowering KeyDict ROI
+
+Measured the same 1M-key keyspace at a realistic value size (DEBUG POPULATE 1000000 key:
+100 = 100-byte values) vs the tiny-value case:
+- tiny values: fr 236MB / redis 88MB = **2.687x**
+- 100-byte values: fr 307MB / redis 179MB = **1.673x** (+121MB). Both RSS deltas (+71/+91MB)
+  confirm ~100MB of value data stored on each — fair comparison (a redis-cli GET-sample
+  display quirk showed len=1, but redis's +91MB RSS proves it stored the 100B values).
+
+CONCLUSION: the keyspace RAM gap is PER-KEY-OVERHEAD-DOMINATED, so it SHRINKS as value
+data grows (overhead becomes a smaller fraction): 2.687x (tiny) → 1.673x (100B) → trending
+toward ~1.x for larger values. The alarming 2.687x is a WORST-CASE tiny-value artifact;
+REAL workloads (values typically ≥100B) see ~1.5-1.7x or less. Combined with the prior
+finding that the KeyDict only reaches ~2x even at tiny values (and cuts fixed overhead
+that matters LESS at larger values), the multi-day KeyDict session's REAL-WORLD ROI is
+modest — it would move ~1.67x→~1.3-1.4x on realistic 100B-value workloads, not a
+headline win. This is the decisive prioritization input: the keyspace-RAM "4.49x/2.687x"
+headline overstates the real-world gap; for typical data fr is ~1.5-1.7x, and closing it
+is a multi-day structural effort with a bounded, value-size-diluted payoff. No source.
+
 ## 2026-06-28 CrimsonHawk: keyspace 236MB RAM breakdown — hashbrown 2x-table dominates (~136MB); KeyDict structural ceiling is only ~2x, NOT parity
 
 Decomposed the 236MB fr RSS @1M small keys (from known struct sizes) to scope the
