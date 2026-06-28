@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-28 BlackThrush: REJECTED PFMERGE missing-source no-reencode path — 1.007x vs ORIG / no stable Redis-ratio win
+
+Land-or-dig scan: no unlanded measured source win was found in
+`.scratch/.worktrees`. The relevant fresh worktree evidence was already on
+`main` or was docs/bench-row-only negative evidence; the current largest
+measured Redis-relative gap remained `keyed_write_vs_redis/PFMERGE_1v`, which
+issues repeated `PFMERGE k a` packets against a missing source key.
+
+Lever tested: a narrow `Store::pfmerge` fast path for exactly one missing source.
+It directly created an empty raw sparse HLL when the destination was missing and,
+for an existing destination, tried to validate/touch/dirty the HLL in place
+without allocating the 16,384-register merge buffer. A follow-up correctness fix
+also invalidated the Redis HLL cardinality cache on the no-reencode path.
+
+Correctness while applied: focused PFMERGE tests passed via
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- bash -lc 'cargo test -p fr-store pfmerge -- --nocapture'`.
+The literal requested bench spelling
+`cargo bench --release -p fr-bench --bench keyed_write_vs_redis -- PFMERGE_1v --noplot`
+was attempted through `rch exec` and failed because this Cargo rejects
+`--release` for `cargo bench` (`unexpected argument '--release'`). Direct remote
+`rch exec -- cargo bench --profile release ...` also failed because workers do
+not have the `.rchignore`-excluded Redis oracle path, so the decisive rows used
+the release-profile equivalent through local shell pass-through under
+`rch exec`, with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`
+and `REDIS_SERVER_BIN=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+Current-main control and fixed candidate, same target dir and same local host:
+
+| row | Redis 7.2.4 median | FrankenRedis median | FR/Redis | candidate/ORIG |
+|---|---:|---:|---:|---:|
+| ORIG/current main `dbfaf7fce` | `157.79 Kelem/s` | `34.364 Kelem/s` | `0.218x` | baseline |
+| fixed missing-source fast path | `166.67 Kelem/s` | `34.616 Kelem/s` | `0.208x` | `1.007x` |
+
+Decision: **REJECT / REVERTED**. The fixed candidate was a ~0-gain direct
+throughput move (`34.616` vs `34.364 Kelem/s`) and Criterion reported no
+FrankenRedis change (`p = 0.12`). An additional forced-fingerprint rebuild was
+too noisy to accept as proof: ORIG measured Redis/FR `101.21/17.016 Kelem/s`
+while the candidate measured `139.43/28.369 Kelem/s`, so system load moved both
+sides and conflicted with the normal current-main comparison. Source and tests
+were reverted before commit; this entry is negative evidence only. Do not retry
+the missing-source no-reencode PFMERGE path without a lower-noise profile proving
+the store merge/re-encode dominates end-to-end command cost after cache
+invalidation is preserved.
+
 ## 2026-06-28 AmberRiver: LANDED intset SINTERCARD direct-i64 path — 3.46x vs main / 1.23x faster than Redis
 
 Broad sweep found SINTERCARD a gap **only on integer (intset) sets**: parity on
