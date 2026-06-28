@@ -2092,3 +2092,28 @@ closes BOTH the 4.4x per-EVAL overhead AND the 14x compute loop is structural:
 replace the custom tree-walker with a bytecode VM or an mlua/LuaJIT dependency
 (major, owned, multi-day). Clone-elimination is no longer recommended as a
 standalone lever. No source change.
+
+## 2026-06-28 AmberRiver: Lua-map foldhash swap MEASURED ~0-gain (1.00-1.02x), REVERTED — hashing isn't the EVAL bottleneck
+
+Tried the last concrete SAFE EVAL lever: swap the Lua interpreter's tables/globals
+(`LuaTableInner.string_hash: HashMap<Vec<u8>,LuaValue>` + `LuaState.globals:
+HashMap<String,LuaValue>`) from default SipHash to foldhash (≈3-5x faster per hash,
+already used elsewhere in fr-command). Byte-safe: iteration order is already
+non-deterministic RandomState, so order-dependent tests can't regress —
+**1157 fr-command tests passed, 0 failed**.
+
+A/B (cand=foldhash vs ctrl=SipHash vs redis, best-of-12×2, load ~12):
+
+| script | win vs ctrl |
+|---|---:|
+| EVAL trivial `redis.call('get',k)` | `1.009x` |
+| EVAL globals (tonumber/tostring/type) | `0.996x` |
+| EVAL table-fields (t.aaa/t.bbb/t.ccc) | `1.021x` |
+| EVAL loop+call (20× incr) | `1.004x` |
+
+All within noise → **REVERTED** (labeled stash). The profile's
+`RandomState::hash_one` 1.33% was the STORE keyspace lookup, not the Lua maps —
+those are small/cold enough that the hasher is sub-noise. This rules out the LAST
+contained safe lever for EVAL: the clone is ~14% but risky (_G/fenv), hashing is
+~0-gain, and everything else is diffuse tree-walker. EVAL is conclusively a
+STRUCTURAL-only gap (bytecode VM / mlua-LuaJIT). No source change retained.
