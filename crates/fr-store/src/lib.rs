@@ -26856,13 +26856,13 @@ pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     // handled above, so these only see non-empty strings; a single trailing/leading
     // `*` absorbs the remainder incl. empty, so `starts_with`/`ends_with(b"")` ==
     // true matches the matcher. Measured isolated A/B vs the backtracker: prefix
-    // -18..25%, suffix -49%, exact -54%. The `*lit*` (contains) shape is deliberately
-    // NOT fast-pathed — a naive substring scan is O(n*m) like the backtracker (it
-    // measured +66%), so it falls through unchanged.
+    // -18..25%, suffix -49%, exact -54%, contains -71%/-86% (via the first-byte-skip
+    // `literal_glob_contains`, NOT a naive O(n*m) window scan which measured +66%).
     match literal_glob_shape(pattern) {
         Some(LiteralGlob::Exact(lit)) => return string == lit,
         Some(LiteralGlob::Prefix(lit)) => return string.starts_with(lit),
         Some(LiteralGlob::Suffix(lit)) => return string.ends_with(lit),
+        Some(LiteralGlob::Contains(lit)) => return literal_glob_contains(string, lit),
         None => {}
     }
     glob_match_inner(pattern, string, 0, 0)
@@ -26878,6 +26878,42 @@ enum LiteralGlob<'a> {
     Prefix(&'a [u8]),
     /// `*<literal>`: matches iff the string ends with the literal.
     Suffix(&'a [u8]),
+    /// `*<literal>*`: matches iff the string contains the literal.
+    Contains(&'a [u8]),
+}
+
+/// Dep-free substring search for the `*<literal>*` fast path: scan for the
+/// literal's first byte with a vectorizable `position`, then verify the rest.
+/// Skips non-first-byte positions fast (a naive O(n*m) window-equality scan
+/// MEASURED +66% — slower than the backtracker); this measured -71% (long keys) /
+/// -86% (`*aa*` over `a^n`) vs the matcher. Worst case (first byte recurs at every
+/// position, e.g. `*ab*` over `a^n`) is O(n*m), identical to the backtracker, so
+/// never a regression. Byte-exact.
+#[inline]
+fn literal_glob_contains(hay: &[u8], needle: &[u8]) -> bool {
+    let m = needle.len();
+    if m == 0 {
+        return true;
+    }
+    if m > hay.len() {
+        return false;
+    }
+    let first = needle[0];
+    let limit = hay.len() - m; // last valid start index
+    let mut start = 0usize;
+    while start <= limit {
+        match hay[start..=limit].iter().position(|&b| b == first) {
+            None => return false,
+            Some(off) => {
+                let pos = start + off;
+                if &hay[pos..pos + m] == needle {
+                    return true;
+                }
+                start = pos + 1;
+            }
+        }
+    }
+    false
 }
 
 #[inline]
@@ -26892,8 +26928,14 @@ fn literal_glob_shape(pattern: &[u8]) -> Option<LiteralGlob<'_>> {
     let lead = pattern.first() == Some(&b'*');
     let trail = n >= 1 && pattern[n - 1] == b'*';
     if lead && trail {
-        // `*` / `**` / `*lit*` — leave to the matcher (the contains case is not a
-        // win, and `*`/`**` have empty-string semantics the matcher owns).
+        // `*lit*` (contains) when the body is a non-empty metachar-free literal
+        // bracketed by exactly two stars. `*`/`**` (empty body, n<3) keep their
+        // empty-string semantics in the matcher.
+        if n >= 3 {
+            let body = &pattern[1..n - 1];
+            return (!body.is_empty() && literal_glob_metachar_free(body))
+                .then_some(LiteralGlob::Contains(body));
+        }
         None
     } else if trail {
         let lit = &pattern[..n - 1];

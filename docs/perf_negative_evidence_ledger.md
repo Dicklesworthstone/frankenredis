@@ -2589,3 +2589,26 @@ LESSON: when a real, causally-sound micro-lever measures as noise (or impossibly
 negative) on the shared mixed criterion bench, it is the BENCH that failed — re-run it
 as an isolated in-process A/B before recording a REJECT. (Worth revisiting the
 hash-field and set-member decode arms the same way.)
+
+## 2026-06-28 CrimsonHawk: LANDED glob_match contains `*<lit>*` fast path (dep-free first-byte-skip) — -71% / -86%; completes the literal-glob vein
+
+Reversal of the earlier contains REJECT (which used a naive `windows().any(|w| w==needle)`
+scan, O(n·m), +66% vs the backtracker). A dep-free first-byte-skip search wins big:
+scan for the literal's first byte with a vectorizable `position`, then verify the
+rest (`literal_glob_contains`). Skips non-first-byte positions fast; worst case (first
+byte recurs at every position, e.g. `*ab*` over `a^n`) is O(n·m) — identical to the
+backtracker, so never a regression.
+
+Measured isolated in-process A/B vs the backtracking matcher: `*session*` over long
+keys **-70.7%** (86.8→25.4 ns), adversarial `*aa*` over `a^64` **-86.1%** (37.0→5.1 ns,
+it matches immediately). No new dependency (no memchr). Byte-exact: parity proven
+across `*ab*`/`*aa*`/overlap/partial/`**`/`*`/empty cases; full fr-store suite 658
+passed (the lone failure was the unrelated `zset_index_slice_treap_..._ab_ratio`
+perf-ratio test, which flakes under rch-worker load and passes isolated — same class
+as foldhash/scan/galp1), and all 6 `golden_glob_match_*` + 7 `metamorphic::mr_glob_*`
+gates pass.
+
+The literal-glob vein is now COMPLETE: exact -54%, prefix -18..25%, suffix -49%,
+contains -71..86% — every metachar-free shape framed by ≤2 end-stars now serves from
+a memcmp/skip-search instead of backtracking, beating Redis `stringmatchlen` on the
+KEYS / SCAN-MATCH / PSUBSCRIBE / keyspace-notify pattern surface. Landed in `glob_match`.
