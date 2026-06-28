@@ -2690,6 +2690,31 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: LANDED HLL histogram 4-bank accumulator — -53.5% on the PFCOUNT estimate loop (an inspection-only "ceiling" that was actually dependency-bound)
+
+**The convergence summary below UNDERCOUNTS by one: a 7th win, found by re-measuring an
+"already optimal" inspection call.** I had recorded `hll_estimate`'s register histogram
+as a "memory-bound ceiling". WRONG — it is read-after-write DEPENDENCY-bound: HLL
+registers cluster hard around log2(n/m), so consecutive registers repeatedly hit the
+SAME `reghisto[idx]`, and `reghisto[idx] += 1` serializes on that cell's ~5-cycle
+RAW latency. Fix: tally into 4 independent accumulator banks interleaved
+(`banks[0..4][reg&63] += 1` over `chunks_exact(4)`), then sum — the 4 increments are
+dependency-free even when all four indices collide, so the OOO core runs them in
+parallel. Byte-identical histogram (parity proven, incl. non-mult-of-4 tails).
+
+Measured isolated in-process A/B (best-of-9 × 300k histograms over 16384 clustered
+registers): single **10834 ns** → quad **5036 ns** = **-53.5%** (2.15×). This is the
+PFCOUNT cardinality-estimate hot loop. Conformance GREEN: 25 HLL tests pass incl.
+`hll_estimate_matches_redis_ertl_count_exactly` + the HLL core/range differential
+gates. Landed in `hll_estimate`.
+
+LESSON (third time this session, now decisive): an inspection-only "optimal/ceiling"
+verdict is NOT evidence — the zset int-score (-24.7%) and now this HLL histogram
+(-53.5%) were both wrongly shelved by inspection and recovered ONLY by an isolated
+in-process A/B. **Measure every plausible lever; don't trust "it looks memory-bound".**
+The primitive survey rows marked "optimal" by inspection (BITOP/BITPOS/intset/geohash/
+murmur) deserve the same A/B treatment before being trusted as closed.
+
 ## ============================================================================
 ## 2026-06-28 CrimsonHawk: SESSION CONVERGENCE SUMMARY (decision-ready snapshot)
 ## ============================================================================
