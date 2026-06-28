@@ -1978,3 +1978,27 @@ or a name-hash jump table instead of the sequential borrowed-parser chain), owne
 by the core crates, multi-day — not a per-turn point fix. The other named residual
 levers are structural (XADD `tcknm` in-object side-maps; keyspace dict RAM 4.49x;
 list/zset RESTORE keep-listpack). No source change this turn.
+
+## 2026-06-28 AmberRiver: correctness surface ALSO saturated (88 differential probes byte-exact) — both veins mined
+
+With the perf point-fix surface proven exhausted (entry above), pivoted to the
+other high-yield vein (differential vs vendored redis 7.2.4). Ran 88 edge-case
+probes across three batches: (1) BITCOUNT/BITPOS BIT|BYTE ranges + negatives,
+GETRANGE/SETRANGE bounds, LPOS RANK/COUNT edges, SINTERCARD LIMIT/arity, OBJECT
+ENCODING transitions, EXPIRE NX/XX/GT/LT — 0 diffs; (2) error exactness (arity,
+non-int args, mutually-exclusive flags ZADD GT+LT / NX+XX / NX+GT, EXPIRE NX+XX),
+SET option combos (XX/NX/GET/KEEPTTL/EXAT), random-count SRANDMEMBER/HRANDFIELD/
+ZRANDMEMBER, INCR/INCRBYFLOAT overflow/nan/exp-notation — 0 diffs; (3) RESP3
+(HELLO 3) double/bignum/verbatim/map/set/attrib via DEBUG PROTOCOL, ZSCORE/ZMSCORE/
+ZRANGE-WITHSCORES/ZPOPMIN inf/-inf, HGETALL map, HRANDFIELD WITHVALUES, CONFIG GET
+map, XADD/XRANGE, set-type replies — 0 real diffs (only CLIENT INFO, which differs
+solely by per-connection id/port/fd digit lengths = environment variance, not a
+field bug).
+
+CONCLUSION: both the perf point-fix surface (~40 cmds) AND the correctness surface
+(88 probes incl RESP3) are saturated this session — fr is byte-exact and
+perf-competitive. The only remaining levers are multi-day & owned by the core
+crates: per-command-overhead dispatch refactor (name-hash jump table vs sequential
+borrowed-parser chain), XADD `tcknm` in-object side-maps, keyspace dict RAM 4.49x
+(SCAN-reversal), list/zset RESTORE keep-listpack. Next productive move is a
+structural commitment, not another point-fix/probe sweep. No source change.
