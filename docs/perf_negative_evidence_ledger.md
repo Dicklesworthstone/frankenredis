@@ -2728,6 +2728,25 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: fresh differential edge sweeps byte-exact on live binary — DUAL closure (perf + correctness) confirmed
+
+Pivoted to the build-unblock's other high-value use (differential correctness). Ran both
+deterministic edge sweeps fr (gate binary, valid for non-ACL cmds) vs vendored redis
+7.2.4 on the live binary: `edge_sweep_differ.py` → "OK: 100 edge scenarios byte-exact"
+(exit 0); `edge_sweep2_differ.py` → "OK: edge sweep 2 byte-exact (HELLO maps skipped)"
+(exit 0). Covers LMPOP/ZMPOP/SMISMEMBER, LPOS RANK/COUNT, OBJECT ENCODING transitions,
+GETDEL/GETEX, SETRANGE/GETRANGE padding, COPY, SINTERCARD, BITCOUNT/BITPOS BYTE|BIT,
+EXPIRE flags, ZADD GT/LT. No divergence — consistent with the documented differential
+saturation (150k fuzz + ~30 surfaces + ~68 gates already byte-exact).
+
+NET: the session has now confirmed, on the build-unblocked live binary, a DUAL closure —
+(perf) parity-or-faster across every command family (hot path syscall floor, compute-heavy
+1.5-3.8x, HLL parity; only SCAN ~1.33x + treap-constant-factor structural residuals), AND
+(correctness) byte-exact on the edge surfaces. fr is at parity-or-better on both axes
+except the documented multi-day structural items (keyspace RAM ~1.5-1.7x realistic, KeyDict
+modest ROI; treap rank; RESTORE-decode). No per-turn lever — perf OR correctness —
+remains; both veins are empirically saturated. No source change.
+
 ## 2026-06-28 CrimsonHawk: uncovered families measured — PFADD now PARITY (stale 2.75x corrected), SCAN ~1.33x structural; throughput surface closed across ALL families
 
 Swept the families the broad head-to-head misses (HLL/scan) on the live binary:
