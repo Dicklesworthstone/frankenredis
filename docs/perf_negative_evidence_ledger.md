@@ -2117,3 +2117,28 @@ those are small/cold enough that the hasher is sub-noise. This rules out the LAS
 contained safe lever for EVAL: the clone is ~14% but risky (_G/fenv), hashing is
 ~0-gain, and everything else is diffuse tree-walker. EVAL is conclusively a
 STRUCTURAL-only gap (bytecode VM / mlua-LuaJIT). No source change retained.
+
+## 2026-06-28 AmberRiver: EVAL 14x compute-loop PROFILED — tree-walk + per-iteration value/scope churn, structural (no safe point-fix)
+
+Profiled the 14x case directly (`local x=0 for i=1,5000 do x=x+i*2-1 end return x`,
+long loop to amortize setup). Self-time:
+  eval_expr 23.2% (recursive AST walk — the tree-walker core) + exec_stmt 6.5% +
+  eval_binop 5.2%; VALUE LIFECYCLE ~15%: drop_glue<LuaValue> 5.2% + LuaValue::clone
+  3.5% + mi_malloc 4.2% + RawVec::finish_grow 2.4%; Env::set_local 3.6% +
+  set_existing_local_slot 2.5% + to_number 3.8%.
+
+Checked the obvious lever: eval_expr ALREADY returns a single `LuaValue` (not
+`Vec<LuaValue>`) and eval_binop takes `&LuaValue` (no operand clone) — so there is
+NO per-expression Vec alloc to remove. The ~15% alloc/clone/drop is (a) local
+reads/writes cloning LuaValue per access and (b) a per-iteration loop-scope
+allocation. Reusing the loop scope is UNSAFE without compile-time closure-capture
+analysis (Lua 5.1 gives each iteration a fresh binding observable by closures) —
+too delicate/risky for the win on a non-hottest command.
+
+CONCLUSION: the 14x is the tree-walking architecture itself (re-dispatching
+eval_expr per AST node per iteration) + the Env's per-access value churn — exactly
+what a bytecode VM eliminates. Combined with the prior findings (setup clone ~14%
+but _G/fenv-risky; hashing ~0-gain measured), EVAL has NO safe per-turn point-fix
+on any path. The whole scripting gap (4.4x setup + 14x compute) is a single
+structural lever: replace the custom tree-walker with a bytecode VM or mlua/LuaJIT
+(major, owned, multi-day). EVAL investigation CLOSED. No source change.
