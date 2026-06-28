@@ -4,6 +4,53 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-28 BlackThrush: REJECTED PFADD short-element Murmur64 path — 0.790x vs ORIG
+
+Land-or-dig scan: local `main` first fast-forwarded to `origin/main`
+(`c7783686c`). The only dirty bench worktrees were controls or already-ledgered
+rejects: fresh-SADD direct de-dup, BITFIELD aligned-u8, PFADD/HLL cache variants,
+packed-zset varint score storage, and stream consumer-state WIP with no unlanded
+measured source win. No measured worktree win was landed.
+
+Dig target: the largest current per-crate short-ledger gap remained
+`keyed_write_vs_redis/PFADD_16v` against Redis 7.2.4 after the prior rejected
+parser-admission, no-op-batch-cache, HLL hash-tail, cache-encoding, and
+one-byte-table attempts. A quick same-run sanity check showed the older
+`SMISMEMBER_2v/3v` gap is no longer the 0.39x class on current main
+(`0.856x` and `0.918x` FR/Redis respectively), so this pass pivoted back to
+PFADD.
+
+Lever attempted: a narrow short-element path inside `hll_hash` for inputs under
+8 bytes, intended to cut the iterator/chunk setup on the benchmark's one-byte
+PFADD elements without retrying the rejected HLL cache/table or parser-admission
+ideas. Correctness while applied: focused equivalence test
+`hll_hash_short_path_matches_generic_tail_flow` passed via
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a
+rch exec -- cargo test -p fr-store hll_hash_short_path_matches_generic_tail_flow -- --nocapture`.
+
+The literal requested bench spelling
+`cargo bench --release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot`
+was attempted through `rch` and failed again because this Cargo rejects
+`--release` for `cargo bench` (`unexpected argument '--release'`). Measurements
+used the accepted release-profile equivalent:
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot`,
+with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`. A remote
+candidate bench attempt on `hz2` failed before measurement because that worker
+lacked the `.rchignore`-excluded vendored Redis binary; the decisive rows below
+are both local RCH fallback against `/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server`.
+
+| row | Redis 7.2.4 median | FrankenRedis median | FR/Redis | candidate/ORIG |
+|---|---:|---:|---:|---:|
+| ORIG/current main `c7783686c` | `376.32 Kelem/s` | `143.12 Kelem/s` | `0.380x` | baseline |
+| short-element `hll_hash` candidate | `310.03 Kelem/s` | `113.15 Kelem/s` | `0.365x` | **`0.790x`** |
+
+Decision: **REJECT / REVERTED**. Criterion reported no significant improvement
+for the candidate (`p = 0.41`), and the median target throughput regressed
+against ORIG. Source and the focused test were reverted before commit; this is
+ledger-only negative evidence. Do not retry short-HLL-hash micro-specialization
+for `PFADD_16v` without a profile naming `hll_hash` setup overhead as the
+dominant cost.
+
 ## 2026-06-27 BlueFalcon: REJECTED fresh SADD direct CompactStrSet de-dup — 1.032x vs ORIG, ~0 Redis-ratio movement
 
 Dig target: the fresh-key large `SADD` follow-up named by the HSET bulk-path
