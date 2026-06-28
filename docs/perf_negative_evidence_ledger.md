@@ -2002,3 +2002,27 @@ crates: per-command-overhead dispatch refactor (name-hash jump table vs sequenti
 borrowed-parser chain), XADD `tcknm` in-object side-maps, keyspace dict RAM 4.49x
 (SCAN-reversal), list/zset RESTORE keep-listpack. Next productive move is a
 structural commitment, not another point-fix/probe sweep. No source change.
+
+## 2026-06-28 AmberRiver: large-value SET/GET re-measured = parity-or-faster (qesp3 framing gap CONFIRMED closed)
+
+Checked the last untested dimension this session — large-value throughput (the
+old qesp3 "2-copy framing plateau, large SET 0.4x / GET 0.6x"). Re-measured
+SET/GET across 4 KB → 1 MB values (best-of-2×6, PING-sentinel pipelines, load ~9):
+
+| value size | SET fr/Redis | GET fr/Redis |
+|---|---:|---:|
+| 4 KB    | `0.254x` (fr 4x faster) | `0.869x` |
+| 64 KB   | `0.552x` | `0.818x` |
+| 256 KB  | `1.131x` | `0.578x` (fr faster) |
+| 1 MB    | `1.089x` | `0.649x` (fr faster) |
+
+All parity-or-fr-faster — large SET tops out at `1.13x` (within noise, not the old
+0.4x), large GET is solidly fr-faster at scale. The qesp3 gap is CLOSED (CoralOx's
+large-SET work b6215ebf7 + framing). No remaining large-value lever.
+
+This was the final unmeasured dimension. Net session state: every throughput
+dimension (command point-fixes, set-algebra, RDB load, large values) is
+parity-or-faster, and 88 differential correctness probes (incl RESP3) are
+byte-exact. The only open levers are multi-day/core-owned structural ones
+(per-command dispatch name-hash, XADD tcknm, keyspace dict RAM SCAN-reversal,
+RESTORE keep-listpack). No source change.
