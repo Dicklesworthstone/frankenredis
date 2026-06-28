@@ -2728,6 +2728,35 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: keyspace RAM gap MEASURED 2.687x RSS (1M small keys) on the live binary — the real #1 gap, bigger than the modeled used_memory shows; STRUCTURAL
+
+Used the now-benchable binary to measure the #1 structural gap precisely: fr vs vendored
+redis 7.2.4, DEBUG POPULATE 1,000,000 identical small string keys (`key:N`→`value:N`),
+fresh-process VmRSS:
+- fr   : VmRSS **236 MB** (241740 KB), used_memory 72 MB (modeled)
+- redis: VmRSS **88 MB** (89960 KB),  used_memory 82 MB
+- **RSS ratio fr/redis = 2.687x (+148 MB for 1M keys, ~236 vs ~88 bytes/key)**
+
+KEY INSIGHTS:
+1. fr's `used_memory` (72MB) ≈ redis's (82MB) — that parity is INTENTIONAL (fr models
+   redis's accounting so maxmemory/eviction behaves like redis, [[project_used_memory_estimate_models_redis]]).
+   But it MASKS the real footprint: fr's ACTUAL RSS is 2.687x redis's. INFO memory does
+   NOT reveal fr's true RAM — only fresh-process RSS does (as the memory notes warn).
+2. 2.687x is the WORST-CASE shape: small keys → per-key OVERHEAD dominates (the structural
+   weakness). The overhead = each key stored TWICE (hashbrown `entries` map + the
+   `ordered_keys` sorted Vec for deterministic SCAN) + per-Entry metadata + mimalloc
+   segment/alignment RSS. Larger values would dilute the ratio (data dominates).
+3. This is BIGGER than the 1.74-1.79x in older notes (those were different workloads/value
+   sizes); the small-key overhead case is the true headline gap.
+
+STILL STRUCTURAL (per prior analysis): killing the `ordered_keys` duplicate needs either
+(a) arena+offset KeyDict (CompactFieldMap-style — risks regressing the HOTTEST map's O(1)
+lookup; a prior KeyDict-Arc attempt regressed vs hashbrown), or (b) dropping sorted-SCAN
+for hash-order (breaks core_scan.json + test 32939 — a SCAN-semantics human decision).
+Multi-day, fr-store core, all-or-nothing. The measurement RE-CONFIRMS this as the single
+largest gap vs redis and quantifies the prize (~2.7x → ~1x on small-key RAM) for whoever
+takes the structural session. Per-turn-unshippable; not a fabricable lever. No source.
+
 ## 2026-06-28 CrimsonHawk: SET (write) hot-path profile ALSO at the syscall floor — fr CPU ~7%, spread across already-optimized inherent ops; no lever
 
 Complemented the GET profile with SET (the write path does more fr work — keyspace
