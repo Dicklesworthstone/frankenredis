@@ -2728,6 +2728,30 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: build-unblock COMPLETE end-to-end + fresh full-binary GET profile/strace proves the hot path is AT THE SYSCALL FLOOR (no CPU or batching lever)
+
+Completed the build-unblock and used it for the first full-binary hot-path profile this
+session (the method that historically found the clock-chaining/pubsub wins):
+- `env FR_ALLOW_STUB_COMMANDS=1 cargo build --bin frankenredis --release` → BUILDS
+  (exit=0, 33s), binary present locally (rch synced it to the target dir), RUNS, and
+  serves all core commands correctly (PING/SET/GET/RPUSH/LRANGE/HSET/HGETALL/DBSIZE via
+  vendored redis-cli; ACL CAT even returns "keyspace"). Build-unblock is now complete for
+  fr-command + fr-runtime + the full binary.
+- perf record, GET -c50 -P16: ALL fr functions <0.3% SELF time; cumulative is 66%
+  `__syscall_cancel`, 54% `__send`/socket-write, rest kernel network stack ([unknown]
+  kernel addrs). No fr CPU function carries meaningful self-time.
+- strace -c, 100k pipelined(-P16) GET: **6251 sendto + 6302 recvfrom = EXACTLY 16
+  commands/syscall** → fr batches pipelined replies PERFECTLY (one send per -P16 batch),
+  reads batched too; 5 writes, 75 reads total otherwise. Minimal syscalls.
+
+CONCLUSION (direct dual evidence, not memory): the GET hot path is at the NETWORK/SYSCALL
+FLOOR. No CPU lever (no hot fr function), no reply-batching lever (batching is already
+optimal at 16/send). The 54%-in-send is the inherent kernel cost of shipping reply bytes.
+This DEFINITIVELY validates the long-standing "epoll/syscall-bound" claim with fresh perf
++ strace on the now-benchable binary, and positively confirms fr's write-batching is
+correct. The build-unblock's last residual perf value (full-binary hot-path profiling) is
+now spent → hot path empirically closed. Remaining: differential correctness probing only.
+
 ## 2026-06-28 CrimsonHawk: cold-dispatch 6s9dx cluster verified COMPLETE — GETEX/HINCRBY/INCRBYFLOAT/COPY all already have borrowed fast paths
 
 Resolved the last conflicting memory (project_6s9dx "remaining GETEX/HINCRBY/INCRBYFLOAT/
