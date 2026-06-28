@@ -2142,3 +2142,32 @@ but _G/fenv-risky; hashing ~0-gain measured), EVAL has NO safe per-turn point-fi
 on any path. The whole scripting gap (4.4x setup + 14x compute) is a single
 structural lever: replace the custom tree-walker with a bytecode VM or mlua/LuaJIT
 (major, owned, multi-day). EVAL investigation CLOSED. No source change.
+
+## 2026-06-28 AmberRiver: EVAL 14x loop — exact ~15% mechanism pinpointed (per-iter loop-var Rc-cell alloc); safe lever spec'd for a dedicated effort
+
+Drilled the ~15% value-lifecycle from the loop profile to its exact source.
+`exec_stmt` Stmt::NumericFor does, PER ITERATION: `env.push_scope()` →
+`env.set_local(name, Number(i))` → exec body → `env.pop_scope()`. And `set_local`
+does `Rc::new(RefCell::new(value))` + `lua_gc_register_cell(&cell)` (thread-local
+GC-registry insert) + push. So every loop iteration HEAP-ALLOCATES a fresh LuaCell
+for the loop variable (+ GC-registers it + drops it on pop) — that IS the
+malloc 4.2% / finish_grow 2.4% / drop_glue 5.2% in the profile. The arithmetic
+itself (`x+i*2-1`) is alloc-free (LuaValue::Number is an f64; eval_expr returns a
+single value; eval_binop takes &LuaValue).
+
+WHY the fresh cell exists: Lua 5.1 gives each iteration a DISTINCT binding so a
+closure created in iteration k captures a cell separate from iteration k+1. It is
+pure waste only when the loop body creates NO closures.
+
+SAFE LEVER (for a dedicated effort, NOT a per-turn ALL-SAFE edit): add a
+conservative `block_defines_any_function_literal(body)` scan; when false, run a
+NumericFor/GenericFor fast path that allocates the loop-var cell ONCE and reuses it
+(overwrite value in place), keeping the existing slow path UNTOUCHED for the
+closure case. Est. ~10% on compute-heavy EVAL (the tree-walk eval_expr 23% remains
+→ does NOT close the 14x; only a bytecode VM does). NOT attempted because: the scan
+must be EXHAUSTIVE over the full Expr/Stmt AST (a missed function-literal form —
+e.g. inside a table ctor, method call, or nested loop — would SILENTLY break
+closure capture, and passing the 1157 tests would not prove the scan complete), on
+a correctness-delicate file with recent closure/coroutine/upvalue semantic work
+(last touched 2026-06-25). Warrants the full Lua conformance suite + closure/
+coroutine fuzzing, not a rushed turn. No source change.
