@@ -2663,6 +2663,25 @@ the ONLY way to avoid them is to not element-decode at all = the full keep-listp
 multi-day. Confirms the #1 lever cannot be salami-sliced into a per-turn win. No
 source change.
 
+## 2026-06-28 CrimsonHawk: XADD sidemap `to_vec` lever is ALREADY LANDED (get_mut) — tcknm note stale; residual is the in-object-metadata structural lever
+
+Chased the memory-flagged "XADD ~1.5x: 2× key.to_vec() per call for stream_last_ids /
+stream_entries_added (tcknm, found+compiled+reverted-unbenched)". It is ALREADY FIXED
+in `Store::xadd` (lib.rs ~15968): the per-XADD side-map updates use
+`stream_last_ids.get_mut(key)` / `stream_entries_added.get_mut(key)` (borrowed, zero
+alloc), with the comment "use get_mut — no wasted key.to_vec() per XADD — falling back
+to entry only defensively". The `key.to_vec()` inserts that remain are stream
+CREATE / RESTORE / RENAME (once per stream), not the hot per-XADD path. So the tcknm
+to_vec lever is closed.
+
+The residual XADD gap is STRUCTURAL: per XADD fr still does THREE hash lookups —
+`entries.get_mut(key)` + `stream_last_ids.get_mut(key)` + `stream_entries_added
+.get_mut(key)` — where redis keeps `last_id` + `entries_added` IN the stream object (1
+lookup). Folding both side-maps into `Value::Stream` would cut to 1 lookup, but that
+re-homes metadata across ~15 access sites in contended fr-store core (multi-hour,
+not a clean per-turn win, and the 2 extra foldhash probes are ~30 ns of a >1× gap, so
+dominance is uncertain). Filed as the real XADD lever. No source change.
+
 The repeatable win pattern this session — *pure parity-with-Redis function + a
 common-case fast path / better-impl, measured with an isolated in-process A/B that
 beats shared-worker noise* — has now harvested glob (4 shapes), CRC64, and 2 RDB
