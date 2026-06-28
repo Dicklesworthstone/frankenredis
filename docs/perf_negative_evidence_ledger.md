@@ -1947,3 +1947,34 @@ The drop_if_expired guard (which shaved 2 lookups) already measured ~0-gain on X
 leaner per-command processing (or moving these commands earlier in the borrowed
 dispatch chain), not a point fix — surfaced for a focused per-command pass. No
 source change this turn.
+
+## 2026-06-28 AmberRiver: final sweep — small-command gaps are per-command overhead (proven by BITOP large=parity); point-fix surface EXHAUSTED
+
+Swept the last unmeasured families (BITOP/LMPOP/OBJECT/GETEX/GETDEL/HRANDFIELD).
+Every apparent "gap" is a sub-µs command where per-command framing+dispatch
+dominates, NOT an algorithm issue. The clinching evidence is BITOP:
+
+| | fr/Redis |
+|---|---:|
+| BITOP AND/XOR, 5 KB bitmaps | `2.10x` / `2.40x` (GAP) |
+| BITOP AND/XOR, 1 MB bitmaps | **`1.18x` / `1.17x` (parity)** |
+
+fr's BITOP loop is already SWAR (word-at-a-time) and competes at scale — the
+"gap" exists ONLY when the bitmaps are tiny, i.e. when the fixed per-command cost
+(RESP framing, the borrowed-parser chain, dispatch, bookkeeping) outweighs the
+~zero actual work. Same shape: LMPOP `3.96x`, GETEX `2.80x`, OBJECT ENCODING
+`1.68x`, GETDEL `1.61x`, OBJECT REFCOUNT `1.76x` — all sub-µs commands; HRANDFIELD
+(real work) is fr-faster `0.83x`. (Checked the prime suspects: BITOP's
+`values.push(v.into_owned())` source-clone does NOT dominate — large BITOP would
+be far worse than 1.18x if it did; `run_active_expire_cycle`'s per-command
+`ActiveExpireCycleStats` is 3 scalars, no alloc.)
+
+CONCLUSION: across ~40 commands swept this session, every clean point-fix lever is
+shipped (HSET/HMSET/SADD/ZADD-all-flags O(n²), intset SINTERCARD round-trip) and
+the entire residual is ONE root: constant per-command processing overhead for the
+less-optimized commands (GET/SET are parity only because they are the leanest fast
+paths). This is a holistic core-dispatch lever (leaner framing/dispatch/bookkeeping
+or a name-hash jump table instead of the sequential borrowed-parser chain), owned
+by the core crates, multi-day — not a per-turn point fix. The other named residual
+levers are structural (XADD `tcknm` in-object side-maps; keyspace dict RAM 4.49x;
+list/zset RESTORE keep-listpack). No source change this turn.
