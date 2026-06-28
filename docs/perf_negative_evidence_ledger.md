@@ -2712,6 +2712,29 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: LANDED encode_aof_stream direct multibulk encode — -67.6% (3.1x); 9th win, OVERTURNS the "practical optimum" claim
+
+`encode_aof_stream` (AOF rewrite serialization) did
+`out.extend_from_slice(&record.to_resp_frame().to_bytes())` PER record — which (a)
+clones every arg into a `RespFrame::BulkString(Some(arg.clone()))`, (b) allocs a `Vec`
+in `to_bytes`, (c) copies it into `out`: 3 allocs/copies per record. Replaced with a
+direct multibulk encode into `out` via the borrow-encode helpers
+(`encode_aggregate_header` + `encode_bulk_string_slice(Some(arg), …)` per arg) — no
+RespFrame, no arg clones, no intermediate Vec. Byte-identical (same `*N\r\n$len\r\narg\r\n…`).
+
+Measured isolated A/B (10k-record AOF rewrite chunk, best-of-9): **124.2 → 40.3
+ns/record = -67.6% (3.1x)**. Conformance GREEN: 223 fr-persist tests incl. the
+`encode_decode_aof_stream_round_trips` proptest. Landed in `encode_aof_stream` (runs on
+AOF rewrite — appendonly=yes).
+
+LESSON (again): I had just declared fr "at practical optimum" and labeled AOF
+"argv-clone inherent, parity" BY INSPECTION — wrong, the ENCODE side had a 3x
+RespFrame-materialization waste. Measuring the newly-examined path caught it, exactly
+like the 2 HLL wins. The "exhausted/optimum" claim is only ever valid for paths actually
+MEASURED — and AOF was the first I'd looked at in several turns. The borrow-encode
+direct-multibulk pattern should be audited at EVERY `to_resp_frame().to_bytes()` /
+`.to_bytes()`-then-extend site (replication feed, MONITOR feed, etc.) — see next.
+
 ## 2026-06-28 CrimsonHawk: stream consumer-group PEL verified parity (BTreeMap, O(log n)) — last unexamined data structure
 
 Checked the stream PEL (pending entries list) — a plausible linear-scan gap if fr used
