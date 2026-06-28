@@ -2690,6 +2690,25 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: per-command-overhead FULLY CHARACTERIZED as irreducible — the ledger's "biggest-reach lever" closed by verification
+
+The recurring "per-command-overhead dominates the long tail / name-hash jump table is
+the biggest reach" theme is now fully resolved by measurement+verification:
+- name MATCH (`classify_*` eq_ignore_ascii_case chain) — MEASURED ~3.5 ns, beats
+  uppercase-match (+19.7%); the perfect-hash alternative is multi-day core-owned.
+- per-command HISTOGRAM record — lowercases into a `[u8;40]` STACK buffer (no alloc
+  for ≤40-byte names) then a BORROWED `histograms.get_mut(&str)` foldhash lookup +
+  bucket increment. No per-command heap alloc.
+- per-command active-expire — periodic cycle, not per-command (prev entry).
+- keyspace-notify channel build — already byte-concat (AmberRiver), gated behind a
+  flags==0 early-out.
+- GET/SET — single-probe (frankenredis-get-single-lookup), borrowed args, itoa2 reply.
+So the per-command overhead is the IRREDUCIBLE framing/dispatch/bookkeeping cost
+(~few ns each, all measured/verified optimal) — the only further reduction is the
+multi-day perfect-hash command table (PHF), core-owned. There is NO cheap per-turn
+lever in the per-command path. The ledger's long-standing "biggest reach" item is
+hereby CLOSED as verified-irreducible-per-turn. No source change.
+
 ## 2026-06-28 CrimsonHawk: stale flagged item cleared — "active-expire stats-struct-per-cmd" is a periodic-cycle STACK return, not a per-command heap alloc
 
 Verified the last open flagged perf item ([[project_generic_dispatch_clock_chaining]]
