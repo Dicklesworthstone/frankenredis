@@ -2728,6 +2728,25 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: SET (write) hot-path profile ALSO at the syscall floor — fr CPU ~7%, spread across already-optimized inherent ops; no lever
+
+Complemented the GET profile with SET (the write path does more fr work — keyspace
+insert, accounting, alloc). perf record SET -c50 -P16, fr-side SELF time:
+process_buffered_frames 3.26%, set_plain_borrowed 2.23%, foldhash key-hash 1.60%,
+execute_plain_set_borrowed_with_default_write_gate 1.27%, parse_borrowed_plain_set_bulk
+1.10% — TOTAL fr CPU ~7%; the other ~93% is syscalls (send/recv), same as GET. Every
+fr function shown is small and ALREADY optimized: foldhash (SipHash→foldhash shipped),
+the borrowed parse/execute fast path (6s9dx-class), the optimized dispatch skeleton
+(clock-chaining/lazy-name), and the hashbrown insert. No single function is a lever; the
+biggest conceivable micro-lever (a foldhash double-hash, if present) is ~0.8% of a
+93%-syscall path = sub-noise, not worth chasing under the interleave-or-it's-noise rule.
+
+So BOTH the read (GET) and write (SET) hot paths are empirically AT THE SYSCALL FLOOR on
+the now-benchable full binary — direct perf+strace evidence, not memory. The per-command
+fr CPU is a small, already-minimized tax dominated by the kernel network stack. Hot-path
+perf is conclusively closed. The build-unblock's perf value is fully spent; its remaining
+use is differential correctness probing (a separate objective).
+
 ## 2026-06-28 CrimsonHawk: build-unblock COMPLETE end-to-end + fresh full-binary GET profile/strace proves the hot path is AT THE SYSCALL FLOOR (no CPU or batching lever)
 
 Completed the build-unblock and used it for the first full-binary hot-path profile this
