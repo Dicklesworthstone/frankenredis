@@ -2690,6 +2690,25 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: VERIFY intset binary_search optimal at ALL sizes — linear-SIMD loses 1.26x–80x (inspection call confirmed by measurement)
+
+Per the "measure inspection-optimal calls" discipline (which recovered the two HLL
+wins), tested the intset membership inspection verdict: `v.binary_search(&n).is_ok()`
+(current) vs `v.iter().any(|&x| x==n)` (branchless linear-SIMD), hypothesising the
+mispredict-free scan might beat binary's ~log2(n) branch mispredicts on the small
+L1-resident intsets (default cap 512).
+
+MEASURED — binary wins EVERYWHERE (linear/binary, +% = linear slower):
+n=16 +126% · n=64 +280% · n=256 +874% · n=512 +1490% · n=4096 +7908%.
+Linear loses even at n=16 (binary 3.1 ns vs linear 7.0 ns): i64 compares are 8-byte
+(few lanes/reg), `any`'s early-exit fights full vectorization, and binary at n≤512 is
+≤9 well-predicted L1 probes. intset `binary_search` is OPTIMAL at every size — no
+linear/hybrid lever. Test-only, no source.
+
+NOTE on the discipline: inspection is a HYPOTHESIS, not a verdict — this time it was
+RIGHT (binary optimal), the HLL histogram/merge times it was WRONG (-53%/-94%). The
+rule is to MEASURE, not to assume inspection is always wrong. Three measured, decided.
+
 ## 2026-06-28 CrimsonHawk: LANDED HLL merge conditional-store→`.max()` — -93.9% (16.3x) via SIMD pmaxub; 8th win, another inspection-"optimal" miss
 
 `hll_merge_registers` (PFMERGE / multi-key PFCOUNT register merge over 16384 regs)
