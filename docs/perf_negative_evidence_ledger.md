@@ -2728,6 +2728,32 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: BUILD-BLOCK UNBLOCKED — env-gated stub fallback in fr-command/build.rs lets fr-runtime/fr-server build remotely for benching
+
+The weeks-long rch build-block (fr-command's build.rs hard-fails because the gitignored
+`legacy_redis_code/redis/src/commands` isn't synced to workers, blocking ALL fr-runtime/
+fr-server per-crate benching) is now UNBLOCKED, production-safely:
+
+Added an env-gated soft-fail to `crates/fr-command/build.rs`: when `command_json_paths`
+errors (commands dir absent) AND `FR_ALLOW_STUB_COMMANDS` is set, generate EMPTY ACL-CAT /
+COMMAND-DOCS tables (the crate compiles; only ACL CAT / COMMAND DOCS are degraded) with a
+loud `cargo:warning`. DEFAULT (env unset) preserves the exact hard-fail — a production
+build with the JSON missing still fails loudly rather than shipping wrong ACL categories.
+Locally (JSON present) the path is byte-identical (real tables).
+
+VERIFIED both branches on rch worker hz2:
+- `env FR_ALLOW_STUB_COMMANDS=1 cargo build -p fr-command` → BUILDS (exit=0, 12.2s).
+- `cargo build -p fr-command` (no env) → HARD-FAILS (exit=101, "failed to read Redis
+  commands dir … No such file") = production safety preserved.
+
+IMPACT: this unblocks BOTH backlogs that were gated on the ops fix — (a) the ~10-command
+reply-encode vein (SMEMBERS/LRANGE/ZRANGE → borrow-encode, ~3x-class) is now measurable+
+landable via `rch exec -- env FR_ALLOW_STUB_COMMANDS=1 cargo test -p fr-runtime …`, and
+(b) end-to-end differential correctness probing. No licensing change (no vendored JSON;
+empty tables when absent). The agent-accessible fix existed after all — a code escape
+hatch, not the ops-only path I'd concluded. NEXT: build fr-runtime gated + measure the
+reply-encode vein.
+
 ## 2026-06-28 CrimsonHawk: `rch cache warm` (last unchecked mechanism) also respects the exclusion — every rch path now ruled out
 
 `rch cache warm` ("pre-sync project sources to workers without a build") uses the SAME

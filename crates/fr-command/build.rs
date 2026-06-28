@@ -101,7 +101,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     // the JSON. Embedded as a single JSON blob; lib.rs parses once
     // (OnceLock) and converts to RespFrame on demand.
     let mut docs_arg_trees = BTreeMap::<String, serde_json::Value>::new();
-    for path in command_json_paths(&commands_dir)? {
+    // (CrimsonHawk) The Redis command JSON (legacy_redis_code/redis/src/commands) is
+    // gitignored (clean-room/licensing boundary) and not synced to remote rch workers, so
+    // fr-command — hence fr-runtime/fr-server — cannot build remotely, blocking per-crate
+    // benching of those crates. With FR_ALLOW_STUB_COMMANDS set, fall back to EMPTY ACL-CAT
+    // / COMMAND-DOCS tables so the crate COMPILES for REMOTE-BUILD/BENCH ONLY (ACL CAT and
+    // COMMAND DOCS are degraded to empty — NOT for production binaries). The DEFAULT (env
+    // unset) preserves the hard-fail, so a production build with the JSON dir missing still
+    // fails loudly rather than silently shipping wrong ACL categories.
+    let command_paths = match command_json_paths(&commands_dir) {
+        Ok(paths) => paths,
+        Err(err) => {
+            if std::env::var_os("FR_ALLOW_STUB_COMMANDS").is_some() {
+                println!(
+                    "cargo:warning=fr-command: {err}; FR_ALLOW_STUB_COMMANDS set -> EMPTY ACL/COMMAND-DOCS tables (degraded; remote-build/bench only, NOT production)"
+                );
+                Vec::new()
+            } else {
+                return Err(err.into());
+            }
+        }
+    };
+    for path in command_paths {
         println!("cargo:rerun-if-changed={}", path.display());
         let raw = fs::read_to_string(&path).map_err(|err| {
             io::Error::new(
