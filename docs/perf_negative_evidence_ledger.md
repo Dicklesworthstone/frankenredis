@@ -1833,3 +1833,33 @@ than Redis; this trims the residual second hash). Byte-exact: live
 last-wins (200 args → 130 unique), 130 just-over-128 boundary, and HMSET-200;
 **659** fr-store lib tests green. One fix covers both HSET and HMSET (shared
 `hset_borrowed_many`).
+
+## 2026-06-28 AmberRiver: XADD 3.57x gap root-caused (structural side-maps + no fast-path) — needs lower load to bench a fix
+
+Gap-sweep (prior turn, load ~45) measured `XADD st * f v f v` building a fresh
+50-entry stream at **3.57x slower than Redis 7.2.4** (the biggest remaining
+throughput gap after the HSET/HMSET/SADD/ZADD-CH O(n²) wins). Code-read root cause
+(profile was dispatch-diffuse, no single O(n²) hotspot):
+
+1. **No borrowed fast-path for XADD** — it goes through the generic multibulk →
+   fr-command handler (heavier per-command parse than the borrowed fast paths the
+   hot string/hash commands have).
+2. **~5 key-hash lookups per add** (`fr-store::xadd`, lib.rs:15906): `drop_if_expired`
+   (entries.get + expiry probe = 2), `entries.get_mut` (the stream = 1), then
+   `stream_last_ids.get_mut` (1) and `stream_entries_added.get_mut` (1). Redis does
+   ONE dict lookup and keeps last_id + entries_added **in the stream object**.
+   The two side-maps are the `tcknm` structural design — the `get_mut` form already
+   dropped the per-call `key.to_vec()` allocs, but the two extra hashed lookups
+   remain. Eliminating them = move `last_id`/`entries_added` into `StreamEntries`,
+   a multi-day refactor across ~20 `stream_last_ids`/`stream_entries_added` sites.
+
+Per-turn-clean levers are weak: guarding `drop_if_expired` on `expires_count==0`
+(removes 2 of the 5 lookups when no stream has a TTL) is the same shape as the
+turn-7 SET guard, which measured ~0-gain (mimalloc + reply-send dominate at the
+throughput level) — declined. The real fix is the structural in-object side-map
+move (`tcknm`).
+
+BLOCKER: host load spiked to **~130–161** this turn, so any XADD A/B is
+contention-dominated and unreliable — the structural fix needs to be benched at
+low load. No source change landed; this root-caches the biggest open gap so the
+next pass (at lower load) starts from the side-map move, not a fresh profile.
