@@ -240,42 +240,62 @@ fn bench_codec(c: &mut Criterion) {
     g.finish();
 
     let quicklist_entries = build_quicklist_entries();
+    let quicklist_encoded = encode_rdb(&quicklist_entries, &[]);
     let mut quicklist = c.benchmark_group("rdb_codec_quicklist");
     quicklist.throughput(Throughput::Elements(quicklist_entries.len() as u64));
     quicklist.bench_function("encode_quicklist_rdb", |b| {
         b.iter(|| encode_rdb(std::hint::black_box(&quicklist_entries), &[]))
     });
+    quicklist.bench_function("decode_quicklist_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&quicklist_encoded)).unwrap())
+    });
     quicklist.finish();
 
     let mixed_zset_entries = build_mixed_zset_entries();
+    let mixed_zset_encoded = encode_rdb(&mixed_zset_entries, &[]);
     let mut mixed_zset = c.benchmark_group("rdb_codec_mixed_zset");
     mixed_zset.throughput(Throughput::Elements(mixed_zset_entries.len() as u64));
     mixed_zset.bench_function("encode_mixed_zset_rdb", |b| {
         b.iter(|| encode_rdb(std::hint::black_box(&mixed_zset_entries), &[]))
     });
+    mixed_zset.bench_function("decode_mixed_zset_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&mixed_zset_encoded)).unwrap())
+    });
     mixed_zset.finish();
 
     let hash_listpack_entries = build_hash_listpack_entries();
+    let hash_listpack_encoded = encode_rdb(&hash_listpack_entries, &[]);
     let mut hash_listpack = c.benchmark_group("rdb_codec_hash_listpack");
     hash_listpack.throughput(Throughput::Elements(hash_listpack_entries.len() as u64));
     hash_listpack.bench_function("encode_hash_listpack_rdb", |b| {
         b.iter(|| encode_rdb(std::hint::black_box(&hash_listpack_entries), &[]))
     });
+    hash_listpack.bench_function("decode_hash_listpack_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&hash_listpack_encoded)).unwrap())
+    });
     hash_listpack.finish();
 
     let set_listpack_entries = build_set_listpack_entries();
+    let set_listpack_encoded = encode_rdb(&set_listpack_entries, &[]);
     let mut set_listpack = c.benchmark_group("rdb_codec_set_listpack");
     set_listpack.throughput(Throughput::Elements(set_listpack_entries.len() as u64));
     set_listpack.bench_function("encode_set_listpack_rdb", |b| {
         b.iter(|| encode_rdb(std::hint::black_box(&set_listpack_entries), &[]))
     });
+    set_listpack.bench_function("decode_set_listpack_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&set_listpack_encoded)).unwrap())
+    });
     set_listpack.finish();
 
     let set_intset_entries = build_set_intset_entries();
+    let set_intset_encoded = encode_rdb(&set_intset_entries, &[]);
     let mut set_intset = c.benchmark_group("rdb_codec_set_intset");
     set_intset.throughput(Throughput::Elements(set_intset_entries.len() as u64));
     set_intset.bench_function("encode_set_intset_rdb", |b| {
         b.iter(|| encode_rdb(std::hint::black_box(&set_intset_entries), &[]))
+    });
+    set_intset.bench_function("decode_set_intset_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&set_intset_encoded)).unwrap())
     });
     set_intset.finish();
 }

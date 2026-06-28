@@ -2437,3 +2437,30 @@ Conclusion: the per-turn perf-lever well in the clean/uncontended crates is dry;
 only positive-ROI remaining work is the multi-day keep-listpack decode lever (#2),
 which needs a dedicated fr-store+fr-persist session, not a per-turn loop iteration.
 No source change.
+
+## 2026-06-28 CrimsonHawk: per-type RDB DECODE benches added — hash decode is the largest cost, but allocation-bound (linear), not a per-element pathology → keep-listpack is the only real lever
+
+`perf` profiling of the decode hotspot is blocked (rch doesn't sync the bench binary
+locally + local-build metadata skew), and the harness had per-type ENCODE benches
+but only ONE mixed `decode_rdb`. Added per-type DECODE benches
+(`decode_{quicklist,mixed_zset,hash_listpack,set_listpack,set_intset}_rdb`,
+additive/test-only) to localize the decode gap by type. Results (fr absolute,
+criterion, rch worker):
+
+| type | decode | elements | ns/element |
+|---|---:|---:|---:|
+| hash_listpack | 9.92 ms | 32000 (400x40 pairs) | ~310 |
+| mixed_zset | 6.30 ms | 16000 | ~394 |
+| set_intset | 5.50 ms | 16000 | ~344 |
+| quicklist | 5.65 ms | 72000 | ~78 (post list-clone fix) |
+| set_listpack | 4.34 ms | 16000 | ~271 |
+
+Hash is the biggest ABSOLUTE decode cost, but its per-element rate (~310 ns, vs set
+~271) is ~linear — no pathology to point-fix; both hash and set paths already MOVE
+payloads via `into_bytes`. The zset per-element rate (~394) is the worst, carrying
+the score `from_utf8`+`parse::<f64>` (the sub-noise int-score lever already
+rejected). Conclusion: collection decode is fundamentally **per-element allocation
+bound** (one owned `Vec<u8>` per member — inherent to producing `RdbValue`), so the
+ONLY lever that moves it is the structural keep-listpack `RdbValue` (don't decode at
+all; carry the listpack), the multi-day fr-persist+fr-store item ranked #1 above.
+No further point-fix exists on the decode path. (Bench infra only; no source.)
