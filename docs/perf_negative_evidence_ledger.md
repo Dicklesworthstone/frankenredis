@@ -2690,6 +2690,25 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: LANDED HLL merge conditional-store→`.max()` — -93.9% (16.3x) via SIMD pmaxub; 8th win, another inspection-"optimal" miss
+
+`hll_merge_registers` (PFMERGE / multi-key PFCOUNT register merge over 16384 regs)
+used `if src > *dst { *dst = src }`. LLVM sees a PREDICATED STORE and does NOT
+autovectorize it — it ran fully scalar. Rewriting as the byte-identical unconditional
+`*dst = (*dst).max(src)` lowers to SIMD u8 max (`pmaxub`, 16–32 lanes/instruction).
+
+Measured isolated A/B (best-of-9 × 300k merges of 16384 regs): conditional **9188 ns**
+→ max **563 ns** = **-93.9% (16.3×)**. Byte-identical (register-wise max; parity proven
+incl. length-mismatch zip). Conformance GREEN: 25 HLL tests incl. PFMERGE round-trip +
+the HLL core/range differential gates. Landed in `hll_merge_registers`.
+
+NEW heuristic row (complements the multi-accumulator one): **a conditional store
+`if cmp { *p = v }` blocks autovectorization — rewrite min/max-shaped conditional
+stores as unconditional `*p = (*p).max/min(v)`.** This is a distinct, high-yield class
+from the memory-RAW multi-accumulator class (HLL histogram -53.5%). Both were
+inspection-"optimal" calls; both were big wins found ONLY by measuring. Audit other
+`if x > arr[i] { arr[i] = x }` / `if x < … { … }` element-wise loops the same way.
+
 ## 2026-06-28 CrimsonHawk: REJECT BITCOUNT popcount multi-accumulator (+6-8%) — register add-chain ≠ the HLL memory chain; multi-bank only wins for MEMORY-RAW loops
 
 Applied the HLL-histogram lesson (re-measure inspection "optimal" calls) to the next
