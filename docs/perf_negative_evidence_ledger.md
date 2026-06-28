@@ -2628,7 +2628,7 @@ optimal or low-value — recorded so the loop doesn't re-walk them:
 | intset membership / intersection | `binary_search` (O(log n)) | optimal |
 | geohash interleave | magic-number parallel bit-spread (`0x5555…`/`0x3333…`) | optimal |
 | CRC16 keyslot | byte-at-a-time CRC16-CCITT (non-reflected) | cluster-only over SHORT keys → slice-by-N won't pay off (read_line lesson); low value |
-| BITOP AND/OR/XOR/NOT | already SWAR / word-at-a-time (`u64` chunks, with a SWAR A/B gate) | optimal |
+| BITOP / BITPOS / BITCOUNT | whole bit-primitive family already SWAR / word-at-a-time (`chunks_exact(8)` word-skip + `leading_zeros`/`count_ones`, each with a SWAR A/B gate); BITCOUNT is fr-FASTER (0.477x) | optimal |
 | SRANDMEMBER/SPOP/HRANDFIELD/ZRANDMEMBER count | rejection-sampling (n<len/2) + partial Fisher-Yates split, O(1) `get_index` clones (rndcnt) | optimal |
 | LPOS / LREM | `l.iter().position(\|v\| v==elem)` linear scan — identical to redis `lposCommand`; residual is ChunkedList iteration (structural) | parity |
 
