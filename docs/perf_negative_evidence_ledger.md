@@ -2225,3 +2225,26 @@ name-hash jump table (replacing the sequential borrowed-parser chain + leaner
 per-command bookkeeping) would lift the entire non-hot long tail at once — the
 single highest-reach structural lever, but core-owned/multi-day. No clean per-turn
 point-fix exists for any of these individually. No source change.
+
+## 2026-06-28 AmberRiver: LANDED keyspace-notification channel build format!→byte-concat — -3.9% instructions on the notify write path
+
+First feature-specific (non-per-command-overhead) gap found in the recent sweep:
+plain SET is parity but SET with `notify-keyspace-events` enabled was 1.72x slower.
+Profiled SET+notify: ~4.5% self-time in the `core::fmt` machinery
+(`format_inner` / `fmt::write` / `String::write_str`) from
+`Store::notify_keyspace_event` building the channel names via
+`format!("__keyspace@{db}__:")` / `format!("__keyevent@{db}__:{event}")` on EVERY
+write.
+
+Fix: build the channels with byte concatenation (`Vec::with_capacity` +
+`extend_from_slice` + a stack-buffer `push_usize_decimal` for the db index) —
+byte-identical output, no fmt machinery. Verified byte-exact: PSUBSCRIBE
+`__key*@0__:*` capture over SET/EXPIRE/DEL/LPUSH/SADD yields IDENTICAL 8 channels
+on candidate == Redis 7.2.4 == control; 659 fr-store tests green.
+
+Measured load-independent (throughput A/B was noise-swamped at load ~16, ±5%):
+`perf stat -e instructions` over 60k SET+notify ops — candidate **629.94M** vs
+control **655.38M** = **-3.9% instructions** (matches the 4.5% profile). Real win
+on the notification-enabled write path (cache-invalidation / event-driven
+workloads). fr/Redis SET+notify ~1.72x→~1.65x; residual is the pub/sub
+subscriber-lookup + per-command dispatch (the broad overhead).

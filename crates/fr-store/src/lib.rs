@@ -3000,6 +3000,23 @@ fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
 ///
 /// Result is byte-identical to
 /// `small.iter().filter(|x| large.binary_search(x).is_ok())` in both modes.
+/// (frankenredis-notifyfmt) Append `n` as decimal ASCII to `buf` without the
+/// `core::fmt` machinery (hot keyspace-notification channel path).
+fn push_usize_decimal(buf: &mut Vec<u8>, n: usize) {
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    let mut v = n;
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&tmp[i..]);
+}
+
 fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     /// Above this large:small size ratio, per-element binary search beats a
     /// linear merge (crossover ≈ log2(N); 32 is safely past it for N≤4B).
@@ -21125,10 +21142,17 @@ impl Store {
 
         let event_bytes = event.as_bytes();
 
+        // (frankenredis-notifyfmt) Build the channel names with byte concatenation
+        // rather than format!. This fires on EVERY write under
+        // notify-keyspace-events and the fmt machinery (format_inner / fmt::write /
+        // String::write_str) was ~4.5% of the notify path. Output is byte-identical
+        // to format!("__keyspace@{db}__:") / format!("__keyevent@{db}__:{event}").
         // __keyspace@<db>__:<key> → event name
         if flags & NOTIFY_KEYSPACE != 0 {
-            let channel = format!("__keyspace@{db}__:");
-            let mut chan = channel.into_bytes();
+            let mut chan = Vec::with_capacity(14 + key.len());
+            chan.extend_from_slice(b"__keyspace@");
+            push_usize_decimal(&mut chan, db);
+            chan.extend_from_slice(b"__:");
             chan.extend_from_slice(key);
             self.keyspace_notifications
                 .push((chan, event_bytes.to_vec()));
@@ -21136,9 +21160,12 @@ impl Store {
 
         // __keyevent@<db>__:<event> → key name
         if flags & NOTIFY_KEYEVENT != 0 {
-            let channel = format!("__keyevent@{db}__:{event}");
-            self.keyspace_notifications
-                .push((channel.into_bytes(), key.to_vec()));
+            let mut chan = Vec::with_capacity(14 + event_bytes.len());
+            chan.extend_from_slice(b"__keyevent@");
+            push_usize_decimal(&mut chan, db);
+            chan.extend_from_slice(b"__:");
+            chan.extend_from_slice(event_bytes);
+            self.keyspace_notifications.push((chan, key.to_vec()));
         }
     }
 
