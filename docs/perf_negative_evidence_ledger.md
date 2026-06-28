@@ -2728,6 +2728,20 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: buildable materialization vein fully swept — encode_aof_stream was the unique instance; smaller crates clean
+
+Applied the sharpened materialization rule (intermediate-structure-then-serialize,
+replaceable by direct encode — the AOF win class) across ALL buildable crates. Grepped
+fr-sentinel / fr-repl / fr-config / fr-eventloop / fr-expire / fr-protocol for
+`to_resp_frame().to_bytes()` / `.to_bytes()`-in-loop / `RespFrame::Array(map BulkString)`:
+ZERO non-test instances. `encode_aof_stream` (fr-persist, LANDED −67.6%) was the unique
+buildable instance of this class. The remaining materialization wins (the reply-encode
+vein: SMEMBERS/LRANGE/ZRANGE etc.) are all in fr-runtime — BLOCKED (ops build-fix).
+Buildable perf surface fully harvested: 9 wins, every lever class measured/swept, the
+materialization class included. Build-block re-confirmed un-fixable by an agent (option
+(c) relax-gitignore violates the licensing clean-room boundary; (b) committed-table
+redesign is a policy decision, not mine). No source change.
+
 ## 2026-06-28 CrimsonHawk: fr-runtime build-unblock EXHAUSTIVELY ruled out via current rch — ops fix required to harvest the reply-encode vein + differential probing
 
 Pursued the highest-EV move (unblock fr-runtime → land the ~10-command reply-encode
