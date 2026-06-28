@@ -2728,6 +2728,36 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: REVERTED the BulkArray reply variant — build-unblock REVEALED the vein is mostly pre-harvested (`_into` fast paths) + the variant's blast radius isn't worth the long-tail-only EV
+
+Built + tested `RespFrame::BulkArray(Option<Vec<Vec<u8>>>)` (borrow-friendly array reply,
+direct multibulk encode, no `Vec<RespFrame>`): fr-protocol compiled (1-arm blast radius
+there) and the parity test PASSED — byte-identical to `Array(map BulkString)` in RESP2,
+RESP3, and null, len-hint matched. Converted LPOP/RPOP-COUNT as the pilot. Then the
+now-buildable fr-runtime/fr-command exposed TWO killers:
+
+1. The HOT collection replies are ALREADY borrow-encoded via `_into` reply fast paths —
+   `execute_plain_lrange_borrowed_into` (fr-runtime 11860, "as the SMEMBERS fast path"),
+   plus HVALS/HKEYS (11705). So BulkArray only ever serves the COLD/long-tail
+   materializing always-Array commands (LPOP/RPOP-count, ZRANGE-no-scores, SORT…) — and
+   the ~25-40% is on the ENCODE step, a fraction of those non-fast-path commands' time.
+2. The variant's inner type (`Vec<Vec<u8>>`) differs from `Array`'s (`Vec<RespFrame>`),
+   so EVERY exhaustive `RespFrame` consumer breaks and needs a hand-written arm —
+   fr-command's `resp_to_lua` (Lua sees converted-command replies), the
+   `Array(Some(v))|Set(Some(v)) => v.clone()` extractors (lib.rs 211/292, want
+   `Vec<RespFrame>` → must re-wrap), and unknown fr-runtime/fr-server sites. Multi-crate,
+   correctness-sensitive (a missed Array-vs-Set/nil semantic = a bug), slow gated builds
+   per iteration.
+
+DECISION: REVERTED cleanly (working tree restored byte-identical; build-unblock
+26b02032f retained). Low long-tail-only EV × multi-crate correctness-risky blast radius
+= not worth it (the `_into` per-command fast-path pattern is fr's chosen, already-applied
+approach for the hot replies). The build-unblock PAID OFF here as a diagnostic: it let me
+SEE the vein is largely done rather than guess. Reply-encode vein = CLOSED (hot part
+shipped via `_into`; long tail not worth a new variant). The unblock's remaining value is
+differential correctness probing + any future fr-runtime/fr-server lever found by
+profiling the now-benchable full binary.
+
 ## 2026-06-28 CrimsonHawk: reply-encode vein MEASURED (~25-40%) + fr-runtime build CONFIRMED via the unblock; conversion is multi-turn (needs a new RespFrame variant)
 
 With the build-unblock live, verified + quantified the reply-encode vein:
