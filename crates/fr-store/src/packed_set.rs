@@ -239,6 +239,30 @@ impl GenericSet {
         }
     }
 
+    /// (frankenredis-saddnodbl) Build a hashtable set directly from
+    /// possibly-duplicate borrowed members, deduping via the set's OWN `insert`
+    /// (first occurrence kept, insertion order preserved) and returning the
+    /// unique/added count. Only applies when the result is unambiguously a
+    /// hashtable (`> PACKED_MAX_ENTRIES` members); returns `None` otherwise so the
+    /// caller's small/large-value-aware path handles it. This lets the bulk SADD
+    /// builder skip the separate throwaway uniqueness `HashSet` (which re-hashes
+    /// every member a second time) — byte-identical result to dedup-then-build.
+    #[must_use]
+    pub fn try_from_str_members_hash_dedup<M: AsRef<[u8]>>(members: &[M]) -> Option<(Self, u64)> {
+        if members.len() <= PACKED_MAX_ENTRIES {
+            return None;
+        }
+        let bytes: usize = members.iter().map(|m| m.as_ref().len() + 2).sum();
+        let mut h = CompactStrSet::with_capacity(members.len(), bytes);
+        let mut added = 0_u64;
+        for m in members {
+            if h.insert(m.as_ref()) {
+                added += 1;
+            }
+        }
+        Some((GenericSet::Hash(h), added))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         match self {

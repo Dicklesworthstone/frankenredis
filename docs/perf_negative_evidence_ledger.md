@@ -1781,3 +1781,31 @@ Decision: **REVERT ~0-gain** (preserved as a labeled stash). The list RDB-load
 gap is structural (LZF parity + 99fwc Owned-chunk re-synthesis); per-element
 clone-elision is sub-noise. RESTORE dig fully closed: hash✓ set✓ shipped, zset +
 list structural.
+
+## 2026-06-28 AmberRiver: LANDED bulk-SADD skip redundant uniqueness HashSet — 1.22x faster
+
+Profiled a fresh large all-string SADD (300 members) under low load. The bulk
+builder `SetValue::try_bulk_unique_strings` built a throwaway
+`HashSet<&[u8]>` (`8.98%` self-time + its hashing) purely to de-dup the input
+before `from_unique_str_members` rebuilt the set via `CompactStrSet::insert` —
+which ALREADY de-dups. So every member was hashed TWICE.
+
+Fix: `GenericSet::try_from_str_members_hash_dedup` builds the hashtable set
+directly from the raw members (de-dup via the set's own insert, first-occurrence
+order, returns the added count), used by `try_bulk_unique_strings` whenever the
+set is unambiguously hashtable-sized (`> PACKED_MAX_ENTRIES` = 128). The
+small/large-value Packed cases keep the existing dedup path (PackedStrSet has no
+index to de-dup against).
+
+Measured (`SADD key <300 unique strings>` fresh, pipelined DEL+SADD ×300,
+best-of-15, host load ~4):
+
+| | candidate | control (no-fix) | Redis 7.2.4 |
+|---|---:|---:|---:|
+| best | **`5.79 ms`** | `7.06 ms` | `10.12 ms` |
+
+→ **1.219x faster than control**; fr/Redis improves from `0.698` to **`0.572`
+(1.75x faster than Redis)**. Byte-exact: live `DEBUG DIGEST-VALUE` identical to
+control across 300-unique, dup-collapse (300 args → 150 unique), and the 130
+just-over-128 boundary; **659** fr-store lib tests green. (SADD-string was not a
+gap vs Redis — fr already won — but this banks a clean further speedup.)

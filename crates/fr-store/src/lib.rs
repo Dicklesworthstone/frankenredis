@@ -2592,6 +2592,14 @@ impl SetValue {
         {
             return None;
         }
+        // (frankenredis-saddnodbl) For a genuine hashtable-sized set the target
+        // CompactStrSet already dedups on insert, so the separate uniqueness
+        // HashSet below (which re-hashes every member a second time) is pure
+        // overhead - build straight into the set. Byte-identical: same
+        // first-occurrence insertion order, same de-duplicated `added`.
+        if let Some((set, added)) = GenericSet::try_from_str_members_hash_dedup(members) {
+            return Some((SetValue::Generic(set), added));
+        }
         let mut seen: HashSet<&[u8], foldhash::quality::RandomState> =
             HashSet::with_capacity_and_hasher(
                 members.len(),
