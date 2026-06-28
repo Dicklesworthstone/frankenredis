@@ -2728,6 +2728,36 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: reply-encode vein MEASURED (~25-40%) + fr-runtime build CONFIRMED via the unblock; conversion is multi-turn (needs a new RespFrame variant)
+
+With the build-unblock live, verified + quantified the reply-encode vein:
+- fr-runtime FULLY COMPILES on the worker with the gate: `env FR_ALLOW_STUB_COMMANDS=1
+  cargo test -p fr-runtime --release --no-run` → exit=0 (all test binaries built). The
+  unblock works end-to-end for the target crate, not just fr-command.
+- Isolated A/B (fr-store, `RespFrame::Array(map BulkString).to_bytes()` vs direct
+  multibulk borrow-encode), best-of-9, members MOVED (not cloned), INCLUDING an equal
+  per-iter clone on both sides (so the encode-step win is UNDERSTATED): N=100 −25.6%,
+  N=2000 −39.1%, N=10000 −39.3%. Byte-identical. The vein is real and sizeable on
+  large collection replies (SMEMBERS/LRANGE/ZRANGE/SINTER…), HOT production commands.
+
+CONVERSION IS MULTI-TURN, NOT A QUICK SWAP (scoped this turn):
+- fr-server's hot reply path ALREADY uses `frame.encode_into(&mut write_buf)` (main.rs
+  20055/21399-21401) — the to_bytes→encode_into win is already done. The remaining win
+  is the `Vec<RespFrame>` MATERIALIZATION inside the handlers (build Array of N
+  BulkStrings), which `encode_into` still walks.
+- RespFrame has NO `Raw`/pre-encoded variant, and a pre-encoded blob can't work anyway
+  because SMEMBERS is Array (`*`) under RESP2 but Set (`~`) under RESP3 — the encoder
+  must pick the prefix per-protocol. So the clean fix is a NEW protocol-aware borrowed
+  variant `RespFrame::BulkArray(Option<Vec<Vec<u8>>>)` (+ a Set-typed form), handled in
+  the 52 fr-protocol encode arms, then ~10-20 of the 404 `RespFrame::Array(Some(` sites
+  in fr-runtime converted. Core fr-protocol change w/ exhaustive-match blast radius.
+
+STATUS: build-block LANDED (26b02032f); vein MEASURED+SCOPED = a real multi-turn lever
+(BulkArray variant) now REACHABLE thanks to the unblock — the first genuinely-new
+sizeable perf lever since the buildable surface was exhausted. NEXT: implement the
+BulkArray variant + convert SMEMBERS as the pilot, behind the gate. No source change this
+turn (measurement+scoping).
+
 ## 2026-06-28 CrimsonHawk: BUILD-BLOCK UNBLOCKED — env-gated stub fallback in fr-command/build.rs lets fr-runtime/fr-server build remotely for benching
 
 The weeks-long rch build-block (fr-command's build.rs hard-fails because the gitignored
