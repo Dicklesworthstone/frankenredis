@@ -2567,3 +2567,25 @@ left to the matcher (empty-string semantics + the contains non-win). Suite green
 (658 lib tests; the lone failure was the unrelated `galp1` galloping-intersection
 perf-ratio assertion, which flakes under rch-worker load and passes isolated — same
 class as foldhash/scan). Landed in `glob_match`.
+
+## 2026-06-28 CrimsonHawk: LANDED zset listpack decode integer-score direct-convert — -24.7% (the lever the noisy mixed bench had hidden)
+
+Reversal of the earlier "sub-noise/unprovable" zset int-score entry: that REJECT was
+a measurement failure, not a real null. Integer-valued zset scores round-trip through
+the listpack as INT entries, so the ZSET_LISTPACK decode did `into_bytes` (decimal
+render alloc) → `from_utf8` → `parse::<f64>` per integer score. The fix reads the i64
+straight to f64 for `ListpackEntry::Integer` (String scores still parse). The mixed
+`decode_rdb` criterion bench couldn't resolve it (the rch worker's load once even
+reported a physically-impossible +55%), so it was wrongly shelved.
+
+Re-measured with an **isolated in-process A/B** (`tests/zset_score_decode_ab.rs`,
+best-of-9 × 1.5M iters over a 40-member zset listpack, ~half integer scores; the same
+noise-immune harness that landed CRC64 + glob): OLD 3212 ns/zset → NEW 2419 ns/zset =
+**-24.7%**. Byte-identical: `n as f64` == `parse(decimal(n))` for all i64 (parity
+proven bit-exact via `to_bits()` across n=1,2,40,128; 223 fr-persist tests green incl.
+DUMP/RESTORE round-trips). Landed in `decode_rdb` ZSET_LISTPACK arm.
+
+LESSON: when a real, causally-sound micro-lever measures as noise (or impossibly
+negative) on the shared mixed criterion bench, it is the BENCH that failed — re-run it
+as an isolated in-process A/B before recording a REJECT. (Worth revisiting the
+hash-field and set-member decode arms the same way.)
