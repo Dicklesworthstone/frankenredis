@@ -2690,6 +2690,24 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: remaining inspection-only primitives are at the SAFE-RUST CEILING — beating them needs unavailable intrinsics or byte-breaking swaps
+
+Final pass on the still-inspection-only "optimal" calls. Each is genuinely at the
+safe-Rust ceiling — no measurable lever exists without crossing a hard boundary:
+- geohash interleave (Morton) — magic-number bit-spread; faster only via PDEP (BMI2
+  intrinsic, not portable safe Rust).
+- haversine `geo_distance_m` — scalar libm sin/cos/asin; SIMD libm not in safe std,
+  and byte-exactness to redis pins the algorithm.
+- `fpconv_dtoa` double / `decimal_i64_bytes` itoa2 — Ryu/jeaiii would change bytes
+  (fpconv) or give ~0 on the small-int common case (itoa2 DIGIT_PAIRS already 2-at-a-time).
+- murmur `hll_hash` — serial h→h mixing chain, unparallelizable for one hash.
+- glob-complex backtracking (multi-star/`[`/`?`) — identical to redis `stringmatchlen`
+  (parity; beating it = a different matcher, but redis backtracks too → no domination gap).
+- LCS — already bit-parallel CIPR (alien-tier).
+These are CEILING, not lazy. The "measure inspection calls" discipline yielded 2 big
+HLL wins from the SIMD/dependency class (the one where safe Rust HAD headroom); these
+remaining primitives have none. Per-turn perf surface DEFINITIVELY closed. No source.
+
 ## 2026-06-28 CrimsonHawk: strength-reduction class checked — div-by-const compiler-reduced, RNG-modulo byte-risky; sole-agent campaign-complete checkpoint
 
 Last lever class: strength reduction (expensive per-iteration ops). Div-by-CONSTANT
