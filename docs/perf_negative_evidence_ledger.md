@@ -1914,3 +1914,36 @@ the turn-7 SET guard). The real XADD lever remains the `tcknm` in-object side-ma
 move (multi-day, ~20 sites) + possibly an XADD borrowed fast-path. (rch workers
 still hit the fr-command legacy_redis_code build-blocker every retry; binary built
 locally.)
+
+## 2026-06-28 AmberRiver: SETBIT 2.67x is per-command overhead (NOT O(n²)), shares root with XADD — surfaced
+
+After the intset SINTERCARD win, swept more families. Almost all clean (LINSERT/
+LSET/LREM parity, LPOS/SORT/HSCAN/ZSCAN fr-faster, BITCOUNT parity, SINTER/SDIFF/
+SUNION on intsets parity-or-faster, SINTERSTORE/SDIFFSTORE fr-faster). Two
+remaining write-command gaps share ONE root:
+
+- **SETBIT `2.67x`** (building a bitmap by setting bits at growing offsets).
+- **XADD `3.57x`** (appending to a stream).
+
+Both were initially suspected O(n²) (per-op re-materialize / `with_mutated_entry`
+digest hashing). RULED OUT for SETBIT with two tests: (1) per-bit cost is CONSTANT
+across bitmap sizes (ratio `2.73/2.70/2.81/2.58x` at 50/100/200/400 bits — an
+O(n²) cost would grow); (2) forcing `digest_stale` with a preceding write does NOT
+change it (37.66ms vs 38.32ms), so the `with_mutated_entry` digest hash is not the
+cost (digest is already stale on the hot path). The setbit fast-path is
+structurally identical to the GET/SET fast-paths (validation + active-expire +
+chained timing + store call + metrics) — no SETBIT-specific redundancy.
+
+Both profiles are dominated by `process_buffered_frames` (~23% self-time, the
+RESP framing + dispatch loop) with the store work spread thin. So the remaining
+SETBIT/XADD gaps are **constant per-command processing overhead** (framing +
+dispatch + per-write bookkeeping: `drop_if_expired` 2 lookups, `with_mutated_entry`
+get_mut, `run_active_expire_cycle`, metrics) being heavier than redis's per-command
+loop for these less-optimized write commands — NOT a single fixable O(n²) or
+data-structure issue. GET/SET are parity because they are the leanest fast paths.
+
+The drop_if_expired guard (which shaved 2 lookups) already measured ~0-gain on XADD
+(turn-prior), confirming lookups aren't the dominant slice. The lever is holistic
+leaner per-command processing (or moving these commands earlier in the borrowed
+dispatch chain), not a point fix — surfaced for a focused per-command pass. No
+source change this turn.
