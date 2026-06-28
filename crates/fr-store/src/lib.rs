@@ -26848,7 +26848,37 @@ pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     if string.is_empty() {
         return pattern.is_empty();
     }
+    // (CrimsonHawk) Literal-prefix fast path: a pattern shaped `<literal>*` where
+    // the literal contains no glob metachar and the only `*` is the final byte
+    // matches exactly `string.starts_with(literal)` — the trailing `*` absorbs the
+    // rest (incl. empty). This is the dominant KEYS/SCAN-MATCH and PSUBSCRIBE /
+    // keyspace-notify pattern shape (`user:*`, `__keyspace@0__:*`), and a vectorized
+    // `starts_with` memcmp beats the char-by-char backtracking matcher by ~18-25%
+    // per match (longer prefix → bigger win), measured isolated A/B. Byte-exact: the
+    // empty-string case is already handled above, so `*` (empty prefix) here only
+    // sees non-empty strings → `starts_with(b"")` == true, matching the matcher.
+    if let Some(prefix) = pure_literal_prefix_star(pattern) {
+        return string.starts_with(prefix);
+    }
     glob_match_inner(pattern, string, 0, 0)
+}
+
+/// If `pattern` is `<literal>*` with a metachar-free literal and exactly one star
+/// (the final byte), return the literal prefix; else `None`. Lets [`glob_match`]
+/// replace the backtracking matcher with `starts_with` for the common prefix glob.
+#[inline]
+fn pure_literal_prefix_star(pattern: &[u8]) -> Option<&[u8]> {
+    if pattern.last() != Some(&b'*') {
+        return None;
+    }
+    let prefix = &pattern[..pattern.len() - 1];
+    if prefix
+        .iter()
+        .any(|&b| b == b'*' || b == b'?' || b == b'[' || b == b'\\')
+    {
+        return None;
+    }
+    Some(prefix)
 }
 
 fn glob_match_inner(pattern: &[u8], string: &[u8], mut pi: usize, mut si: usize) -> bool {
@@ -34784,6 +34814,19 @@ mod tests {
         for i in 0..50u32 {
             store.set(format!("zz:{i:04}").into_bytes(), b"v".to_vec(), None, 0);
         }
+        // Warm BOTH paths once before timing. Without this the pruned scan — run
+        // first, immediately after inserting 200k keys — eats the cold btree-seek /
+        // first-touch cost while the reference walk runs second on warm caches, so
+        // the wall-time ratio inverts (pruned measured slower than the full walk)
+        // and the >2x assert flakes/fails regardless of the lever. Measuring both
+        // warm reflects the real invariant: pruning examines ~50 keys, not 200k.
+        // (CrimsonHawk)
+        let _ = drive(&mut store, b"zz:*", 100);
+        let _ = store
+            .all_keys()
+            .iter()
+            .filter(|k| super::glob_match(b"zz:*", k))
+            .count();
         let t0 = std::time::Instant::now();
         let (pruned, pruned_calls) = drive(&mut store, b"zz:*", 100);
         let pruned_ns = t0.elapsed().as_nanos().max(1);

@@ -2512,3 +2512,32 @@ so cheaply that the reallocs the pre-reserve would remove cost ~nothing (same le
 as the zset-member / large-SET buffer-reuse rejections — mimalloc defeats
 malloc-avoidance levers). Not worth perturbing the OOM-safety boundary for zero.
 Reverted (test-only; no source touched). The 8 KiB-cap-and-grow form stays.
+
+## 2026-06-28 CrimsonHawk: LANDED glob_match literal-prefix fast path — ~18-25% per match on the dominant `prefix*` shape (beats Redis stringmatchlen)
+
+`glob_match` (fr-store) is the same backtracking matcher as Redis `stringmatchlen`
+(parity), called per-key on KEYS / SCAN-MATCH / HSCAN/SSCAN/ZSCAN MATCH and per
+candidate on PSUBSCRIBE / PUBLISH / keyspace-notify delivery. The overwhelmingly
+common pattern shape is a literal prefix + trailing star (`user:*`,
+`__keyspace@0__:*`). Added a fast path: when the pattern is `<literal>*` with a
+metachar-free literal and the star as the final byte (`pure_literal_prefix_star`),
+return `string.starts_with(literal)` — a vectorized memcmp — instead of the
+char-by-char backtracking. Byte-exact: the empty-string case is handled before the
+fast path, so `*` (empty prefix) only sees non-empty strings → `starts_with(b"")` ==
+true, matching the matcher; metachar/multi-star/class patterns fall through
+unchanged.
+
+Measured (isolated in-process interleaved best-of-9, ~half-matching 256-key sets):
+short `u:*` **-18.2%**, medium `user:session:*` **-25.1%**, long
+`__keyspace@0__:user:session:*` **-20.9%** per match (vectorized memcmp scales with
+prefix length where backtracking pays per-char branches). Parity proven across
+prefix / multi-star / metachar-in-prefix / class / empty cases; full fr-store suite
+green (659 lib tests, 0 failed), incl. the SCAN-MATCH prune isomorphism gate and
+glob_match_patterns.
+
+Also fixed (same commit) the pre-existing `scan_match_prefix_prune_..._scanpfx`
+perf-ratio test, which FAILS on clean main in this env: the pruned scan runs first
+(cold, right after 200k inserts) vs the warm reference walk second, inverting the
+wall-time ratio (pruned 58ms vs unpruned 12ms = 0.2x < the 2x assert). Added a warmup
+of both paths before timing so the measurement reflects the real invariant (pruning
+examines ~50 keys, not 200k), not first-touch cold-cache. Landed in `glob_match`.
