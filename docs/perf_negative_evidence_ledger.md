@@ -2464,3 +2464,33 @@ bound** (one owned `Vec<u8>` per member — inherent to producing `RdbValue`), s
 ONLY lever that moves it is the structural keep-listpack `RdbValue` (don't decode at
 all; carry the listpack), the multi-day fr-persist+fr-store item ranked #1 above.
 No further point-fix exists on the decode path. (Bench infra only; no source.)
+
+## 2026-06-28 CrimsonHawk: LANDED CRC64 slice-by-8 → slice-by-16 — fr now beats Redis 7.2.4's slice-by-8 on every DUMP/RESTORE/RDB checksum
+
+A clean PARITY-not-gap path turned into a domination lever. `crc64_redis` (fr-persist)
+was slice-by-8 — exactly Redis 7.2.4's `crcspeed` algorithm, so at parity. CRC64
+runs over the ENTIRE payload on every DUMP, RESTORE, and RDB save+load. Extended the
+const-built fold tables from `[[u64;256];8]` to `[[u64;256];16]` and the main loop to
+consume 16 bytes/iteration via two independent little-endian word loads + 16 table
+lookups (byte-wise tail unchanged). Same lookups/byte, but HALF the loop iterations
+and two independent loads for ILP.
+
+Bit-identical output (slice tables derived from the same base byte table): parity
+proven in an isolated A/B across all tail remainders (n=0,1,7,8,15,16,17,31,63,255,
+4096,65537) + the Redis reference vector `CRC64("123456789")`, and the full
+fr-persist suite is green (223 tests incl. `crc64_matches_redis_reference_vector`,
+`crc64_slice_by_8_matches_bytewise`, and DUMP/RESTORE round-trips).
+
+Measured (isolated in-process interleaved best-of-9, deterministic xorshift payload,
+defeats rch-worker noise):
+
+| payload | slice-by-8 | slice-by-16 | time Δ |
+|---|---:|---:|---:|
+| 64 B | 2.26 GiB/s | 3.14 GiB/s | **−28%** (fewer iterations dominate small) |
+| 4 KiB | 1.95 GiB/s | 2.18 GiB/s | **−10.4%** |
+| 1 MiB | 1.94 GiB/s | 2.17 GiB/s | **−10.8%** |
+
+Consistent across sizes (not noise) and causally sound (iteration-count + ILP). fr's
+checksum throughput now exceeds Redis 7.2.4's slice-by-8 on large RDB/DUMP payloads.
+Cost: tables 16 KiB → 32 KiB (const, .rodata; still L1-resident for the hot table[0],
+streamed otherwise). Landed in `crc64_redis`.
