@@ -2712,6 +2712,17 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: stream consumer-group PEL verified parity (BTreeMap, O(log n)) — last unexamined data structure
+
+Checked the stream PEL (pending entries list) — a plausible linear-scan gap if fr used
+a Vec where redis uses a rax. NOT: `group.pending` is a `BTreeMap<StreamId, …>`. XACK/
+XCLAIM = `get_mut`/`insert`/`remove` O(log n); XAUTOCLAIM/XRANGE-over-PEL = `.range()`;
+XINFO len/first/last = `len()`/`first_key_value()`/`last_key_value()` O(1)/O(log n);
+per-consumer counting is a SINGLE O(n) pass (lib.rs 595) and the XPENDING summary is
+MEMOIZED (b0exs). Parity with redis's rax PEL — no lever. Streams were the last
+unexamined data structure (after intset, hash CompactFieldMap, set, zset BTreeMap+treap,
+ChunkedList, keyspace dict). Every fr data structure now verified optimal/parity. No source.
+
 ## 2026-06-28 CrimsonHawk: keyspace-RAM lever is STUCK behind tradeoffs, not just multi-day — both structural levers now re-priced; fr at practical optimum
 
 Completed the structural re-pricing by re-evaluating the keyspace-dict RAM gap (1.79x
