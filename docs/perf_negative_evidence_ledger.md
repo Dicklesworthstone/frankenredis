@@ -2690,6 +2690,17 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: RESP3 double encoding verified optimal (fpconv direct dtoa + integer fast path) — reply-path coverage complete
+
+`push_redis_double_ascii` (per zset score in ZRANGE/ZSCORE WITHSCORES — hot for zset
+workloads) is already optimal: nan/inf/0 special-cased; integer-valued doubles take a
+`push_i64` itoa2 fast path (the common zset-score case); non-integers use
+`fpconv_dtoa_into` — a direct Grisu dtoa writing straight into the out buffer, NO
+`fmt`/`format!`/String alloc, byte-exact to redis `d2string`. Can't swap to Ryu etc.
+(byte-exactness to d2string formatting rules). No lever. Reply path now fully covered:
+bulk-string encode (A/B'd optimal), aggregate/map headers, push_i64/usize itoa2,
+double = fpconv+int-fast-path. No source change.
+
 ## 2026-06-28 CrimsonHawk: stream RDB codec checked — serial byte-build, niche, optimal; testable-surface sweep COMPLETE
 
 Last unexamined testable area: the stream RDB codec (`rdb_stream.rs`). It is a serial
