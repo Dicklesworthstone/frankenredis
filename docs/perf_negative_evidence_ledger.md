@@ -2823,19 +2823,27 @@ murmur) deserve the same A/B treatment before being trusted as closed.
 One consolidated view of where the per-turn perf campaign stands, so the next
 operator (human or agent) decides from the true state instead of re-deriving it.
 
-**WINS LANDED THIS SESSION (6, all beat Redis 7.2.4, all isolated-A/B measured):**
+**WINS LANDED THIS SESSION (8, all beat Redis 7.2.4, all isolated-A/B measured):**
 1. RDB list-decode `to_bytes`→`into_bytes` clone-elim — `decode_rdb` −21.5% (2a43fb0db)
 2. CRC64 slice-by-8→slice-by-16 — −10.5% large / −28% tiny (7194d2443)
 3. glob_match prefix fast path — −18..25%/match (5e4c99393)
 4. glob_match exact+suffix fast paths — −54%/−49% (682f025d9)
 5. glob_match contains fast path (dep-free first-byte-skip) — −71%/−86% (d65774a96)
 6. zset listpack decode integer-score direct-convert — −24.7% (788bbfd00)
-Plus: per-type decode benches, a glob fuzz-differential regression gate, 2 wrong
-rejections recovered via isolated A/B, 1 pre-existing broken test repaired.
+7. HLL estimate histogram 4-bank accumulator — −53.5% (57c471cef)
+8. HLL merge conditional-store→`.max()` (SIMD pmaxub) — −93.9%/16.3x (d98e409d4)
+Plus: per-type decode benches, a glob fuzz-differential regression gate, 3 wrong
+rejections recovered via isolated A/B (#6,#7,#8 were all wrongly shelved by inspection),
+1 pre-existing broken test repaired.
 
-**PER-TURN VEIN: CLOSED.** Every reachable compute/algorithm primitive verified
-optimal or parity (glob, CRC64/16, HLL hash+estimate, intset, geohash, BITOP/BITPOS/
-BITCOUNT SWAR, random-sampling, LPOS/LREM, parse_listpack_integer, float-parse).
+**PER-TURN VEIN: CLOSED — and now MEASUREMENT-BACKED, not inspection-backed.** The
+earlier "all primitives optimal" was inspection-only and WRONG twice (HLL histogram/
+merge, found by actually measuring). Now the key candidates are A/B-MEASURED optimal:
+intset binary (vs linear-SIMD, +126..7908%), popcount single-acc (vs 4-bank, +6-8%),
+command dispatch eq_ignore_ascii_case chain (vs uppercase-match, +19.7%), GEOSEARCH
+(bbox prefilter present), HLL dense codec (4-at-a-time), string-set (linear≤128 like
+redis / hash O(1)). Remaining inspection-only "optimal": glob/CRC64/16, geohash magic-
+number, murmur — A/B these too before trusting (the lesson: inspection is a hypothesis).
 RDB codec fully characterized: ENCODE LZF-bound (parity+), DECODE per-element-alloc-
 bound. XADD to_vec lever already landed (get_mut).
 
