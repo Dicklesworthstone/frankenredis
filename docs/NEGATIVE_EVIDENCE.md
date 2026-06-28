@@ -6962,3 +6962,31 @@ randomkey_in_db(0) + decode_db_key for the logical name, same RNG advancement). 
 cand/ctrl/redis all return a key that EXISTS (30 draws each verified via EXISTS), nil on empty db, lowercase works.
 conformance GREEN (its seeded RANDOMKEY tests pass = same store primitive + RNG calls as generic). fr-runtime + fr-server.
 Remaining uncovered: MOVE (complex cross-db, byte-exact error surface), OBJECT IDLETIME/FREQ, PFMERGE. 38 dispatch commits.
+
+### 2026-06-28 (part 176) NO-SHIP: PFADD existing-key lookup consolidation regresses normalized ratio (cod/BlackThrush)
+Bench-worktree scan found no landable measured source win missing from main. The only clean ahead worktree was docs-only, and
+dirty source candidates matched already-recorded rejections (BITFIELD u8 aligned store, HLL/PFADD register-cache encoding,
+packed zset varint/score storage).
+
+New lever from the remaining PFADD_16v gap: collapse `Store::pfadd_impl`'s existing-key path from `contains_key(key)` plus
+`entries.get(key)` into a single `entries.get(key)` branch, leaving the direct sparse-create path for missing keys. This targets
+the steady-state PFADD_16v workload where almost every command hits an existing HLL key, and avoids re-trying the prior rejected
+parser/hash/cache micro-levers.
+
+Build/bench note: literal requested `cargo bench --release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot`
+is rejected by this Cargo (`unexpected argument '--release'`), so the comparable per-crate release bench used
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- PFADD_16v --noplot` via `rch exec`, with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-a`.
+
+Measured on the clean `origin/main` worktree, same target dir, local fallback because remote workers cannot see the ignored
+legacy Redis oracle directory:
+
+| variant | Redis 7.2.4 median | fr median | fr/Redis ratio |
+|---|---:|---:|---:|
+| ORIG (`cb3a0165d` lineage before candidate) | `502.08 Kelem/s` | `229.21 Kelem/s` | `0.457x` |
+| candidate lookup consolidation | `269.77 Kelem/s` | `111.11 Kelem/s` | `0.412x` |
+
+Result: normalized ratio worsened (`0.412 / 0.457 = 0.902x`), and raw fr throughput was `0.485x` of ORIG on the candidate run.
+Criterion marked the fr candidate as a regression. Decision: **REVERT ~0-gain/regression**; no source shipped. Focused PFADD
+tests were green before revert (`cargo test -p fr-store pfadd -- --nocapture`: 10 unit PFADD tests + 2 HLL metamorphic + empty
+PFADD integration pass). Next PFADD work should skip lookup-collapse and move to a deeper primitive than map-probe shaving.
