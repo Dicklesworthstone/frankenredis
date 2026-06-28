@@ -2629,6 +2629,17 @@ optimal or low-value — recorded so the loop doesn't re-walk them:
 | geohash interleave | magic-number parallel bit-spread (`0x5555…`/`0x3333…`) | optimal |
 | CRC16 keyslot | byte-at-a-time CRC16-CCITT (non-reflected) | cluster-only over SHORT keys → slice-by-N won't pay off (read_line lesson); low value |
 | BITOP AND/OR/XOR/NOT | already SWAR / word-at-a-time (`u64` chunks, with a SWAR A/B gate) | optimal |
+| SRANDMEMBER/SPOP/HRANDFIELD/ZRANDMEMBER count | rejection-sampling (n<len/2) + partial Fisher-Yates split, O(1) `get_index` clones (rndcnt) | optimal |
+| LPOS / LREM | `l.iter().position(\|v\| v==elem)` linear scan — identical to redis `lposCommand`; residual is ChunkedList iteration (structural) | parity |
+
+**Convergence note (2026-06-28):** across two survey passes, EVERY pure compute /
+algorithm primitive reachable in a per-turn loop is now verified at its optimum or
+parity. The session's win pattern (pure parity fn + common-case fast path, isolated
+A/B) is fully harvested. The only positive-EV perf work left is STRUCTURAL and
+multi-day (keep-listpack `RdbValue` decode #1; keyspace-dict RAM uhthd) — outside a
+single loop turn. Recommend the loop pivot to a dedicated keep-listpack session, or
+to differential correctness probing vs vendored redis 7.2.4 (historically the
+highest-yield review pattern when the perf surface is saturated).
 
 The repeatable win pattern this session — *pure parity-with-Redis function + a
 common-case fast path / better-impl, measured with an isolated in-process A/B that
