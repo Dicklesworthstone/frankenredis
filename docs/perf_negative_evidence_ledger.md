@@ -2196,3 +2196,32 @@ lua_State (kills the per-EVAL clone/teardown). That is the only EVAL work worth
 doing, and it is major/multi-day/owned. Every smaller EVAL micro-lever is now
 measured/spec'd and either ~0-gain, risky, or rare-workload. EVAL fully closed.
 No source change.
+
+## 2026-06-28 AmberRiver: transactions + admin commands ALSO per-command-overhead — broadens the core-dispatch lever case
+
+Benched 3 untested feature dimensions (transactions / admin / cursor):
+
+| command | fr/Redis | note |
+|---|---:|---|
+| MULTI/EXEC (10 SET) | `3.77x` | does real work — 10 queue + 10 exec |
+| WAIT 0 0 | `2.96x` | sub-µs (0.38 vs 0.13ms) |
+| WATCH+UNWATCH | `6.67x` | sub-µs (1.34 vs 0.20ms) |
+| DBSIZE | `4.14x` | sub-µs (0.43 vs 0.10ms) |
+| SCAN step (10k keys) | `0.85x` | fr-FASTER |
+
+MULTI/EXEC was the only one doing real work, so I profiled it for a queue-specific
+hotspot (argv clone, queue insert). NONE — flat self-time is diffuse:
+process_buffered_frames 11.5% + execute_frame_internal 3.1% + dispatch 3.1% +
+handle_exec_command 2.6% + parse 3.4%. So MULTI/EXEC is the SAME per-command
+framing+dispatch overhead, paid per queued command + per EXEC. WAIT/WATCH/DBSIZE
+are the classic sub-µs-command version (near-zero work, ratio dominated by the
+fixed per-command cost). SCAN is fr-faster.
+
+SIGNIFICANCE: the per-command-overhead root now spans GET/SET-adjacent writes
+(SETBIT/XADD), set/hash long-tail (LMPOP/OBJECT/GETEX), AND transactions + admin
+(MULTI/EXEC/WAIT/WATCH/DBSIZE) — essentially EVERY command that isn't one of the
+hand-tuned hottest fast paths. This STRENGTHENS the core-dispatch lever: a
+name-hash jump table (replacing the sequential borrowed-parser chain + leaner
+per-command bookkeeping) would lift the entire non-hot long tail at once — the
+single highest-reach structural lever, but core-owned/multi-day. No clean per-turn
+point-fix exists for any of these individually. No source change.
