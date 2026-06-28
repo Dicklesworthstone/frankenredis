@@ -2026,3 +2026,45 @@ parity-or-faster, and 88 differential correctness probes (incl RESP3) are
 byte-exact. The only open levers are multi-day/core-owned structural ones
 (per-command dispatch name-hash, XADD tcknm, keyspace dict RAM SCAN-reversal,
 RESTORE keep-listpack). No source change.
+
+## 2026-06-28 AmberRiver: NEW BIG GAP — EVAL/EVALSHA scripting 3-14x slower (whole subsystem, never perf-tested); root-caused
+
+The scripting subsystem had never been throughput-benched this campaign. It is the
+single largest remaining gap by ratio:
+
+| script | fr/Redis |
+|---|---:|
+| `EVAL "return 1" 0` | `4.39x` |
+| `EVAL "return redis.call('get',KEYS[1])" 1 k` | `4.25x` |
+| `EVAL "local x=0 for i=1,100 do x=x+i end return x" 0` | **`14.29x`** |
+| `EVAL "return {1,2,3,4,5}" 0` | `3.21x` |
+| `EVALSHA <get> 1 k` (pre-compiled) | `4.42x` |
+
+TWO distinct root causes:
+
+1. **Per-EVAL globals-template CLONE = the ~4.4x base overhead** (point-fixable).
+   fr's Lua is a custom pure-Rust tree-walker (`fr-command/src/lua_eval.rs`, 23k
+   lines; no mlua/LuaJIT). The AST IS cached (`LUA_COMPILED_CHUNK_CACHE`), so
+   EVALSHA isn't re-parsing — but `LuaState::new` does
+   `lua_base_globals_template().clone()`, cloning a ~200-entry
+   `HashMap<String, LuaValue>` (all stdlib + redis API) EVERY EVAL. The clone allocs
+   ~200-350 String keys/RustFunction-name values ≈ 5 µs — which matches the 4.9 µs
+   per-EVAL gap on the trivial cached script. Redis reuses ONE persistent lua_State
+   and only resets KEYS/ARGV per call.
+   PROPOSED LEVER: hold the read-only base as `Rc<HashMap>` (shared, never cloned)
+   + a small per-EVAL write overlay (KEYS/ARGV + script-defined globals); global
+   get checks overlay→base, insert→overlay. Globals are `globals_locked` after init
+   so scripts rarely write — the overlay stays tiny. RISK/why-not-this-turn: must
+   keep byte-exact the `_G` table (mirrors globals, `_G._G` self-ref), `getfenv`/
+   `setfenv` env-swapping, and the lock semantics — needs the full Lua conformance
+   suite, not a one-turn edit. ~15 `self.globals` access sites = contained but
+   semantically delicate.
+
+2. **Tree-walking interpreter = the 14x on compute loops** (structural). A 100-iter
+   Lua loop is 14x; redis runs Lua 5.1 bytecode. Closing this needs a bytecode VM
+   or an mlua/LuaJIT dependency — a major, owned, multi-day effort.
+
+This is the biggest ratio gap on the board and the first genuinely NEW lever in
+several turns (perf point-fixes + correctness + large-values all saturated). Next
+focused effort should start with lever #1 (globals Rc-share, biggest bang for a
+contained-but-careful change). No source change this turn (risk-gated).
