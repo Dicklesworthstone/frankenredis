@@ -2379,3 +2379,23 @@ anyway (cf. mimalloc-defeats-buffer-reuse). The intermediate Vec's presize is a
 *feature*. Reverted (stashed `crimsonhawk-decode-foreach-streaming-REJECTED-…`);
 the two-pass presized decode is optimal. Don't re-chase intermediate-Vec
 elimination on the listpack decode path. No source change landed.
+
+## 2026-06-28 CrimsonHawk: REJECT vectorized `read_line` (position-scan for CRLF) — scalar byte loop is optimal on tiny RESP header lines (+6.8%)
+
+`read_line` is the most-called RESP parse primitive — invoked once per `*count`
+and per `$len` header, i.e. 1+N times per command. Recurring temptation: replace
+the scalar `while` byte loop with a vectorizable `input[base..].iter().position(|&b|
+b==b'\r')` scan (LLVM autovectorizes byte-eq position) + a `\n` check, lone-`\r`
+continuing the search. Finally MEASURED instead of asserted.
+
+Isolated in-process interleaved A/B (`tests/read_line_ab.rs`, best-of-9 × 3M iters
+over the exact tiny header lines the command parser feeds — `*3`,`$3`,`$5`,`$100`,
+`$65535`,…; parity proven incl. lone-`\r` skip / incomplete / CRLF-at-offset):
+CONTROL **2.167 ns/line**, CANDIDATE **2.314 ns/line** = **+6.8% SLOWER**.
+
+Why: in the command framing path `read_line` only ever scans the SHORT header
+lines (the bulk DATA is taken by length via `parse_bulk_slice`, never scanned), so
+the CRLF sits at offset 1–5. The vectorized `position` pays SIMD/loop setup that the
+trivial scalar loop — already ~register-bound at 2.2 ns/line — skips. Vectorization
+can only win on long lines, which this primitive never sees. The scalar `read_line`
+is optimal; don't swap it for memchr/position. (Test-only; no source modified.)
