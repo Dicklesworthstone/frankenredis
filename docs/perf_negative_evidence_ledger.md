@@ -2690,6 +2690,51 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## ============================================================================
+## 2026-06-28 CrimsonHawk: SESSION CONVERGENCE SUMMARY (decision-ready snapshot)
+## ============================================================================
+
+One consolidated view of where the per-turn perf campaign stands, so the next
+operator (human or agent) decides from the true state instead of re-deriving it.
+
+**WINS LANDED THIS SESSION (6, all beat Redis 7.2.4, all isolated-A/B measured):**
+1. RDB list-decode `to_bytes`→`into_bytes` clone-elim — `decode_rdb` −21.5% (2a43fb0db)
+2. CRC64 slice-by-8→slice-by-16 — −10.5% large / −28% tiny (7194d2443)
+3. glob_match prefix fast path — −18..25%/match (5e4c99393)
+4. glob_match exact+suffix fast paths — −54%/−49% (682f025d9)
+5. glob_match contains fast path (dep-free first-byte-skip) — −71%/−86% (d65774a96)
+6. zset listpack decode integer-score direct-convert — −24.7% (788bbfd00)
+Plus: per-type decode benches, a glob fuzz-differential regression gate, 2 wrong
+rejections recovered via isolated A/B, 1 pre-existing broken test repaired.
+
+**PER-TURN VEIN: CLOSED.** Every reachable compute/algorithm primitive verified
+optimal or parity (glob, CRC64/16, HLL hash+estimate, intset, geohash, BITOP/BITPOS/
+BITCOUNT SWAR, random-sampling, LPOS/LREM, parse_listpack_integer, float-parse).
+RDB codec fully characterized: ENCODE LZF-bound (parity+), DECODE per-element-alloc-
+bound. XADD to_vec lever already landed (get_mut).
+
+**REMAINING WORK — STRUCTURAL, NOT per-turn-shippable (with why-not):**
+- #1 keep-listpack `RdbValue` decode — kills the per-element `Vec<u8>` alloc that IS
+  the decode gap. Cross-crate (fr-persist variant + fr-store storage), contract-
+  changing, multi-day. Cheap increments PROVEN defeated: borrow-blob (LZF), inter-
+  mediate-Vec (presize is a feature), streaming (+79%).
+- XADD in-object metadata (3 hash lookups/XADD → 1). ~20 contended-core sites for
+  ~10ns of a ~900ns gap → dominated by the StreamEntries insert (structural). Low EV.
+- keyspace-dict RAM 4.49x→1.79x (uhthd) — SCAN-semantics-coupled, multi-day.
+
+**BLOCKERS:** end-to-end differential correctness probing (the other high-yield vein)
+needs the FULL `frankenredis` binary, blocked by fr-command's build.rs reading the
+gitignored `legacy_redis_code/redis/src/commands` (ops-level fix only; do not
+re-attempt per [[project_xadd_sidemap_alloc_gap]]). Per-crate `cargo test/bench -p`
++ isolated in-process A/B is unaffected and is how all 6 wins shipped.
+
+**RECOMMENDED PIVOT (loop is otherwise returning "already optimal"):** (a) dedicated
+multi-session keep-listpack implementation (highest EV), or (b) ops fix to the rch
+build block (unblocks full-binary benching + differential probing), or (c) retarget
+the loop to RAM/correctness.
+
+## ============================================================================
+
 ## 2026-06-28 CrimsonHawk: RDB ENCODE side re-examined — LZF-compression-bound (parity), no per-turn lever; codec veins fully closed
 
 Closing the last codec sub-vein I hadn't explicitly recorded. Per-type ENCODE benches:
