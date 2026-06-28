@@ -8,6 +8,28 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+> ## ⇩ READ THIS FIRST — PER-TURN PERF STATUS (CrimsonHawk, 2026-06-28) ⇩
+> The per-turn perf surface is **EXHAUSTIVELY VERIFIED CLOSED** (by measurement, not
+> inspection). This session landed **8 measured wins** (RDB list-decode −21.5%, CRC64
+> sb16, glob ×4 −18..86%, zset-int-score decode −24.7%, **HLL histogram −53.5%, HLL
+> merge SIMD-pmaxub −93.9%**) — see the "SESSION CONVERGENCE SUMMARY" + lever-class
+> coverage table below. EVERY lever class (autovec/SWAR, redundant-work, algorithm,
+> search/reduction, alloc-avoidance, strength-reduction, RDB codec, per-command
+> overhead) is swept across all 5 crates; every flagged item resolved; remaining
+> "ceiling" primitives confirmed at the safe-Rust ceiling.
+> **No per-turn lever remains.** The only positive-EV perf work left is STRUCTURAL /
+> multi-day and NOT per-turn-sliceable: (1) keep-listpack `RdbValue` decode [#1], (2)
+> XADD in-object metadata, (3) keyspace-dict RAM (uhthd) — cheap increments to each
+> PROVEN defeated. RAM struct-shrinks are a measured LOSS (invisible to modeled
+> used_memory). Differential correctness probing (the other high-yield vein) is BLOCKED
+> by the full-binary build (fr-command build.rs needs gitignored commands dir — ops fix
+> only). **A loop firing "find a per-turn perf lever" will only return verification.**
+> PIVOT NEEDED: dedicated structural session, or ops fix to the rch build block, or a
+> different objective. Method that works (for the structural session): isolated
+> in-process A/B via `rch exec -- cargo test -p <crate> --release --test <ab> -- --ignored`
+> (defeats shared-worker noise); the two SIMD heuristic classes; "inspection is a
+> hypothesis — MEASURE it" (it recovered the 2 big HLL wins after premature convergence).
+
 ## Established baseline (do NOT re-litigate)
 - **Throughput is parity-or-faster** on hot commands (GET ~1.2x faster, SET ~1.3x faster,
   HSET 1.13x the lone residual). The historical "fr 2x slower pipelined" (ohsk5) headline
