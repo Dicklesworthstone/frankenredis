@@ -2690,6 +2690,22 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: hash-decode 310ns/elem cost breakdown corrected — it's LZF-decompress + parse + alloc, NOT a hidden alloc lever
+
+Re-analyzed the per-type bench's hash decode (9.92 ms / 32k elems ≈ 310 ns/elem) which
+I'd loosely called "allocation-bound". CORRECTION: that figure also includes 400 LZF
+DECOMPRESSES — the ~200-byte hash listpack blobs ("f0v0f1v1…", repetitive) are
+LZF-compressed by `rdb_encode_string` (>20 B + shrinks), so decode_rdb runs
+`lzf_decompress` per hash before parsing. Breakdown, each already verified optimal:
+- LZF decompress (chunked `extend_from_within`; the pre-reserve lever was REJECTED as
+  mimalloc-free) — optimal.
+- listpack `decode_entry` per element (encoding-byte dispatch + span) — tuned.
+- per-element `Vec<u8>` alloc — inherent to `RdbValue::Hash(Vec<Vec<u8>>)`, mimalloc-cheap.
+So 310 ns/elem is LZF-amortized + parse + alloc — no hidden lever; the only structural
+reduction is keep-listpack (#1, avoids the element-decode entirely). The list-clone
+(−21.5%) + zset-int-score (−24.7%) decode wins already took the per-element redundancy;
+the rest is LZF+alloc, both at their floor. No source change.
+
 ## 2026-06-28 CrimsonHawk: per-command-overhead FULLY CHARACTERIZED as irreducible — the ledger's "biggest-reach lever" closed by verification
 
 The recurring "per-command-overhead dominates the long tail / name-hash jump table is
