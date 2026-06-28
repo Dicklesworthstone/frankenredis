@@ -6990,3 +6990,15 @@ Result: normalized ratio worsened (`0.412 / 0.457 = 0.902x`), and raw fr through
 Criterion marked the fr candidate as a regression. Decision: **REVERT ~0-gain/regression**; no source shipped. Focused PFADD
 tests were green before revert (`cargo test -p fr-store pfadd -- --nocapture`: 10 unit PFADD tests + 2 HLL metamorphic + empty
 PFADD integration pass). Next PFADD work should skip lookup-collapse and move to a deeper primitive than map-probe shaving.
+
+### 2026-06-28 NO-SHIP: PFMERGE borrowed fast path regressed the measured gap; keep bench row only (codex/BlueFalcon)
+Dug the remaining PFMERGE dispatch gap after the MOVE/OBJECT/RANDOMKEY family had already landed. Added PFMERGE to
+`keyed_write_vs_redis` so the missing surface is now directly measured by `PFMERGE_1v`. Baseline ORIG/current-main+bench-row
+local fallback (same `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b`; rch remote lacked the Redis oracle
+path) measured Redis 129.06 Kelem/s vs FrankenRedis 30.218 Kelem/s, FR/Redis 0.234x. Candidate borrowed executor for
+`PFMERGE dst src` passed the focused parity test but measured Redis 124.72 Kelem/s vs FrankenRedis 19.792 Kelem/s,
+FR/Redis 0.159x, so the source fast path was reverted. Verdict: the PFMERGE loss is not generic dispatch allocation; route
+next work into `Store::pfmerge`/HLL merge+re-encode or a less-degenerate source workload instead of retrying a shallow
+parser/executor fast path. Final kept-state recheck through `rch exec -- cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- PFMERGE_1v --noplot` fell back local due worker preflight slots and measured Redis 96.925 Kelem/s vs
+FrankenRedis 17.759 Kelem/s, FR/Redis 0.183x.
