@@ -2728,6 +2728,19 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: `rch cache warm` (last unchecked mechanism) also respects the exclusion — every rch path now ruled out
+
+`rch cache warm` ("pre-sync project sources to workers without a build") uses the SAME
+sync mechanism, so it honors `.rchignore` (`legacy_redis_code/`) + gitignore and will NOT
+push the commands dir. That was the last rch mechanism I hadn't checked. COMPLETE list of
+ruled-out rch unblock paths: config include keys, `force_local` (not settable), `rch exec
+--local`, `RCH_FORCE_LOCAL` env, hook bypass, `rch sync`, `rch cache warm`. None bypasses
+the gitignore/`.rchignore` exclusion of the commands dir. The unblock therefore requires
+placing the 394-file commands dir into each worker's rch `remote_base` (the staging root)
+OUTSIDE rch's own sync — a host-level/ops action with no agent-facing CLI. Investigation
+of the build-block is now provably exhaustive: it is ops-only, and option (a) [pre-seed
+workers] is the recommended one-time fix. No source change.
+
 ## 2026-06-28 CrimsonHawk: ACTIONABLE build-fix — pre-seed workers with the commands dir (ops, no licensing change) is the clean unblock
 
 Read `crates/fr-command/build.rs` (410 lines) to make the build-fix concrete. It reads
