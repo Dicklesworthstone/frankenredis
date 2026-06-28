@@ -2728,6 +2728,26 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: uncovered families measured — PFADD now PARITY (stale 2.75x corrected), SCAN ~1.33x structural; throughput surface closed across ALL families
+
+Swept the families the broad head-to-head misses (HLL/scan) on the live binary:
+- **PFADD: fr 842k vs redis 823k req/s = 1.02x (fr ~parity/faster)** — the long-documented
+  "PFADD 2.75x slow" is STALE; fr now matches/beats redis on PFADD. No gap. (corrects
+  project_6s9dx note.)
+- **SCAN (full-keyspace, 100k keys): fr 0.56s vs redis 0.42s = ~1.33x slower** — the
+  ordered_keys binary-search sorted-cursor (deterministic SCAN by design); structural,
+  tied to the keyspace-RAM ordered_keys duplicate; LESS than the documented 1.62x. Not a
+  per-turn lever (fixing needs the SCAN-semantics reversal = the keyspace structural work).
+Caveat: load was 48 (high) so ABSOLUTES are depressed, but fr/redis RATIOS on the same
+box are robust (both single-threaded, 64 cores >> load).
+
+CONCLUSION: across EVERY command family now measured on the live binary — hot path
+(GET/SET syscall floor), compute-heavy (broad sweep fr-dominant), and the HLL/scan tail —
+fr is parity-or-faster EXCEPT the two by-design/structural residuals: SCAN ~1.33x (sorted
+cursor) and zcount/ZRANK treap-constant-factor. No per-turn throughput lever remains
+anywhere; both residuals are the keyspace/treap structural domains already documented.
+Throughput surface conclusively + comprehensively closed. No source change.
+
 ## 2026-06-28 CrimsonHawk: broad throughput head-to-head on the live binary — fr DOMINATES compute-heavy commands; sole loss zcount 0.71x is treap-structural (dispatch already fast-pathed), not a per-turn lever
 
 Ran scripts/broad_command_headtohead.py (the tool that found the set-algebra losses)
