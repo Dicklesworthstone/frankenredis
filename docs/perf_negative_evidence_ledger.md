@@ -2690,6 +2690,17 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: stale flagged item cleared — "active-expire stats-struct-per-cmd" is a periodic-cycle STACK return, not a per-command heap alloc
+
+Verified the last open flagged perf item ([[project_generic_dispatch_clock_chaining]]
+flagged "active-expire stats-struct-per-cmd" to CobaltCove). NOT an issue:
+`ActiveExpireCycleResult` is a plain struct literal RETURNED BY VALUE (stack/RVO) from
+`run_active_expire_cycle`, which runs PERIODICALLY (serverCron-equivalent tick), NOT
+per command. Per-command expiry is lazy (`drop_if_expired`, already folded into the GET
+single-probe fast path). No per-command heap alloc, no lever. With the GET double-probe
+also already fixed (`frankenredis-get-single-lookup`), the CobaltCove-flagged core items
+are both closed. Every flagged perf item is now resolved or confirmed-stale. No source.
+
 ## 2026-06-28 CrimsonHawk: remaining inspection-only primitives are at the SAFE-RUST CEILING — beating them needs unavailable intrinsics or byte-breaking swaps
 
 Final pass on the still-inspection-only "optimal" calls. Each is genuinely at the
