@@ -1863,3 +1863,29 @@ BLOCKER: host load spiked to **~130–161** this turn, so any XADD A/B is
 contention-dominated and unreliable — the structural fix needs to be benched at
 low load. No source change landed; this root-caches the biggest open gap so the
 next pass (at lower load) starts from the side-map move, not a fresh profile.
+
+## 2026-06-28 AmberRiver: LANDED ZADD NX/GT/LT fresh-key bulk path — O(n²)→O(n), 4.4-4.5x vs main / 1.5x faster than Redis
+
+Completes the ZADD-CH win: the CH fix excluded NX/GT/LT, but a gap-sweep found
+those ALSO ~3x slower on a fresh key (ZADD_NX 3.05x, ZADD_GT 3.09x vs Redis) —
+same O(n²) PackedZSet per-member build. On a FRESH key every DISTINCT member is
+just added regardless of flag (no existing score to gate on); only an intra-batch
+DUPLICATE member needs the per-member loop (NX=first-wins, GT=max-wins). Extended
+the fresh-key bulk path to ALL flags: build the last-wins `latest` map (also
+detects dups); bulk-build when default/CH (dups last-wins, always safe) OR no
+intra-batch dup; else fall through to the per-member loop.
+
+Measured (`ZADD key <FLAG> <200 members>` fresh, DEL+ZADD x200, best-of-12, load ~42):
+
+| flag | candidate | main control | Redis 7.2.4 | win vs main | fr/Redis (was) |
+|---|---:|---:|---:|---:|---:|
+| NX | `6.56 ms` | `29.45 ms` | `10.03 ms` | **4.49x** | `0.654` (2.936) |
+| GT | `6.79 ms` | `29.64 ms` | `10.17 ms` | **4.37x** | `0.668` (2.914) |
+
+fr flips from ~2.9x SLOWER to ~1.5x FASTER than Redis. Byte-exact: live
+`DEBUG DIGEST-VALUE` identical to control across NX/GT fresh-200, NX intra-dup
+(first-wins), GT intra-dup (max-wins), GT+LT (empty), NX-CH intra-dup; 659
+fr-store lib tests green (incl zadd_repeated_member_processes_pairs_sequentially).
+Fresh-key ZADD bulk coverage now complete (default/CH/NX/GT/LT). Binary built
+LOCALLY — rch workers hit the fr-command legacy_redis_code build-blocker on every
+retry this turn.

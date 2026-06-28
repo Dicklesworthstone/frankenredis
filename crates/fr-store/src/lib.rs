@@ -13758,7 +13758,14 @@ impl Store {
         // instead builds the zset one insert at a time, which is O(n^2) in the
         // PackedZSet sorted-Vec phase. Route to the one-shot bulk build (sort
         // once) and report the same (added, changed). Byte-identical final set.
-        if !opts.nx && !opts.gt && !opts.lt && !self.entries.contains_key(key) {
+        if !self.entries.contains_key(key) {
+            // (frankenredis-zaddflagbulk) default/CH: intra-batch repeats are
+            // last-wins (safe to bulk). NX/GT/LT repeat semantics are
+            // order-dependent, so for those only bulk when there is no
+            // intra-batch duplicate member; otherwise fall through to the
+            // per-member loop. A fresh key means every DISTINCT member is just
+            // added regardless of flag (no existing score to gate on).
+            let permissive = !opts.nx && !opts.gt && !opts.lt;
             let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
                 HashMap::with_capacity_and_hasher(
                     members.len(),
@@ -13766,10 +13773,12 @@ impl Store {
                 );
             let mut added = 0_usize;
             let mut changed = 0_usize;
+            let mut intra_dup = false;
             for (score, member) in &members {
                 let score = canonicalize_zero_score(*score);
                 match latest.insert(member.clone(), score) {
                     Some(old_score) => {
+                        intra_dup = true;
                         if !old_score.total_cmp(&score).is_eq() {
                             changed += 1;
                         }
@@ -13777,6 +13786,7 @@ impl Store {
                     None => added += 1,
                 }
             }
+            if permissive || !intra_dup {
             if added == 0 {
                 return Ok((0, 0));
             }
@@ -13795,6 +13805,7 @@ impl Store {
                 return Ok((added + changed, changed));
             }
             return Ok((added, changed));
+            }
         }
         let (added, changed, is_empty, touched) = {
             let entry =
