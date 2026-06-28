@@ -2688,3 +2688,25 @@ beats shared-worker noise* — has now harvested glob (4 shapes), CRC64, and 2 R
 decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outside a
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
+
+## 2026-06-28 CrimsonHawk: RDB ENCODE side re-examined — LZF-compression-bound (parity), no per-turn lever; codec veins fully closed
+
+Closing the last codec sub-vein I hadn't explicitly recorded. Per-type ENCODE benches:
+quicklist 47ms (slowest), zset 16.6ms, hash 6.4ms, set 3.2ms, intset 2.5ms. The
+quicklist dominance is NOT framing or allocation — it is **LZF compression**:
+`encode_compact_list_quicklist2` builds a listpack per PACKED node, and
+`rdb_encode_string` LZF-compresses any blob > 20 B when it shrinks (the node
+listpacks do). So encode wall-clock is the LZF hash-chain matcher, a faithful port of
+upstream `lzf_c.c` whose fixed-array-table opt was already PROVEN neutral (the bounds
+checks weren't the cost). fr compresses the same blobs redis does → parity-or-faster
+on DUMP (measured 0.46-0.56x fr-faster on collections). No per-turn lever:
+- zset/hash/set/intset encode = listpack build + (for >20 B) LZF — same as redis.
+- the `format!("{score}")` per fractional zset score is a String alloc, but it is the
+  byte-correct shortest-repr (redis 7.2 `fpconv_dtoa`, not %.17g) and the alloc is
+  ~10 ns mimalloc of a >1× -faster-than-redis path — not worth the float-format byte
+  risk ([[geodist {:.4} declined]] lesson).
+
+RDB codec is now FULLY characterized: ENCODE is LZF-bound (parity+), DECODE is
+per-element-`Vec<u8>`-allocation-bound (only keep-listpack avoids it, #1 multi-day,
+borrow-increment defeated by LZF). Both directions have no remaining per-turn lever.
+No source change.
