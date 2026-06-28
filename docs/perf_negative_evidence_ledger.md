@@ -2728,6 +2728,32 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: gap #2 RESTORE-decode measured 3.1x on live binary (DUMP-encode PARITY) — CORRECTS my own keep-listpack ~3-6% down-pricing (that was a smaller lever)
+
+Measured the #2 documented gap (collection RDB codec) on the live binary,
+collection_reload_headtohead.py interleaved median (load 10, clean), 2000 hashes/sets/
+zsets × 40 members:
+- DUMP (encode half): fr 33.2ms / redis 32.1ms = **0.967x = PARITY** (encode levers worked).
+- RESTORE (decode half): fr 62.5ms / redis 20.2ms = **0.323x (redis 3.1x faster)** — the gap.
+- DEBUG RELOAD (save+load): 0.770x (redis 1.30x).
+
+SELF-CORRECTION: an earlier entry this session down-priced the keep-listpack lever to
+~3-6% ("from_unique_pairs already bulk-builds"). The MEASURED decode gap is 3.1x — that
+down-pricing CONFLATED two different levers:
+- **decode-into-arena FUSION** (eliminate the intermediate `Vec<(Vec,Vec)>` by decoding
+  the listpack straight into the CompactFieldMap arena) = the ~3-6% lever. Per-turn-ish
+  but tiny, AND on a NON-HOT path.
+- **full keep-listpack** (carry the raw listpack AS the store encoding, like redis
+  OBJ_ENCODING_LISTPACK) = saves the ENTIRE decode+arena-build (fr parses N elements +
+  copies into arena; redis just memcpys the kept blob) = the full ~3.1x. Multi-day
+  architectural (new store encoding + every collection op handles listpack-or-arena).
+
+So keep-listpack's TRUE EV is the 3.1x RESTORE-decode gap, NOT 3-6% — but RESTORE/RELOAD
+is a NON-HOT path (MIGRATE/DEBUG RELOAD/replica full-sync load, not steady-state), so the
+real-world weight is bounded, and the fix is multi-day. No per-turn lever (fusion is
+~3-6% of a non-hot path = negligible). DUMP-encode parity confirms the encode side is
+done. Gap #2 precisely characterized: decode-only, structural keep-listpack, non-hot. No source.
+
 ## 2026-06-28 CrimsonHawk: fresh differential edge sweeps byte-exact on live binary — DUAL closure (perf + correctness) confirmed
 
 Pivoted to the build-unblock's other high-value use (differential correctness). Ran both
