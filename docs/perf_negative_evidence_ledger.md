@@ -2712,6 +2712,30 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: keyspace-RAM lever is STUCK behind tradeoffs, not just multi-day — both structural levers now re-priced; fr at practical optimum
+
+Completed the structural re-pricing by re-evaluating the keyspace-dict RAM gap (1.79x
+after uhthd, the biggest remaining ratio). It is STUCK, not merely multi-day:
+- fr's SCAN is DELIBERATELY sorted-order (deterministic — a guarantee STRONGER than
+  redis, whose SCAN is unordered), which REQUIRES the `ordered_keys` Vec → key bytes
+  stored twice (entries map + ordered_keys) = the 1.79x residual.
+- Arc-share the key bytes between `entries` and `ordered_keys` to dedupe → memory's
+  "KeyDict-Arc-keys regresses vs hashbrown": Arc<[u8]> keys in the HOTTEST map (every
+  GET/SET) trade RAM for hot-path THROUGHPUT regression. Net negative (throughput is
+  the priority; fr is currently parity-or-faster there).
+- Drop sorted-order (hash-order SCAN like redis, store keys once) → changes observable
+  SCAN order, breaks the deliberate `core_scan.json` fixtures + test 32939; multi-day,
+  all-or-nothing, BEHAVIOR-CHANGE.
+
+CONCLUSION (both structural levers now concretely re-priced): keep-listpack ~3-6% +
+multi-hour; keyspace-RAM stuck behind a throughput-vs-RAM and a SCAN-semantics tradeoff.
+**fr is at its PRACTICAL OPTIMUM vs redis 7.2.4 within the current design**: throughput
+parity-or-faster, decode near its floor, the RAM residual locked behind fr's stronger-
+than-redis deterministic-SCAN guarantee (a deliberate quality choice, not a bug). No
+remaining lever — per-turn OR multi-day — clears a clean ROI bar without a design/
+semantics decision a HUMAN must make (keep deterministic SCAN + accept the RAM, or
+relax it for RAM). No source change.
+
 ## 2026-06-28 CrimsonHawk: keep-listpack #1 lever EV RE-EVALUATED DOWN to ~3-6% — `from_unique_pairs` already took the bulk-build; only the intermediate alloc remains
 
 Concrete re-analysis of the "#1 structural lever" (keep-listpack RdbValue decode) before
