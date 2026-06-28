@@ -2353,3 +2353,29 @@ mixed-collection criterion bench **cannot resolve it**. Reverted (stashed
 unprovable change. If revisited, isolate it with an in-process A/B micro-bench over a
 zset-only `RdbValue` (defeats cross-run worker-load variance, the way the encoder
 A/B test did) — NOT another mixed `decode_rdb` invocation. No source change landed.
+
+## 2026-06-28 CrimsonHawk: REJECT streaming listpack decode (eliminate intermediate `Vec<ListpackEntry>`) — +79% SLOWER, the intermediate's presize is a feature not a cost
+
+After the list-decode clone win, the next hypothesis was that the intermediate
+`Vec<ListpackEntry>` every `decode_listpack` builds (then the RDB hash/set/zset/list
+callers immediately drain via `into_iter().map(into_bytes).collect()`) is wasted —
+one alloc + one extra pass per listpack across ~2200 collection listpacks in the
+bench. Added `decode_listpack_for_each(data, |entry| …)` (byte-for-byte identical
+validation — header, per-entry bounds, exact terminator, count match) that streams
+entries straight into the caller's target Vec with no intermediate.
+
+Measured with an **isolated in-process interleaved A/B** (`tests/listpack_decode_ab.rs`,
+best-of-9 × 3M iters, defeats the rch-worker load noise that swamped the earlier
+zset attempt; parity proven across n=0,1,2,17,100,1000): OLD `decode_listpack`+collect
+**2152 ns/decode**, NEW streaming **3861 ns/decode** = **+79.4% SLOWER**.
+
+Why the "optimization" loses: `decode_listpack` reads the header's `num_elements`
+and **presizes** the intermediate `Vec<ListpackEntry>` exactly, and the subsequent
+`collect()` presizes the output from the iterator's exact `size_hint` — so the
+two-pass path does TWO exact-sized allocations and zero reallocs. The streaming path
+has no count when it starts pushing, so the target Vec grows from empty (~log2(n)
+reallocs+copies) — and under mimalloc the "saved" intermediate alloc is ~free
+anyway (cf. mimalloc-defeats-buffer-reuse). The intermediate Vec's presize is a
+*feature*. Reverted (stashed `crimsonhawk-decode-foreach-streaming-REJECTED-…`);
+the two-pass presized decode is optimal. Don't re-chase intermediate-Vec
+elimination on the listpack decode path. No source change landed.
