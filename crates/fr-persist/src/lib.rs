@@ -3624,11 +3624,17 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                     items.push(node_blob);
                                 }
                                 2 => {
-                                    // PACKED: the blob is a listpack.
+                                    // PACKED: the blob is a listpack. Move each
+                                    // decoded entry's payload out with `into_bytes`
+                                    // (the iterator yields owned entries) rather than
+                                    // `to_bytes`, which cloned the string payload and
+                                    // dropped the original — one wasted alloc+copy+free
+                                    // per packed list element on the quicklist2 decode
+                                    // (RESTORE / DEBUG RELOAD) path. Byte-identical.
                                     for entry in listpack::decode_listpack(&node_blob)
                                         .map_err(|_| PersistError::InvalidFrame)?
                                     {
-                                        items.push(entry.to_bytes());
+                                        items.push(entry.into_bytes());
                                     }
                                 }
                                 _ => return Err(PersistError::InvalidFrame),

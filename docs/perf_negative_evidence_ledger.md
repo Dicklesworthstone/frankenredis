@@ -2300,3 +2300,35 @@ the small known-length `extend_from_slice` copies better than (a) per-`push`
 capacity rechecks it can't prove away across separate calls, or (b) the extra stack
 writes + right-aligned reassembly the buffer variant adds. The 5-extend form is the
 optimum. Reply-encoder micro-rewrites are closed — don't re-chase. No source change.
+
+## 2026-06-28 CrimsonHawk: LANDED quicklist2 listpack decode `to_bytes`→`into_bytes` — −21.5% on the full mixed RDB decode
+
+Digging the dominant collection-RDB **decode** gap (RESTORE/DEBUG RELOAD decode is
+the side fr loses to Redis). The hash/zset/set listpack decode paths already MOVE
+each decoded entry's payload out via `ListpackEntry::into_bytes(self)`, but the
+`RDB_TYPE_LIST_QUICKLIST_2` PACKED-node arm (fr-persist lib.rs ~3631) iterated the
+SAME owned `Vec<ListpackEntry>` yet called `entry.to_bytes(&self)` — which **clones**
+the string payload into a fresh `Vec<u8>` and then drops the original. One wasted
+alloc+memcpy+free per packed list element. Lists are the largest objects on the
+load path (a quicklist2 is the only multi-node packed container), so this fired on
+every element of every restored list.
+
+Fix: `entry.to_bytes()` → `entry.into_bytes()` (the loop already binds `entry` by
+value). Byte-identical — `into_bytes` returns the exact same bytes, only moved
+instead of copied; integer entries still render canonical decimal either way.
+
+Measured per-crate (server-free criterion `rdb_codec`, builds anywhere — leaf crate,
+no commands-dir blocker; CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cc via
+`rch exec -- cargo bench -p fr-persist`):
+- `rdb_codec/decode_rdb` (mixed: 300 lists×240 + 400 hash×40 + 400 zset×40 +
+  800 set×40 + intset) — control **[25.58 27.35 29.54] ms**, candidate
+  **[21.19 21.46 21.75] ms**, criterion **change −21.5% (CI −27.4%…−15.9%,
+  p=0.00), "Performance has improved"**. Candidate variance also collapsed
+  (±1.3% vs the baseline's ±7%). Conservative floor (candidate median vs baseline
+  fastest sample) is still ~−16%. The list portion drives it: 300×240 = 72k
+  per-element clones eliminated.
+- conformance: 223 fr-persist tests green (196+5+10+12), 0 failed.
+
+The only remaining decode clone in the path; hash/set/zset were already moved. This
+is the cheap half of the decode gap — the structural remainder (keep-listpack
+`RdbValue` so collections never element-decode at all) stays fr-store-owned.
