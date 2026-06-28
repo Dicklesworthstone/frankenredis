@@ -2171,3 +2171,28 @@ closure capture, and passing the 1157 tests would not prove the scan complete), 
 a correctness-delicate file with recent closure/coroutine/upvalue semantic work
 (last touched 2026-06-25). Warrants the full Lua conformance suite + closure/
 coroutine fuzzing, not a rushed turn. No source change.
+
+## 2026-06-28 AmberRiver: EVAL lever RE-PRIORITIZED — loop-var cell-reuse targets a RARE workload; real scripts are redis.call/setup-bound
+
+Correcting the prior entry's prioritization with the workload data already
+collected. The 14x was a SYNTHETIC tight arithmetic loop (`for i=1,5000 do
+x=x+i*2-1 end`). But real redis Lua scripts are redis.call-BOUND, and that case
+measured only **2.95x** (`for i=1,20 do redis.call('incr','c') end`), while the
+trivial/setup case is ~4.4x. So:
+
+- The loop-var cell-reuse lever (spec'd 7d8771e42) only helps tight-COMPUTE Lua
+  loops — RARE in real redis scripts. Its real-world impact is <5%, not the ~10%
+  the synthetic loop suggested. Combined with the exhaustive-AST-scanner risk on a
+  correctness-delicate file, it is NOT worth a dedicated effort. WITHDRAWN as a
+  recommended standalone lever.
+- Real EVAL cost (~3-4.4x) is dominated by per-EVAL SETUP (globals clone ~14% +
+  LuaState build/teardown + GC scope) and the redis.call BRIDGE (Lua↔store arg/
+  result marshalling), NOT the tree-walk compute.
+
+NET strategic conclusion for the whole scripting gap: the ONE lever that addresses
+all three cost centers (setup + redis.call bridge + compute) at once is replacing
+the custom tree-walker with a bytecode VM (or mlua/LuaJIT) + a persistent reused
+lua_State (kills the per-EVAL clone/teardown). That is the only EVAL work worth
+doing, and it is major/multi-day/owned. Every smaller EVAL micro-lever is now
+measured/spec'd and either ~0-gain, risky, or rare-workload. EVAL fully closed.
+No source change.
