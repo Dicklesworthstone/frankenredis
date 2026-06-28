@@ -2332,3 +2332,24 @@ no commands-dir blocker; CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cc v
 The only remaining decode clone in the path; hash/set/zset were already moved. This
 is the cheap half of the decode gap — the structural remainder (keep-listpack
 `RdbValue` so collections never element-decode at all) stays fr-store-owned.
+
+## 2026-06-28 CrimsonHawk: REVERT zset listpack decode integer-score direct-convert — real but sub-noise, unprovable on this session's box
+
+Follow-on to the list-decode win: integer-valued zset scores round-trip through the
+listpack as INT entries (`encode_listpack_entry` int-encodes the decimal), so the
+ZSET_LISTPACK decode does `into_bytes` (decimal render alloc) → `from_utf8` →
+`parse::<f64>` per integer score. Tried matching the `ListpackEntry` directly:
+`Integer(n) => n as f64` (skip render+utf8+float-parse), `String(bytes) =>` textual
+parse unchanged. Byte-identical (`n as f64` == `parse(decimal(n))` for all i64).
+
+Causally this only REMOVES work (a float parse + a decimal alloc for ~half the bench
+scores), yet the criterion run reported `decode_rdb` **[30.28 33.47 37.80] ms,
+change +55.9% "regressed"** vs the 21.4 ms baseline — a physically impossible
+regression, i.e. the rch worker was loaded during the run (baseline itself swings
+±7%; this run ±12%). The true signal (~half of 400×40 = 8k integer scores out of
+~150k total per-element allocs on the decode) is well under that noise floor, so the
+mixed-collection criterion bench **cannot resolve it**. Reverted (stashed
+`crimsonhawk-zset-intscore-subnoise-reverted-20260628`) rather than ship an
+unprovable change. If revisited, isolate it with an in-process A/B micro-bench over a
+zset-only `RdbValue` (defeats cross-run worker-load variance, the way the encoder
+A/B test did) — NOT another mixed `decode_rdb` invocation. No source change landed.
