@@ -2612,3 +2612,27 @@ The literal-glob vein is now COMPLETE: exact -54%, prefix -18..25%, suffix -49%,
 contains -71..86% — every metachar-free shape framed by ≤2 end-stars now serves from
 a memcmp/skip-search instead of backtracking, beating Redis `stringmatchlen` on the
 KEYS / SCAN-MATCH / PSUBSCRIBE / keyspace-notify pattern surface. Landed in `glob_match`.
+
+## 2026-06-28 CrimsonHawk: pure-primitive survey — 6 more primitives verified at their optimum (no lever); the easy algorithmic vein is mined out
+
+After the session's 6 wins (RDB list-decode -21.5%, CRC64 sb16 -10.5%/-28%, glob
+prefix/exact/suffix/contains -18..86%, zset int-score decode -24.7%), surveyed the
+next tier of pure parity-with-Redis primitives by code inspection. Each is already
+optimal or low-value — recorded so the loop doesn't re-walk them:
+
+| primitive | state | verdict |
+|---|---|---|
+| `listpack_int_bytes_are_canonical` | `.all(is_ascii_digit)` short-circuits on the first non-digit byte | optimal — fast-rejects non-numeric elements in 1 byte |
+| `hll_hash` | faithful word-at-a-time MurmurHash64A (`chunks_exact(8)` + LE word mix) | impl ceiling (algo fixed for redis cross-compat) |
+| `hll_estimate` | histogram over 16384 registers + Ertl tau/sigma | memory-bound ceiling |
+| intset membership / intersection | `binary_search` (O(log n)) | optimal |
+| geohash interleave | magic-number parallel bit-spread (`0x5555…`/`0x3333…`) | optimal |
+| CRC16 keyslot | byte-at-a-time CRC16-CCITT (non-reflected) | cluster-only over SHORT keys → slice-by-N won't pay off (read_line lesson); low value |
+| BITOP AND/OR/XOR/NOT | already SWAR / word-at-a-time (`u64` chunks, with a SWAR A/B gate) | optimal |
+
+The repeatable win pattern this session — *pure parity-with-Redis function + a
+common-case fast path / better-impl, measured with an isolated in-process A/B that
+beats shared-worker noise* — has now harvested glob (4 shapes), CRC64, and 2 RDB
+decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outside a
+per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
+`RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
