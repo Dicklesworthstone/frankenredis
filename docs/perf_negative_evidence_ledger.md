@@ -2728,6 +2728,23 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: cold-dispatch 6s9dx cluster verified COMPLETE — GETEX/HINCRBY/INCRBYFLOAT/COPY all already have borrowed fast paths
+
+Resolved the last conflicting memory (project_6s9dx "remaining GETEX/HINCRBY/INCRBYFLOAT/
+COPY" vs project_perf_surface "68 fast-paths ALL shipped"). Grepped fast-path refs
+(`parse_borrowed_plain_*` / `execute_plain_*` / `*_borrowed`) per command vs the
+known-shipped setnx/persist baseline: GETEX 15+32, HINCRBY 12+12, INCRBYFLOAT 6+9, COPY
+5+9 — ALL ≥ setnx(6+5)/persist(7+10). So those four DO have borrowed fast paths; the
+6s9dx cold-dispatch cluster is COMPLETE. Cold-dispatch vein exhausted, confirmed against
+the actual tree (not just memory).
+
+With this + the reply-encode vein closed (hot via `_into`, long tail not worth a variant)
++ the materialization class swept + structural gaps stuck(RAM)/low-EV(keep-listpack), the
+per-turn perf surface is exhaustively verified-closed INCLUDING the now-buildable fr-runtime
+dispatch paths. The build-unblock's residual value is differential correctness probing +
+full-binary profiling for any genuinely-new hot-path lever — not the dispatch/reply veins,
+which are done. No source change.
+
 ## 2026-06-28 CrimsonHawk: REVERTED the BulkArray reply variant — build-unblock REVEALED the vein is mostly pre-harvested (`_into` fast paths) + the variant's blast radius isn't worth the long-tail-only EV
 
 Built + tested `RespFrame::BulkArray(Option<Vec<Vec<u8>>>)` (borrow-friendly array reply,
