@@ -2712,6 +2712,22 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: REJECT listpack-blob encode presize (+5.1%) — confirms AOF win was MATERIALIZATION, not alloc-avoidance
+
+After the AOF win I re-checked whether the same "win hiding behind inspection" applied
+to `encode_listpack_strings_blob` (per-node list/collection DUMP encode), which builds
+its output with `Vec::new()` (grows ~log2(n) reallocs). Presizing via `with_capacity`
+(sum of entry lengths) MEASURED **+5.1% SLOWER** (827→869 ns/node, 240-entry node): the
+sum-computation pass + the up-front large alloc cost more than mimalloc's cheap doubling
+reallocs save. `Vec::new()`-grow is optimal — don't presize. (Consistent with the
+LZF-reserve reject and the buffer-reuse rejects: alloc-AVOIDANCE is mimalloc-~0-or-loss.)
+
+IMPORTANT distinction: the AOF win (−67.6%) was NOT alloc-avoidance — it eliminated a
+MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i.e. a
+2-pass build-then-serialize) by encoding DIRECTLY. That class (intermediate-structure-
+then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
+stays mimalloc-bound. Two different things — only the materialization class wins.
+
 ## 2026-06-28 CrimsonHawk: collection-reply RespFrame::Array materialization vein — ~10+ probable reply-encode wins (AOF pattern) BLOCKED by unbuildable fr-runtime
 
 The AOF win (encode_aof_stream −67.6%) was the borrow-encode-direct-vs-RespFrame-
