@@ -2541,3 +2541,29 @@ perf-ratio test, which FAILS on clean main in this env: the pruned scan runs fir
 wall-time ratio (pruned 58ms vs unpruned 12ms = 0.2x < the 2x assert). Added a warmup
 of both paths before timing so the measurement reflects the real invariant (pruning
 examines ~50 keys, not 200k), not first-touch cold-cache. Landed in `glob_match`.
+
+## 2026-06-28 CrimsonHawk: LANDED glob_match exact + suffix fast paths (-54% / -49%); contains REJECTED (+66%)
+
+Generalized the landed prefix fast path to the full set of metachar-free literal
+shapes framed by at most one leading/trailing star (`literal_glob_shape` →
+Exact/Prefix/Suffix), so `glob_match` serves them with a memcmp instead of the
+backtracking matcher:
+- exact `<literal>` (no star) → `string == lit` — **-53.5%** per match
+- suffix `*<literal>` → `string.ends_with(lit)` — **-49.4%**
+- prefix `<literal>*` → `string.starts_with(lit)` (already landed) — -18..25%
+
+**Contains `*<literal>*` was MEASURED and REJECTED: +65.7% SLOWER.** A naive
+substring scan (`hay.windows(n).any(|w| w==needle)`) is O(n·m) — the same complexity
+as the backtracker but with more per-window overhead — so it loses on the long-key
+near-miss case. A real win there needs `memchr::memmem` (Two-Way), a new dep on a
+zero-runtime-dep-in-this-spot path; not worth it for the rarer `*kw*` shape. The
+contains case falls through to the matcher unchanged.
+
+Byte-exact: all 6 `golden_glob_match_*` (exact/prefix/suffix/star/question/escape) +
+7 `metamorphic::mr_glob_*` gates pass, plus an exhaustive isolated parity cross-product
+(exact/prefix/suffix/contains/multi-star/metachar/class/empty × edge strings). Empty
+string handled before the fast paths; `*`/`**`/`*lit*` (lead&&trail) deliberately
+left to the matcher (empty-string semantics + the contains non-win). Suite green
+(658 lib tests; the lone failure was the unrelated `galp1` galloping-intersection
+perf-ratio assertion, which flakes under rch-worker load and passes isolated — same
+class as foldhash/scan). Landed in `glob_match`.

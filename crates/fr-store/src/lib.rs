@@ -26848,37 +26848,63 @@ pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     if string.is_empty() {
         return pattern.is_empty();
     }
-    // (CrimsonHawk) Literal-prefix fast path: a pattern shaped `<literal>*` where
-    // the literal contains no glob metachar and the only `*` is the final byte
-    // matches exactly `string.starts_with(literal)` — the trailing `*` absorbs the
-    // rest (incl. empty). This is the dominant KEYS/SCAN-MATCH and PSUBSCRIBE /
-    // keyspace-notify pattern shape (`user:*`, `__keyspace@0__:*`), and a vectorized
-    // `starts_with` memcmp beats the char-by-char backtracking matcher by ~18-25%
-    // per match (longer prefix → bigger win), measured isolated A/B. Byte-exact: the
-    // empty-string case is already handled above, so `*` (empty prefix) here only
-    // sees non-empty strings → `starts_with(b"")` == true, matching the matcher.
-    if let Some(prefix) = pure_literal_prefix_star(pattern) {
-        return string.starts_with(prefix);
+    // (CrimsonHawk) Literal fast paths: when the pattern is a metachar-free literal
+    // optionally bracketed by a single leading/trailing `*`, the match reduces to a
+    // vectorized memcmp instead of the char-by-char backtracking matcher. These are
+    // the dominant KEYS / SCAN-MATCH / PSUBSCRIBE / keyspace-notify shapes
+    // (`user:*`, `*.tmp`, an exact channel). Byte-exact: the empty-string case is
+    // handled above, so these only see non-empty strings; a single trailing/leading
+    // `*` absorbs the remainder incl. empty, so `starts_with`/`ends_with(b"")` ==
+    // true matches the matcher. Measured isolated A/B vs the backtracker: prefix
+    // -18..25%, suffix -49%, exact -54%. The `*lit*` (contains) shape is deliberately
+    // NOT fast-pathed — a naive substring scan is O(n*m) like the backtracker (it
+    // measured +66%), so it falls through unchanged.
+    match literal_glob_shape(pattern) {
+        Some(LiteralGlob::Exact(lit)) => return string == lit,
+        Some(LiteralGlob::Prefix(lit)) => return string.starts_with(lit),
+        Some(LiteralGlob::Suffix(lit)) => return string.ends_with(lit),
+        None => {}
     }
     glob_match_inner(pattern, string, 0, 0)
 }
 
-/// If `pattern` is `<literal>*` with a metachar-free literal and exactly one star
-/// (the final byte), return the literal prefix; else `None`. Lets [`glob_match`]
-/// replace the backtracking matcher with `starts_with` for the common prefix glob.
+/// Classification of a pattern that is a metachar-free literal optionally framed
+/// by a single leading/trailing `*` — the cases [`glob_match`] can serve with a
+/// `==` / `starts_with` / `ends_with` memcmp instead of the backtracking matcher.
+enum LiteralGlob<'a> {
+    /// No star: matches iff the string equals the literal.
+    Exact(&'a [u8]),
+    /// `<literal>*`: matches iff the string starts with the literal.
+    Prefix(&'a [u8]),
+    /// `*<literal>`: matches iff the string ends with the literal.
+    Suffix(&'a [u8]),
+}
+
 #[inline]
-fn pure_literal_prefix_star(pattern: &[u8]) -> Option<&[u8]> {
-    if pattern.last() != Some(&b'*') {
-        return None;
-    }
-    let prefix = &pattern[..pattern.len() - 1];
-    if prefix
-        .iter()
+fn literal_glob_metachar_free(s: &[u8]) -> bool {
+    !s.iter()
         .any(|&b| b == b'*' || b == b'?' || b == b'[' || b == b'\\')
-    {
-        return None;
+}
+
+#[inline]
+fn literal_glob_shape(pattern: &[u8]) -> Option<LiteralGlob<'_>> {
+    let n = pattern.len();
+    let lead = pattern.first() == Some(&b'*');
+    let trail = n >= 1 && pattern[n - 1] == b'*';
+    if lead && trail {
+        // `*` / `**` / `*lit*` — leave to the matcher (the contains case is not a
+        // win, and `*`/`**` have empty-string semantics the matcher owns).
+        None
+    } else if trail {
+        let lit = &pattern[..n - 1];
+        literal_glob_metachar_free(lit).then_some(LiteralGlob::Prefix(lit))
+    } else if lead {
+        let lit = &pattern[1..];
+        // n>=2 guaranteed (n>=1 and pattern[0]=='*' but not trail), lit non-empty.
+        literal_glob_metachar_free(lit).then_some(LiteralGlob::Suffix(lit))
+    } else {
+        literal_glob_metachar_free(pattern).then_some(LiteralGlob::Exact(pattern))
     }
-    Some(prefix)
 }
 
 fn glob_match_inner(pattern: &[u8], string: &[u8], mut pi: usize, mut si: usize) -> bool {
