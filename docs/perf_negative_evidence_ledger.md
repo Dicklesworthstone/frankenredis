@@ -2728,6 +2728,31 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: ACTIONABLE build-fix — pre-seed workers with the commands dir (ops, no licensing change) is the clean unblock
+
+Read `crates/fr-command/build.rs` (410 lines) to make the build-fix concrete. It reads
+`legacy_redis_code/redis/src/commands` (394 gitignored JSON files, ~20KB, present
+locally) and generates `$OUT_DIR/acl_categories.rs` + `$OUT_DIR/docs_arg_trees.json`
+(the ACL-CAT category table + COMMAND-DOCS arg trees), `include!`'d by the crate. The
+rch worker lacks the JSON → build.rs fails → fr-command (hence fr-runtime/fr-server)
+can't build remotely.
+
+UNBLOCK OPTIONS, ranked:
+(a) **OPS — pre-seed each rch worker's sync root with the 394-file commands dir** (or an
+    rsync/symlink so build.rs's relative path resolves). NO code, NO licensing change,
+    one-time. CLEANEST. ← recommended.
+(b) commit the GENERATED `acl_categories.rs`/`docs_arg_trees.json` as tracked fallbacks +
+    have build.rs use them when the JSON is absent. Unblocks, but VENDORS redis-derived
+    metadata into the tracked tree = the licensing clean-room boundary the project
+    deliberately avoids. A POLICY call, not an agent's.
+(c) a degraded/empty fallback when JSON absent — REJECTED: ACL-CAT / COMMAND-DOCS tests
+    would fail and a worker-built binary would carry wrong ACL categories (correctness).
+
+So: option (a) unblocks the reply-encode vein (~10 commands, ~3x-class) + differential
+correctness probing with a one-time OPS action and zero licensing/code risk. That is the
+single highest-EV next step; it is outside an agent's reach (no rch force-include, can't
+write to worker sync roots from here). No source change.
+
 ## 2026-06-28 CrimsonHawk: buildable materialization vein fully swept — encode_aof_stream was the unique instance; smaller crates clean
 
 Applied the sharpened materialization rule (intermediate-structure-then-serialize,
