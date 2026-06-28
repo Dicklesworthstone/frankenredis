@@ -51,6 +51,52 @@ ledger-only negative evidence. Do not retry short-HLL-hash micro-specialization
 for `PFADD_16v` without a profile naming `hll_hash` setup overhead as the
 dominant cost.
 
+## 2026-06-27 BlueFalcon: REJECTED medium-ZCOUNT count-only rank-tree warm gate — 0.963x vs ORIG
+
+Land-or-dig found no unlanded measured source win in `.scratch/.worktrees`: the
+only ahead worktree was stale docs-only ZADD negative evidence, while dirty
+bench/control scratch trees were already landed or recorded rejects. The dig
+therefore targeted the current ledger's reproducible medium-zset `ZCOUNT` gap
+(`ZCOUNT z 30 170` over a 200-member skiplist zset, Redis 7.2.4 faster).
+
+Lever tested: keep the deep-index rank-tree threshold at `4096`, but add a
+count-only threshold at the Redis listpack boundary (`129`) so repeated
+`ZCOUNT`/`ZLEXCOUNT` on medium full zsets warm the existing order-statistic
+treap after the existing two-hit guard. This was the narrow version of the
+succinct/rank-index idea: bring the O(log n) rank-difference path to the same
+representation band where Redis already uses skiplist spans, without changing
+the deep `ZRANGE` warming policy.
+
+Correctness while applied: `AGENT_NAME=BlueFalcon
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b rch exec --
+cargo test -p fr-store rank_tree -- --nocapture` passed on `ovh-a`, including
+the new medium-zset warmup proof and the existing deep-ZRANGE warmup proof.
+`rch exec -- cargo build --profile release -p fr-server -p fr-bench` was
+attempted and failed remotely because workers lack the `.rchignore`-excluded
+`legacy_redis_code/redis/src/commands` metadata; direct local release builds
+then passed for candidate and control using the same target-dir family. The
+required literal bench spelling,
+`rch exec -- cargo bench --release -p fr-bench --bench exists_vs_redis --
+zcount_200_midrange --noplot`, was attempted and rejected by Cargo
+(`unexpected argument '--release'`); measured runs used `--profile release`.
+
+Same host, same temporary `fr-bench` row (`exists_vs_redis/zcount_200_midrange`),
+Redis 7.2.4 oracle:
+
+| row | Redis 7.2.4 median | FrankenRedis median | FR/Redis | candidate/ORIG |
+|---|---:|---:|---:|---:|
+| ORIG/control `origin/main c7783686c` + temporary bench row | `1.0870 Melem/s` | `658.85 Kelem/s` | `0.606x` | baseline |
+| count-only medium warm threshold candidate | `930.36 Kelem/s` | `634.15 Kelem/s` | `0.681x` | `0.963x` |
+
+Decision: **REJECT / REVERTED**. Although the Redis-relative ratio moved only
+because the Redis sample was slower in the candidate run, the direct
+FrankenRedis candidate/control comparison lost (`634.15` vs `658.85 Kelem/s`).
+The extra medium-zset treap build/maintenance is not justified for this row.
+Source and the temporary bench row were reverted before commit; this is
+ledger-only negative evidence. Do not retry lower count warm thresholds without
+a lower-noise profile proving the cold range walk dominates after the one-time
+rank-tree build and maintenance costs.
+
 ## 2026-06-27 BlueFalcon: REJECTED fresh SADD direct CompactStrSet de-dup — 1.032x vs ORIG, ~0 Redis-ratio movement
 
 Dig target: the fresh-key large `SADD` follow-up named by the HSET bulk-path
