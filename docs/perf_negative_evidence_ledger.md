@@ -1889,3 +1889,28 @@ fr-store lib tests green (incl zadd_repeated_member_processes_pairs_sequentially
 Fresh-key ZADD bulk coverage now complete (default/CH/NX/GT/LT). Binary built
 LOCALLY — rch workers hit the fr-command legacy_redis_code build-blocker on every
 retry this turn.
+
+## 2026-06-28 AmberRiver: XADD drop_if_expired guard MEASURED ~0-gain (1.015x), REVERTED — gap confirmed structural
+
+After the ZADD-flag wins, swept the remaining command classes for another
+bulk-build gap; all clean: zset-algebra-STORE is fr-FASTER (ZUNIONSTORE `0.46x` /
+ZINTERSTORE `0.53x` / ZDIFFSTORE `0.59x` vs ORIG), stream READS parity-or-faster
+(XRANGE `1.02x`, XREVRANGE `1.01x`, XRANGE+COUNT `1.08x`; XLEN `1.83x` is a
+sub-µs dispatch-overhead artifact, 0.24ms vs 0.13ms). The bulk-build O(n²) vein
+(HSET/HMSET/SADD/ZADD-all-flags) is mined.
+
+So tried a targeted XADD lever: guard `drop_if_expired` on `expires_count==0`
+(drops 2 of the ~5 per-add key lookups when no stream has a TTL — the same shape
+as the lpush guard). First A/B looked like `1.069x`, but a best-of-15 reconfirm
+(×2) settled at **`1.015x` / `1.016x` = within noise**. Byte-exact (live
+`DEBUG DIGEST-VALUE` identical to control on a 100-entry stream AND a TTL stream
+that exercises the un-guarded path; 659 fr-store tests green).
+
+Decision: **REVERT ~0-gain** (preserved as a labeled stash). This CONFIRMS the
+XADD 3.57x gap is structural — the cost is the two side-map `get_mut`s
+(`stream_last_ids`/`stream_entries_added`) + stream insert + generic parse, NOT
+the expiry lookups. The drop_if_expired guard is a dead end here (same lesson as
+the turn-7 SET guard). The real XADD lever remains the `tcknm` in-object side-map
+move (multi-day, ~20 sites) + possibly an XADD borrowed fast-path. (rch workers
+still hit the fr-command legacy_redis_code build-blocker every retry; binary built
+locally.)
