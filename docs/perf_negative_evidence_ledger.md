@@ -2712,6 +2712,27 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: keep-listpack #1 lever EV RE-EVALUATED DOWN to ~3-6% — `from_unique_pairs` already took the bulk-build; only the intermediate alloc remains
+
+Concrete re-analysis of the "#1 structural lever" (keep-listpack RdbValue decode) before
+recommending a multi-hour structural session for it. Current RESTORE path: fr-persist
+`decode_rdb` lzf-decompresses → `decode_listpack` → `Vec<(field,value)>` (per-element
+`Vec<u8>` allocs) → `RdbValue::Hash`; fr-store then bulk-builds the `CompactFieldMap`
+arena via `HashFieldMap::from_unique_pairs` (qxfmr, ALREADY O(n) bulk — shipped 264bd00fe).
+Keep-listpack (carry the raw listpack, parse straight into the fr-store arena) would only
+eliminate the INTERMEDIATE per-element `Vec<u8>` allocs + the `Vec<(Vec,Vec)>` container —
+the listpack→arena byte copy and the bulk insert happen EITHER WAY (from_unique_pairs
+already does them efficiently). Estimated savings ≈ the 32k intermediate small allocs ≈
+~3-6% of collection RESTORE under mimalloc, NOT the headline decode cost.
+
+REVISED PRIORITY: the #1 structural lever is **lower-ROI than the ledger implied**
+(~3-6%, multi-hour, cross-crate, contract-changing) — `from_unique_pairs`/the list-clone
++ zset-int-score wins already captured the big per-element redundancy. So for a structural
+session, keep-listpack is NOT obviously worth it; keyspace RAM (uhthd, 4.49x→1.79x, a much
+bigger ratio) is the higher-value structural target IF the SCAN-semantics-reversal cost is
+accepted. Net: fr's RESTORE/decode is closer to its floor than the "#1 multi-day lever"
+framing suggested. No source change.
+
 ## 2026-06-28 CrimsonHawk: hash-decode 310ns/elem cost breakdown corrected — it's LZF-decompress + parse + alloc, NOT a hidden alloc lever
 
 Re-analyzed the per-type bench's hash decode (9.92 ms / 32k elems ≈ 310 ns/elem) which
