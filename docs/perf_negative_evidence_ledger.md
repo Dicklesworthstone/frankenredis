@@ -2728,6 +2728,27 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: keyspace Entry-shrink vein EXHAUSTED — Entry is already `<= 48B` (all flagged levers shipped); the 2.687x RAM gap is purely structural
+
+Assessed the per-turn keyspace-RAM lever memory flagged (`lfu_last_touch_min` u64→u32,
+Entry shrink) now that it's RSS-measurable + the tree is clean (no peer WIP). Read the
+actual `Entry` struct (fr-store lib.rs 3435): it is ALREADY minimal —
+`const _: () = assert!(size_of::<Entry>() <= 48)`. Every shrink memory listed is shipped
+AND MORE: `last_access_ms: u32` (low-32 of the ms clock), `lfu_last_touch_min: u16` (even
+narrower than the u32 memory suggested), the 7 sticky-encoding/COPY bools packed into
+`entry_flags: u8`, and the `random_slot` field memory's lever-#1 added is GONE. Only
+`modification_count: u64` remains wide (WATCH counter — narrowing to u32 risks a
+false-negative WATCH miss on >4B writes/key = correctness edge, ~4B/key for ~alignment-
+eaten gain = not worth it).
+
+So there is NO per-turn Entry RAM lever left — the Entry is at Redis-like density. The
+2.687x RSS gap (236 vs 88 bytes/key, small keys) is therefore PURELY structural: the key
+stored twice (hashbrown `entries` Arc-key + `ordered_keys` sorted index for deterministic
+SCAN), hashbrown's 2x power-of-2 table at the 1M/2^20 boundary, and mimalloc segment
+overhead — none per-turn-shippable. Confirms the KeyDict step-2 wiring (or hash-order
+SCAN) as the ONLY remaining keyspace-RAM lever, multi-day/human-gated. Entry-shrink vein
+closed. No source change.
+
 ## 2026-06-28 CrimsonHawk: keyspace RAM gap MEASURED 2.687x RSS (1M small keys) on the live binary — the real #1 gap, bigger than the modeled used_memory shows; STRUCTURAL
 
 Used the now-benchable binary to measure the #1 structural gap precisely: fr vs vendored
