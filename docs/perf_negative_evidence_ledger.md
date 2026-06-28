@@ -2728,6 +2728,33 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: keyspace 236MB RAM breakdown — hashbrown 2x-table dominates (~136MB); KeyDict structural ceiling is only ~2x, NOT parity
+
+Decomposed the 236MB fr RSS @1M small keys (from known struct sizes) to scope the
+structural prize before recommending the multi-day KeyDict session:
+- hashbrown `HashMap<Arc<[u8]>,Entry>` TABLE: next_pow2(1M/0.875)=2^21=2.097M slots ×
+  ~65B `(Arc<[u8]>16B + Entry<=48B + 1 ctrl)` ≈ **136 MB**, only ~48% full → the
+  DOMINANT cost is half-empty INLINE 64B entries just past the 2^20 boundary.
+- Arc key allocs: 1M × (~17B key + 16B strong/weak counts + rounding) ≈ **37 MB**.
+- `ordered_keys` (Arc-shared sorted SCAN index): ~**16-40 MB** (Arc ptrs, bytes shared).
+- random_key_slots + mimalloc segment/alignment overhead → ~236 MB total (matches the
+  measured 2.687x).
+
+KeyDict (chaining, step-1 shipped 9186a4a0b unwired) replaces the table with buckets
+(2.097M × 8B `Option<Box<Node>>` = 17MB) + nodes (1M × ~72B `key Box + Entry + next` =
+72MB) ≈ **89 MB**, AND removes ordered_keys via native reverse-binary cursor SCAN. Cut ≈
+(136+16) − 89 ≈ **63 MB → ~173 MB → ~1.97x**. CRITICAL EV FINDING: even the full
+multi-day KeyDict wiring only reaches **~2x, NOT parity** — the residual ~2x is inherent
+safe-Rust chaining overhead (per-node Box alloc 16B header + the `next` pointer + key Box
+header) vs redis's compact packed `dictEntry`, plus mimalloc vs jemalloc. Redis's 88
+bytes/key is a C-struct-density floor a safe-Rust map can't fully match without unsafe
+packed nodes.
+
+So the keyspace-RAM structural prize is 2.687x → ~2x (≈63MB/1M keys), multi-day,
+all-or-nothing, AND leaves a ~2x residual. That materially lowers the KeyDict session's
+ROI — worth knowing before committing days to it. No further per-turn lever; Entry is
+minimal, table waste is the KeyDict's (bounded) domain. No source change.
+
 ## 2026-06-28 CrimsonHawk: keyspace Entry-shrink vein EXHAUSTED — Entry is already `<= 48B` (all flagged levers shipped); the 2.687x RAM gap is purely structural
 
 Assessed the per-turn keyspace-RAM lever memory flagged (`lfu_last_touch_min` u64→u32,
