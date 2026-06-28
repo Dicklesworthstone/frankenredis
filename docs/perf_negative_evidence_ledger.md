@@ -2690,6 +2690,30 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: redundant-parse/format class checked — INCR int-encoded like redis; lever-class coverage now complete
+
+Checked the redundant-work class (the one that yielded the zset round-trip −24.7% and
+list-clone −21.5% wins). INCR/INCRBY is already optimal: fr stores integer-valued
+strings as `Value::Integer(i64)` (lib.rs 3398/3405, redis `OBJ_ENCODING_INT` analog),
+so `incr` increments the i64 in place (6801) — no parse-on-read/format-on-write
+round-trip. SET's int-encoding check fast-rejects non-integers (len>20 or first
+non-digit). Parity with redis `tryObjectEncoding`. No lever.
+
+LEVER-CLASS COVERAGE (this session, all MEASURED or code-verified — per-turn surface):
+| class | status |
+|---|---|
+| autovectorization / SWAR | SWEPT — HLL histogram+merge won; rest pre-optimized (g9h0v/kgsni/BITOP) |
+| redundant parse/format/clone | decode list+zset WON; INCR/GET/notify already optimal |
+| algorithm upgrade | CRC64 sb16 WON, glob ×4 WON; geohash/murmur/LCS already best-known |
+| search / reduction | intset binary, popcount, dispatch, string-set — MEASURED optimal |
+| allocation avoidance | mimalloc-bound (~0); LZF-reserve REJECTED |
+| RDB codec | ENCODE LZF-bound (parity+), DECODE per-elem-alloc-bound (keep-listpack #1) |
+
+8 wins landed; remaining gaps are STRUCTURAL (keep-listpack decode, XADD in-object
+metadata, keyspace RAM) — none per-turn-shippable; cheap increments proven defeated.
+The per-turn measurable lever surface is now closed by MEASUREMENT across every class,
+not inspection. No source change.
+
 ## 2026-06-28 CrimsonHawk: autovectorization/SWAR class SWEPT — codebase already extensively SWAR-optimized; HLL was the last 2 misses
 
 Swept every element-wise array loop (`.zip` / `iter_mut().zip` / `chunks_exact` /
