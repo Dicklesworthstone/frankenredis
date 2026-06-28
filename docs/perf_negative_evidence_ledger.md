@@ -2690,6 +2690,25 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: HLL primitive fully harvested — dense 6-bit codec already 4-at-a-time; 2 wins + 3 verified-optimal ops
+
+Closing the HLL sweep. The dense register codec (`hll_encode/decode_dense_registers`,
+the DUMP/RESTORE 6-bit packing) is ALREADY word-at-a-time: 4 registers = 24 bits = 3
+bytes per `chunks_exact(4)`/`chunks_exact_mut(3)` group (frankenredis-kgsni), no
+per-register bit%8 shifts. Optimal. Full HLL status after the measure-don't-inspect
+sweep:
+- `hll_estimate` histogram — **LANDED -53.5%** (4-bank, broke memory-RAW chain)
+- `hll_merge_registers` — **LANDED -93.9%** (conditional-store→`.max()`, SIMD pmaxub)
+- `hll_add_to_registers` — scatter (one hash-indexed register/elem), OOO-overlapped, optimal
+- `hll_hash` — faithful word-at-a-time MurmurHash64A (serial h→h, unparallelizable), optimal
+- dense 6-bit codec — already 4-register/3-byte word grouping, optimal
+
+The HLL was the richest remaining measurable vein (a 16384-byte dense array with
+several element-wise ops); both its non-optimal loops are now fixed. The
+measure-don't-inspect discipline scoreboard this session: HLL histogram WIN, HLL merge
+WIN, intset binary VERIFIED-optimal, BITCOUNT multi-acc REJECT, popcount VERIFIED-
+optimal — 5 inspection calls measured, 2 were wrong (both big wins). No source change.
+
 ## 2026-06-28 CrimsonHawk: VERIFY intset binary_search optimal at ALL sizes — linear-SIMD loses 1.26x–80x (inspection call confirmed by measurement)
 
 Per the "measure inspection-optimal calls" discipline (which recovered the two HLL
