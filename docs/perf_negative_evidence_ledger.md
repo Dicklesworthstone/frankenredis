@@ -2690,6 +2690,28 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: REJECT BITCOUNT popcount multi-accumulator (+6-8%) — register add-chain ≠ the HLL memory chain; multi-bank only wins for MEMORY-RAW loops
+
+Applied the HLL-histogram lesson (re-measure inspection "optimal" calls) to the next
+candidate: `popcount_bytes` sums `count += word.count_ones()` in a single accumulator
+across ~131072 words for a 1 MB BITCOUNT — a serial add-chain, the same shape that the
+4-bank rewrite fixed for HLL. Tried 4 independent popcount accumulators over
+`chunks_exact(32)`.
+
+MEASURED +5.5% (4 KB) / +7.9% (1 MB) SLOWER — single accumulator wins (15.7 vs 14.6
+GiB/s). The single loop already runs at popcnt throughput / memory bandwidth; the
+4-bank version just adds setup. Byte-identical, but reverted (test-only, no source).
+
+KEY DISTINCTION (refines the HLL win): multi-accumulator helps ONLY when the
+dependency is a MEMORY read-after-write — HLL's `reghisto[idx] += 1` round-trips
+through an L1 cell (~5-cycle RAW latency) that serializes hard on clustered indices,
+so 4 banks gave -53.5%. BITCOUNT's `count += ...` is a REGISTER add (1-cycle latency)
+that already matches popcnt's 1/cycle throughput, so breaking it buys nothing and
+costs setup. So the "re-measure inspection calls" sweep must target loops whose
+accumulator/state lives in MEMORY and whose indices/cells COLLIDE (histograms,
+scatter-tallies) — NOT register reductions (sum/popcount/min/max), which are already
+throughput-bound. popcount_bytes confirmed optimal by measurement.
+
 ## 2026-06-28 CrimsonHawk: LANDED HLL histogram 4-bank accumulator — -53.5% on the PFCOUNT estimate loop (an inspection-only "ceiling" that was actually dependency-bound)
 
 **The convergence summary below UNDERCOUNTS by one: a 7th win, found by re-measuring an
