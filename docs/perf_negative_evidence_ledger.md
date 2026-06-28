@@ -2272,3 +2272,31 @@ throughput-noisy; instructions load-independent): candidate **866.0M** vs contro
 **902.2M** = **-4.0% instructions**. Residual GET+tracking gap is the per-read key
 extraction (`command_key_indexes` + owned-key clone into the table) — architectural
 (the table owns keys), not a clean swap.
+
+## 2026-06-28 CrimsonHawk: REJECT both rewrites of `encode_bulk_string_slice` — the hottest reply encoder is already optimal (+8.6–10.5% slower)
+
+The per-command-overhead theme points at reply encoding: `encode_bulk_string_slice`
+in fr-protocol fires on EVERY GET and EVERY bulk array element (HGETALL/LRANGE/
+SMEMBERS/MGET...). The current main impl emits the `$<len>\r\n` header in three
+`extend_from_slice` calls (`$`, then `push_usize` digits, then `\r\n`), five
+`extend_from_slice` total per reply. Two "obvious" rewrites were tried to shave the
+small-slice extends:
+
+| variant | what it does | candidate/control |
+|---|---|---:|
+| **stack-buffer header** | assemble whole `$<len>\r\n` header right-aligned in a `[u8;24]` stack buffer, single `extend_from_slice` for the header (5→3 extends) | **+10.5% slower** |
+| **push single bytes** | `out.push(b'$')` / `push(b'\r')` / `push(b'\n')` instead of `extend_from_slice` for the 1–2 byte fixed parts | **+8.6% slower** |
+
+Method: self-contained in-crate A/B (`crates/fr-protocol/tests/bulk_encode_ab.rs`),
+byte-identical output proven across all digit-count boundaries (len 0,1,2,9,10,11,
+99,100,101,999,1000,65535,65536,1_000_000 + null + resp3-null arms), interleaved
+best-of-9 over 2M iters × 10 realistic small reply sizes (1–64 B, the read-hot
+range). `cargo test -p fr-protocol --release` (builds anywhere — leaf crate, no
+commands-dir blocker), CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cc.
+
+Results: CONTROL 8.72 ns/encode, CANDIDATE 9.63 ns (+10.5%), PUSH 9.47 ns (+8.6%).
+Both regress. Why: with the exact capacity already `reserve`d, the compiler batches
+the small known-length `extend_from_slice` copies better than (a) per-`push`
+capacity rechecks it can't prove away across separate calls, or (b) the extra stack
+writes + right-aligned reassembly the buffer variant adds. The 5-extend form is the
+optimum. Reply-encoder micro-rewrites are closed — don't re-chase. No source change.
