@@ -3822,7 +3822,8 @@ pub struct ServerState {
     /// Per-client outbox: client_id → pending messages for delivery.
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>,
     /// Key → client IDs that should receive client-tracking invalidations.
-    client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>,
+    client_tracking_observed_keys:
+        HashMap<Vec<u8>, HashSet<u64, foldhash::quality::RandomState>, foldhash::quality::RandomState>,
     /// Client IDs with CLIENT TRACKING enabled in BCAST mode.
     client_tracking_bcast_clients: BTreeSet<u64>,
     /// Inverse mapping: client_id → set of channels they are subscribed to.
@@ -3954,7 +3955,7 @@ impl Default for ServerState {
             pubsub_pattern_subs: HashMap::new(),
             pubsub_shard_subs: HashMap::new(),
             pubsub_outbox: HashMap::default(),
-            client_tracking_observed_keys: HashMap::new(),
+            client_tracking_observed_keys: HashMap::default(),
             client_tracking_bcast_clients: BTreeSet::new(),
             pubsub_client_channels: HashMap::new(),
             pubsub_client_patterns: HashMap::new(),
@@ -4223,7 +4224,7 @@ impl ServerState {
         // Non-bcast clients: remove each expired key from the tracking table and
         // remember its observers (upstream deletes the key from the table on
         // invalidation; a later read re-adds it).
-        let observed: Vec<(Vec<u8>, std::collections::HashSet<u64>)> = keys
+        let observed: Vec<(Vec<u8>, std::collections::HashSet<u64, foldhash::quality::RandomState>)> = keys
             .iter()
             .filter_map(|key| {
                 self.client_tracking_observed_keys
@@ -6721,7 +6722,7 @@ impl Runtime {
             return;
         }
 
-        let observed_keys: Vec<(Vec<u8>, HashSet<u64>)> = keys
+        let observed_keys: Vec<(Vec<u8>, HashSet<u64, foldhash::quality::RandomState>)> = keys
             .iter()
             .filter_map(|key| {
                 self.server

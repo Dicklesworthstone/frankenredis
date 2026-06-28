@@ -2248,3 +2248,27 @@ control **655.38M** = **-3.9% instructions** (matches the 4.5% profile). Real wi
 on the notification-enabled write path (cache-invalidation / event-driven
 workloads). fr/Redis SET+notify ~1.72x→~1.65x; residual is the pub/sub
 subscriber-lookup + per-command dispatch (the broad overhead).
+
+## 2026-06-28 AmberRiver: LANDED client-tracking table SipHash→foldhash — -4.0% instructions on GET-with-tracking
+
+Continuing the untested-feature-dimension dig: plain GET is parity but GET with
+`CLIENT TRACKING ON` (RESP3 client-side caching) was 2.34x slower. Profile of the
+tracked-GET path: `command_key_indexes` 2.45% + `Vec<Vec<u8>>` key build 1.22% +
+**`Sip13` (SipHash) 1.47%** — the tracking table
+`client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>` used the DEFAULT
+SipHash on BOTH the Vec<u8> key map and the inner u64 client-set, and
+`entry(key.clone()).or_default().insert(client_id)` runs on every tracked read.
+
+Fix: swap both to `foldhash::quality::RandomState` (already used for the sibling
+maps pubsub_outbox / monitor_clients / blocked_client_ids in the same struct).
+Byte-safe: tracking is membership/lookup, and SipHash RandomState was already
+random per-process, so no test can depend on iteration order. Verified byte-exact:
+RESP3 `invalidate` push frames IDENTICAL to Redis 7.2.4 (`>2 invalidate k2`,
+`>2 invalidate k1` after a tracked read + cross-client write/DEL); 550 fr-runtime
++ 11 client_tracking tests green.
+
+Measured `perf stat -e instructions` over 120k tracked GETs (load ~43, so
+throughput-noisy; instructions load-independent): candidate **866.0M** vs control
+**902.2M** = **-4.0% instructions**. Residual GET+tracking gap is the per-read key
+extraction (`command_key_indexes` + owned-key clone into the table) — architectural
+(the table owns keys), not a clean swap.
