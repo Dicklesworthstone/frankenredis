@@ -2738,6 +2738,44 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_watch_packet(unparsed, &parser_config)
+                {
+                    if runtime
+                        .execute_plain_watch_borrowed_into(packet.key, ts, &mut conn.write_buf)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(consumed) =
+                    parse_borrowed_plain_unwatch_packet(unparsed, &parser_config)
+                {
+                    if runtime
+                        .execute_plain_unwatch_borrowed_into(ts, &mut conn.write_buf)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
                 {
@@ -10883,6 +10921,28 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                     }
+                    b'U' => {
+                        if borrowed_plain_unwatch_args(&borrowed_args)
+                            && runtime
+                                .execute_plain_unwatch_borrowed_into(ts, out)
+                                .is_some()
+                        {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: parsed.consumed,
+                            });
+                        }
+                    }
+                    b'W' => {
+                        if let Some(key) = borrowed_plain_watch_args(&borrowed_args)
+                            && runtime
+                                .execute_plain_watch_borrowed_into(key, ts, out)
+                                .is_some()
+                        {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: parsed.consumed,
+                            });
+                        }
+                    }
                     b'X' => {
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                             && let Some(response) =
@@ -13013,6 +13073,38 @@ fn parse_borrowed_plain_dbsize_packet(input: &[u8], config: &ParserConfig) -> Op
         return None;
     }
     let rest = rest.get(6..)?.strip_prefix(b"\r\n")?;
+    Some(input.len() - rest.len())
+}
+
+fn parse_borrowed_plain_watch_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"WATCH".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"WATCH"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
+}
+
+fn parse_borrowed_plain_unwatch_packet(input: &[u8], config: &ParserConfig) -> Option<usize> {
+    if config.max_array_len < 1 || config.max_bulk_len < b"UNWATCH".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*1\r\n$7\r\n")?;
+    if !rest.get(..7)?.eq_ignore_ascii_case(b"UNWATCH") {
+        return None;
+    }
+    let rest = rest.get(7..)?.strip_prefix(b"\r\n")?;
     Some(input.len() - rest.len())
 }
 
@@ -19000,6 +19092,17 @@ fn borrowed_plain_command_count_args(borrowed_args: &[&[u8]]) -> bool {
 
 fn borrowed_plain_dbsize_args(borrowed_args: &[&[u8]]) -> bool {
     matches!(borrowed_args, [command] if command.eq_ignore_ascii_case(b"DBSIZE"))
+}
+
+fn borrowed_plain_watch_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"WATCH") => Some(*key),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_unwatch_args(borrowed_args: &[&[u8]]) -> bool {
+    matches!(borrowed_args, [command] if command.eq_ignore_ascii_case(b"UNWATCH"))
 }
 
 /// Only the no-flag `EXPIRE key seconds` form (argc 3); flagged forms

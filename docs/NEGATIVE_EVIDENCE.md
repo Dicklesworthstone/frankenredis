@@ -49,6 +49,37 @@ the missing-source no-reencode PFMERGE path without a lower-noise profile provin
 the store merge/re-encode dominates end-to-end command cost after cache
 invalidation is preserved.
 
+## 2026-06-28 BlueFalcon: LANDED WATCH/UNWATCH borrowed control path — 0.098x vs ORIG / 0.583x Redis time
+
+Land-or-dig scan found no unlanded measured source win in `.scratch/.worktrees`;
+the only ahead worktree was stale docs-only ZADD negative evidence. Current
+short-ledger routing pointed at control-command per-command overhead: `WATCH` +
+`UNWATCH` remained a `~6.5x` time gap against Redis 7.2.4.
+
+Lever landed: add a fixed-shape RESP fast path for canonical `WATCH key` and
+`UNWATCH`, plus borrowed-argv fallback dispatch. The runtime path is gated by
+the existing plain borrowed read predicate, so it falls back for non-db0,
+MULTI, monitors, tracking, AOF/replica state, auth/ACL special cases, and every
+state where the generic special-command path has observable work. In the gated
+case it registers the watched physical key or clears watch state and emits the
+fixed `+OK` reply without owned argv or `RespFrame` allocation.
+
+Same target dir, same local `rch exec` fallback path, Redis 7.2.4 oracle,
+temporary committed `fr-bench` row `exists_vs_redis/watch_unwatch`:
+
+| row | Redis 7.2.4 median | FrankenRedis median | FR/Redis time | candidate/ORIG |
+|---|---:|---:|---:|---:|
+| ORIG/current main `c42feedc1` + bench row | `122.94 us` | `796.13 us` | `6.476x` slower | baseline |
+| borrowed WATCH/UNWATCH candidate | `133.53 us` | `77.883 us` | `0.583x` = 1.71x faster | **`0.098x` = 10.22x faster** |
+
+Remote sanity on `ovh-a` also showed candidate faster than Redis
+(`47.311 us` vs `75.824 us`, `0.624x` Redis time), but the keep/reject decision
+uses the directly comparable local ORIG/candidate pair above because the ORIG
+bench row fell back locally. Correctness: `cargo test -p fr-runtime watch --
+--nocapture` passed; `cargo test -p fr-conformance -- --nocapture` passed via
+`rch exec` local fallback (194 lib tests, all conformance bin tests, 99 smoke
+tests, doc-tests green).
+
 ## 2026-06-28 AmberRiver: LANDED intset SINTERCARD direct-i64 path — 3.46x vs main / 1.23x faster than Redis
 
 Broad sweep found SINTERCARD a gap **only on integer (intset) sets**: parity on

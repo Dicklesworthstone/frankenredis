@@ -229,6 +229,21 @@ fn exists_vs_redis(c: &mut Criterion) {
         });
     }
 
+    let watch_unwatch_packet = watch_unwatch_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        let id = BenchmarkId::new("watch_unwatch", engine.name);
+        group.bench_with_input(id, &engine, |b, engine| {
+            let mut client = Client::connect(engine.port);
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    client.run_packet(&watch_unwatch_packet, COMMANDS_PER_ITER * 2);
+                }
+                start.elapsed()
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -273,6 +288,15 @@ fn object_idletime_hit_packet(count: usize) -> Vec<u8> {
             b"IDLETIME".as_slice(),
             b"k0".as_slice(),
         ]));
+    }
+    packet
+}
+
+fn watch_unwatch_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 56);
+    for _ in 0..count {
+        packet.extend_from_slice(&encode_command(&[b"WATCH".as_slice(), b"k0".as_slice()]));
+        packet.extend_from_slice(&encode_command(&[b"UNWATCH".as_slice()]));
     }
     packet
 }

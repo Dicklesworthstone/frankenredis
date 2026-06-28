@@ -928,6 +928,14 @@ fn plain_dbsize_owned_argv() -> Vec<Vec<u8>> {
     vec![b"DBSIZE".to_vec()]
 }
 
+fn plain_watch_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"WATCH".to_vec(), key.to_vec()]
+}
+
+fn plain_unwatch_owned_argv() -> Vec<Vec<u8>> {
+    vec![b"UNWATCH".to_vec()]
+}
+
 fn plain_command_count_owned_argv() -> Vec<Vec<u8>> {
     vec![b"COMMAND".to_vec(), b"COUNT".to_vec()]
 }
@@ -15162,6 +15170,201 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    /// Borrow-encoded fast path for the common `WATCH key` form. The shared
+    /// plain gate pins db 0 and excludes MULTI, monitors, tracking, AOF, replicas,
+    /// and ACL/auth special cases, so the fast path can directly register the
+    /// single watched physical key and emit the fixed `+OK` reply.
+    pub fn execute_plain_watch_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"WATCH".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("watch");
+        self.session.last_argv_len_sum = b"WATCH".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+
+        let start = self.chained_command_start();
+        let physical = encode_db_key(0, key);
+        let fp = self.server.store.key_fingerprint(&physical, now_ms);
+        let mod_count = self.server.store.key_modification_count(&physical, now_ms);
+        self.session
+            .transaction_state
+            .watched_keys
+            .push((physical, fp, mod_count));
+        if !suppress_reply {
+            out.extend_from_slice(b"+OK\r\n");
+        }
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_watch_borrowed_metrics(key, elapsed_us, now_ms, packet_id);
+
+        Some(())
+    }
+
+    fn record_plain_watch_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_watch_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_watch_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "watch",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_watch_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'WATCH' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// Borrow-encoded fast path for keyless `UNWATCH`, paired with the single-key
+    /// WATCH path above. The same gate excludes MULTI and every state where the
+    /// generic special-command path has extra observable work.
+    pub fn execute_plain_unwatch_borrowed_into(
+        &mut self,
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 1
+            || self.policy.gate.max_bulk_len < b"UNWATCH".len()
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("unwatch");
+        self.session.last_argv_len_sum = b"UNWATCH".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+
+        let start = self.chained_command_start();
+        self.session.transaction_state.watched_keys.clear();
+        self.session.transaction_state.watch_dirty = false;
+        if !suppress_reply {
+            out.extend_from_slice(b"+OK\r\n");
+        }
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_unwatch_borrowed_metrics(elapsed_us, now_ms, packet_id);
+
+        Some(())
+    }
+
+    fn record_plain_unwatch_borrowed_metrics(
+        &mut self,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(plain_unwatch_owned_argv);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(plain_unwatch_owned_argv);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "unwatch",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(plain_unwatch_owned_argv);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'UNWATCH' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
             });
         }
     }
@@ -50826,6 +51029,84 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"k", b"new"]), 4);
         let result = rt.execute_frame(command(&[b"EXEC"]), 5);
         assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn plain_watch_unwatch_borrowed_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let mut direct_watch = Vec::new();
+        assert_eq!(
+            direct.execute_plain_watch_borrowed_into(b"k", 1, &mut direct_watch),
+            Some(())
+        );
+        let generic_watch = generic.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        assert_eq!(direct_watch, generic_watch.to_bytes());
+        assert_eq!(direct.session.last_command_name, "watch");
+
+        for rt in [&mut direct, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"k"]), 4),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            direct.execute_frame(command(&[b"EXEC"]), 5),
+            generic.execute_frame(command(&[b"EXEC"]), 5)
+        );
+
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            rt.execute_plain_watch_borrowed_into(b"k", 1, &mut out),
+            Some(())
+        );
+        assert_eq!(out, b"+OK\r\n");
+        rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2);
+        out.clear();
+        assert_eq!(
+            rt.execute_plain_unwatch_borrowed_into(3, &mut out),
+            Some(())
+        );
+        assert_eq!(out, b"+OK\r\n");
+        assert_eq!(rt.session.last_command_name, "unwatch");
+        rt.execute_frame(command(&[b"MULTI"]), 4);
+        rt.execute_frame(command(&[b"GET", b"k"]), 5);
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 6),
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"changed".to_vec()))]))
+        );
+
+        let mut in_multi = Runtime::default_strict();
+        in_multi.execute_frame(command(&[b"MULTI"]), 0);
+        let mut out = Vec::new();
+        assert_eq!(
+            in_multi.execute_plain_watch_borrowed_into(b"k", 1, &mut out),
+            None
+        );
+        assert_eq!(
+            in_multi.execute_plain_unwatch_borrowed_into(1, &mut out),
+            None
+        );
     }
 
     #[test]
