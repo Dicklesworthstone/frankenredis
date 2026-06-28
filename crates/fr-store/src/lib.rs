@@ -10047,6 +10047,10 @@ impl Store {
         };
         let added: usize;
         if m.is_empty() {
+            if let Some((map, hadded)) = HashFieldMap::try_from_flat_pairs_hash_dedup(pairs) {
+                **m = map;
+                added = hadded;
+            } else {
             let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
                 std::collections::HashSet::with_capacity_and_hasher(
                     count as usize,
@@ -10067,6 +10071,7 @@ impl Store {
                     }
                 }
                 added = a;
+            }
             }
         } else {
             let mut a = 0_usize;

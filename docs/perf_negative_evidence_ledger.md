@@ -1809,3 +1809,27 @@ best-of-15, host load ~4):
 control across 300-unique, dup-collapse (300 args → 150 unique), and the 130
 just-over-128 boundary; **659** fr-store lib tests green. (SADD-string was not a
 gap vs Redis — fr already won — but this banks a clean further speedup.)
+
+## 2026-06-28 AmberRiver: LANDED bulk HSET/HMSET skip redundant uniqueness HashSet — 1.14x further
+
+Same double-hash as the SADD fix, in the hash bulk path. `hset_borrowed_many`
+(the multi-field HSET/HMSET runtime path) built a throwaway uniqueness `HashSet`
+(re-hashing every field) before `from_unique_pairs_borrowed` rebuilt the hash via
+`CompactFieldMap::insert` (which already dedups/last-wins). Added
+`HashFieldMap::try_from_flat_pairs_hash_dedup`: builds the hashtable hash directly
+from the flat `[f,v,…]` borrowed slice (dedup + last-wins via insert, returns the
+new-field count), used when `> PACKED_MAX_ENTRIES` (always hashtable). Packed/
+small cases keep the existing dedup path.
+
+Measured (`HSET key <200 fields>` fresh, DEL+HSET ×400, best-of-15, host load ~56):
+
+| | candidate | control (HSET O(n)-fixed, no dedup-skip) |
+|---|---:|---:|
+| best | **`6.23 ms`** | `7.11 ms` |
+
+→ **1.141x** on top of the earlier O(n²)→O(n) HSET win (so HSET stays ~8x faster
+than Redis; this trims the residual second hash). Byte-exact: live
+`DEBUG DIGEST-VALUE` identical to control across fresh-200, duplicate-field
+last-wins (200 args → 130 unique), 130 just-over-128 boundary, and HMSET-200;
+**659** fr-store lib tests green. One fix covers both HSET and HMSET (shared
+`hset_borrowed_many`).

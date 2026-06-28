@@ -564,6 +564,32 @@ impl HashFieldMap {
         }
     }
 
+    /// (frankenredis-saddnodbl) Build a hashtable hash directly from a FLAT
+    /// borrowed `[f0,v0,f1,v1,…]` slice, de-duping/last-wins via the map's OWN
+    /// `insert` and returning the added (new-field) count. Only applies when the
+    /// result is unambiguously a hashtable (`> PACKED_MAX_ENTRIES` pairs); returns
+    /// `None` otherwise so the caller's Packed-capable path handles it. Lets the
+    /// bulk HSET/HMSET builder skip its separate uniqueness `HashSet` (a second
+    /// hash of every field). Byte-identical to dedup-then-build: `CompactFieldMap`
+    /// keeps insertion order and overwrites on a repeat field exactly like the
+    /// incremental loop.
+    #[must_use]
+    pub fn try_from_flat_pairs_hash_dedup(flat: &[&[u8]]) -> Option<(Self, usize)> {
+        let npairs = flat.len() / 2;
+        if npairs <= PACKED_MAX_ENTRIES {
+            return None;
+        }
+        let bytes: usize = flat.iter().map(|s| s.len() + 5).sum();
+        let mut h = CompactFieldMap::with_capacity(npairs, bytes);
+        let mut added = 0_usize;
+        for p in flat.chunks_exact(2) {
+            if h.insert(p[0], p[1]).is_none() {
+                added += 1;
+            }
+        }
+        Some((HashFieldMap::Hash(h), added))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
