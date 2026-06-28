@@ -2690,6 +2690,17 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: SORT BY/GET substitution verified optimal (buffer-reuse byte-concat) — command-path CPU coverage complete
+
+SORT-with-patterns was a plausible `format!`-substitution lever (the class AmberRiver
+byte-concat'd for keyspace-notify). Already optimized: `resolve_sort_pattern` threads
+one `keybuf: Vec<u8>` reused across all elements; the numeric-fast path rebuilds the
+lookup key in place (`k.clear(); k.extend_from_slice(&pat[..star]); …` — byte-concat,
+no `format!` / no per-element alloc); `plan_sort_pattern` precomputes the `*` split
+once. The `format!("&{pat}")` sites in fr-runtime are cold ACL/CONFIG GETUSER display.
+No lever. SORT is the last big CPU command path; with HLL/glob/CRC/decode/bit-ops/geo
+all covered, the per-turn command-path CPU surface is fully checked. No source change.
+
 ## 2026-06-28 CrimsonHawk: redundant-parse/format class checked — INCR int-encoded like redis; lever-class coverage now complete
 
 Checked the redundant-work class (the one that yielded the zset round-trip −24.7% and
