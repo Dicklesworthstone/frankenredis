@@ -2068,3 +2068,27 @@ This is the biggest ratio gap on the board and the first genuinely NEW lever in
 several turns (perf point-fixes + correctness + large-values all saturated). Next
 focused effort should start with lever #1 (globals Rc-share, biggest bang for a
 contained-but-careful change). No source change this turn (risk-gated).
+
+## 2026-06-28 AmberRiver: EVAL gap PROFILED — clone is only ~11-14% (diffuse interpreter), corrects prior "4.4x base point-fixable"
+
+Profiled EVALSHA (cached trivial `redis.call('get',k)`) flat self-time to attribute
+the 4.4x per-EVAL overhead before attempting lever #1. The globals-template clone
+lifecycle is NOT the whole gap — it is ~11-14%:
+  String::clone 2.92% + RawTable<(String,LuaValue)>::clone 2.76% (the template
+  HashMap clone) + LuaState::drop::clear_table_recursive 1.32% + drop_glue<LuaValue>
+  1.26% (per-EVAL teardown) + ~part of mi_free 2.33% / mi_malloc 2.18%+1.16%.
+The REST is diffuse: no single dominant frame — RandomState::hash_one 1.33%,
+HashMap insert 1.05%, and the tree-walking execute_compiled / redis.call bridge /
+lua_to_resp spread below 1% each.
+
+REVISION of the prior entry: lever #1 (Rc-share the base globals to kill the clone)
+would save only ~11-14% (4.4x → ~3.8x), NOT close the gap — and it still carries
+the full _G-mirror / getfenv-setfenv / globals_locked byte-exactness risk. That is
+a POOR risk/reward (delicate refactor on a 23k-line interpreter for ~14% on a
+non-hottest command). EVAL is, like XADD/SETBIT, DIFFUSE per-operation overhead —
+here the tree-walking interpreter's whole setup→walk→bridge→convert→teardown cycle
+is ~4x redis's persistent-lua_State + bytecode VM. The ONLY lever that meaningfully
+closes BOTH the 4.4x per-EVAL overhead AND the 14x compute loop is structural:
+replace the custom tree-walker with a bytecode VM or an mlua/LuaJIT dependency
+(major, owned, multi-day). Clone-elimination is no longer recommended as a
+standalone lever. No source change.
