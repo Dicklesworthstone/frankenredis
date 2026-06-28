@@ -2690,6 +2690,20 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: SIMD heuristic sweep extended to the build-blocked crates (fr-command/runtime/server) — none; class exhausted CODEBASE-WIDE
+
+Completed the SIMD/dependency lever sweep by grepping the crates I can't test directly
+(fr-command/fr-runtime/fr-server — fr-command's build.rs blocks per-crate rch builds,
+but they're greppable and any pure fn could be copied into an fr-store test to measure).
+NO conditional-min/max-store, array-tally, or element-wise-transform levers found:
+- fr-server `iter_mut().take(N)` loops = multi-pair arg PARSERS (HSET/ZADD slot fill),
+  not transforms.
+- the one fr-runtime `.zip()` (1964) is an INTENTIONAL constant-time password compare
+  (AUTH/ACL) — must NOT short-circuit/vectorize (timing-attack safety). DO NOT touch.
+So the two SIMD heuristic classes (memory-RAW multi-accumulator; conditional-store→max)
+are EXHAUSTED across all 5 crates — HLL histogram (-53.5%) + merge (-93.9%) were the
+only two instances; everything else pre-SWAR'd or non-applicable. No source change.
+
 ## 2026-06-28 CrimsonHawk: RESP3 double encoding verified optimal (fpconv direct dtoa + integer fast path) — reply-path coverage complete
 
 `push_redis_double_ascii` (per zset score in ZRANGE/ZSCORE WITHSCORES — hot for zset
