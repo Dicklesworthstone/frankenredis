@@ -2728,6 +2728,30 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: broad throughput head-to-head on the live binary — fr DOMINATES compute-heavy commands; sole loss zcount 0.71x is treap-structural (dispatch already fast-pathed), not a per-turn lever
+
+Ran scripts/broad_command_headtohead.py (the tool that found the set-algebra losses)
+fr vs vendored redis 7.2.4 on the now-benchable binary, --pipe 200 --trials 7:
+  fr FASTER/parity on ~all: sunionstore 3.79x, bitcount 2.03x, lpos 1.96x, sinterstore
+  1.71x, sdiffstore 1.56x, sintercard 1.37x, lrange_full 1.20x, smismember 1.09x,
+  getrange 1.07x, srandmember 1.08x, zrange_rev 1.05x; sinter3 0.98~, zrangebyscore
+  1.02~, hrandfield 1.05~, zrandmember 0.96~.
+  SOLE loss flagged: **zcount 0.71x** (1.0 vs 0.7ms — tiny absolute at load 14-23).
+
+zcount RULED OUT as a per-turn lever: it ALREADY has a borrowed fast path
+(`parse_borrowed_plain_zcount_packet` main.rs 12118 + `execute_plain_zcount_borrowed`
+fr-runtime 22931, wired at dispatch 5180/5924). So 0.71x is NOT dispatch-bound — the
+residual is the treap range-count constant-factor (augmented-treap rank vs redis
+skiplist, the SAME structural class as ZRANK 1.41x handed to CoralOx) and/or load noise
+on a 1ms measurement. No dispatch lever remains; the algorithm gap is fr-store treap
+structural.
+
+CONCLUSION: the broad compute-heavy throughput surface is fr-DOMINANT on the live binary
+(many 1.5-3.8x wins, rest parity), with the single residual (zcount) being a known
+treap-structural micro-gap whose dispatch is already optimized. No per-turn throughput
+lever remains — consistent with the GET/SET syscall-floor profiles. Perf surface
+empirically closed across hot path AND compute-heavy long tail. No source change.
+
 ## 2026-06-28 CrimsonHawk: keyspace RAM gap is VALUE-SIZE-DEPENDENT — 2.687x@tiny → 1.673x@100B; realistic workloads ~1.5-1.7x, further lowering KeyDict ROI
 
 Measured the same 1M-key keyspace at a realistic value size (DEBUG POPULATE 1000000 key:
