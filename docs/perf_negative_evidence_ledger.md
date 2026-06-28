@@ -2631,6 +2631,7 @@ optimal or low-value — recorded so the loop doesn't re-walk them:
 | BITOP / BITPOS / BITCOUNT | whole bit-primitive family already SWAR / word-at-a-time (`chunks_exact(8)` word-skip + `leading_zeros`/`count_ones`, each with a SWAR A/B gate); BITCOUNT is fr-FASTER (0.477x) | optimal |
 | SRANDMEMBER/SPOP/HRANDFIELD/ZRANDMEMBER count | rejection-sampling (n<len/2) + partial Fisher-Yates split, O(1) `get_index` clones (rndcnt) | optimal |
 | LPOS / LREM | `l.iter().position(\|v\| v==elem)` linear scan — identical to redis `lposCommand`; residual is ChunkedList iteration (structural) | parity |
+| float parse (`parse::<f64>` in ZADD/INCRBYFLOAT/zset-score/legacy-double) | std uses Eisel–Lemire fast-float since Rust 1.55; must byte-match strtod anyway | optimal — already the fast path |
 
 **Convergence note (2026-06-28):** across two survey passes, EVERY pure compute /
 algorithm primitive reachable in a per-turn loop is now verified at its optimum or
