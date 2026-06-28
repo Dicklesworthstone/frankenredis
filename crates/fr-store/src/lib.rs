@@ -12909,6 +12909,40 @@ impl Store {
             }
         }
 
+        // (frankenredis-sintercard-intset) When every set is intset-encoded,
+        // count over the raw sorted i64 slices directly. The generic path below
+        // formats each min-set member i64 to a decimal string (iter) and
+        // re-parses it to i64 inside each other set's `contains` — an
+        // i64<->string round-trip per (member, set) pair that dominates intset
+        // SINTERCARD (redis compares the encoded integers directly). Byte-
+        // identical: the COUNT is order-independent and a LIMIT'd call still
+        // returns `limit` once reached.
+        if let Some(min_ints) = min_set.as_int_slice() {
+            let mut other_ints: Vec<&[i64]> = Vec::with_capacity(other_sets.len());
+            let mut all_int = true;
+            for s in &other_sets {
+                match s.as_int_slice() {
+                    Some(v) => other_ints.push(v),
+                    None => {
+                        all_int = false;
+                        break;
+                    }
+                }
+            }
+            if all_int {
+                let mut count = 0_u64;
+                for &x in min_ints {
+                    if other_ints.iter().all(|o| o.binary_search(&x).is_ok()) {
+                        count = count.saturating_add(1);
+                        if limit > 0 && count >= limit {
+                            return Ok(limit);
+                        }
+                    }
+                }
+                return Ok(count);
+            }
+        }
+
         if !declustered {
             // Original sequential path (small sets / no LIMIT): byte-identical.
             let mut count = 0_u64;

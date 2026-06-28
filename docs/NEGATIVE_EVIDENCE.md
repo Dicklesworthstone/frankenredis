@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-06-28 AmberRiver: LANDED intset SINTERCARD direct-i64 path — 3.46x vs main / 1.23x faster than Redis
+
+Broad sweep found SINTERCARD a gap **only on integer (intset) sets**: parity on
+two different STRING sets (`0.99x`) but `2.5-7x` slower on intsets (`SINTERCARD 2
+Si Si2` = `2.53x`; same-key `Si Si` up to `7x`). Root cause: the generic count
+loop iterates the min set as byte strings (`iter()` formats each member i64 to
+decimal) and calls `other.contains(&[u8])`, which re-parses the bytes back to i64
+for the intset binary search — an i64<->string round-trip per (member, set) pair.
+Redis compares the encoded integers directly.
+
+Fix (`fr-store::sintercard`): when every set is intset-encoded
+(`SetValue::as_int_slice` is `Some`), count over the raw sorted i64 slices with a
+direct `binary_search` — no string round-trip. Byte-identical: the count is
+order-independent and a LIMIT'd call still returns `limit` once reached; mixed
+intset+string falls through to the generic path.
+
+Measured (`SINTERCARD 2 Si Si2`, 300-member intsets, x300, best-of-12, load ~17):
+
+| | candidate | main control | Redis 7.2.4 |
+|---|---:|---:|---:|
+| best | **`1.02 ms`** | `3.53 ms` | `1.25 ms` |
+
+→ **3.46x faster than main**; fr/Redis flips from `2.824` slower to **`0.816` =
+1.23x FASTER**. Correctness: returned COUNT identical to control AND Redis across
+A∩B, A∩B∩C, same-key A∩A, LIMIT, intset∩string (0), and single-set; **659**
+fr-store lib tests green. (SINTER full-intersection on intsets has the same
+round-trip — `1.45x` — a follow-up.)
+
 ## 2026-06-28 AmberRiver: LANDED flagged ZADD (CH) fresh-key bulk path — O(n²)→O(n), 4.23x vs main / 1.9x faster than Redis
 
 Sweep found a big gap: `ZADD key CH score member …` (and any flagged ZADD) on a
