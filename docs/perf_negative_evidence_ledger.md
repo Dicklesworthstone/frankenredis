@@ -2399,3 +2399,41 @@ the CRLF sits at offset 1–5. The vectorized `position` pays SIMD/loop setup th
 trivial scalar loop — already ~register-bound at 2.2 ns/line — skips. Vectorization
 can only win on long lines, which this primitive never sees. The scalar `read_line`
 is optimal; don't swap it for memchr/position. (Test-only; no source modified.)
+
+## 2026-06-28 CrimsonHawk: /alien-graveyard EV-screen of the 3 remaining STRUCTURAL gaps — none clears the per-turn EV>=2.0 gate; one multi-day lever ranked for a dedicated session
+
+With the clean per-crate surface exhausted (reply/parse encoders optimal; RDB
+list-decode clone eliminated [landed 2a43fb0db]; streaming-decode rejected; GET
+already single-probe via `frankenredis-get-single-lookup`; `read_line` scalar
+optimal), ran the alien-graveyard matcher over the 3 next-biggest gaps vs Redis
+7.2.4. Result: all three are structural and fail the EV>=2.0 / per-turn-shippable
+gate. Recorded so the loop stops re-deriving it.
+
+1. **Keyspace-dict RAM 4.49x->1.79x** — maps to graveyard §7.1 Succinct Data
+   Structures / Elias-Fano. BUT the cost is `ordered_keys: Vec<key>` storing every
+   key a SECOND time (alongside the hash) to serve fr's *deterministic sorted* SCAN
+   (encoded in conformance `core_scan.json` + test 32939). Elias-Fano fits sorted
+   *integers*, not byte-string keys; the real fix is storing indices/handles not key
+   copies, which hashbrown can't give stably. EV: Impact 4 / Conf 2 / Reuse 2 /
+   Effort 5 / Friction 4 = **0.8**. Multi-day, SCAN-semantics-coupled, fr-store-owned
+   (uhthd in progress). REJECT for per-turn.
+
+2. **RDB collection decode 2.2-2.8x (keep-listpack `RdbValue`)** — graveyard
+   "keep the representation" / arena (§5.x). Highest-EV of the three but still
+   cross-crate (fr-persist `RdbValue` listpack variant + fr-store store-side
+   pass-through) and the SET/HASH span-decode half already landed (0ea29b6fe /
+   88f433be9). EV: Impact 3 / Conf 3 / Reuse 3 / Effort 4 / Friction 3 = **1.5**.
+   Below gate; ranked #1 for a *dedicated multi-day* session, not a loop turn.
+
+3. **Per-command dispatch long tail (name-hash jump table)** — premise is partly
+   STALE: fr already dispatches length-bucketed (`match cmd.len()` then
+   `eq_ascii_token`), so it is NOT a flat sequential strcmp chain. The residual
+   within-bucket fold-compare chain only touches COLD control commands (hot GET/SET
+   are separately fast-pathed), and a `match`-on-uppercased-bytes rewrite lives in
+   contended fr-runtime core (AmberRiver active). EV: Impact 2 / Conf 3 / Reuse 2 /
+   Effort 3 / Friction 4 = **0.5**. REJECT.
+
+Conclusion: the per-turn perf-lever well in the clean/uncontended crates is dry; the
+only positive-ROI remaining work is the multi-day keep-listpack decode lever (#2),
+which needs a dedicated fr-store+fr-persist session, not a per-turn loop iteration.
+No source change.
