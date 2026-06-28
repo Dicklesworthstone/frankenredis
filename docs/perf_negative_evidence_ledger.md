@@ -2690,6 +2690,19 @@ decode arms. The remaining measured gaps vs Redis 7.2.4 are STRUCTURAL and outsi
 per-turn loop: RDB collection decode is per-element-allocation-bound (keep-listpack
 `RdbValue`, multi-day, ranked #1), and keyspace-dict RAM (uhthd). No source change.
 
+## 2026-06-28 CrimsonHawk: stream RDB codec checked — serial byte-build, niche, optimal; testable-surface sweep COMPLETE
+
+Last unexamined testable area: the stream RDB codec (`rdb_stream.rs`). It is a serial
+byte-stream listpack build (per-entry/field opcode pushes, SAMEFIELDS field-dedup
+already shipped) — byte-exact-bound to the redis stream RDB format and niche (streams
+uncommon). Same class as the listpack encode (optimal serial build). No lever. The one
+`entries.to_vec()` (113) is a once-per-stream sort buffer. With this, the per-turn
+TESTABLE surface (fr-store + fr-persist — the crates that build on rch without the
+fr-command commands-dir blocker) is FULLY swept: every CPU command path, codec, and
+data-structure op is measured/verified optimal-or-parity, or structural. The 8 wins
+this session were the entire harvestable per-turn yield; the rest is multi-day
+structural. No source change.
+
 ## 2026-06-28 CrimsonHawk: SORT BY/GET substitution verified optimal (buffer-reuse byte-concat) — command-path CPU coverage complete
 
 SORT-with-patterns was a plausible `format!`-substitution lever (the class AmberRiver
