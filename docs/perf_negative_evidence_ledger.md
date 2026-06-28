@@ -2728,6 +2728,32 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: fr-runtime build-unblock EXHAUSTIVELY ruled out via current rch — ops fix required to harvest the reply-encode vein + differential probing
+
+Pursued the highest-EV move (unblock fr-runtime → land the ~10-command reply-encode
+vein + enable differential probing) via the rch tooling. Checked EVERY mechanism on the
+current rch; NONE works:
+- `rch config`: no `include_patterns` / `sync.include_untracked` (both "unknown key").
+- `force_local`: shown in `config show` but NOT settable (`config get force_local` =
+  "unknown configuration key"); a computed/display value, not an override.
+- `rch exec`: no `--local`/`--here`/`--no-offload` flag.
+- no `RCH_FORCE_LOCAL` env var (robot-docs has none).
+- `rch diagnose -- cargo build -p fr-runtime` → "Effective worker: ovh-a" (WILL
+  offload to a remote worker lacking the commands dir → build fails).
+- daemon-stop to force local would be defeated by the hook's daemon AUTO-START.
+ROOT: `legacy_redis_code/redis/src/commands` (394 files, present LOCALLY) is GITIGNORED
+(deliberate clean-room/licensing boundary) + `.rchignore`'d → rch's sync skips it → the
+remote worker can't run fr-command's build.rs. Per-crate `cargo test -p fr-store/
+fr-persist/fr-protocol` works ONLY because those leaf crates don't pull fr-command.
+
+CONFIRMED OPS-ONLY (now tooling-verified, not just memory). The fix is a HUMAN action:
+(a) pre-seed workers' sync roots with the commands dir, (b) redesign fr-command's
+build.rs to read a TRACKED generated table instead of the gitignored JSON, (c) relax
+the gitignore for `redis/src/commands` only, or (d) an rch feature to force-include an
+untracked path. Until one lands, the reply-encode vein (SMEMBERS/LRANGE/ZRANGE etc.,
+~3x-class) and end-to-end differential correctness probing stay BLOCKED — these are the
+two concrete high-value backlogs the ops fix unlocks. No source change.
+
 ## 2026-06-28 CrimsonHawk: collection-reply RespFrame::Array materialization vein — ~10+ probable reply-encode wins (AOF pattern) BLOCKED by unbuildable fr-runtime
 
 The AOF win (encode_aof_stream −67.6%) was the borrow-encode-direct-vs-RespFrame-
