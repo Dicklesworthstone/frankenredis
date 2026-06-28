@@ -2494,3 +2494,21 @@ Consistent across sizes (not noise) and causally sound (iteration-count + ILP). 
 checksum throughput now exceeds Redis 7.2.4's slice-by-8 on large RDB/DUMP payloads.
 Cost: tables 16 KiB → 32 KiB (const, .rodata; still L1-resident for the hot table[0],
 streamed otherwise). Landed in `crc64_redis`.
+
+## 2026-06-28 CrimsonHawk: REJECT LZF-decompress pre-reserve (vs 8 KiB-cap + grow) — mimalloc makes the reallocs free (~0%)
+
+`lzf_decompress` caps its output `Vec::with_capacity(expected_len.min(8192))` (an
+anti-OOM measure — the `expected_len` comes from an attacker-controllable RDB
+header), so a legit large compressed value reallocs ~log2(size/8K) times growing
+from 8 KiB while Redis pre-allocates the full size. Hypothesis: pre-reserving up to a
+ratio-bounded cap of the ACTUAL compressed input size (OOM-safe: bounded by real
+bytes present × the ~88x max LZF expansion, not the header) would kill the reallocs.
+
+Isolated in-process A/B (parity proven byte-identical + round-trip across 32 B..1 MiB
++ adversarial tiny-input/huge-`expected_len` stays bounded): `decode` time
+4 KiB **-0.2%**, 64 KiB **+1.0%**, 1 MiB **-0.2%** — all within noise, ~0-gain.
+Cause: fr's default allocator is mimalloc, which grows the `Vec` in place / recycles
+so cheaply that the reallocs the pre-reserve would remove cost ~nothing (same lesson
+as the zset-member / large-SET buffer-reuse rejections — mimalloc defeats
+malloc-avoidance levers). Not worth perturbing the OOM-safety boundary for zero.
+Reverted (test-only; no source touched). The 8 KiB-cap-and-grow form stays.
