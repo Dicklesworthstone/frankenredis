@@ -7152,3 +7152,19 @@ Residual 0.77–0.87x is a small constant factor (two `rank_of` calls clone the 
 the O(range) scan. BYTE-EXACT: 2772/2772 live differential checks vs redis 7.2.4 across sizes 130..5000 (bracket `[`/`(`,
 -inf/+inf, -/+) = 0 mismatches; fr-store `lex_count`/`score_bound_count`/`7uonw` isomorphism unit tests green. Corrects the
 prior memory note that called the ZLEXCOUNT loss "dispatch-bound" — it was a warm-threshold gate.
+
+### 2026-06-29 NO-SHIP (unverifiable under load): ZRANK/ZREVRANK WITHSCORE combined rank+score one-pass (CrimsonHawk)
+Round-2 extended sweep (`scripts/extended2_headtohead_ch.py`) flagged ZRANK WITHSCORE at ~0.58x vs Redis 7.2.4 (n=2000),
+~3x slower than plain ZRANK (0.99x parity). ROOT CAUSE is real: the WITHSCORE handler (fr-command `zrank_generic`) called
+`store.zrank` THEN `store.zmscore` — two `entries` probes + two `get_score(member)` lookups — even though `FullSortedSet::rank`
+already decodes the score to build the rank-tree target key. Implemented a combined path: `rank_with_score`/`rev_rank_with_score`
+at FullSortedSet + PackedZSet + SortedSet dispatcher, and `Store::zrank_withscore(reverse)` doing ONE keyspace lookup; wired
+`zrank_generic` to use it. CORRECTNESS SOLID: 444/444 live differential vs redis 7.2.4 (RESP2+RESP3, packed n=5..128 + full
+n=129..2000, missing key/member, plain-ZRANK regression guard) = 0 mismatches. BUT the candidate-vs-control A/B (true two-fr-binary
+interleaved, /tmp saved binaries) could NOT confirm a win: under heavy machine load (abs times 4x baseline: zrank_ws 5-7µs vs
+earlier 1.5µs) the candidate measured 0.75x of control — AND the UNTOUCHED plain-ZRANK guard path also measured 0.87x "slower",
+proving the result is scheduling/placement NOISE, not signal. The change is strictly-less-work (removes one keyspace probe + one
+get_score per WITHSCORE call) so it is sound in principle, but per the "REVERT ~0-gain / never land an unverified perf claim" rule
+it is NOT shipped — stashed (`CrimsonHawk-zrankws-combined-CORRECT-but-UNVERIFIED-under-load-444diff-pass`) for a re-bench on a
+quiet machine. The reusable sweep scripts (`extended_headtohead_ch.py` round-1 found the SHIPPED ZLEXCOUNT 4096→512 win
+bdcc79a02; `extended2_headtohead_ch.py` round-2) are kept. BLOCKER for measurement: machine load — interleaved A/B needs a quiet host.
