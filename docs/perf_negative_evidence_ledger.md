@@ -4869,3 +4869,20 @@ The ONE lever is keep-listpack (RdbValue/Value listpack-backed variant, decode-o
 addresses ALL collection types uniformly (~3x on every collection RESTORE). Multi-day,
 all-or-nothing fr-store value-representation change; needs a dedicated slice. This is now the
 single data-ranked top priority for the perf campaign.
+
+## 2026-06-29 cc: MEASURED broad online-command scorecard (release binary vs redis 7.2.4) — online surface PARITY+; no bounded online gap; completes the exhaustion proof
+
+Ran scripts/broad_command_headtohead.py (pipe=64, 7 trials) fr vs vendored redis 7.2.4 to
+confirm whether ANY online command (the only per-turn-fixable class — RESTORE-decode is
+structural) has a residual gap. Result: PARITY-or-fr-FASTER across the board.
+  fr-FASTER: sunionstore 2.98x, sdiffstore 2.03x, lpos 2.05x, bitcount 1.83x, sinterstore
+    1.40x, hrandfield 1.34x, zrandmember 1.17x, lrange_full 1.08x.
+  PARITY (~): getrange, sinter3, smismember, zrangebyscore, zrange_rev, srandmember.
+  ONLY sub-0.9x: zcount 0.772x (0.3ms vs 0.2ms — known micro, dispatch/setup-dominated at
+    pipelined-tiny scale, previously REJECTED) + sintercard 0.898x (borderline noise; already
+    shipped 0.62x->1.10x resolve-once, vein exhausted).
+CONCLUSION: the online command surface has NO bounded win left. Combined with this session's
+measurements (RESTORE-decode 0.31-0.41x uniform = structural keep-listpack; DUMP 1.026x parity
+= SAVE candidate refuted), the perf picture is now FULLY measured & ranked: the SOLE remaining
+real gap vs redis is keep-listpack RESTORE-decode (multi-day fr-store value-rep, no bounded
+step). Everything per-turn-fixable is shipped or at parity+.
