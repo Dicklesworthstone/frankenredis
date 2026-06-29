@@ -4576,3 +4576,22 @@ GET 26.6 vs 23.8 ns — so the gain is conservative): incr 85.719 ns → 43.474 
 First WRITE-path single-lookup collapse; the same pattern (read deadline once, conditional
 drop_if_expired, single get_mut/insert) should extend to APPEND / SETRANGE / SETBIT /
 GETSET / GETDEL — future per-crate follow-ups.
+
+## 2026-06-29 cc: REJECTED append lazy-drop collapse (~0-gain) — write-path lazy-drop only pays on LOOKUP-dominated writes, not MUTATION-dominated ones
+
+Extended the INCR lazy-`drop_if_expired` idea to APPEND via a `drop_if_expired_lazy` helper
+(statement-form: peek deadline, only call `drop_if_expired` when due, eliding the redundant
+`entries.get`). BYTE-EXACT (`cargo test -p fr-store --lib` 659/0). But MEASURED ~0-gain:
+append-empty 44.825 ns (baseline) → 40.142 ns (candidate) looks like −10.5% RAW, but the
+candidate ran on a ~9% faster worker (GET 24.4 vs 26.7 ns); worker-normalized the true win
+is **~2%** — noise-level. REVERTED (helper + bench removed; no source change retained).
+
+BOUNDARY FINDING (why INCR won big and APPEND didn't): the lazy-drop saves one `entries`
+probe (~15 ns). INCR ALSO saved a second expiry probe (`key_has_expiry`) AND its op is
+cheap (`replace_with_integer_write`), so the 2 saved probes were ~half its cost → −49%.
+APPEND saves only ONE probe and its cost is dominated by `with_mutated_entry` →
+`materialize_string` (may clone) + `extend` + `touch_write` + `set_flag`, so the saved
+probe is a small fraction → ~0. COROLLARY: don't bother applying lazy-drop to the
+mutation-heavy writes (SETRANGE/SETBIT/GETSET/APPEND); it only pays where the op is
+lookup-dominated like INCR (and INCR's extra `key_has_expiry` reuse was key). Write-path
+single-lookup vein is effectively just INCR-family (shipped). No source change this entry.
