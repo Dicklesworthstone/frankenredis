@@ -6791,15 +6791,36 @@ impl Store {
     }
 
     pub fn expiretime_value(&mut self, key: &[u8], now_ms: u64) -> ExpireTimeValue {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (frankenredis-cc incr-single-lookup) Read the deadline ONCE. A key with a live
+        // (future) expiry is by construction present in `entries`, so when the peeked
+        // deadline is `Some` and not yet due we answer ExpiresAt without a second probe —
+        // collapsing record_keyspace_lookup's `drop_if_expired` probe + the redundant
+        // `expiry_ms`. Only an actually-due key falls to the full `drop_if_expired` (probe +
+        // remove + notify), and a no-expiry key still needs ONE `entries` probe to tell a
+        // present (NoExpiry) key from an absent (KeyMissing) one. Byte-identical hit/miss
+        // accounting and result vs the record_keyspace_lookup + expiry_ms pair.
+        // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries that do NOT
+        // update access time (no RNG consumed, LFU-independent), so the collapse is exact.
+        let deadline = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, deadline).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
             return ExpireTimeValue::KeyMissing;
         }
-        // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries
-        // that do NOT update access time. Differential probe vs vendored 7.2.4
-        // confirmed OBJECT IDLETIME remains unchanged after these commands.
-        match self.expiry_ms(key) {
-            Some(expires_at_ms) => ExpireTimeValue::ExpiresAt(expires_at_ms),
-            None => ExpireTimeValue::NoExpiry,
+        match deadline {
+            Some(expires_at_ms) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                ExpireTimeValue::ExpiresAt(expires_at_ms)
+            }
+            None => {
+                if self.entries.contains_key(key) {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    ExpireTimeValue::NoExpiry
+                } else {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    ExpireTimeValue::KeyMissing
+                }
+            }
         }
     }
 
@@ -8645,6 +8666,27 @@ impl Store {
 
     /// Touch a key (update its last access time) without modifying the value.
     pub fn touch_key(&mut self, key: &[u8], now_ms: u64) -> bool {
+        // (frankenredis-cc incr-single-lookup) Non-LFU fast path: TOUCH consumes no RNG and
+        // bumps no keyspace stat here (the original called `drop_if_expired` directly), so
+        // for the common non-LFU config we lazy-drop — peek the deadline, only probe+remove
+        // when actually due, else serve the access-touch from a single `get_mut` — eliding
+        // `drop_if_expired`'s redundant `entries` probe. Byte-identical (no RNG, no stat).
+        // The LFU path is left verbatim so its `next_rand()` consumption order is preserved.
+        if !self.lfu_tracking_enabled() {
+            if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                return false;
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    true
+                }
+                None => false,
+            };
+        }
         self.drop_if_expired(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;

@@ -4643,3 +4643,22 @@ so the worker factor cancels in the ratio): persist-no-ttl 65.868 ns → 17.640 
 win to date — because PERSIST's return-false path is PURE lookups (no mutation) and we cut
 2 of 3. The TTL'd path (actual TTL removal) saves the same 2 probes atop a light mutation.
 Write-path lookup-dominated wins now: INCR-family, SETNX, EXPIRE-family, PERSIST.
+
+## 2026-06-29 cc: SHIPPED expiretime_value (EXPIRETIME/PEXPIRETIME) **−66.8% (~3.0x)** + touch_key (TOUCH) **−43.3% (~1.76x)** single-lookup collapse, byte-exact
+
+Two more lookup-dominated wins in the same vein. `expiretime_value` did
+`record_keyspace_lookup` (drop_if_expired probe) + a SECOND `expiry_ms` — collapsed like
+PERSIST: read the deadline ONCE; a `Some` future deadline proves the key is present so we
+answer `ExpiresAt` from that single probe (only an actually-due key falls to the full
+`drop_if_expired`; a no-expiry key needs one `entries` probe to tell NoExpiry from
+KeyMissing). `touch_key` (TOUCH) did unconditional `drop_if_expired` + `get_mut`; collapsed
+the COMMON non-LFU path (which consumes no RNG and bumps no keyspace stat) to a lazy-drop
+single `get_mut`, leaving the LFU path verbatim so its `next_rand()` order is preserved.
+BYTE-EXACT: existing `expiretime_value_reports_state` covers all four branches (missing /
+no-expiry / future / due); `cargo test -p fr-store --lib` 659/0. MEASURED — same-worker
+A/B (vmi1264463), with BOTH controls confirming worker stability across the two runs
+(get-ref + persist-no-ttl each "No change in performance detected", p>0.05):
+expiretime_ttl 104.54 ns → 32.842 ns = **−66.8% (~3.0x)**, change CI [+180%,+226%] p=0.00;
+touch_no_ttl 79.685 ns → 45.179 ns = **−43.3% (~1.76x)**, change CI [+69%,+85%] p=0.00.
+Write/read lookup-dominated single-lookup wins now: INCR-family, SETNX, EXPIRE-family,
+PERSIST, EXPIRETIME/PEXPIRETIME, TOUCH.

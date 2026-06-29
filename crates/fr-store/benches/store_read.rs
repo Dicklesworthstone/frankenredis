@@ -109,6 +109,18 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("persist_no_ttl", |b| {
         b.iter(|| std::hint::black_box(store.persist(std::hint::black_box(b"target:key"), 2_000)))
     });
+    // EXPIRETIME on a TTL-bearing key: the live-deadline case answers ExpiresAt from ONE
+    // `expiry_ms` probe (a key with a future expiry is provably present), collapsing the
+    // record_keyspace_lookup probe + the redundant second `expiry_ms`.
+    g.bench_function("expiretime_ttl", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.expiretime_value(std::hint::black_box(b"ttl:sentinel"), 2_000))
+        })
+    });
+    // TOUCH on a live no-TTL key (non-LFU): lazy-drop single `get_mut` access-touch.
+    g.bench_function("touch_no_ttl", |b| {
+        b.iter(|| std::hint::black_box(store.touch_key(std::hint::black_box(b"target:key"), 2_000)))
+    });
     g.finish();
 }
 
