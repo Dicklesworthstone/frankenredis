@@ -6630,9 +6630,14 @@ impl Store {
             (old_expiry, old_was_stream)
         };
 
-        self.set_existing_expiry_ms(key.as_slice(), None);
-        self.forget_volatile_key(key.as_slice());
-        self.update_expiry_deadline(old_expiry, None);
+        // (CrimsonHawk) Same no-TTL guard as set_plain_borrowed: these three are no-ops
+        // when the key carried no expiry — skip the three redundant hash-map probes on the
+        // common SET-overwrite-of-a-no-TTL-key path (byte-identical).
+        if old_expiry.is_some() {
+            self.set_existing_expiry_ms(key.as_slice(), None);
+            self.forget_volatile_key(key.as_slice());
+            self.update_expiry_deadline(old_expiry, None);
+        }
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
             self.stream_groups.remove(key.as_slice());

@@ -2728,7 +2728,19 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
-## 2026-06-29 CrimsonHawk: LANDED set_plain_borrowed no-TTL expiry-guard — per-crate ~1.41x on the hottest store-write (common no-TTL SET)
+## 2026-06-29 CrimsonHawk: LANDED set_plain_OWNED no-TTL expiry-guard (sibling) — same ~1.3-1.4x; both SET-overwrite paths now guarded
+
+Applied the proven no-TTL expiry-guard to `set_plain_owned` (the owned-args SET-overwrite
+path used by generic-dispatch SET), the only remaining unguarded sibling of
+set_plain_borrowed. Same three redundant ops (set_existing_expiry_ms(None)/forget_volatile_
+key/update_expiry_deadline(None,None)), same `if old_expiry.is_some()` guard, byte-identical.
+The 3 ops are the SAME code measured at 15.8 ns/call in the set_plain_borrowed A/B, so the
+owned path saves the identical 15.8 ns (~1.3-1.4x on the no-TTL overwrite, baseline a touch
+higher than borrowed's 38.9ns due to owned-arg handling). CONFORMANCE GREEN: full fr-store
+suite 864 passed / 0 failed. Swept the other expiry-ops clusters (set@6480 uses a different
+mechanism; 7999 has a known TTL so ops aren't redundant; 18542 already gated) — no other
+unguarded instances. Both hot SET-overwrite paths (borrowed fast path + owned generic path)
+now skip the redundant probes for no-TTL keys. (End-to-end still syscall-bound = CPU-headroom.)
 
 The SET-overwrite path ran three expiry/volatile ops UNCONDITIONALLY that are no-ops for a
 no-TTL key (`set_existing_expiry_ms(None)` / `forget_volatile_key` / `update_expiry_deadline
