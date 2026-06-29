@@ -15272,26 +15272,28 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
     }
     for key in &argv[2..keys_end] {
-        // LMPOP is a write (upstream lookupKeyWrite); use the no-stat length
-        // probe so the candidate scan does not bump keyspace_hits/misses.
-        let len = store.llen_no_stat(key, now_ms);
-        match len {
-            Ok(n) if n > 0 => {
-                let mut popped = Vec::new();
-                for _ in 0..count {
-                    let val = if left {
-                        store.lpop(key, now_ms)?
-                    } else {
-                        store.rpop(key, now_ms)?
-                    };
-                    match val {
-                        Some(v) => popped.push(RespFrame::BulkString(Some(v))),
-                        None => break,
-                    }
-                }
+        // (CrimsonHawk) LMPOP is a write (upstream lookupKeyWrite). Pop directly with
+        // the count variant: ONE keyspace lookup pops up to `count` from the chosen key,
+        // replacing the old `llen_no_stat` probe + per-element single-pop loop (count+1
+        // lookups). Lists are never stored empty, so a missing/empty key returns None —
+        // exactly the old `n > 0` test — and we scan the next key; WrongType -> error.
+        // lpop_count/rpop_count back the shipped LPOP/RPOP COUNT (byte-exact order), and
+        // neither lpop nor lpop_count emits keyspace events (the runtime does), so dirty,
+        // key-removal, and notifications are unchanged.
+        let popped = if left {
+            store.lpop_count(key, count, now_ms)
+        } else {
+            store.rpop_count(key, count, now_ms)
+        };
+        match popped {
+            Ok(Some(items)) if !items.is_empty() => {
+                let arr = items
+                    .into_iter()
+                    .map(|v| RespFrame::BulkString(Some(v)))
+                    .collect();
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
-                    RespFrame::Array(Some(popped)),
+                    RespFrame::Array(Some(arr)),
                 ])));
             }
             Ok(_) => continue,
@@ -15356,32 +15358,32 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::SyntaxError);
         }
     }
+    let resp_proto = store.dispatch_client_ctx.resp_protocol_version;
     for key in &argv[2..keys_end] {
-        // ZMPOP is a write (upstream lookupKeyWrite); use the no-stat card
-        // probe so the candidate scan does not bump keyspace_hits/misses.
-        let card = store.zcard_no_stat(key, now_ms);
-        match card {
-            Ok(n) if n > 0 => {
-                let mut popped = Vec::new();
-                for _ in 0..count {
-                    let result = if use_min {
-                        store.zpopmin(key, now_ms)?
-                    } else {
-                        store.zpopmax(key, now_ms)?
-                    };
-                    match result {
-                        Some((member, score)) => {
-                            popped.push(RespFrame::Array(Some(vec![
-                                RespFrame::BulkString(Some(member)),
-                                zpop_score_frame(
-                                    score,
-                                    store.dispatch_client_ctx.resp_protocol_version,
-                                ),
-                            ])));
-                        }
-                        None => break,
-                    }
-                }
+        // (CrimsonHawk) ZMPOP is a write (upstream lookupKeyWrite). Pop directly with
+        // the count variant: ONE keyspace lookup pops up to `count` from the chosen key,
+        // replacing the old `zcard_no_stat` probe + per-element single-pop loop (count+1
+        // lookups). Sorted sets are never stored empty, so an empty result == the old
+        // `n > 0` test; scan the next key on empty, error on WrongType. zpopmin_count/
+        // zpopmax_count back the shipped ZPOPMIN/ZPOPMAX COUNT (byte-exact order), and
+        // emit no keyspace events themselves (the runtime does), so dirty/removal/notify
+        // are unchanged.
+        let result = if use_min {
+            store.zpopmin_count(key, count, now_ms)
+        } else {
+            store.zpopmax_count(key, count, now_ms)
+        };
+        match result {
+            Ok(pairs) if !pairs.is_empty() => {
+                let popped = pairs
+                    .into_iter()
+                    .map(|(member, score)| {
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(member)),
+                            zpop_score_frame(score, resp_proto),
+                        ]))
+                    })
+                    .collect();
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::Array(Some(popped)),

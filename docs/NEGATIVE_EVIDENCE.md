@@ -7185,3 +7185,21 @@ Implementation: `rank_with_score`/`rev_rank_with_score` at FullSortedSet + Packe
 live differential vs redis 7.2.4 (RESP2+RESP3, packed n=5..128 + full n=129..2000, missing key/member) = 0 mismatches;
 fr-store+fr-command `zrank` tests compile+pass. LESSON: when a perf change reduces a FIXED per-command work item, measure
 `perf stat instructions:u` over a fixed-count blast — it sees the win through machine load that swamps wall-clock A/B.
+
+### 2026-06-29 SHIP (perf-stat instructions): LMPOP/ZMPOP drop redundant llen_no_stat/zcard_no_stat probe (CrimsonHawk)
+extended2 sweep flagged LMPOP ~0.61x / ZMPOP ~0.70x vs Redis 7.2.4. ROOT CAUSE: both the generic fr-command handlers AND
+the four fr-runtime borrowed fast paths (lmpop1/lmpop2/zmpop1/zmpop2) did a `llen_no_stat`/`zcard_no_stat` probe to find a
+non-empty key, THEN re-looked-up the same key to pop (probe + pop = 2 keyspace lookups; COUNT>1 looped single pops =
+count+1 lookups). A list/zset is NEVER stored empty in redis semantics, so a direct `lpop`/`zpopmin` returns None exactly
+when the probe returned 0 — the probe is a pure redundant lookup. FIX: pop directly (generic handlers use lpop_count/
+zpopmin_count for the whole COUNT in one lookup; fast paths drop the probe). lpop_count/zpopmin_count back the shipped
+LPOP/ZPOPMIN COUNT (byte-exact order); neither single nor count pop emits keyspace events (runtime does), so dirty,
+key-removal, notifications, and keyspace hit/miss accounting are all unchanged.
+MEASURED load-independent via perf-stat instructions over fixed 300k-cmd pop blasts (scripts/mpop_blast.py; preload>N so no
+nil-path confound), candidate=this change vs control=8344b5098 (identical mpop code to HEAD 374d82db4):
+  - LMPOP no-COUNT (fast path): control 2.595G vs candidate 2.493G instr = **-3.9%** (~340 instr/cmd)
+  - ZMPOP no-COUNT (fast path): control 3.162G vs candidate 3.063G instr = **-3.1%** (~331 instr/cmd)
+  - LMPOP COUNT 1 (generic): -0.3% (~84/cmd); ZMPOP COUNT 1 (generic): -1.0% (~284/cmd) — all positive, no regression.
+Byte-exact: 1800 live differential checks vs redis 7.2.4 (RESP2 + RESP3 with correct map parser; 1/2/3 keys, COUNT 1/2/5/7,
+LEFT/RIGHT, MIN/MAX, missing keys mixed with non-empty, WrongType first/second key) = 0 mismatches; keyspace_hits/misses +0
+and DBSIZE identical to redis. (BLMPOP/BZMPOP left on the old path — blocking, rarer — no regression.)

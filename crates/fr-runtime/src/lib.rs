@@ -20619,23 +20619,21 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
-        let reply = match self.server.store.llen_no_stat(key, now_ms) {
-            Ok(n) if n > 0 => {
-                let val = if left {
-                    self.server.store.lpop(key, now_ms)
-                } else {
-                    self.server.store.rpop(key, now_ms)
-                };
-                match val {
-                    Ok(Some(v)) => RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(key.to_vec())),
-                        RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
-                    ])),
-                    Ok(None) => RespFrame::Array(None),
-                    Err(err) => CommandError::Store(err).to_resp(),
-                }
-            }
-            Ok(_) => RespFrame::Array(None),
+        // (CrimsonHawk) Pop directly: a list is never stored empty, so lpop/rpop
+        // returns None exactly when the old llen_no_stat probe returned 0 — the probe
+        // was a redundant second keyspace lookup. Same stats (llen_no_stat was no-stat)
+        // and events (the store pops emit none; the runtime metrics below are unchanged).
+        let val = if left {
+            self.server.store.lpop(key, now_ms)
+        } else {
+            self.server.store.rpop(key, now_ms)
+        };
+        let reply = match val {
+            Ok(Some(v)) => RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(key.to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
+            ])),
+            Ok(None) => RespFrame::Array(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(st);
@@ -20702,26 +20700,26 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
+        // (CrimsonHawk) Pop directly per key: a list is never stored empty, so lpop/rpop
+        // returns None exactly when the old llen_no_stat probe returned 0 (scan next key),
+        // Some on the first non-empty key (result), Err on WrongType — one keyspace lookup
+        // per key instead of probe+pop. Stats/events unchanged.
         let mut reply = RespFrame::Array(None);
         for k in [k1, k2] {
-            match self.server.store.llen_no_stat(k, now_ms) {
-                Ok(n) if n > 0 => {
-                    let val = if left {
-                        self.server.store.lpop(k, now_ms)
-                    } else {
-                        self.server.store.rpop(k, now_ms)
-                    };
-                    reply = match val {
-                        Ok(Some(v)) => RespFrame::Array(Some(vec![
-                            RespFrame::BulkString(Some(k.to_vec())),
-                            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
-                        ])),
-                        Ok(None) => RespFrame::Array(None),
-                        Err(err) => CommandError::Store(err).to_resp(),
-                    };
+            let val = if left {
+                self.server.store.lpop(k, now_ms)
+            } else {
+                self.server.store.rpop(k, now_ms)
+            };
+            match val {
+                Ok(Some(v)) => {
+                    reply = RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(k.to_vec())),
+                        RespFrame::Array(Some(vec![RespFrame::BulkString(Some(v))])),
+                    ]));
                     break;
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(err) => {
                     reply = CommandError::Store(err).to_resp();
                     break;
@@ -20804,26 +20802,23 @@ impl Runtime {
             }
         };
         let st = self.chained_command_start();
-        let reply = match self.server.store.zcard_no_stat(key, now_ms) {
-            Ok(n) if n > 0 => {
-                let popped = if use_min {
-                    self.server.store.zpopmin(key, now_ms)
-                } else {
-                    self.server.store.zpopmax(key, now_ms)
-                };
-                match popped {
-                    Ok(Some((member, score))) => RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(key.to_vec())),
-                        RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
-                            RespFrame::BulkString(Some(member)),
-                            score_frame(score),
-                        ]))])),
-                    ])),
-                    Ok(None) => RespFrame::Array(None),
-                    Err(err) => CommandError::Store(err).to_resp(),
-                }
-            }
-            Ok(_) => RespFrame::Array(None),
+        // (CrimsonHawk) Pop directly: a sorted set is never stored empty, so zpopmin/
+        // zpopmax returns None exactly when the old zcard_no_stat probe returned 0 — the
+        // probe was a redundant second keyspace lookup. Stats/events unchanged.
+        let popped = if use_min {
+            self.server.store.zpopmin(key, now_ms)
+        } else {
+            self.server.store.zpopmax(key, now_ms)
+        };
+        let reply = match popped {
+            Ok(Some((member, score))) => RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(key.to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(member)),
+                    score_frame(score),
+                ]))])),
+            ])),
+            Ok(None) => RespFrame::Array(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(st);
@@ -20899,29 +20894,29 @@ impl Runtime {
             }
         };
         let st = self.chained_command_start();
+        // (CrimsonHawk) Pop directly per key: a sorted set is never stored empty, so
+        // zpopmin/zpopmax returns None exactly when the old zcard_no_stat probe returned 0
+        // (scan next key), Some on the first non-empty key, Err on WrongType — one keyspace
+        // lookup per key instead of probe+pop. Stats/events unchanged.
         let mut reply = RespFrame::Array(None);
         for k in [z1, z2] {
-            match self.server.store.zcard_no_stat(k, now_ms) {
-                Ok(n) if n > 0 => {
-                    let popped = if use_min {
-                        self.server.store.zpopmin(k, now_ms)
-                    } else {
-                        self.server.store.zpopmax(k, now_ms)
-                    };
-                    reply = match popped {
-                        Ok(Some((member, score))) => RespFrame::Array(Some(vec![
-                            RespFrame::BulkString(Some(k.to_vec())),
-                            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
-                                RespFrame::BulkString(Some(member)),
-                                score_frame(score),
-                            ]))])),
-                        ])),
-                        Ok(None) => RespFrame::Array(None),
-                        Err(err) => CommandError::Store(err).to_resp(),
-                    };
+            let popped = if use_min {
+                self.server.store.zpopmin(k, now_ms)
+            } else {
+                self.server.store.zpopmax(k, now_ms)
+            };
+            match popped {
+                Ok(Some((member, score))) => {
+                    reply = RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(k.to_vec())),
+                        RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(member)),
+                            score_frame(score),
+                        ]))])),
+                    ]));
                     break;
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(err) => {
                     reply = CommandError::Store(err).to_resp();
                     break;
