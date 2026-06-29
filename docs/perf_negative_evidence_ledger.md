@@ -4140,3 +4140,31 @@ CIs.** This directly narrows the dominant vs-redis codec deficit (collection RES
 ≈ 0.36–0.46x = redis 2.2–2.8x faster) on the large-collection RDB-load / RESTORE path.
 Conformance GREEN: full `cargo test -p fr-persist` exit 0. Large-hashtable bench
 coverage added alongside.
+
+## 2026-06-29 cc: REJECTED quicklist-encode output presize (−5%, measured LOSS) — realloc-cap vein is DECODE-only; encode buffers are write-only and mimalloc-growth-optimal
+
+Full-surface codec re-measurement (rch criterion, all groups) to find the next lever
+after the two shipped decode wins. Absolute timings (mt=2–4): encode_rdb 5.53 / decode
+12.22; **quicklist encode 24.9 ms (dominant outlier, 5–9× any other encode)** / decode
+5.43; mixed_zset enc 6.47 / dec 4.89; hash_listpack enc 2.79 / dec 5.75; set_listpack
+enc 1.33 / dec 2.41; set_intset enc 0.92 / dec 3.34. quicklist encode is the only
+outlier and the sole remaining big codec lever.
+
+Tried the obvious realloc-vein extension on it: `encode_compact_list_quicklist2` grows
+its multi-MiB output `buf` from `Vec::new()`; pre-sized it to the raw upper bound
+(`Σ item.len() + items.len()*11 + 64`). Paired A/B (quicklist encode, mt=4):
+baseline `Vec::new()` 23.178 ms [23.154, 23.204]; candidate `with_capacity(est)`
+24.41 ms — **+5.0% SLOWER, p=0.00.** REVERTED (source restored byte-for-byte).
+
+LESSON (sharpens the realloc vein's boundary): the two shipped wins (lzfcap, collection
+cap) work because those buffers are GROWN THEN READ BACK during decode — eliminating
+realloc-copy of live bytes pays. ENCODE buffers are WRITE-ONLY append: mimalloc grows
+them in place efficiently, so a single big upfront reservation only adds the `est`
+O(n) pass + a worse-locality large alloc and loses ~5% (consistent with
+[[feedback_mimalloc_defeats_buffer_reuse_levers]]). Corollary: do NOT presize the
+`encode_rdb` top-level buffer either (same write-only shape + would over-commit to
+uncompressed size = transient RAM regression for compressible data). The realloc-cap
+vein is DECODE-only and is now fully harvested. quicklist encode's real cost is the
+listpack REBUILD (fr holds ChunkedList, redis memcpys a cached listpack) + per-node
+LZF attempt — the structural 99fwc ChunkedList-packed-node lever (multi-day, fr-store),
+not a per-turn buffer tweak. No source change this entry.
