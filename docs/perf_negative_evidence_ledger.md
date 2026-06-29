@@ -4168,3 +4168,31 @@ vein is DECODE-only and is now fully harvested. quicklist encode's real cost is 
 listpack REBUILD (fr holds ChunkedList, redis memcpys a cached listpack) + per-node
 LZF attempt — the structural 99fwc ChunkedList-packed-node lever (multi-day, fr-store),
 not a per-turn buffer tweak. No source change this entry.
+
+## 2026-06-29 cc: SHIPPED lpblob1 — build listpack blob in ONE buffer (remove redundant 2nd alloc + full-blob memcpy per collection encode); byte-identical, monotonic
+
+`finish_listpack_blob` built every collection listpack (DUMP / RDB-save of each
+hash/set/zset listpack + every quicklist PACKED node) by encoding entries into one
+`Vec`, then allocating a SECOND `Vec::with_capacity(total)` and copying the whole
+blob into it (`extend_from_slice(&encoded)`) just to prepend the 6-byte header. That
+is one extra allocation + one full-blob memcpy per blob. Reworked to build IN PLACE:
+new `listpack_blob_with_header(cap)` starts the buffer with a 6-byte header
+placeholder, entries append after it, and `finish_listpack_blob` now appends the
+`0xFF` terminator and BACKPATCHES `[u32 total_bytes][u16 count]` — no second buffer,
+no copy. All 5 call sites routed through it (small collections keep their right-sized
+`cap` reserve; quicklist nodes stay un-presized via `cap=0`, per the lzfcap-sibling
+finding that LARGE write-only encode buffers lose from a big upfront reservation).
+
+This is a MONOTONIC redundancy removal (strictly removes an alloc + a memcpy; cannot
+regress) and BYTE-IDENTICAL: full `cargo test -p fr-persist` = 223 passed / 0 failed,
+including the golden/round-trip + metamorphic RDB tests that assert exact encoded
+bytes. Magnitude is small — the removed work is ~1 alloc + a blob-sized memcpy per
+node (estimated ~0.7% hash / ~1.4% quicklist of encode wall-clock) — and a clean
+criterion ratio could NOT be isolated this session because the rch remote workers
+were under heavy variable load (±25–30%: the SAME candidate binary measured 30.0 then
+32.2 ms on quicklist encode while the earlier low-load baseline window read 23.2 ms;
+encode A/Bs swung 2× on a loaded worker). Shipped on the strength of the monotonic
+guarantee + byte-identity + the concrete redundancy removed, not a wall-clock ratio.
+MEASUREMENT NOTE for the swarm: rch-worker load this session is too noisy to A/B
+sub-5% levers; interleaved best-of-N on a single low-load worker (or a local target)
+is required for marginal-lever ratios.

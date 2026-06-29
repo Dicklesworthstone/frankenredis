@@ -1772,7 +1772,7 @@ fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
     // bulk RDB-save path). Under-estimates are harmless (Vec just grows); output is
     // byte-identical. (frankenredis perf: presize listpack blob, code-first batch-test pending)
     let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.len() + 11).sum::<usize>();
-    let mut encoded = Vec::with_capacity(cap);
+    let mut encoded = listpack_blob_with_header(cap);
     for member in members {
         encode_listpack_entry(&mut encoded, member);
     }
@@ -1811,7 +1811,7 @@ fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
             .iter()
             .map(|(f, v)| f.len() + v.len() + 22)
             .sum::<usize>();
-    let mut encoded = Vec::with_capacity(cap);
+    let mut encoded = listpack_blob_with_header(cap);
     for (field, value) in fields {
         encode_listpack_entry(&mut encoded, field);
         encode_listpack_entry(&mut encoded, value);
@@ -1883,7 +1883,7 @@ fn encode_zset_score_listpack_blob_from_members(
             .iter()
             .map(|(m, _)| m.len() + 11 + 32)
             .sum::<usize>();
-    let mut encoded = Vec::with_capacity(cap);
+    let mut encoded = listpack_blob_with_header(cap);
     for (member, score) in sorted_members {
         encode_zset_score_listpack_entry(&mut encoded, member, *score);
     }
@@ -1900,7 +1900,7 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
             .iter()
             .map(|(m, _)| m.len() + 11 + 32)
             .sum::<usize>();
-    let mut encoded = Vec::with_capacity(cap);
+    let mut encoded = listpack_blob_with_header(cap);
     for (member, score) in sorted_members {
         encode_zset_score_listpack_entry(&mut encoded, member, *score);
     }
@@ -2474,23 +2474,37 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
 /// chunk. Public so the in-memory `ChunkedList` can SEAL a full `Owned` chunk
 /// into the compact `Listpack` representation (frankenredis-99fwc).
 pub fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
-    let mut encoded = Vec::new();
+    let mut encoded = listpack_blob_with_header(0);
     for entry in entries {
         encode_listpack_entry(&mut encoded, entry);
     }
     finish_listpack_blob(encoded, entries.len())
 }
 
-fn finish_listpack_blob(encoded: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
-    let total_bytes = 6usize.checked_add(encoded.len())?.checked_add(1)?;
-    let total_bytes = u32::try_from(total_bytes).ok()?;
-    let mut listpack = Vec::with_capacity(total_bytes as usize);
-    listpack.extend_from_slice(&total_bytes.to_le_bytes());
+/// Finish a listpack blob built IN PLACE: `buf` must already start with a 6-byte
+/// header placeholder (written by [`listpack_blob_with_header`]) followed by the
+/// encoded entries. Appends the `0xFF` terminator and backpatches the
+/// `[u32 total_bytes][u16 entry_count]` header. This replaces the prior
+/// build-entries-then-allocate-a-second-buffer-and-copy form, removing one
+/// allocation and one full-blob memcpy per collection encode (every DUMP /
+/// RDB-save listpack node). Output bytes are identical. (frankenredis-cc lpblob1)
+fn finish_listpack_blob(mut buf: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
+    buf.push(0xFF);
+    let total_bytes = u32::try_from(buf.len()).ok()?;
+    buf[0..4].copy_from_slice(&total_bytes.to_le_bytes());
     let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
-    listpack.extend_from_slice(&entry_count.to_le_bytes());
-    listpack.extend_from_slice(&encoded);
-    listpack.push(0xFF);
-    Some(listpack)
+    buf[4..6].copy_from_slice(&entry_count.to_le_bytes());
+    Some(buf)
+}
+
+/// A fresh listpack output buffer with `capacity` reserved and the 6-byte header
+/// placeholder already written. Entries are appended after it; [`finish_listpack_blob`]
+/// backpatches the header.
+#[inline]
+fn listpack_blob_with_header(capacity: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(capacity.max(6));
+    buf.extend_from_slice(&[0u8; 6]);
+    buf
 }
 
 fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
