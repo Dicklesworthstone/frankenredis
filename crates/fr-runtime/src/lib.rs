@@ -5375,7 +5375,8 @@ impl Runtime {
         // Seed the fresh store with the base RDB snapshot (multi-part AOF) before
         // replaying the incremental command records. (frankenredis-nvcby)
         if let Some((entries, functions)) = &base_rdb {
-            if apply_rdb_entries_to_store(&mut self.server.store, entries, now_ms).is_err() {
+            if apply_rdb_entries_to_store(&mut self.server.store, entries.clone(), now_ms).is_err()
+            {
                 self.server.store = original_store;
                 self.server.aof_records = original_records;
                 self.server.aof_selected_db = original_aof_db;
@@ -5436,7 +5437,7 @@ impl Runtime {
         // rebuild so replayed collections pick their encoding under the current
         // config, not the fresh store's compiled defaults.
         copy_encoding_thresholds(&mut store, &self.server.store);
-        let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+        let counts = apply_rdb_entries_to_store(&mut store, entries, now_ms)?;
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
         for code in &functions {
@@ -5469,7 +5470,7 @@ impl Runtime {
                     copy_encoding_thresholds(&mut store, &self.server.store);
                     let counts = match apply_rdb_entries_to_store(
                         &mut store,
-                        &entries,
+                        entries,
                         now_ms.saturating_add(1),
                     ) {
                         Ok(counts) => counts,
@@ -5536,7 +5537,7 @@ impl Runtime {
         copy_encoding_thresholds(&mut store, &self.server.store);
         let counts = match apply_rdb_entries_to_store(
             &mut store,
-            &decoded.entries,
+            decoded.entries,
             now_ms.saturating_add(1),
         ) {
             Ok(counts) => counts,
@@ -5825,7 +5826,7 @@ impl Runtime {
                 let mut store = Store::new();
                 // (frankenredis-63p1s) live encoding thresholds before rebuild.
                 copy_encoding_thresholds(&mut store, &self.server.store);
-                let counts = apply_rdb_entries_to_store(&mut store, &decoded.entries, now_ms)?;
+                let counts = apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms)?;
                 // (frankenredis-t1yxa) Re-register FUNCTION libraries carried in
                 // the full-sync snapshot so FCALL / FUNCTION LIST work on the
                 // replica too, matching the master.
@@ -37780,7 +37781,7 @@ struct RdbLoadCounts {
 
 fn apply_rdb_entries_to_store(
     store: &mut Store,
-    entries: &[RdbEntry],
+    entries: Vec<RdbEntry>,
     now_ms: u64,
 ) -> Result<RdbLoadCounts, PersistError> {
     let mut counts = RdbLoadCounts::default();
@@ -37794,11 +37795,17 @@ fn apply_rdb_entries_to_store(
         }
 
         let key = encode_db_key(entry.db, &entry.key);
-        match &entry.value {
+        let entry_expire_ms = entry.expire_ms;
+        // (frankenredis-cc rdb-apply-move) Own the RdbValue so the String/Hash arms MOVE
+        // their payload into the store instead of cloning it (eliminating a redundant
+        // copy of every loaded string value + every hash field/value on the RDB-load /
+        // RESTORE / full-sync path). Every OTHER arm binds with `ref`, so its body is the
+        // exact borrowed code as before — byte-identical, zero behavior change.
+        match entry.value {
             RdbValue::String(value) => {
-                store.set_with_abs_expiry(key, value.clone(), entry.expire_ms, now_ms);
+                store.set_with_abs_expiry(key, value, entry_expire_ms, now_ms);
             }
-            RdbValue::List(items) => {
+            RdbValue::List(ref items) => {
                 store
                     .rpush(&key, items, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
@@ -37810,7 +37817,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::ListQuicklist2Packed(nodes) => {
+            RdbValue::ListQuicklist2Packed(ref nodes) => {
                 let mut items = Vec::new();
                 for node in nodes {
                     let spans = fr_persist::listpack::decode_value_spans(node)
@@ -37830,7 +37837,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::Set(members) => {
+            RdbValue::Set(ref members) => {
                 store
                     .sadd(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
@@ -37842,7 +37849,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::SetHashtable(members) => {
+            RdbValue::SetHashtable(ref members) => {
                 // (frankenredis-nom8d) Replicate redis rdbLoadObject's RDB_TYPE_SET
                 // decision exactly: a plain set with MORE than set-max-intset-
                 // entries members is created as a hashtable directly; otherwise it
@@ -37875,10 +37882,11 @@ fn apply_rdb_entries_to_store(
             RdbValue::Hash(fields) => {
                 // (frankenredis-rdbhashbulk) Seed every field in one keyspace
                 // lookup instead of N separate hsets.
-                let pairs: Vec<(Vec<u8>, Vec<u8>)> =
-                    fields.iter().map(|(f, v)| (f.clone(), v.clone())).collect();
+                // (frankenredis-cc rdb-apply-move) `fields` is owned (this arm omits `ref`)
+                // — MOVE it into hset_many instead of cloning every field+value into a
+                // fresh pairs Vec (2n redundant allocs+copies per hash on RDB load).
                 store
-                    .hset_many(&key, pairs, now_ms)
+                    .hset_many(&key, fields, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -37888,7 +37896,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::HashWithTtls(fields) => {
+            RdbValue::HashWithTtls(ref fields) => {
                 // Seed the hash with every field, then reinstate per-field
                 // deadlines via hash_field_expires directly so the persist
                 // state round-trips. (br-frankenredis-th7q)
@@ -37914,7 +37922,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::SortedSet(members) => {
+            RdbValue::SortedSet(ref members) => {
                 let zset_members: Vec<(f64, Vec<u8>)> = members
                     .iter()
                     .map(|(member, score)| (*score, member.clone()))
@@ -37931,12 +37939,12 @@ fn apply_rdb_entries_to_store(
                 }
             }
             RdbValue::Stream(
-                stream_entries,
-                watermark,
-                groups,
-                _metadata,
-                entries_added,
-                max_deleted,
+                ref stream_entries,
+                ref watermark,
+                ref groups,
+                ref _metadata,
+                ref entries_added,
+                ref max_deleted,
             ) => {
                 // (frankenredis-qxfmrstream) Bulk-load all entries in one O(n)
                 // pass — one field clone (not the former clone-here +
@@ -45578,7 +45586,7 @@ mod tests {
         let (decoded_entries, _aux) = fr_persist::decode_rdb(&bytes).expect("decode");
 
         let mut rt2 = Runtime::default_strict();
-        super::apply_rdb_entries_to_store(&mut rt2.server.store, &decoded_entries, 0)
+        super::apply_rdb_entries_to_store(&mut rt2.server.store, decoded_entries, 0)
             .expect("apply rdb");
 
         // Verify the hash + TTLs reconstruct via the Store API.
@@ -55663,7 +55671,7 @@ mod tests {
         );
 
         let mut restored = Runtime::default_strict();
-        super::apply_rdb_entries_to_store(&mut restored.server.store, &entries, 6)
+        super::apply_rdb_entries_to_store(&mut restored.server.store, entries, 6)
             .expect("apply rdb entries");
 
         assert_eq!(
