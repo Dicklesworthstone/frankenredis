@@ -37922,10 +37922,13 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::SortedSet(ref members) => {
+            RdbValue::SortedSet(members) => {
+                // (frankenredis-cc rdb-apply-move) Own `members` (no `ref`) so each member
+                // MOVES into the reordered (score, member) pair `zadd` wants, instead of
+                // cloning every member byte-string per zset on RDB load. Byte-identical.
                 let zset_members: Vec<(f64, Vec<u8>)> = members
-                    .iter()
-                    .map(|(member, score)| (*score, member.clone()))
+                    .into_iter()
+                    .map(|(member, score)| (score, member))
                     .collect();
                 store
                     .zadd(&key, &zset_members, now_ms)
