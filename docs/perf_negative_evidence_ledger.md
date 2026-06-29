@@ -4196,3 +4196,33 @@ guarantee + byte-identity + the concrete redundancy removed, not a wall-clock ra
 MEASUREMENT NOTE for the swarm: rch-worker load this session is too noisy to A/B
 sub-5% levers; interleaved best-of-N on a single low-load worker (or a local target)
 is required for marginal-lever ratios.
+
+## 2026-06-29 cc: DECISION-READY — per-turn per-crate codec vein CLOSED this cycle; remaining measured gaps all need a multi-session greenlight or are non-per-crate-benchable
+
+Fresh confirmation this turn (the on-disk `perf_domination_scorecard.md` /
+`RELEASE_READINESS_SCORECARD.md` are 2026-06-19/21, stale). Ranked remaining MEASURED
+vs-redis gaps and per-turn tractability under the swarm's constraints (per-crate `-p`
+bench only; don't re-verify covered work; don't ship ~0/noise):
+
+| gap | measured | why NOT a per-turn per-crate win |
+|-----|----------|----------------------------------|
+| large-value SET 256 KB | 0.246x (redis 4.1x) | server-level 2-copy framing (qesp3); NOT per-crate-benchable (needs full-server head-to-head); CoralOx domain; mimalloc already recycles — hand-rolled reuse measured-regressed |
+| large-value SET 64 KB | 0.417x | same path as above |
+| zset RESTORE/RELOAD | 1.615x | structural IndexMap(dict)+BTreeMap(sorted) DUAL build (uybhq); bulk-build + sorted-input fast path already present; residual is the 2-structure invariant; multi-day, contested fr-store |
+| set/zset listpack RESTORE decode | 0.437/0.450x | per-element `Vec<u8>` copy forced by LZF-temp lifetime; only keep-listpack removes it (multi-day, RdbValue API + fr-store) |
+| quicklist encode | ~1.07x | ChunkedList listpack REBUILD (redis memcpys a cached listpack); structural 99fwc, multi-day fr-store |
+| pipelined P16 dispatch | ~2x | flat profile, ~200 passes; per-command-alloc→0 fr-runtime refactor (ohsk5), contested |
+
+What WAS harvestable this cycle (all shipped/measured): lzfcap −4.96%, collection
+presize-cap −11.23%, lpblob1 double-buffer removal (byte-identical monotonic);
+quicklist-encode presize +5% LOSS rejected; small-collection presizes confirmed
+appropriately-sized (kept). The cheap "conservative pre-size cap" + "redundant
+buffer/copy" vein in fr-persist is now fully worked.
+
+DECISION REQUIRED (no clean per-turn lever remains for cc): greenlight ONE multi-session
+structural lever — (a) uybhq zset single-structure rewrite, (b) 99fwc ChunkedList
+packed-node (also closes quicklist encode + list RESTORE), (c) keep-listpack RdbValue
+decode (closes set/zset/hash RESTORE decode), or (d) keyspace-RAM KeyDict wiring — each
+all-or-nothing in contested fr-store and gated on the deterministic-SCAN / dual-index
+design calls a human must make. Also: fix rch worker-load noise (±25–30% this session)
+so marginal levers can be A/B'd. No source change this entry.
