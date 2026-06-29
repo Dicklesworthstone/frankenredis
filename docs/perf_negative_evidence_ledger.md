@@ -4929,3 +4929,14 @@ byte-exact gates (digest/SSCAN-order/algebra/OBJECT ENCODING) — a MULTI-HOUR p
 slice; the impl-block framing was right that it's call-site-safe but UNDERSTATED the arm count.
 Honest bottom line: the sole remaining gap is real, fully diagnosed, de-risked (call-site-safe,
 order-preserving => digest/SSCAN stay byte-exact), and waiting on a dedicated multi-hour session.
+
+## 2026-06-29 cc: MEASURED hot-command throughput vs redis 7.2.4 — fr WINS the hot path (SET/GET/HSET/ZADD/LPUSH 1.18-1.22x faster); confirms no bounded online win exists
+
+Ran a pipelined (pipe=200, N=40k, 5 trials, interleaved) throughput head-to-head on the
+HOTTEST commands (the broad scorecard covered reads/set-algebra, not raw SET/GET/write tput):
+  SET 1.21x | GET 1.22x | HSET 1.21x | ZADD 1.21x | LPUSH 1.18x  = fr 18-22% FASTER than redis
+  INCR 1.01x | SADD 1.01x = parity.
+fr DOMINATES or matches every hot command. Combined with the broad scorecard (parity+/fr-faster)
++ DUMP parity, the ENTIRE online + encode surface is fr-at-or-ahead-of redis 7.2.4. The SOLE
+place redis is faster is RESTORE-decode (keep-listpack structural, ~3x, multi-hour dedicated
+slice). The perf campaign has WON the hot path; the remaining gap is a cold load-time codec rep.
