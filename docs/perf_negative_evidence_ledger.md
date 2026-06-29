@@ -5074,3 +5074,21 @@ both byte-exact, conformance GREEN):
   store-insertion bookkeeping (internal_entries_insert + flags/dirty/digest-stale), where redis's
   dbAdd is tighter — a dispatch-bound lever, not a codec one, and hard to isolate without server
   profiling. The two shipped keep-listpack wins are the high-value chips off this gap.
+
+## 2026-06-29 cc: zset keep-listpack = mechanically ~0-GAIN (int-scores rejected) — keep-listpack lever now COMPLETE (Set+Hash shipped, zset declined on evidence)
+
+Definitive close on zset keep-listpack (NOT ceiling-framing — mechanical evidence): a
+ZSET_LISTPACK int-encodes INTEGER scores, and the all-string keep gate
+(decode_string_ranges_if_all_strings) returns None on any int entry. Integer scores are the
+COMMON zset case (leaderboards/counters/timestamps) AND the head-to-head harness ZADDs integer
+scores (`[j, "m{j}"]`, j=0..N). So a zset keep-path would REJECT essentially every benchmark +
+common zset → fall back to explode → **~0 measurable gain** (would be a REVERT ~0-gain). Not
+worth a full (most-complex, score-parsing) implementation to ship a fallback. (SortedSetInner is
+a clean Packed/Full enum so the STRUCTURE was tractable — it's the int-score COVERAGE that kills
+it, confirmed by the harness using integer scores.)
+
+KEEP-LISTPACK LEVER COMPLETE: Set +20% (57acda127), Hash +17% (ba4b61749) — both byte-exact,
+conformance GREEN; zset declined on mechanical ~0-gain evidence. The structural RESTORE-decode
+gap's high-value chips are taken; the residual is command-overhead (CRC64+RESP+dispatch+store-
+insertion), a dispatch-bound load-time lever needing server profiling (perf/flamegraph), not a
+per-crate codec bench — a different investigation mode for a future slice.
