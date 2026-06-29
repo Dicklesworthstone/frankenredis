@@ -5041,3 +5041,15 @@ bottleneck — the residual ~2.2x is RESTORE COMMAND overhead (CRC64 verify + RE
 dispatch) + the blob copy + store insertion, where redis's tight RESTORE path still wins. The
 keep-listpack win (avoiding the per-element PackedStrSet transcode) is real (~+20%, byte-exact)
 but the remaining gap is command-path, not codec — a different (smaller, dispatch-bound) lever.
+
+## 2026-06-29 cc: SHIPPED keep-listpack for all-string HASH RESTORE — byte-exact ~+17% (0.34x->0.39x vs redis 7.2.4)
+
+Second per-type keep-listpack (after Set 57acda127): HashFieldMap::Listpack lazy variant
+(pair-aware reads via fr_persist::listpack, materialize-on-write) + RdbValue::HashListpack
+keep-path (decode keeps all-string HASH_LISTPACK verbatim; Store::restore_hash_listpack stores
+it when fits-listpack under live config, else explodes). MEASURED hash RESTORE 0.393x (up from
+~0.336x = ~+17%). BYTE-EXACT: fr-conformance GREEN, OBJECT ENCODING "listpack" parity, DEBUG
+DIGEST-VALUE parity; fr-store 661/0 + fr-runtime 551/0. Only all-STRING hashes keep-path
+(int-valued hashes — common — fall back to explode), so the win applies to string-heavy hashes.
+zset is the last per-type repeat. Dispatch-safe blast radius again small (HashFieldMap impl +
+iter + one apply arm + one encode arm).
