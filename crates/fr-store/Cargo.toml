@@ -14,3 +14,8 @@ libc.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion = "0.5"
+
+[[bench]]
+name = "store_read"
+harness = false

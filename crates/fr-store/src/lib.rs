@@ -6444,6 +6444,44 @@ impl Store {
                 }
             };
         }
+        // (frankenredis-cc get-ttl-lru-single-lookup) Extend the no-TTL fast path above
+        // to the common CACHE config: TTL-bearing keys present but LRU (LFU sampling off).
+        // With LFU off, `touch_access`'s `rand_sample` is unused (0) and no RNG is
+        // consumed, so there is no `next_rand` `&mut self` call to tangle with the value
+        // `get_mut`, and the read cannot diverge. Peek the expiry first — delegating an
+        // actually-expired key to the full `drop_if_expired` for removal / notification /
+        // propagation — then a SINGLE `entries.get_mut` serves keyspace hit/miss
+        // accounting AND the value fetch, collapsing the slow path's
+        // `record_keyspace_lookup` (drop_if_expired probe) + `get_mut` double lookup.
+        // Byte-identical: a non-LFU read consumes no RNG and bumps the same hit/miss
+        // counter with the same lazy-expiry behaviour as the slow path below.
+        if !self.lfu_tracking_enabled() {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(None);
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    if !entry.value.is_string_like() {
+                        return Err(StoreError::WrongType);
+                    }
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    let value = entry
+                        .value
+                        .string_bytes()
+                        .expect("string-like value exposes bytes");
+                    Ok(Some(value))
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(None)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }

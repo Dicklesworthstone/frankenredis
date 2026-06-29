@@ -4413,3 +4413,27 @@ Ran the blocker down precisely so an operator can act and agents stop re-scoutin
 Net: the per-turn safe/testable cc surface is mined (7 wins shipped this session); the
 two remaining unblock-actions are OPERATOR-ONLY (restart am pid 2093388; fix fr-command
 build.rs). No source change.
+
+## 2026-06-29 cc: SHIPPED get-ttl-lru-single-lookup — collapse the GET double keyspace lookup for the COMMON CACHE config (TTL keys + LRU); **−43% (~1.76x)** store-op, byte-exact
+
+The GET fast path (`get-single-lookup`, L6413) only single-lookups when the DB holds NO
+TTL key. The moment ANY key has a TTL (i.e. a CACHE), every GET fell to the slow path:
+`record_keyspace_lookup` (→ `drop_if_expired`, one `entries.get`) THEN a second
+`entries.get_mut` for the value — a double keyspace probe per GET. The prior ledger
+flagged the collapse as blocked by a `next_rand` borrow + RNG-determinism tangle. **The
+unlock: gate the new branch on `!lfu_tracking_enabled()`** — with LFU off, `touch_access`
+takes `rand_sample = 0` (literal), so NO RNG is consumed and there is no `next_rand`
+`&mut self` call to conflict with the held `get_mut` entry. That covers the common cache
+config (TTL + LRU). Branch: peek `evaluate_expiry(now, expiry_ms(key))` (delegating an
+actually-expired key to the full `drop_if_expired` for removal/notification/propagation),
+else a SINGLE `entries.get_mut` serves hit/miss accounting + value + `touch_access`.
+
+BYTE-EXACT vs the slow path it replaces: non-LFU reads consume no RNG, drop the same
+expired keys, bump the same hit/miss counters, count the hit before a WrongType error —
+verified by `cargo test -p fr-store --lib` (659 passed / 0 failed; covers GET / expiry /
+keyspace-stats / LFU). MEASURED (new fr-store criterion bench `store_read`, TTL-sentinel
++ LRU, GET hit on a live key; A/B by toggling the branch): baseline (slow path) 46.437 ns
+vs candidate 26.333 ns = **−43% / ~1.76x**, p=0.00, non-overlapping CIs. Saves one
+`entries` probe per cache GET — directly attacks the P16 per-command-CPU gap on the
+realistic cache-GET workload. LFU-on GETs keep the unchanged slow path. (Added the first
+fr-store criterion harness in passing.)

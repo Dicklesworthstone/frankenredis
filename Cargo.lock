@@ -469,6 +469,7 @@ dependencies = [
 name = "fr-store"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "foldhash",
  "fr-expire",
  "fr-persist",
