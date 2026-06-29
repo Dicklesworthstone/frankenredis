@@ -5012,3 +5012,19 @@ RESTORE all-string gate + DUMP-emit-bytes + OBJECT ENCODING). Clean, free parser
 construction (iter order == insertion order == Packed). Ready to execute in a dedicated session;
 the only remaining cost is the implementation + full byte-exact validation (set/scan/digest/
 conformance/head-to-head), which is multi-hour, not a 60-min slice. Repeat for Hash, then zset.
+
+## 2026-06-29 cc: SHIPPED keep-listpack for all-string set RESTORE (3b1e8707a) — byte-exact ~+20% (0.37x->0.44x vs redis 7.2.4), the FIRST chip off the structural RESTORE-decode gap
+
+Executed the keep-listpack lever (blueprint d5b004f7d) for Set: GenericSet::Listpack lazy
+variant (holds raw redis-listpack bytes, reads parse via fr_persist::listpack, mutators
+materialize-on-write) + RdbValue::SetListpack keep-path (decode keeps all-string blobs
+verbatim; Store::restore_set_listpack stores them when they fit listpack under the LIVE
+config, else falls back to explode). MEASURED head-to-head (release binary vs vendored redis
+7.2.4): set-str RESTORE decode **0.442x, up from ~0.37x = ~+20%**. BYTE-EXACT: full
+fr-conformance GREEN (99-test smoke + differential gates), OBJECT ENCODING "listpack" parity,
+DEBUG DIGEST-VALUE exact parity (314b459e...). Per-crate fr-store 660/0 + fr-runtime 551/0.
+NOT the full ~3x because the keep-path decodes ranges twice (all-string gate + live-config
+fit) + copies the blob — eliminating the double-decode is a follow-up. Proves the lever WORKS
++ is byte-exact; Hash (HashFieldMap) + zset are the next per-type repeats. Blast radius was
+far smaller than feared (dispatch-safe: only the GenericSet impl + IntoIterator + one apply
+arm + one RdbValue encode arm; lib.rs SetValue layer dispatches through methods).
