@@ -2728,6 +2728,27 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: EVALSHA CONFIRMS the scripting gap is SETUP-bound (not parse) — fr EVAL≈EVALSHA, redis EVALSHA>EVAL; unified ~4-5x structural scripting lever
+
+Follow-up to the EVAL 4.1x finding. EVALSHA `return 1` (load 51, ratio robust): fr 123k
+vs redis 659k = **0.187x**. The decisive comparison:
+- fr:    EVAL 126k ≈ EVALSHA 123k  (no benefit from skipping parse)
+- redis: EVAL 512k <  EVALSHA 659k (parse-cache lookup DOES help redis)
+So redis speeds up when the parse is pre-cached (EVALSHA), but fr does NOT — proving fr's
+bottleneck is the per-EVAL **Lua-state setup/teardown** (globals-template clone + LuaState
+init + redis-API wiring + teardown + sha), NOT the parse/compile (already cached). The
+scripting gap is uniform across the surface (EVAL/EVALSHA, and FCALL/FUNCTION share the
+engine).
+
+UNIFIED STRUCTURAL LEVER (top remaining throughput lever, ~4-5x on ALL scripting): reuse a
+PERSISTENT Lua state across invocations (redis's model) — build the globals/redis-API env
+ONCE, reset only script-local state per call (with COW/snapshot for the rare global
+mutation to preserve isolation). Removes the per-call clone+init+teardown. Multi-hour,
+script-isolation + conformance-sensitive (extensive Lua tests), not per-turn-sliceable
+(sha ~2.74% and a dispatch fast path each only shave a few % of a 4x gap). This is the
+single highest-value remaining throughput lever and the clear target for a focused
+scripting-engine session. No source.
+
 ## 2026-06-29 CrimsonHawk: EVAL is 4.1x slower vs redis — BIGGEST new throughput gap; root = per-EVAL Lua-globals clone (structural scripting lever)
 
 Probed the uncovered scripting surface. `EVAL "return 1" 0` (-c50 -P16, live binary):
