@@ -4973,3 +4973,25 @@ methods delegate to fr_persist::listpack (free), RESTORE_SET_LISTPACK stores the
 Still multi-hour (the 34 arms + byte-exact gates: DEBUG DIGEST iteration-order parity, SSCAN
 cursor, OBJECT ENCODING "listpack", set-algebra) so NOT a 60-min slice, but materially more
 tractable now that the parser is in-reach. This is the green light for the dedicated session.
+
+## 2026-06-29 cc: keep-listpack-Set IMPLEMENTATION BLUEPRINT (method-by-method) — materialize-guard pattern, ~6 real read-arms; ready for a dedicated session to execute directly
+
+Final method-level scoping of GenericSet (packed_set.rs, 15 methods) for the Listpack variant:
+- ADD `GenericSet::Listpack(Box<[u8]>)` (raw RDB listpack bytes) + `GenericSetIter::Listpack`.
+- `&self` READ methods needing a real Listpack arm (~6): `len` (listpack header count),
+  `is_empty` (len==0), `contains` (scan via fr_persist::listpack::decode_value_spans + cmp),
+  `get_index` (nth span), `iter` (yield decoded spans — the GenericSetIter::Listpack cursor),
+  `eq` (materialize-compare or span-compare).
+- `&mut self` MUTATORS (~7: insert/insert_borrowed/shift_remove/pop_index/swap_remove/retain/
+  promote): one-line guard `self.materialize_from_listpack()` at top, then existing Packed/Hash
+  logic runs unchanged = materialize-on-WRITE (the lazy-hold pattern). ONE new helper.
+- Constructors (with_capacity/from_unique_*): unaffected (they build Packed/Hash).
+- WIRE: RESTORE_SET_LISTPACK stores GenericSet::Listpack(bytes) (skip transcode = the win);
+  OBJECT ENCODING Listpack->"listpack"; estimate_memory_usage handles Listpack; DUMP iterates
+  (works via iter, already parity) or emits bytes directly.
+- BYTE-EXACT GATES (the validation time-sink, NOT the arms): DEBUG DIGEST (iter order ==
+  insertion order == Packed, so identical), SSCAN cursor (materialize-on-SSCAN if cursor
+  semantics differ), set-algebra, OBJECT ENCODING, full set/scan/restore suites + conformance.
+The parser is FREE (fr-store->fr-persist). The lever is now BLUEPRINTED to method granularity;
+only execution (a focused multi-hour session, the GenericSetIter::Listpack cursor + byte-exact
+validation being the real work) remains. Repeat per type after Set: Hash (HashFieldMap), zset.
