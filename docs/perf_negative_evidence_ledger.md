@@ -4437,3 +4437,24 @@ vs candidate 26.333 ns = **−43% / ~1.76x**, p=0.00, non-overlapping CIs. Saves
 `entries` probe per cache GET — directly attacks the P16 per-command-CPU gap on the
 realistic cache-GET workload. LFU-on GETs keep the unchanged slow path. (Added the first
 fr-store criterion harness in passing.)
+
+## 2026-06-29 cc: SHIPPED mget cache single-lookup — extend the get-ttl-lru collapse to MGET (per-key ×N); byte-exact + monotonic, GET-measured mechanism (~1.76x), MGET ratio worker-noise-blocked
+
+Extends the `get-ttl-lru-single-lookup` mechanism to `mget` (a top cache command,
+collapse applies PER KEY in the loop). On the cache config (TTL keys present + LFU off),
+each MGET key took the slow path: `record_keyspace_lookup` (→ `drop_if_expired`, one
+`entries.get` + `expiry_ms`) + a second `entries.get_mut`. New per-key `!lfu` branch:
+peek `evaluate_expiry(now, expiry_ms(key))` (delegate an expired key to `drop_if_expired`),
+else a SINGLE `get_mut` serves hit/miss + value + LRU `touch` — saving one `entries`
+probe PER KEY (so an N-key MGET saves N probes). MGET is simpler than GET here (no
+`touch_access`/`rand_sample` — just `entry.touch`, and a non-string value → `None` with
+no touch, matching upstream).
+
+BYTE-EXACT vs the LFU slow path it mirrors (non-LFU read: no RNG, same drops / hit-miss
+stats / LRU touch / non-string→None) — `cargo test -p fr-store --lib` 659 passed / 0
+failed. MONOTONIC: strictly one fewer `entries` probe per key. This is the SAME mechanism
+already measured clean at **~1.76x** for the GET variant (46.437→26.333 ns) this session;
+a separate MGET criterion ratio could NOT be isolated because the rch worker was swinging
+~2.4x on identical binaries (371 vs 874 ns for the same baseline) — recorded honestly,
+shipped on the byte-exact + monotonic + GET-measured-mechanism basis. LFU-on MGET keeps
+the unchanged slow path.

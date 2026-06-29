@@ -7081,6 +7081,36 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
+            // (frankenredis-cc get-ttl-lru-single-lookup) Per-key cache-config collapse:
+            // with LFU off, MGET consumes no RNG and only LRU-touches, so the slow path's
+            // `record_keyspace_lookup` (drop_if_expired probe) + value `get_mut` double
+            // keyspace lookup collapses to ONE `get_mut`. Peek expiry (delegating an
+            // expired key to the full `drop_if_expired`), else a single `get_mut` serves
+            // hit/miss accounting + the value. Byte-identical to the LFU path below for a
+            // non-LFU read (no RNG, same drops/stats/touch/non-string→None behaviour).
+            if !lfu_tracking_enabled {
+                if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                    self.drop_if_expired(key, now_ms);
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    results.push(None);
+                    continue;
+                }
+                match self.entries.get_mut(*key) {
+                    Some(entry) => {
+                        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                        let v = entry.value.string_owned();
+                        if v.is_some() {
+                            entry.touch(now_ms);
+                        }
+                        results.push(v);
+                    }
+                    None => {
+                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                        results.push(None);
+                    }
+                }
+                continue;
+            }
             if !self.record_keyspace_lookup(key, now_ms) {
                 results.push(None);
                 continue;

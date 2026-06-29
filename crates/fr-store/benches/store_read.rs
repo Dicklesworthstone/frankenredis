@@ -16,6 +16,12 @@ fn bench_get(c: &mut Criterion) {
     // The live target (no TTL): a hit on the read path.
     store.set(b"target:key".to_vec(), vec![b'v'; 64], None, 1_000);
 
+    // Several live string keys for MGET (no TTL; hits the cache-config collapse).
+    for i in 0..8u32 {
+        store.set(format!("mk:{i}").into_bytes(), vec![b'v'; 32], None, 1_000);
+    }
+    let mget_keys: Vec<Vec<u8>> = (0..8u32).map(|i| format!("mk:{i}").into_bytes()).collect();
+
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
         b.iter(|| {
@@ -23,6 +29,13 @@ fn bench_get(c: &mut Criterion) {
                 .get_string_bytes(std::hint::black_box(b"target:key"), 2_000)
                 .unwrap();
             std::hint::black_box(got.map(|v| v.len()))
+        })
+    });
+    g.bench_function("mget_8_ttl_lru_hit", |b| {
+        let refs: Vec<&[u8]> = mget_keys.iter().map(Vec::as_slice).collect();
+        b.iter(|| {
+            let got = store.mget(std::hint::black_box(&refs), 2_000);
+            std::hint::black_box(got.len())
         })
     });
     g.finish();
