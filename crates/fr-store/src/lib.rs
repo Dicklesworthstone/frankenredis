@@ -7040,7 +7040,15 @@ impl Store {
     }
 
     pub fn expire_at_milliseconds(&mut self, key: &[u8], when_ms: i64, now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired (return discarded): for a
+        // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
+        // when actually due, eliding the redundant `entries.get` before the `contains_key`
+        // existence check. Mirrors the relative-time sibling `expire_milliseconds`; the
+        // absolute-time variant (EXPIREAT/PEXPIREAT) was missed by that collapse. Byte-exact
+        // (no RNG, no stat; a live/absent key's drop_if_expired had no side effect).
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
         if !self.entries.contains_key(key) {
             return false;
         }

@@ -4662,3 +4662,21 @@ expiretime_ttl 104.54 ns → 32.842 ns = **−66.8% (~3.0x)**, change CI [+180%,
 touch_no_ttl 79.685 ns → 45.179 ns = **−43.3% (~1.76x)**, change CI [+69%,+85%] p=0.00.
 Write/read lookup-dominated single-lookup wins now: INCR-family, SETNX, EXPIRE-family,
 PERSIST, EXPIRETIME/PEXPIRETIME, TOUCH.
+
+
+## 2026-06-29 cc: SHIPPED expire_at_milliseconds (EXPIREAT/PEXPIREAT) lazy-drop **−10.7% (~1.12x)**, byte-exact — completes the EXPIRE-family vein
+
+The absolute-time EXPIREAT/PEXPIREAT path was MISSED when the relative EXPIRE/PEXPIRE
+sibling got the lazy-drop collapse (24955ee93): it still did an unconditional
+`drop_if_expired` (entries probe, return discarded) before the `contains_key` existence
+check. Applied the identical transform — peek the deadline, only `drop_if_expired` when
+actually due — eliding the redundant `entries.get` for the common live/absent key.
+BYTE-EXACT (no RNG, no stat; a live/absent key's drop_if_expired had no side effect;
+existing tests at lib.rs:28442-28492 cover future/past/immediate/missing): `cargo test -p
+fr-store --lib` 659/0. MEASURED — same-worker A/B (ovh-a) back-to-back, BOTH controls flat
+confirming worker stability (get-ref "No change" p=0.08; expire_existing — the unchanged
+relative sibling — +0.37%): expireat_existing 95.962 ns -> 85.667 ns = **−10.7% (~1.12x)**,
+change CI [+11.8%,+12.4%] p=0.00, non-overlapping. Post-collapse expireat (85.7 ns) now
+matches the collapsed relative sibling (86.3 ns) — the one eliminated probe, exactly.
+Write/read lookup-dominated single-lookup wins now: INCR-family, SETNX, EXPIRE-family
+(EXPIRE/PEXPIRE + EXPIREAT/PEXPIREAT), PERSIST, EXPIRETIME/PEXPIRETIME, TOUCH.

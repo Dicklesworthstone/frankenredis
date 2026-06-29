@@ -104,6 +104,16 @@ fn bench_get(c: &mut Criterion) {
             ))
         })
     });
+    // EXPIREAT/PEXPIREAT on an existing key: absolute-time sibling, lazy-drop collapse.
+    g.bench_function("expireat_existing", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.expire_at_milliseconds(
+                std::hint::black_box(b"expire:key"),
+                10_000_000,
+                2_000,
+            ))
+        })
+    });
     // PERSIST on a no-TTL key (returns false, no mutation): stable, exercises the
     // lazy-drop + deadline-reuse lookup elision.
     g.bench_function("persist_no_ttl", |b| {
