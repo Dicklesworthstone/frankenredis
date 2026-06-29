@@ -4886,3 +4886,27 @@ measurements (RESTORE-decode 0.31-0.41x uniform = structural keep-listpack; DUMP
 = SAVE candidate refuted), the perf picture is now FULLY measured & ranked: the SOLE remaining
 real gap vs redis is keep-listpack RESTORE-decode (multi-day fr-store value-rep, no bounded
 step). Everything per-turn-fixable is shipped or at parity+.
+
+## 2026-06-29 cc: REFRAMED the keep-listpack lever — it is PER-TYPE impl-block work (method-dispatched), NOT all-or-nothing across read paths; start with Set
+
+Did the feasibility check I'd been skipping. The collection values are method-dispatched enums:
+`SetValue` = enum { Int(Vec<i64>), Generic(GenericSet) } with ~12 impl methods (len/is_empty/
+is_intset/contains/iter/get_index/try_bulk_*/promote_to_generic/as_int). The 48 `Value::Set(s)`
+call sites all go through `s.method()`, NOT direct field access. THEREFORE adding a
+`SetValue::Listpack(Vec<u8>)` variant is bounded to SetValue's IMPL BLOCK + SetValueIter +
+RESTORE routing — the call sites DON'T change (dispatch is internal). This refutes the
+"multi-day all-or-nothing across all read paths" framing: keep-listpack is PER-TYPE,
+incremental (Set, then Hash via HashFieldMap, then zset), each closing the measured ~3x on
+that type's RESTORE.
+
+PER-TYPE SCOPE (Set, the simplest, ~12 methods): implement the Listpack arm for len (listpack
+header count), is_empty, contains (O(n) listpack scan = matches redis's listpack-set semantics),
+iter/get_index (decode-on-demand), is_intset (false). Mutations (insert via SADD/SREM) call
+`promote_to_generic` FIRST = materialize-on-write (the lazy-hold pattern). RESTORE_SET_LISTPACK
+stores the listpack bytes directly as SetValue::Listpack instead of exploding to Generic.
+BYTE-EXACT GATES required: OBJECT ENCODING reports "listpack", DEBUG DIGEST-VALUE parity,
+SSCAN cursor semantics, set-algebra (SINTER/SUNION/SDIFF) over a listpack-backed operand,
+the set test suite + restore_encoding_differ. NOT a 60-min slice (core-data-structure change,
+high validation burden — set semantics) but a focused per-type effort (~half-day each), and
+the call-site-invariance makes it FAR safer than feared. This is the concrete execution plan
+for the sole remaining data-ranked gap; recommend a dedicated slice starting with Set.
