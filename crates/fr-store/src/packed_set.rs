@@ -221,16 +221,6 @@ const PACKED_MAX_VALUE: usize = 64;
 pub enum GenericSet {
     Packed(PackedStrSet),
     Hash(CompactStrSet),
-    /// (frankenredis-cc keep-listpack) Raw redis-listpack bytes of an ALL-STRING,
-    /// Packed-fitting set loaded straight from RDB/RESTORE — held lazily (no
-    /// transcode into PackedStrSet) until first mutation. Reads
-    /// (len/contains/iter/get_index) parse the listpack directly via
-    /// `fr_persist::listpack`; any mutation calls `materialize_from_listpack` to
-    /// convert to `Packed` first (byte-identical to having built Packed at load).
-    /// `len` is cached so `len()` stays O(1). Only ever holds an all-string
-    /// listpack (the RESTORE gate rejects int entries / oversized members), so the
-    /// member spans are pure borrows — no Cow/int-format in the iterator.
-    Listpack { data: Box<[u8]>, len: usize },
 }
 
 impl Default for GenericSet {
@@ -273,59 +263,11 @@ impl GenericSet {
         Some((GenericSet::Hash(h), added))
     }
 
-    /// (frankenredis-cc keep-listpack) Decode the member byte-ranges of a stored
-    /// all-string listpack. The variant invariant (RESTORE gate) guarantees the
-    /// blob is a valid all-string listpack, so this is `Some`; defensively empty
-    /// on any decode error.
-    fn listpack_member_ranges(data: &[u8]) -> Vec<std::ops::Range<usize>> {
-        fr_persist::listpack::decode_string_ranges_if_all_strings(data)
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-    }
-
-    /// (frankenredis-cc keep-listpack) Build a lazily-held `Listpack` set from a raw
-    /// RDB SET_LISTPACK blob IFF it is all-string and fits the `Packed` encoding
-    /// (<= PACKED_MAX_ENTRIES members, each <= PACKED_MAX_VALUE) — i.e. exactly the
-    /// shape `from_unique_str_members` would have produced as `Packed`. Returns
-    /// `None` (caller takes the normal explode→build path) for any int entry or
-    /// oversize, so the kept blob always materializes byte-identically to `Packed`.
-    #[must_use]
-    pub fn try_from_listpack_blob(data: &[u8]) -> Option<Self> {
-        let ranges = fr_persist::listpack::decode_string_ranges_if_all_strings(data)
-            .ok()
-            .flatten()?;
-        if ranges.len() > PACKED_MAX_ENTRIES || ranges.iter().any(|r| r.len() > PACKED_MAX_VALUE) {
-            return None;
-        }
-        Some(GenericSet::Listpack {
-            data: data.to_vec().into_boxed_slice(),
-            len: ranges.len(),
-        })
-    }
-
-    /// (frankenredis-cc keep-listpack) Convert a lazily-held listpack set into the
-    /// eager `Packed` form before any mutation. Byte-identical to having built
-    /// `Packed` at load: the members are the listpack's in-order all-string spans,
-    /// all <= PACKED_MAX_VALUE and <= PACKED_MAX_ENTRIES (the gate guaranteed it),
-    /// so `from_unique_str_members` picks `Packed` with the same insertion order.
-    fn materialize_from_listpack(&mut self) {
-        let members: Vec<Vec<u8>> = match self {
-            GenericSet::Listpack { data, .. } => Self::listpack_member_ranges(data)
-                .into_iter()
-                .map(|r| data[r].to_vec())
-                .collect(),
-            _ => return,
-        };
-        *self = GenericSet::from_unique_str_members(&members);
-    }
-
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
             GenericSet::Packed(p) => p.len(),
             GenericSet::Hash(h) => h.len(),
-            GenericSet::Listpack { len, .. } => *len,
         }
     }
 
@@ -339,9 +281,6 @@ impl GenericSet {
         match self {
             GenericSet::Packed(p) => p.contains(member),
             GenericSet::Hash(h) => h.contains(member),
-            GenericSet::Listpack { data, .. } => {
-                Self::listpack_member_ranges(data).iter().any(|r| &data[r.clone()] == member)
-            }
         }
     }
 
@@ -351,9 +290,6 @@ impl GenericSet {
         match self {
             GenericSet::Packed(p) => p.iter().nth(idx),
             GenericSet::Hash(h) => h.get_index(idx),
-            GenericSet::Listpack { data, .. } => {
-                Self::listpack_member_ranges(data).get(idx).map(|r| &data[r.clone()])
-            }
         }
     }
 
@@ -368,7 +304,6 @@ impl GenericSet {
     }
 
     pub fn insert(&mut self, member: Vec<u8>) -> bool {
-        self.materialize_from_listpack();
         if let GenericSet::Packed(p) = self
             && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
         {
@@ -377,7 +312,6 @@ impl GenericSet {
         match self {
             GenericSet::Packed(p) => p.insert(&member),
             GenericSet::Hash(h) => h.insert(&member),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -391,7 +325,6 @@ impl GenericSet {
     /// promotion check fires under the identical condition as `insert`, so the
     /// observable encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, member: &[u8]) -> bool {
-        self.materialize_from_listpack();
         if let GenericSet::Packed(p) = self
             && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
         {
@@ -402,7 +335,6 @@ impl GenericSet {
             // CompactStrSet::insert returns true iff newly added — exactly the
             // IndexSet contains-then-insert split, byte-for-byte.
             GenericSet::Hash(h) => h.insert(member),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -438,11 +370,9 @@ impl GenericSet {
     }
 
     pub fn shift_remove(&mut self, member: &[u8]) -> bool {
-        self.materialize_from_listpack();
         match self {
             GenericSet::Packed(p) => p.remove(member),
             GenericSet::Hash(h) => h.shift_remove(member),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -454,7 +384,6 @@ impl GenericSet {
     /// per element. The `Packed` (listpack) encoding keeps the order-preserving
     /// remove, matching redis's ordered listpack delete on small sets.
     pub fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
-        self.materialize_from_listpack();
         match self {
             GenericSet::Packed(p) => {
                 let member = p.iter().nth(idx)?.to_vec();
@@ -462,7 +391,6 @@ impl GenericSet {
                 Some(member)
             }
             GenericSet::Hash(h) => h.swap_remove_index(idx),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -472,16 +400,13 @@ impl GenericSet {
     /// unspecified (redis's `dict` is unordered). `Packed` (listpack) keeps the
     /// order-preserving remove to match redis's small-set listpack delete.
     pub fn swap_remove(&mut self, member: &[u8]) -> bool {
-        self.materialize_from_listpack();
         match self {
             GenericSet::Packed(p) => p.remove(member),
             GenericSet::Hash(h) => h.swap_remove(member),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        self.materialize_from_listpack();
         match self {
             GenericSet::Packed(p) => {
                 let survivors: Vec<Vec<u8>> =
@@ -493,7 +418,6 @@ impl GenericSet {
                 *p = np;
             }
             GenericSet::Hash(h) => h.retain(keep),
-            GenericSet::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -502,11 +426,6 @@ impl GenericSet {
         match self {
             GenericSet::Packed(p) => GenericSetIter::Packed(p.iter()),
             GenericSet::Hash(h) => GenericSetIter::Hash(h.iter()),
-            GenericSet::Listpack { data, .. } => GenericSetIter::Listpack {
-                data,
-                ranges: Self::listpack_member_ranges(data),
-                idx: 0,
-            },
         }
     }
 }
@@ -537,10 +456,6 @@ impl IntoIterator for GenericSet {
         let owned: Vec<Vec<u8>> = match self {
             GenericSet::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
             GenericSet::Hash(h) => h.iter().map(<[u8]>::to_vec).collect(),
-            GenericSet::Listpack { data, .. } => GenericSet::listpack_member_ranges(&data)
-                .into_iter()
-                .map(|r| data[r].to_vec())
-                .collect(),
         };
         owned.into_iter()
     }
@@ -550,14 +465,6 @@ impl IntoIterator for GenericSet {
 pub enum GenericSetIter<'a> {
     Packed(PackedStrSetIter<'a>),
     Hash(CompactStrSetIter<'a>),
-    /// (frankenredis-cc keep-listpack) Walks a lazily-held all-string listpack,
-    /// yielding each member as a borrowed span into the blob (no alloc per member,
-    /// no int-format — the variant only ever holds all-string listpacks).
-    Listpack {
-        data: &'a [u8],
-        ranges: Vec<std::ops::Range<usize>>,
-        idx: usize,
-    },
 }
 
 impl<'a> Iterator for GenericSetIter<'a> {
@@ -566,11 +473,6 @@ impl<'a> Iterator for GenericSetIter<'a> {
         match self {
             GenericSetIter::Packed(it) => it.next(),
             GenericSetIter::Hash(it) => it.next(),
-            GenericSetIter::Listpack { data, ranges, idx } => {
-                let r = ranges.get(*idx)?.clone();
-                *idx += 1;
-                Some(&data[r])
-            }
         }
     }
 }
@@ -5412,64 +5314,5 @@ mod tests {
             "expected >2x, got {:.1}x",
             old_ns as f64 / new_ns as f64
         );
-    }
-
-    #[test]
-    fn keep_listpack_variant_matches_packed_and_materializes() {
-        use super::GenericSet;
-        let members: Vec<&[u8]> = vec![b"alpha", b"bravo", b"charlie", b"", b"delta"];
-        let blob = fr_persist::encode_listpack_strings_blob(&members)
-            .expect("all-string blob encodes");
-        let lp = GenericSet::try_from_listpack_blob(&blob).expect("kept as listpack");
-        let packed = GenericSet::from_unique_str_members(&members);
-        assert!(matches!(lp, GenericSet::Listpack { .. }));
-        assert!(matches!(packed, GenericSet::Packed(_)));
-
-        // Reads are byte-identical to the eager Packed form.
-        assert_eq!(lp.len(), packed.len());
-        assert_eq!(lp.len(), members.len());
-        for m in &members {
-            assert!(lp.contains(m), "listpack contains {m:?}");
-            assert_eq!(lp.contains(m), packed.contains(m));
-        }
-        assert!(!lp.contains(b"missing"));
-        for i in 0..members.len() {
-            assert_eq!(lp.get_index(i), packed.get_index(i));
-        }
-        let lp_iter: Vec<&[u8]> = lp.iter().collect();
-        let pk_iter: Vec<&[u8]> = packed.iter().collect();
-        assert_eq!(lp_iter, pk_iter, "iteration order identical");
-        assert_eq!(lp_iter, members);
-        assert_eq!(lp, packed, "set equality holds across encodings");
-
-        // First mutation materializes Listpack -> Packed, byte-identically.
-        let mut m = lp.clone();
-        assert!(m.insert(b"echo".to_vec()));
-        assert!(matches!(m, GenericSet::Packed(_)), "materialized on insert");
-        assert_eq!(m.len(), members.len() + 1);
-        for orig in &members {
-            assert!(m.contains(orig), "kept original {orig:?} after materialize");
-        }
-        assert!(m.contains(b"echo"));
-        // Re-inserting an existing member is a no-op (returns false).
-        assert!(!m.insert(b"alpha".to_vec()));
-        // shift_remove also materializes from a fresh Listpack and removes correctly.
-        let mut r = GenericSet::try_from_listpack_blob(&blob).unwrap();
-        assert!(r.shift_remove(b"bravo"));
-        assert!(matches!(r, GenericSet::Packed(_)));
-        assert!(!r.contains(b"bravo"));
-        assert_eq!(r.len(), members.len() - 1);
-
-        // An int-containing or oversize listpack is NOT kept (returns None).
-        let withint: Vec<&[u8]> = vec![b"x", b"123"];
-        if let Some(int_blob) = fr_persist::encode_listpack_strings_blob(&withint) {
-            // encode_listpack_strings_blob int-encodes "123"; the all-string gate rejects it.
-            assert!(
-                GenericSet::try_from_listpack_blob(&int_blob).is_none()
-                    || GenericSet::try_from_listpack_blob(&int_blob)
-                        .is_some_and(|g| g.contains(b"123")),
-                "int member either rejected or correctly readable"
-            );
-        }
     }
 }
