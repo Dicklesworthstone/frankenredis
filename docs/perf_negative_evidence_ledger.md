@@ -4910,3 +4910,22 @@ the set test suite + restore_encoding_differ. NOT a 60-min slice (core-data-stru
 high validation burden — set semantics) but a focused per-type effort (~half-day each), and
 the call-site-invariance makes it FAR safer than feared. This is the concrete execution plan
 for the sole remaining data-ranked gap; recommend a dedicated slice starting with Set.
+
+## 2026-06-29 cc: CORRECTION to the keep-listpack reframing — blast radius is dozens of match arms across NESTED enum layers + custom PackedStrSet format; multi-hour per-type, NOT ~half-day
+
+Quantified the actual blast radius (correcting yesterday's optimistic "~12 methods, bounded to
+one impl block"): a listpack-backed Set touches BOTH enum layers — 59 `SetValue::Int/Generic`
++ 34 `GenericSet::Packed/Hash` direct match arms (the methods dispatch over variants, so each
+method body is several arms). `PackedStrSet { buf: Vec<u8>, len }` is fr's OWN custom packed
+format (length-prefixed buffer), NOT the redis listpack wire format — so RESTORE genuinely must
+TRANSCODE (parse redis listpack -> append each member to PackedStrSet.buf), which is exactly the
+measured ~3x. Keeping the listpack means either (a) GenericSet::Listpack(Box<[u8]>) variant
+holding raw RDB listpack bytes + parse-on-access (34 GenericSet arms + iter/contains/get_index
+listpack parsers + materialize-on-write) or (b) make PackedStrSet itself store redis-listpack
+bytes (changes its format + all its methods). Call-site-invariant (SetValue::Generic(g) ->
+g.method() still dispatches) so it's SAFE, but it is dozens of arms + a listpack parser +
+byte-exact gates (digest/SSCAN-order/algebra/OBJECT ENCODING) — a MULTI-HOUR per-type effort
+(Set, then Hash, then zset), each closing ~3x on that type's RESTORE. Confirmed NOT a per-turn
+slice; the impl-block framing was right that it's call-site-safe but UNDERSTATED the arm count.
+Honest bottom line: the sole remaining gap is real, fully diagnosed, de-risked (call-site-safe,
+order-preserving => digest/SSCAN stay byte-exact), and waiting on a dedicated multi-hour session.
