@@ -5728,7 +5728,7 @@ impl Runtime {
         // (O(records in the tail)) instead of re-encoding the whole backlog and
         // slicing — byte-identical to the prior `encoded_aof_stream()[start..]`.
         // (frankenredis-cc aoftail)
-        let primary = self.replication_ack_state.primary_offset.0;
+        let primary = self.server.replication_ack_state.primary_offset.0;
         let tail_bytes = usize::try_from(primary.saturating_sub(offset)).unwrap_or(usize::MAX);
         encode_aof_stream_tail_bytes(&self.server.aof_records, tail_bytes)
     }
