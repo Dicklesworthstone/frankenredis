@@ -5187,3 +5187,22 @@ all large-arg commands. decode_rdb_string borrow = mimalloc-~0-gain (proven); de
 CONCLUSION: the RESTORE-command gap is now fully characterized — no clean per-turn codec/dispatch
 lever; the real lever (zero-copy large-arg RESP) is an architectural dispatch change for a dedicated
 slice. Biggest gap is now DATA-characterized, not ceiling-asserted.
+
+## 2026-06-29 cc: RESTORE gap — CRC64 RULED OUT as a lever (already slice-by-16, beats redis); ALL components eliminated, gap is architectural argv-copy ONLY
+
+Closed the component-by-component elimination of the RESTORE-command gap. The comparison profile's
+"fr crc64_redis 3.2% vs redis crcspeed64 1.6%" is NOT an fr-is-slower signal: fr's CRC64 is already
+SLICE-BY-16 (3qhkr, beats Redis 7.2.4's slice-by-8 crcspeed — measured -10.5% on 1MB/4KB, -28% on
+64B); the % gap is relative to fr's larger total, not slower CRC. So CRC64 is FASTER on fr, not a
+lever. Full elimination of the RESTORE-command gap components:
+  - lzf_decompress: parity (g9h0v, proven neutral) — not a lever
+  - crc64: fr slice-by-16 BEATS redis slice-by-8 — not a lever
+  - decode_rdb_string blob copy: mimalloc-recycled ~0-gain (proven) — not a lever
+  - dedup HashSet: load-bearing (builder assumes uniqueness) — can't drop
+  - process_buffered_frames (15%): owned-argv copy of the large payload (Vec<Vec<u8>>) — the ONE
+    real asymmetry vs redis's zero-copy query-buffer args; ARCHITECTURAL (retained-buffer Vec<Bytes>
+    across all command handlers), not per-turn.
+DEFINITIVE: the RESTORE-command gap is SOLELY the owned-argv large-payload copy = an architectural
+zero-copy-RESP lever (helps every large-arg command), the only structural cold-path item left
+besides RAM. Every per-turn per-crate codec/kernel lever is shipped or eliminated. fr remains
+at-or-ahead of redis 7.2.4 on the entire online surface + DUMP.
