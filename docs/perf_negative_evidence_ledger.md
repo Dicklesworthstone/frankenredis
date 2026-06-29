@@ -5053,3 +5053,24 @@ DIGEST-VALUE parity; fr-store 661/0 + fr-runtime 551/0. Only all-STRING hashes k
 (int-valued hashes — common — fall back to explode), so the win applies to string-heavy hashes.
 zset is the last per-type repeat. Dispatch-safe blast radius again small (HashFieldMap impl +
 iter + one apply arm + one encode arm).
+
+## 2026-06-29 cc: keep-listpack lever — Set + Hash SHIPPED; zset assessed LOW-ROI (not pursued)
+
+Status after two shipped per-type keep-listpack wins (Set 57acda127 +20%, Hash ba4b61749 +17%,
+both byte-exact, conformance GREEN):
+- **zset = low-ROI, declined**: (1) STRUCTURE — zset is `struct SortedSet { SortedSetInner }`,
+  not a clean 2-variant method-dispatched enum like SetValue/HashFieldMap, so the variant +
+  reads (ZSCORE/ZRANK/ZRANGE need scores AND order) are materially more involved; (2) COVERAGE
+  — a ZSET_LISTPACK int-encodes INTEGER scores, so the all-string keep gate REJECTS the common
+  integer-scored zsets (only all-float/string-scored zsets would keep-path); (3) PRIOR EVIDENCE
+  — zset RDB-load is SORT-dominated (BTreeMap build, project_fr_persist_decode_presize_shipped),
+  and span-build was already NEUTRAL there. Net: more work, less coverage, smaller win than Set/
+  Hash. Not pursued.
+- **Broadening Set/Hash to int entries = declined**: would need the read methods to return owned
+  decimal bytes for int-encoded entries (Cow), breaking the borrowed-&[u8] read API + the
+  lazy-hold; the all-string-only design is the clean, byte-exact choice.
+- **Residual after keep-listpack = command-overhead** (already in the 0-gain-revert note): with
+  the transcode gone, the remaining set/hash RESTORE gap is CRC64 + RESP + dispatch + the
+  store-insertion bookkeeping (internal_entries_insert + flags/dirty/digest-stale), where redis's
+  dbAdd is tighter — a dispatch-bound lever, not a codec one, and hard to isolate without server
+  profiling. The two shipped keep-listpack wins are the high-value chips off this gap.
