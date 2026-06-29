@@ -4717,3 +4717,29 @@ conservative): hget_no_fieldttl candidate/get 2.261 vs baseline/get 3.161 = **�
 (~1.4x)** (raw 169.09→136.96 ns), p=0.00 non-overlapping. HGET is among the hottest hash ops;
 the 2-alloc-per-read tax was ~28% of its cost. Alloc-elision primitive (composite-key probe
 fast-exit on empty side-map) now applied across HDEL + the full hash-read surface.
+
+
+## 2026-06-29 cc: VEIN STATUS after 4 wins — alloc-elision exhausted on hot paths; expiry_ms guard DECLINED (foldhash); next = collection RESTORE-decode
+
+After shipping EXPIRETIME/PEXPIRETIME+TOUCH, EXPIREAT/PEXPIREAT, HDEL, and the hash-read
+field-TTL fast-exit, surveyed the two active veins:
+- **Single-lookup collapse**: exhausted for simple commands (all hot TTL/lookup-dominated cmds
+  done; remaining record_keyspace_lookup callsites are collection cmds = work-dominated, or
+  introspection = cold). HGET collapse already REJECTED earlier (field-lookup-dominated).
+- **Empty-side-map alloc elision** (the new vein): the ONLY composite-tuple-keyed map is
+  `hash_field_expires` (`(Vec,Vec)`), and ALL its hot probe sites are now guarded (HDEL,
+  HGETALL/HKEYS/HVALS/HLEN/HMGET/HRANDFIELD via drop_expired_hash_fields, HGET/HEXISTS via
+  hash_field_is_expired). Single-`Vec`-keyed side-maps (stream_groups/last_ids/max_deleted_ids)
+  use `.remove(key: &[u8])` = alloc-free (no tax). Residual composite sites (XGROUP at ~17050,
+  HTTL/HEXPIRETIME reader at ~18662) are COLD commands — not worth guarding.
+- **DECLINED — expiry_ms `is_empty()` guard**: `expiry_ms` probes `expiry_deadlines`
+  (`HashMap<_,_,foldhash::quality::RandomState>`) on every command via drop_if_expired + the
+  lookup helpers; an is_empty guard would skip the key hash on no-TTL workloads. But foldhash
+  of a short key is ~1-2 ns, so the expected gain is ~3-6% of a ~30 ns EXISTS = sub-noise /
+  ~0-gain revert risk. Not built (avoids burning a cycle to prove ~0). Revisit ONLY if a
+  no-TTL-workload profile shows expiry probing as a real hotspot.
+
+NEXT REAL gap vs ORIG (per [[project_fr_persist_decode_presize_shipped]]): collection
+RESTORE/DEBUG-RELOAD **decode 0.36-0.46x** (redis 2.2-2.8x faster) — the dominant collection
+RDB throughput gap, an fr-store keep-listpack structural lever (RdbValue listpack variant).
+Bounded-but-multi-step; needs a calm session, not a 60-min per-turn slice.
