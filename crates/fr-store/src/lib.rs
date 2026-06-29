@@ -6971,7 +6971,13 @@ impl Store {
     }
 
     pub fn expire_milliseconds(&mut self, key: &[u8], milliseconds: i64, now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired (return discarded): for a
+        // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
+        // when actually due, eliding the redundant `entries.get` before the `contains_key`
+        // existence check. EXPIRE's TTL-set is light (expiry-map update), so this matters.
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
         if !self.entries.contains_key(key) {
             return false;
         }

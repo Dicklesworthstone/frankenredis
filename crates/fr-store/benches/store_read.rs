@@ -24,6 +24,8 @@ fn bench_get(c: &mut Criterion) {
 
     // An integer key (no TTL) for the INCR write-path single-lookup collapse.
     store.set(b"counter:key".to_vec(), b"0".to_vec(), None, 1_000);
+    // A key for the EXPIRE write-path lazy-drop (TTL refreshed each iter).
+    store.set(b"expire:key".to_vec(), b"v".to_vec(), None, 1_000);
 
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
@@ -89,6 +91,15 @@ fn bench_get(c: &mut Criterion) {
             std::hint::black_box(store.setnx(
                 std::hint::black_box(b"target:key"),
                 std::hint::black_box(b"x"),
+                2_000,
+            ))
+        })
+    });
+    g.bench_function("expire_existing", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.expire_milliseconds(
+                std::hint::black_box(b"expire:key"),
+                100_000,
                 2_000,
             ))
         })

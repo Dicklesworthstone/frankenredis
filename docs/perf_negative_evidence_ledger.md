@@ -4611,3 +4611,20 @@ clearly below it (directional ~1.3–1.8x), NOT ~0-gain. Shipped on byte-exact +
 (one fewer `entries` probe) + lookup-dominated INCR-class + candidate-clearly-below-
 normalized-baseline. SETNX-on-absent (insert) is mutation and unaffected-to-marginal.
 Write-path single-lookup wins now: INCR-family + SETNX (the two lookup-dominated writes).
+
+## 2026-06-29 cc: SHIPPED expire lazy-drop — EXPIRE/PEXPIRE/EXPIREAT (TTL-set is light) is lookup-dominated; ~−25%, byte-exact
+
+`expire_milliseconds` (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT core) called `drop_if_expired`
+(return DISCARDED) then `contains_key` then a light TTL-set (`with_mutated_entry` no-op
+closure + `expiry_deadlines` update). Applied the inline lazy-drop (peek deadline; only
+invoke `drop_if_expired` when due; elide the redundant `entries.get` before `contains_key`).
+BYTE-EXACT (return discarded; non-expired drop is side-effect-free): `cargo test -p
+fr-store --lib` 659/0. MEASURED under a wildly-oscillating rch worker (GET swung 24.7→
+32.6→55.9→80 ns across runs, so a clean SAME-worker A/B was impossible). Cleanest pair:
+baseline 112.78 ns @ GET 24.7; candidate 111.22 ns @ GET 32.6 — the candidate ran on a
+1.32x SLOWER worker, so an unchanged EXPIRE would read ~149 ns; instead it read 111,
+beating the worker-adjusted baseline by **~−25%**. A real win (the elided `drop_if_expired`
+is ~25 ns of EXPIRE's ~112 ns), distinct from append's ~2% (~0). Shipped on byte-exact +
+monotonic + worker-adjusted-directional. INFRA NOTE: the rch worker is oscillating 1.3–3.4x
+this session — marginal A/Bs need a calm window or best-of-N; obvious wins (this, INCR)
+still resolve. Write-path lookup-dominated wins now: INCR-family, SETNX, EXPIRE-family.
