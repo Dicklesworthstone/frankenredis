@@ -131,6 +131,31 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("touch_no_ttl", |b| {
         b.iter(|| std::hint::black_box(store.touch_key(std::hint::black_box(b"target:key"), 2_000)))
     });
+    // HDEL of 50 fields on a hashtable with NO field TTLs (the common case): the candidate
+    // skips the per-field `hash_field_ttl_clear_for_field` loop (2 Vec allocs + BTree probe
+    // each) behind an `is_empty` guard. iter_batched rebuilds the hash each iter (untimed
+    // setup), so only the HDEL is measured.
+    let hdel_fields: Vec<Vec<u8>> = (0..50u32).map(|i| format!("f{i}").into_bytes()).collect();
+    let hdel_field_refs: Vec<&[u8]> = hdel_fields.iter().map(Vec::as_slice).collect();
+    let hdel_val: &[u8] = b"v";
+    let mut hdel_flat: Vec<&[u8]> = Vec::with_capacity(100);
+    for f in &hdel_field_refs {
+        hdel_flat.push(f);
+        hdel_flat.push(hdel_val);
+    }
+    g.bench_function("hdel_50_no_fieldttl", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.hset_borrowed_many(b"h", &hdel_flat, 1_000).unwrap();
+                s
+            },
+            |mut s| {
+                std::hint::black_box(s.hdel(std::hint::black_box(b"h"), &hdel_field_refs, 2_000))
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
     g.finish();
 }
 

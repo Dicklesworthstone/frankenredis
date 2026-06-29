@@ -10547,8 +10547,16 @@ impl Store {
             // Clear any per-field TTL entries for the removed fields so
             // re-added fields of the same name don't inherit stale TTLs.
             // (br-frankenredis-b8ut)
-            for field in fields {
-                self.hash_field_ttl_clear_for_field(key, field);
+            // (frankenredis-cc hdel-fieldttl-guard) Per-field clear allocates a
+            // `(Vec, Vec)` composite + probes the BTreeMap for EACH field. When no hash
+            // anywhere carries a field TTL (the overwhelmingly common case — HEXPIRE is
+            // rare) the whole loop is pure waste: every `remove` is a guaranteed no-op on
+            // an empty map. Skip it behind an O(1) `is_empty` check. Byte-exact (an empty
+            // map removes nothing) — eliding 2 allocations + a BTree probe per field.
+            if !self.hash_field_expires.is_empty() {
+                for field in fields {
+                    self.hash_field_ttl_clear_for_field(key, field);
+                }
             }
         }
         if is_empty {

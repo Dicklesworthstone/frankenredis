@@ -4680,3 +4680,22 @@ change CI [+11.8%,+12.4%] p=0.00, non-overlapping. Post-collapse expireat (85.7 
 matches the collapsed relative sibling (86.3 ns) — the one eliminated probe, exactly.
 Write/read lookup-dominated single-lookup wins now: INCR-family, SETNX, EXPIRE-family
 (EXPIRE/PEXPIRE + EXPIREAT/PEXPIREAT), PERSIST, EXPIRETIME/PEXPIRETIME, TOUCH.
+
+
+## 2026-06-29 cc: SHIPPED HDEL per-field field-TTL-clear allocation elision **~−43% (~1.77x)** on no-field-TTL hashes, byte-exact (NEW primitive — alloc elision, not lookup collapse)
+
+Different primitive from the single-lookup vein. `hdel` cleared per-field TTL state in an
+unconditional loop calling `hash_field_ttl_clear_for_field(key, field)` for EVERY removed
+field — and that helper allocates a `(Vec<u8>, Vec<u8>)` composite (key.to_vec() +
+field.to_vec()) and probes the `hash_field_expires` BTreeMap. When NO hash anywhere carries
+a per-field TTL (the overwhelmingly common case; HEXPIRE/HPEXPIRE are rare), that is 2k
+wasted allocations + k BTree probes for a k-field HDEL — measured at ~40% of a hashtable
+HDEL's cost. Guarded the loop behind an O(1) `!self.hash_field_expires.is_empty()` check.
+BYTE-EXACT: an empty map removes nothing, and whenever ANY field TTL exists anywhere the
+guard is true and the loop runs verbatim — so a key whose fields carry TTLs is unaffected.
+`cargo test -p fr-store` (lib 659/0 + all integration incl. hash_field_ttl) green. MEASURED
+— A/B normalized by the get-ref control (cand 24.15 ns / base 25.20 ns, ~4% worker drift):
+hdel_50_no_fieldttl 3.035 µs -> 1.716 µs = **~−43% (~1.77x)** (worker-cancelled ~−41%),
+change CI [+71%,+82%] p=0.00, non-overlapping. The eliminated 2-alloc-per-field tax.
+Generalizable check: scan other multi-element write paths for unconditional per-element
+side-map clears that allocate composite keys when the side map is empty.
