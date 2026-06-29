@@ -5028,3 +5028,16 @@ fit) + copies the blob — eliminating the double-decode is a follow-up. Proves 
 + is byte-exact; Hash (HashFieldMap) + zset are the next per-type repeats. Blast radius was
 far smaller than feared (dispatch-safe: only the GenericSet impl + IntoIterator + one apply
 arm + one RdbValue encode arm; lib.rs SetValue layer dispatches through methods).
+
+## 2026-06-29 cc: REVERT single-decode keep-path opt — ~0-gain; the set-RESTORE residual is NOT the decode
+
+Follow-up to the shipped keep-listpack set RESTORE (57acda127): hypothesized the residual
+(~0.44x vs redis, not the full ~3x) was the keep-path's double listpack decode (fr-persist
+all-string check + fr-store fit check). Tried eliminating the fr-persist decode (always emit
+SetListpack, let the apply layer's single decode decide keep-vs-explode). MEASURED head-to-head
+set-str RESTORE: 0.446x vs 0.442x = WITHIN NOISE (cv ~16%). REVERTED (kept the conformance-
+validated double-decode version on main). CONCLUSION: the decode is NOT the set-RESTORE
+bottleneck — the residual ~2.2x is RESTORE COMMAND overhead (CRC64 verify + RESP parse +
+dispatch) + the blob copy + store insertion, where redis's tight RESTORE path still wins. The
+keep-listpack win (avoiding the per-element PackedStrSet transcode) is real (~+20%, byte-exact)
+but the remaining gap is command-path, not codec — a different (smaller, dispatch-bound) lever.
