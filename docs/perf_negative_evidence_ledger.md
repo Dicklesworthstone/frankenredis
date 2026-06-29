@@ -4743,3 +4743,21 @@ NEXT REAL gap vs ORIG (per [[project_fr_persist_decode_presize_shipped]]): colle
 RESTORE/DEBUG-RELOAD **decode 0.36-0.46x** (redis 2.2-2.8x faster) — the dominant collection
 RDB throughput gap, an fr-store keep-listpack structural lever (RdbValue listpack variant).
 Bounded-but-multi-step; needs a calm session, not a 60-min per-turn slice.
+
+
+## 2026-06-29 cc: BUILD-BLOCKER ROOT CAUSE — full binary not remote-buildable BY POLICY (.rchignore excludes legacy_redis_code); per-crate fr-store is the only supported measure path
+
+Diagnosed the persistent "full-binary build blocked" note precisely. `fr-command/build.rs`
+reads `../../legacy_redis_code/redis/src/commands` (394 vendored redis 7.2.4 command JSONs).
+That dir EXISTS and resolves LOCALLY (it is a real directory; the nested
+`legacy_redis_code/legacy_redis_code -> self` symlink is a harmless leftover, not the cause).
+The remote `rch` build fails because `.rchignore` DELIBERATELY excludes `legacy_redis_code/`
+("Local oracle/build evidence payloads are large and not needed for remote Cargo builds").
+So: remote rch builds are intentionally library-only; the full `frankenredis` binary (hence
+any live head-to-head vs redis-server) requires a LOCAL build — slow, no remote offload, and
+subject to the E0514 rch-artifact-incompat trap if target dirs are shared. NOT a 60-min-slice
+activity, and un-ignoring legacy_redis_code would bloat every remote sync. CONCLUSION for the
+perf campaign: **per-crate `-p fr-store` isolated A/B (benches/store_read.rs) is the supported
+and sufficient measurement path** — which is how all of this session's wins were measured.
+Future sessions: don't re-attempt remote full-binary builds; either accept per-crate A/B or
+budget a dedicated local-build slice for head-to-head on the structural RESTORE-decode/RAM gaps.
