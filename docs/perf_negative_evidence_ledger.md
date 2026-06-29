@@ -2728,6 +2728,28 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: scripting 4-5x is ARCHITECTURALLY INHERENT (store embedded in LuaState borrow) — only ~10-13% recoverable; sharpens the decision request (drop scripting from top levers)
+
+NEW insight chasing the jax "different primitive" steer for scripting: `LuaState::new(store:
+&'a mut Store, ...)` (lua_eval.rs 3642) EMBEDS the per-call store borrow, so the Lua state is
+inherently per-call — redis's persistent `lua_State` is NOT portable in safe Rust without
+threading the store as a per-call PARAM through every interpreter method (eval_expr/eval_call/
+… all read self.store) = a multi-DAY signature refactor. So the EVAL/EVALSHA 4-5x is mostly
+INHERENT (per-call LuaState init + redis-API wiring + teardown, unavoidable under the
+store-borrow model); only the globals-template clone (~10-13%) is recoverable, via an
+Rc-shared-globals + per-EVAL-overlay (multi-hour, borrow-checker-risky, on a NON-hot cmd).
+
+CONSEQUENCE — scripting DROPS from the high-value structural levers (its big number is
+mostly inherent; the cheap slice is ~10% non-hot). The remaining REAL levers narrow to:
+  (A) KEYSPACE RAM ~1.5-1.7x universal — KeyDict wiring; BLOCKER = SCAN sorted→hash design
+      decision (human sign-off) + fixtures. Highest universal value.
+  (C) RESTORE-decode 3.1x / list-DUMP ~5x non-hot — keep-listpack/lazy RdbValue; multi-day
+      Value-variant blast radius.
+Both >60m / human-gated. The per-turn 60m loop has structurally exhausted its scope (hot
+path syscall-bound → fr-CPU levers sub-noise; dispatch harvested; leaf crates saturated;
+scripting mostly inherent). Genuine terminal blocker — needs a human to authorize (A)'s
+design decision or a (C) multi-day session, or redirect the loop. No source.
+
 ## 2026-06-29 CrimsonHawk: ⛔ DECISION REQUEST — per-turn perf surface exhausted; every remaining lever needs a HUMAN DESIGN DECISION or a multi-day refactor (pick one to unblock)
 
 The per-turn-committable perf surface is fully harvested (11 wins + the FR_ALLOW_STUB_COMMANDS
