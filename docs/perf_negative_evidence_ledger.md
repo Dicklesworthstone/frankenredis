@@ -2728,6 +2728,32 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: EVAL is 4.1x slower vs redis — BIGGEST new throughput gap; root = per-EVAL Lua-globals clone (structural scripting lever)
+
+Probed the uncovered scripting surface. `EVAL "return 1" 0` (-c50 -P16, live binary):
+fr 126k vs redis 512k = **0.246x (redis 4.1x faster)** — the biggest single throughput
+gap found this campaign, on a real production feature (Lua scripting).
+
+NOT the parse (compile_lua_chunk_cached caches by source) NOR the interpreter run (trivial
+script). perf record decomposition of fr SELF-time:
+- process_buffered_frames 11.37% (dispatch — EVAL has no fast path; complex KEYS/ARGV).
+- **per-EVAL Lua-state SETUP/TEARDOWN dominates**: `LuaState::new` → `lua_base_globals_
+  template()` CLONES the entire Lua globals table (stdlib + redis API) every EVAL —
+  hashbrown `RawTable<(String,LuaValue)>` clone 2.28% + `String` clone 2.72% (the global
+  NAMES re-allocated) + `clear_table_recursive` 2.15% (LuaState drop) + mi_free/realloc
+  ~6%; plus `sha1_hex` 2.74% (script-cache SHA computed per EVAL).
+ROOT: redis reuses ONE persistent `lua_State` (globals built once); fr builds a fresh
+LuaState with a CLONED globals table per EVAL for script isolation. That clone+teardown +
+sha1 is the 4x.
+
+STRUCTURAL LEVER (high-value, multi-hour, "different primitive" per jax): a persistent /
+copy-on-write Lua globals environment (or Rc/interned global-name keys so the per-EVAL
+clone is a refcount bump, not String re-allocation) — would cut most of the setup cost.
+No clean per-turn slice: sha1 is only ~2.74%; the globals clone needs the COW/persistent
+refactor (script-isolation-sensitive). Recorded as the top structural throughput lever
+(4x on scripting > any remaining RAM/decode ratio in throughput terms). NOT per-turn
+dispatch; needs a focused scripting-engine session. No source.
+
 ## 2026-06-29 CrimsonHawk: XADD residual estimate_stream O(n) assessed MARGINAL — invasive + MEMORY-USAGE-parity-constrained, not worth it; dispatch-lever vein closed
 
 Assessed the last XADD-residual lever (estimate_stream_memory_usage_bytes, 3.59% of XADD).
