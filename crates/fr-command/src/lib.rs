@@ -4837,8 +4837,13 @@ fn geo_encode(
     Some(geo_interleave64(lat_offset, long_offset))
 }
 
+/// (CrimsonHawk) Exposed for the fr-runtime GEOADD borrowed fast path
+/// (`execute_plain_geoadd_borrowed`), mirroring how `parse_f64_arg` is pub for
+/// INCRBYFLOAT. Encodes a WGS84 (longitude, latitude) to the 52-bit geohash bits;
+/// `None` when out of WGS84 range (the generic path then emits the exact
+/// "invalid longitude,latitude pair" error).
 #[inline]
-fn geo_encode_wgs84(longitude: f64, latitude: f64) -> Option<u64> {
+pub fn geo_encode_wgs84(longitude: f64, latitude: f64) -> Option<u64> {
     geo_encode(
         longitude,
         latitude,

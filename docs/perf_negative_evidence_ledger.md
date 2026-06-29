@@ -2728,6 +2728,31 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: LANDED GEOADD borrowed fast path — 0.36x → 0.909x (2.5x), byte-exact (10th win)
+
+Implemented the profile-confirmed lever. `execute_plain_geoadd_borrowed` (fr-runtime) for
+the bare `GEOADD key lon lat member`: reuses `parse_borrowed_plain_key_arg3_packet`
+(prefix `*5\r\n$6\r\n`), parses lon/lat via the pub'd `fr_command::parse_f64_arg`,
+`fr_command::geo_encode_wgs84` (now pub) → score = bits as f64, `store.zadd_plain_owned`
+single-member, Integer(added) reply, cmdstat `geoadd`, behind the default-write-gate.
+DEFERS to the generic path on non-numeric/out-of-range coords, NX/XX/CH options, and
+multi-triple shapes (parser only matches the 5-element form) → byte-exact by construction.
+
+MEASURED (live binary, redis-benchmark -c50 -P16): GEOADD **0.36x → 0.909x** (fr 608k vs
+redis 668k req/s) = **2.5x improvement, near-parity**. CONFORMANCE GREEN: GEOADD/GEOPOS/
+GEODIST/ZSCORE + edge cases (bad-float, invalid-pair, CH, multi-triple, ZCARD) byte-exact
+vs redis; both edge_sweep_differ (100 scenarios) + edge_sweep2 byte-exact (E1=E2=0).
+Gated full-binary build clean. Wired into the LMPOP-context arg3 chain (the pipelined path
+the benchmark + profile hit); a 2nd arg3 context exists (ZMPOP-only) — GEOADD there still
+defers correctly (a follow-on perf-coverage nicety, not a correctness gap).
+
+This is the FIRST throughput win from the build-unblock pipeline: unblock fr-runtime →
+measure the families the broad sweep misses (streams/geo) → profile-isolate the cause
+(GEOADD dispatch, geo_encode <1%) → implement the fast path. Validates persisting past
+"surface closed." Residual GEO gap: GEODIST 0.46x (read, geo decode+haversine — has partial
+borrowed handling); XADD 0.37x (structural stream metadata, multi-hour). Next: GEODIST/
+GEOPOS read fast paths if profiled dispatch-bound.
+
 ## 2026-06-28 CrimsonHawk: GEOADD gap CONFIRMED dispatch-bound by profile (geo_encode <1%) — fast path ~parity-reachable; exact impl recipe worked out
 
 perf record GEOADD -c50 -P16 on the live binary, fr SELF-time: process_buffered_frames

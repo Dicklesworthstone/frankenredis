@@ -10301,6 +10301,168 @@ impl Runtime {
         }
     }
 
+    /// (CrimsonHawk) Borrowed fast path for the bare single-triple
+    /// `GEOADD key lon lat member` (no NX/XX/CH, exactly one triple). Upstream
+    /// geo.c::geoaddCommand builds a `ZADD key score member` argv and dispatches
+    /// zaddGenericCommand, where score = the 52-bit geohash interleave as an f64
+    /// (exactly representable, 52 < 53 mantissa bits). This mirrors that without
+    /// the generic-argv dispatch tax (profiled as ~entirely dispatch-bound: the
+    /// geo encode is <1%). Parses BOTH coordinates BEFORE any state change and
+    /// DEFERS (returns None → generic path, which emits the exact error) on a
+    /// non-numeric coordinate ("value is not a valid float") or an out-of-WGS84
+    /// coordinate ("invalid longitude,latitude pair"). Multi-triple / option
+    /// shapes never reach here (the parser only matches the 5-element form).
+    /// Records cmdstat as `geoadd`; the keyspace "zadd" event / ZADD propagation
+    /// are gated off (default-write-gate defers when notify/repl/AOF/etc active).
+    pub fn execute_plain_geoadd_borrowed(
+        &mut self,
+        key: &[u8],
+        lon: &[u8],
+        lat: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"GEOADD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || lon.len() > self.policy.gate.max_bulk_len
+            || lat.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        // Parse + range-check BOTH coordinates before any state change; bail to
+        // the generic path (exact error) on the first bad one.
+        let longitude = fr_command::parse_f64_arg(lon).ok()?;
+        let latitude = fr_command::parse_f64_arg(lat).ok()?;
+        let bits = fr_command::geo_encode_wgs84(longitude, latitude)?;
+        let score = bits as f64;
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("geoadd");
+        self.session.last_argv_len_sum =
+            b"GEOADD".len() + key.len() + lon.len() + lat.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = match self
+            .server
+            .store
+            .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
+        {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_geoadd_borrowed_metrics(
+            key, lon, lat, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_geoadd_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        lon: &[u8],
+        lat: &[u8],
+        member: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = |key: &[u8], lon: &[u8], lat: &[u8], member: &[u8]| -> Vec<Vec<u8>> {
+            vec![
+                b"GEOADD".to_vec(),
+                key.to_vec(),
+                lon.to_vec(),
+                lat.to_vec(),
+                member.to_vec(),
+            ]
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build(key, lon, lat, member));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build(key, lon, lat, member));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("geoadd", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build(key, lon, lat, member));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'GEOADD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     /// Conservative borrowed runtime fast path for `ZINCRBY key delta member`:
     /// mirrors `execute_plain_zadd_borrowed`. Parses the delta BEFORE any state
     /// change (bailing to the generic path — which produces the exact "value is
