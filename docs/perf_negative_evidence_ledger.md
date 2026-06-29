@@ -4052,3 +4052,37 @@ an fr-runtime refactor IcyWolf owns). Neither is per-turn landable, and am being
 means reservations can't gate a safe attempt. No source change. Operator action:
 restart am (`am service restart`) to re-enable reservations, then greenlight uhthd OR
 ohsk5 as a dedicated multi-session branch.
+
+## 2026-06-29 cc: NEW dig result — SCAN-during-new-key-insertion is O(N²) (ordered_keys lazy rebuild); fix is an eager-vs-lazy TRADEOFF, not a free win
+
+Dug a genuinely un-ledgered primitive (not RAM, not dispatch, not codec): the cost of
+`ordered_keys` (the `BTreeSet<StoreKey>` backing fr's deterministic sorted SCAN/KEYS)
+when SCAN is interleaved with keyspace mutation. Verified in `fr-store/src/lib.rs`:
+- `mark_ordered_keys_dirty` (L5542) clears the whole set + sets a dirty flag;
+  `rebuild_ordered_keys_if_dirty` (L5550) does a full `clear()` + `extend(entries
+  .keys().cloned())` = O(N log N) + N Arc-clones on the next SCAN/KEYS call.
+- **Already-correct cheap part:** `internal_entries_insert_with_expiry` (L9021) only
+  marks dirty for `is_new_key`; **value OVERWRITES never invalidate** ordered_keys. So
+  the common steady-state pattern (fixed keyset: SCAN + repeated SET-overwrite) pays
+  ZERO rebuilds — ordered_keys stays clean. Confirmed, not a bug.
+- **Residual pathology:** SCAN cursor full-iteration WHILE NEW keys are being added
+  (or removed) — each new key dirties, each subsequent SCAN call rebuilds the entire
+  BTreeSet → O(N²·logN) for a full iteration vs redis's O(N) incremental-cursor scan.
+  Real on the "iterate a growing keyspace with SCAN" workload; absent from the
+  write-blast and steady-SCAN benchmarks that have been the focus.
+
+Why it is NOT a clean per-turn win (the honest tradeoff): the obvious fix — eager
+incremental `ordered_keys.insert/remove` (O(log N)) on each keyset change instead of
+clear+dirty — adds O(log N) BTreeSet work to EVERY new-key SET, which REGRESSES the
+headline `redis-benchmark -r <N>` random-key write path (the exact reason the current
+design is lazy). An adaptive variant (incremental-maintain only WHILE ordered_keys is
+already materialized; stay lazy once dirty) could be near-pure-win, but it requires
+threading the added/removed key through ~12 `internal_entries_insert/remove` call
+sites (L9023/9098/9211/9249/9348/…) — multi-hour and correctness-risky (any missed
+mutation site → ordered_keys drifts from entries → SCAN returns wrong keys → breaks
+the deterministic-SCAN conformance fixtures), not safely landable per-turn with am
+reservations down. Filed here as a characterized lever for a dedicated session; same
+eager-vs-lazy + deterministic-SCAN tradeoff class as the keyspace-RAM lever above.
+No source change. Also confirmed this cycle: every .scratch/.worktrees worktree
+(~90) belongs to another agent (blackthrush/bluefalcon/cod-a/cod-b/coralox/
+ivorycoyote) — no `cc`-owned off-main MEASURED win exists to land.
