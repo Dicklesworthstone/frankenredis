@@ -4513,3 +4513,28 @@ Each saves one `entries` probe per cache read; LFU-on keeps the slow path. The c
 single-lookup vein is now broad: GET, MGET, EXISTS, STRLEN, TYPE, PTTL, GETRANGE, GETBIT.
 Remaining: `hget` (needs care around the hash-field-TTL `drop_hash_field_if_expired` layer
 between the key probe and the field read — a future careful follow-up).
+
+## 2026-06-29 cc: SHIPPED get_sort_weight (SORT BY) + bitfield_get (BITFIELD GET) cache single-lookup via the helper — ≥−10% / ≥−17%, byte-exact; hash reads ruled non-viable
+
+Two more clean string-reads through `lookup_live_for_read_mut`. `get_sort_weight` (SORT
+BY pattern, per-element) and `bitfield_get` (BITFIELD GET) each paid the slow
+`record_keyspace_lookup` + second `get_mut`. Matched their slow paths exactly:
+get_sort_weight returns `Missing` (no touch) for a non-string then touch_access + parse;
+bitfield_get touches only if `is_string_like()`, returns `bitfield_read(&[])` on miss,
+WrongType on non-string (Cow borrow threaded out of the helper match).
+
+BYTE-EXACT: `cargo test -p fr-store --lib` 659 passed / 0 failed. MEASURED (store_read
+bench, TTL+LRU hit, A/B toggle): get_sort_weight 43.908→39.345 ns; bitfield_get
+38.169→31.754 ns. CONSERVATIVE raw deltas (≥−10.4% / ≥−16.8%) — the candidate run landed
+on a ~18% SLOWER worker (the unchanged GET bench read 31.6 ns vs 26.8 ns baseline) yet
+each candidate is still NON-OVERLAPPING below its baseline, so the true improvement is
+larger (~1.6x band, matching the other reads). Monotonic (one fewer `entries` probe).
+
+RULED NON-VIABLE (recorded so they aren't re-attempted): the HASH reads `hget` /
+`hexists` / `hlen` cannot use this collapse — each reaps per-field TTLs
+(`drop_hash_field_if_expired` / `drop_expired_hash_fields`) BETWEEN the key probe and the
+value read, and the reap can empty+remove the key, so the keyspace hit/miss must be
+recorded BEFORE the reap while the value is read AFTER — inherently two `entries` probes.
+`exists_no_touch` is already single-lookup (only `record_keyspace_lookup`). Cache-read
+single-lookup vein now spans 10 reads: GET, MGET, EXISTS, STRLEN, TYPE, PTTL, GETRANGE,
+GETBIT, SORT-weight, BITFIELD-GET. Vein effectively complete for clean reads.

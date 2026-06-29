@@ -6385,6 +6385,31 @@ impl Store {
     /// Side-effects (keyspace hit/miss, LFU, touch, wrongtype->Missing) mirror
     /// `get`/`sort_resolve_key_or_hash` so it is byte-exact, only faster.
     pub fn get_sort_weight(&mut self, key: &[u8], now_ms: u64) -> SortWeight {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    if !entry.value.is_string_like() {
+                        return SortWeight::Missing;
+                    }
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    match &entry.value {
+                        Value::Integer(n) => SortWeight::Number(*n as f64),
+                        Value::String(b) => match std::str::from_utf8(b) {
+                            Ok(text) => match text.trim().parse::<f64>() {
+                                Ok(f) => SortWeight::Number(f),
+                                Err(_) => SortWeight::NotNumber,
+                            },
+                            Err(_) => SortWeight::NotNumber,
+                        },
+                        _ => SortWeight::Missing,
+                    }
+                }
+                None => SortWeight::Missing,
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return SortWeight::Missing;
         }
@@ -7679,6 +7704,19 @@ impl Store {
         signed: bool,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            let bytes = match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    if entry.value.is_string_like() {
+                        entry.touch(now_ms);
+                    }
+                    entry.value.string_bytes().ok_or(StoreError::WrongType)?
+                }
+                None => Cow::Borrowed(&[][..]),
+            };
+            return Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed));
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }

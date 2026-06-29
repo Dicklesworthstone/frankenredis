@@ -60,6 +60,22 @@ fn bench_get(c: &mut Criterion) {
             std::hint::black_box(store.getbit(std::hint::black_box(b"target:key"), 100, 2_000))
         })
     });
+    g.bench_function("get_sort_weight_ttl_lru_hit", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.get_sort_weight(std::hint::black_box(b"target:key"), 2_000))
+        })
+    });
+    g.bench_function("bitfield_get_ttl_lru_hit", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.bitfield_get(
+                std::hint::black_box(b"target:key"),
+                0,
+                8,
+                false,
+                2_000,
+            ))
+        })
+    });
     g.finish();
 }
 
