@@ -4360,3 +4360,24 @@ real levers are and why each is blocked (so they aren't re-scouted):
 OPERATOR ACTION to unblock the next round: (a) restart `am` so the GET-core lever (#1, the
 biggest remaining per-command lever) can be safely claimed/coordinated; (b) fix the
 `fr-command` build-script block to open #2. No source change this entry.
+
+## 2026-06-29 cc: CORRECTION — the GET double-lookup is ALREADY collapsed for the common case; only the cache/LFU slow path remains, and it's CoralOx's active core
+
+The prior entry overstated the GET keyspace double-lookup as a broadly-available lever.
+On inspection it is NOT: `Store::get_string_bytes` (fr-store L6413, `frankenredis-get-
+single-lookup`) already has a fast path that, when the DB holds NO TTL-bearing key AND
+LFU sampling is off (the default LRU config — i.e. most non-cache workloads), does ONE
+`entries.get_mut` serving both hit/miss accounting and the value fetch. So the common
+GET is already single-lookup.
+
+The DOUBLE lookup survives only on the SLOW path (L6447: `count_expiring_keys() > 0` OR
+LFU on — i.e. cache/TTL-heavy DBs): `record_keyspace_lookup` (→ `drop_if_expired`, one
+`entries.get`) then a second `entries.get_mut`. Collapsing it (peek `expiry_ms`; delegate
+the rare expired case to `drop_if_expired`; single `get_mut` on the live case) is feasible
+and would help cache GET throughput, BUT carries a real RNG-determinism trap — the live
+case must consume `next_rand` only on a HIT (the old path early-returns before
+`rand_sample` on a miss), or LFU sampling diverges — and it sits in the actively-iterated
+fr-store core that landed the fast path (CoralOx). With `am` down, extending their hot-GET
+optimization risks duplicating in-progress work + a subtle determinism bug on the hottest
+command. Correct owner: CoralOx, once `am` is restored. Not a safe per-turn cc lever.
+This supersedes lever #1 in the prior entry. No source change.
