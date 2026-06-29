@@ -1148,6 +1148,14 @@ pub enum RdbValue {
     /// `List`, so load/apply paths keep a single canonical semantic shape.
     ListQuicklist2Packed(Vec<Vec<u8>>),
     Set(Vec<Vec<u8>>),
+    /// (frankenredis-cc keep-listpack) Raw redis SET_LISTPACK blob kept VERBATIM for
+    /// an all-string set, so RESTORE/DEBUG-RELOAD load stores it lazily
+    /// (`GenericSet::Listpack`) instead of exploding it into a `Vec<member>` and
+    /// transcoding into the packed set — the load-side mirror of redis holding the
+    /// listpack object. Only produced when the blob is all-string (the apply layer
+    /// applies the final Packed-fit gate), so it materializes byte-identically to
+    /// `Set`. An int-bearing listpack falls back to `Set` at decode time.
+    SetListpack(Vec<u8>),
     /// A set that is HASHTABLE-encoded (upstream `RDB_TYPE_SET`, the plain
     /// count-prefixed member list). Distinct from `Set` (which re-derives
     /// intset/listpack/hashtable from content+thresholds) so a sticky hashtable
@@ -1700,6 +1708,14 @@ fn encode_rdb_internal(
                             rdb_encode_string(&mut buf, member);
                         }
                     }
+                }
+                RdbValue::SetListpack(blob) => {
+                    // (frankenredis-cc keep-listpack) Re-emit the kept all-string listpack
+                    // blob verbatim as SET_LISTPACK (the on-disk format is an rdb-string-
+                    // wrapped listpack, matching the decode at RDB_TYPE_SET_LISTPACK).
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    rdb_encode_string(&mut buf, blob);
                 }
                 RdbValue::SetHashtable(members) => {
                     // (frankenredis-39is8) A hashtable-encoded set always emits
@@ -3694,12 +3710,24 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let members = listpack::decode_listpack(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?
-                            .into_iter()
-                            .map(listpack::ListpackEntry::into_bytes)
-                            .collect();
-                        RdbValue::Set(members)
+                        // (frankenredis-cc keep-listpack) Keep the raw blob verbatim when it
+                        // is all-string, so the store holds it lazily instead of transcoding
+                        // on load. An int-bearing listpack (rare; redis usually intset-encodes
+                        // those) falls back to the explode path for a faithful Set.
+                        if listpack::decode_string_ranges_if_all_strings(&listpack)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        {
+                            RdbValue::SetListpack(listpack.to_vec())
+                        } else {
+                            let members = listpack::decode_listpack(&listpack)
+                                .map_err(|_| PersistError::InvalidFrame)?
+                                .into_iter()
+                                .map(listpack::ListpackEntry::into_bytes)
+                                .collect();
+                            RdbValue::Set(members)
+                        }
                     }
                     RDB_TYPE_HASH_LISTPACK => {
                         // Listpack of f1, v1, f2, v2, ... pairs.
