@@ -2728,6 +2728,28 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: XADD profiled — dispatch-dominated (no fast path, ~22%) like GEOADD; fast path = next lever (~2.7x→~1.5x). GEODIST/GEOPOS already fast-pathed
+
+Followed the GEOADD win by checking the other gaps. Findings on the live binary:
+- GEODIST/GEOPOS ALREADY have borrowed fast paths (parse_borrowed_plain_geodist/geopos
+  + execute_plain_geo{dist,pos}_borrowed) — GEOADD was the unique geo command missing one
+  (now landed). Their load-37 ratios (0.46x) were noise; geo dispatch vein DONE.
+- **XADD has NO borrowed fast path** (grep: 0 defs). perf record XADD -c50 -P16 SELF-time:
+  process_buffered_frames **16.73%** + failed fast-path-parser cascade (arg1/2/3 ~5%) +
+  execute_frame_internal 1.94% + dispatch_with_client_context 1.26% = **~22% generic
+  dispatch tax** (same shape as GEOADD pre-fix); PackedStreamLog::insert_new_span 2.95% +
+  BTreeMap range 1.75% (stream append, structural); fr_command::xadd 1.06%;
+  `estimate_stream_memory_usage_bytes` **3.59%** (used_memory recompute every-64-mutations
+  re-iterates the stream — secondary; a candidate incremental-size-tracking fr-store fix).
+
+NEXT LEVER: **XADD borrowed fast path** for the bare `XADD key * field value` (5 elems =
+arg3 shape, reuse parse_borrowed_plain_key_arg3_packet). More complex than GEOADD: auto-ID
+generation, the reply is the generated ID (bulk string, not Integer), + the 2 stream
+side-map updates (last_id/entries_added). Defer explicit-ID / NOMKSTREAM / MAXLEN /
+multi-field / non-`*` to generic = byte-exact. Closes the ~22% dispatch → ~2.7x→~1.5x
+(structural 3-hash-lookup + estimate remain). Implement next turn (careful: byte-exact
+auto-ID format + side-map consistency). Secondary: estimate_stream incremental size.
+
 ## 2026-06-29 CrimsonHawk: LANDED GEOADD borrowed fast path — 0.36x → 0.909x (2.5x), byte-exact (10th win)
 
 Implemented the profile-confirmed lever. `execute_plain_geoadd_borrowed` (fr-runtime) for
