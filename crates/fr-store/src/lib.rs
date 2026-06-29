@@ -6363,6 +6363,35 @@ impl Store {
         true
     }
 
+    /// (frankenredis-cc keep-listpack) Store a HASH_LISTPACK RESTORE/RDB-load payload
+    /// LAZILY as `HashFieldMap::Listpack` (no per-pair transcode) when it is
+    /// all-string + Packed-fitting AND fits listpack under the LIVE config. Returns
+    /// `false` (caller explodes) for an int-bearing/oversize blob or a lowered config,
+    /// so the stored encoding matches the explode path's re-derivation. Byte-identical:
+    /// a small all-string hash with no hashtable flag is OBJECT ENCODING "listpack"
+    /// (the `else` default in object_encoding's set/hash logic), pairs + insertion
+    /// order are the listpack's, and any mutation materializes to `Packed`.
+    #[must_use]
+    pub fn restore_hash_listpack(&mut self, key: &[u8], blob: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        // All-string + Packed-fit gate (<=PACKED_MAX_ENTRIES pairs, fields/values <=64).
+        let Some(hm) = HashFieldMap::try_from_listpack_blob(blob) else {
+            return false;
+        };
+        // Live-config listpack-fit: `try_from_listpack_blob` already bounded pairs<=128 and
+        // every field/value <=64, so only a LOWERED config can reject — fall back then so the
+        // explode path re-derives the (hashtable) encoding faithfully.
+        if hm.len() > self.hash_max_listpack_entries || self.hash_max_listpack_value < 64 {
+            return false;
+        }
+        let entry = Entry::new(Value::Hash(Box::new(hm)), now_ms);
+        // Small all-string hash, no FORCE_HASH_HASHTABLE flag ⇒ OBJECT ENCODING "listpack",
+        // exactly what the explode path yields for a Packed-fitting hash (no field TTLs).
+        self.internal_entries_insert(key.to_vec(), entry);
+        self.dirty = self.dirty.saturating_add(1);
+        true
+    }
+
     /// Store a set-algebra result in `destination`.
     ///
     /// Non-empty results overwrite the destination in place through

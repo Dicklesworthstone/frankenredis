@@ -37918,6 +37918,31 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
+            RdbValue::HashListpack(ref blob) => {
+                // (frankenredis-cc keep-listpack) Keep the raw all-string hash listpack
+                // lazily when it fits listpack under the live config; else explode it into
+                // (field, value) pairs and seed via hset_many so the encoding re-derives.
+                if !store.restore_hash_listpack(&key, blob, now_ms) {
+                    let decoded = fr_persist::listpack::decode_listpack(blob)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    let mut pairs = Vec::with_capacity(decoded.len() / 2);
+                    let mut it = decoded.into_iter();
+                    while let Some(f) = it.next() {
+                        let v = it.next().ok_or(PersistError::InvalidFrame)?;
+                        pairs.push((f.into_bytes(), v.into_bytes()));
+                    }
+                    store
+                        .hset_many(&key, pairs, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                }
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
             RdbValue::HashWithTtls(ref fields) => {
                 // Seed the hash with every field, then reinstate per-field
                 // deadlines via hash_field_expires directly so the persist
@@ -55430,7 +55455,9 @@ mod tests {
                 .iter()
                 .any(|entry| entry.db == 1
                     && entry.key == b"db1:hash"
-                    && matches!(entry.value, RdbValue::Hash(_))),
+                    // (frankenredis-cc keep-listpack) an all-string small hash now decodes to
+                    // the lazily-held HashListpack variant; either shape carries the pairs.
+                    && matches!(entry.value, RdbValue::Hash(_) | RdbValue::HashListpack(_))),
             "SAVE manifest base RDB must include DB 1 hash, got {:?}",
             loaded_manifest.base_rdb_entries
         );
