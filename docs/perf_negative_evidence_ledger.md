@@ -5108,3 +5108,25 @@ codec lever; closing it meaningfully needs server perf/flamegraph profiling of t
 workload (a different mode) + a possibly-structural insertion-path change. The high-value chips
 (keep-listpack Set+Hash) are taken; this residual is documented load-time work for a future
 profiling slice. RESTORE-decode investigation CLOSED for the per-turn per-crate mode.
+
+## 2026-06-29 cc: RIGOR CORRECTION (profile-driven) — keep-listpack landed on the WRONG path for the RESTORE-command measurement; my +17-20% "RESTORE" ratios were CONFOUNDED
+
+perf-profiling the RESTORE-command workload exposed an attribution error I must correct: the
+harness's "RESTORE (decode)" calls the RESTORE COMMAND (RESTORE r:k 0 payload REPLACE), which
+routes to `Store::restore_key_with_metadata` (fr-store, lib.rs:21898) — a SEPARATE decode path
+from fr-persist's `decode_rdb` where I added SetListpack/HashListpack keep-listpack.
+`restore_key_with_metadata`'s SET_LISTPACK (22241) / HASH_LISTPACK (22187) arms were NEVER
+changed: they still decode_value_spans -> dedup HashSet -> from_unique_str_members (eager
+explode). The profile confirms it: top RESTORE self-time = process_buffered_frames 15% +
+decode_rdb_string 7% + crc64 3% + the dedup HashSet<&[u8]>::insert 3% + the bulk build. So the
+RESTORE COMMAND does NOT keep-listpack. My set 0.37->0.44x / hash 0.34->0.39x ratios compared
+DIFFERENT binaries at DIFFERENT member counts (40 vs 30) — NOT a clean same-binary A/B — so the
+"win" is unverified for the RESTORE command (the path it claims to measure).
+WHAT IS TRUE: the keep-listpack changes are byte-exact (conformance GREEN, DIGEST/ENCODING
+parity) and DO take effect on fr-persist's decode_rdb path = DEBUG RELOAD / RDB-file-load /
+replication full-sync (real load-time ops) — just not the RESTORE command. NEXT (genuine,
+profile-guided lever): (1) clean A/B keep-listpack on DEBUG RELOAD (its actual path) to get an
+honest ratio; (2) extend keep-listpack to `restore_key_with_metadata` (call restore_set/
+hash_listpack, preserving the dedup-reject behavior) for the ACTUAL RESTORE-command win — the
+profile proves that path is hot. Lesson: always clean-A/B on the SAME binary/config, and verify
+the code path the bench exercises actually contains the change.
