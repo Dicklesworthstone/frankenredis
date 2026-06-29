@@ -5130,3 +5130,22 @@ honest ratio; (2) extend keep-listpack to `restore_key_with_metadata` (call rest
 hash_listpack, preserving the dedup-reject behavior) for the ACTUAL RESTORE-command win — the
 profile proves that path is hot. Lesson: always clean-A/B on the SAME binary/config, and verify
 the code path the bench exercises actually contains the change.
+
+## 2026-06-29 cc: REVERT landed keep-listpack (Set+Hash) — clean A/B shows ~0-gain/negative; original "wins" were CONFOUNDED. Integrity revert.
+
+Did the clean SAME-config A/B I should have done before landing (rigor lesson). Built pre-
+keep-listpack (d5b004f7d) vs current main, set DEBUG RELOAD + RESTORE, normalized fr/redis to
+cancel large worker drift:
+  WITHOUT keep-listpack: DEBUG RELOAD fr/redis=0.94 (fr FASTER), RESTORE fr/redis=2.46
+  WITH    keep-listpack: DEBUG RELOAD fr/redis=1.03 (fr slower), RESTORE fr/redis=2.61
+=> keep-listpack is ~0-gain-to-slightly-WORSE on BOTH (within cv 3-11% noise). WHY: (1) set
+DEBUG RELOAD was ALREADY fr-faster-than-redis WITHOUT it (didn't need it); (2) the RESTORE
+COMMAND gap is on restore_key_with_metadata, a DIFFERENT path keep-listpack never touched; (3)
+keep-listpack ADDS work (decode_string_ranges fit-check + 2 blob copies + restore_*_listpack
+overhead) that offsets the avoided build. My earlier set 0.37->0.44x / hash 0.34->0.39x were
+CONFOUNDED (different binary + member count 40 vs 30, never a same-binary A/B). REVERTING the
+whole keep-listpack lever (GenericSet/HashFieldMap::Listpack + RdbValue::Set/HashListpack +
+restore_*_listpack + decode/encode/apply wiring). LESSON (reinforced): clean same-binary/config
+A/B BEFORE landing; "byte-exact + conformance-green" proves correctness, NOT that it's a win.
+The biggest gap (RESTORE-command) is command-overhead-bound (decode+dedup+insertion), not the
+codec build — needs a different lever entirely.
