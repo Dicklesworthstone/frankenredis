@@ -2728,7 +2728,32 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
-## 2026-06-29 CrimsonHawk: BLOCKER — scripting Rc-COW lever defeated by per-EVAL KEYS/ARGV globals write; working design = overlay refactor (multi-hour); no clean per-turn lever remains
+## 2026-06-29 CrimsonHawk: SET hot path has redundant no-TTL expiry lookups (real fr-CPU waste) but PROVABLY SUB-NOISE — concretely confirms hot levers are syscall-bound; only structural levers move the needle
+
+Dug a NEW hot-path lever (not re-verification): `set_plain_borrowed` (fr-store 6512, the
+hottest write) runs `self.expiry_ms` + `set_existing_expiry_ms(None)` +
+`forget_volatile_key` + `update_expiry_deadline(old,None)` on EVERY SET even for keys with
+NO TTL — each a redundant hash-map probe (the expiry lives in a SEPARATE map, not the
+Entry, so these can't piggyback the `get_mut`). Guardable on `old_expiry.is_some()` to
+skip them for the common no-TTL SET. Also confirmed three other flagged hot items are
+already DONE this turn: active-expire (early-return on O(1) counter, no per-call alloc,
+frankenredis-bk7pi), RESP parse (borrowed pattern-match for hot cmds; `\r\n` byte-scan only
+on short cold headers), LZF decompress (extend_from_slice + chunked memcpy).
+
+WHY IT'S NOT A LEVER (the decisive point): SET is 93% SYSCALL-bound (perf+strace, established
+syscall-floor finding), fr CPU ~7%; this guard saves ~0.8% of SET ≈ 0.06% of total =
+deeply sub-noise → REVERT-territory. GENERALIZES: ANY hot-path fr-CPU optimization is
+sub-noise because the hot path is syscall-bound — which is WHY GET/SET fr-CPU levers were
+already declared done. So there is NO per-turn HOT throughput lever, by construction.
+
+CONFIRMED BLOCKER (concrete, not just asserted): the ONLY levers that move throughput/RAM
+are STRUCTURAL — scripting persistent-state (4-5x, conformance-heavy), keyspace-RAM KeyDict
+(universal RAM, SCAN-semantics, all-or-nothing), RESTORE keep-listpack (3.1x non-hot) — and
+each is all-or-nothing/multi-hour, so a per-turn loop CANNOT incrementally land them
+(partial = broken main). The per-turn-committable surface is fully harvested (11 wins +
+build-unblock + GEOADD/XADD). RECOMMENDATION: pivot to ONE dedicated uninterrupted
+structural session — scripting persistent-state for raw throughput, or keyspace-RAM KeyDict
+for universal memory impact. No source (guard is sub-noise; not landed per REVERT rule).
 
 Attempted to design the radical per-crate lever for the #1 gap (scripting 4-5x): Rc-COW
 globals (share the cached `lua_base_globals_template` via `Rc`, `make_mut` only on the rare
