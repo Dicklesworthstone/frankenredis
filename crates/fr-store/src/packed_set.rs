@@ -587,15 +587,6 @@ impl<'a> Iterator for GenericSetIter<'a> {
 pub enum HashFieldMap {
     Packed(PackedStrMap),
     Hash(CompactFieldMap),
-    /// (frankenredis-cc keep-listpack) Raw redis HASH_LISTPACK bytes (flat
-    /// [f0,v0,f1,v1,…] listpack) of an ALL-STRING, Packed-fitting hash loaded
-    /// straight from RDB/RESTORE — held lazily until first mutation, mirroring the
-    /// Set variant. Reads (len O(1) via cached PAIR count, get/contains_key/
-    /// get_index/iter) parse the listpack directly via `fr_persist::listpack`;
-    /// mutators `materialize_from_listpack` to `Packed` first. Only ever holds an
-    /// all-string listpack (RESTORE gate rejects int fields/values + oversize), so
-    /// the spans are pure borrows. `len` caches the PAIR count (= entries / 2).
-    Listpack { data: Box<[u8]>, len: usize },
 }
 
 impl Default for HashFieldMap {
@@ -697,62 +688,11 @@ impl HashFieldMap {
         Some((HashFieldMap::Hash(h), added))
     }
 
-    /// (frankenredis-cc keep-listpack) Decode the [f0,v0,f1,v1,…] byte-ranges of a
-    /// stored all-string hash listpack (2 ranges per pair). `Some` by the RESTORE
-    /// gate's all-string invariant; defensively empty on any decode error.
-    fn listpack_pair_ranges(data: &[u8]) -> Vec<std::ops::Range<usize>> {
-        fr_persist::listpack::decode_string_ranges_if_all_strings(data)
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-    }
-
-    /// (frankenredis-cc keep-listpack) Build a lazily-held `Listpack` hash from a raw
-    /// RDB HASH_LISTPACK blob IFF it is all-string, even-length, and fits `Packed`
-    /// (<= PACKED_MAX_ENTRIES pairs, every field/value <= PACKED_MAX_VALUE). Returns
-    /// `None` otherwise so the caller explodes — the kept blob then materializes
-    /// byte-identically to what `from_unique_pairs` would build as `Packed`.
-    #[must_use]
-    pub fn try_from_listpack_blob(data: &[u8]) -> Option<Self> {
-        let ranges = fr_persist::listpack::decode_string_ranges_if_all_strings(data)
-            .ok()
-            .flatten()?;
-        if ranges.len() % 2 != 0 {
-            return None;
-        }
-        let pairs = ranges.len() / 2;
-        if pairs > PACKED_MAX_ENTRIES || ranges.iter().any(|r| r.len() > PACKED_MAX_VALUE) {
-            return None;
-        }
-        Some(HashFieldMap::Listpack {
-            data: data.to_vec().into_boxed_slice(),
-            len: pairs,
-        })
-    }
-
-    /// (frankenredis-cc keep-listpack) Convert a lazily-held listpack hash into the
-    /// eager `Packed` form before any mutation — byte-identical to building `Packed`
-    /// at load (the listpack's in-order all-string pairs, all Packed-fitting).
-    fn materialize_from_listpack(&mut self) {
-        let pairs: Vec<(Vec<u8>, Vec<u8>)> = match self {
-            HashFieldMap::Listpack { data, .. } => {
-                let ranges = Self::listpack_pair_ranges(data);
-                ranges
-                    .chunks_exact(2)
-                    .map(|fv| (data[fv[0].clone()].to_vec(), data[fv[1].clone()].to_vec()))
-                    .collect()
-            }
-            _ => return,
-        };
-        *self = HashFieldMap::from_unique_pairs(pairs);
-    }
-
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
             HashFieldMap::Packed(p) => p.len(),
             HashFieldMap::Hash(h) => h.len(),
-            HashFieldMap::Listpack { len, .. } => *len,
         }
     }
 
@@ -766,13 +706,6 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.get(field),
             HashFieldMap::Hash(h) => h.get(field),
-            HashFieldMap::Listpack { data, .. } => {
-                let ranges = Self::listpack_pair_ranges(data);
-                ranges
-                    .chunks_exact(2)
-                    .find(|fv| &data[fv[0].clone()] == field)
-                    .map(|fv| &data[fv[1].clone()])
-            }
         }
     }
 
@@ -781,9 +714,6 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.contains_key(field),
             HashFieldMap::Hash(h) => h.contains_key(field),
-            HashFieldMap::Listpack { data, .. } => Self::listpack_pair_ranges(data)
-                .chunks_exact(2)
-                .any(|fv| &data[fv[0].clone()] == field),
         }
     }
 
@@ -792,12 +722,6 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.get_index(idx),
             HashFieldMap::Hash(h) => h.get_index(idx),
-            HashFieldMap::Listpack { data, .. } => {
-                let ranges = Self::listpack_pair_ranges(data);
-                let f = ranges.get(2 * idx)?.clone();
-                let v = ranges.get(2 * idx + 1)?.clone();
-                Some((&data[f], &data[v]))
-            }
         }
     }
 
@@ -813,7 +737,6 @@ impl HashFieldMap {
 
     /// Insert/overwrite, returning the previous value (matches `IndexMap::insert`).
     pub fn insert(&mut self, field: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
-        self.materialize_from_listpack();
         if let HashFieldMap::Packed(p) = self
             && !p.contains_key(&field)
             && (p.len() >= PACKED_MAX_ENTRIES
@@ -825,7 +748,6 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.insert(field, value),
             HashFieldMap::Hash(h) => h.insert(&field, &value),
-            HashFieldMap::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -841,7 +763,6 @@ impl HashFieldMap {
     /// a single `get_mut`. The promotion check fires under the identical condition
     /// as `insert` (new field only), so the encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
-        self.materialize_from_listpack();
         if let HashFieldMap::Packed(p) = self
             && !p.contains_key(field)
             && (p.len() >= PACKED_MAX_ENTRIES
@@ -857,16 +778,13 @@ impl HashFieldMap {
             // get_mut/insert split byte-for-byte while avoiding old-value
             // allocation on duplicate-field HSET.
             HashFieldMap::Hash(h) => h.insert_borrowed(field, &value),
-            HashFieldMap::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
     pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
-        self.materialize_from_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
             HashFieldMap::Hash(h) => h.shift_remove(field),
-            HashFieldMap::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -878,11 +796,9 @@ impl HashFieldMap {
     /// unordered too), so swapping is safe. `Packed` (listpack) keeps the
     /// order-preserving remove to match redis's small-hash listpack delete.
     pub fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
-        self.materialize_from_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
             HashFieldMap::Hash(h) => h.swap_remove(field),
-            HashFieldMap::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -891,11 +807,9 @@ impl HashFieldMap {
     /// owned-value allocation that `swap_remove` makes on the hashtable path.
     /// Same final state and order semantics as `swap_remove(field).is_some()`.
     pub fn delete(&mut self, field: &[u8]) -> bool {
-        self.materialize_from_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field).is_some(),
             HashFieldMap::Hash(h) => h.delete(field),
-            HashFieldMap::Listpack { .. } => unreachable!("materialized above"),
         }
     }
 
@@ -904,11 +818,6 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => HashFieldMapIter::Packed(p.iter()),
             HashFieldMap::Hash(h) => HashFieldMapIter::Hash(h.iter()),
-            HashFieldMap::Listpack { data, .. } => HashFieldMapIter::Listpack {
-                data,
-                ranges: Self::listpack_pair_ranges(data),
-                idx: 0,
-            },
         }
     }
 
@@ -945,13 +854,6 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
 pub enum HashFieldMapIter<'a> {
     Packed(PackedStrMapIter<'a>),
     Hash(CompactFieldMapIter<'a>),
-    /// (frankenredis-cc keep-listpack) Walks a lazily-held all-string hash listpack,
-    /// yielding each (field, value) as borrowed spans (2 ranges per pair).
-    Listpack {
-        data: &'a [u8],
-        ranges: Vec<std::ops::Range<usize>>,
-        idx: usize,
-    },
 }
 
 impl<'a> Iterator for HashFieldMapIter<'a> {
@@ -960,12 +862,6 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
         match self {
             HashFieldMapIter::Packed(it) => it.next(),
             HashFieldMapIter::Hash(it) => it.next(),
-            HashFieldMapIter::Listpack { data, ranges, idx } => {
-                let f = ranges.get(2 * *idx)?.clone();
-                let v = ranges.get(2 * *idx + 1)?.clone();
-                *idx += 1;
-                Some((&data[f], &data[v]))
-            }
         }
     }
 }
@@ -5516,60 +5412,6 @@ mod tests {
             "expected >2x, got {:.1}x",
             old_ns as f64 / new_ns as f64
         );
-    }
-
-    #[test]
-    fn keep_listpack_hash_variant_matches_packed_and_materializes() {
-        use super::HashFieldMap;
-        let pairs: Vec<(&[u8], &[u8])> = vec![
-            (b"f0", b"v0"),
-            (b"field1", b""),
-            (b"", b"emptyfield-value"),
-            (b"f3", b"value3"),
-        ];
-        let flat: Vec<&[u8]> = pairs.iter().flat_map(|(f, v)| [*f, *v]).collect();
-        let blob = fr_persist::encode_listpack_strings_blob(&flat).expect("all-string blob");
-        let lp = HashFieldMap::try_from_listpack_blob(&blob).expect("kept as listpack");
-        let owned: Vec<(Vec<u8>, Vec<u8>)> =
-            pairs.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect();
-        let packed = HashFieldMap::from_unique_pairs(owned);
-        assert!(matches!(lp, HashFieldMap::Listpack { .. }));
-        assert!(matches!(packed, HashFieldMap::Packed(_)));
-
-        assert_eq!(lp.len(), packed.len());
-        assert_eq!(lp.len(), pairs.len());
-        for (f, v) in &pairs {
-            assert_eq!(lp.get(f), Some(&v[..]), "get {f:?}");
-            assert_eq!(lp.get(f), packed.get(f));
-            assert!(lp.contains_key(f));
-        }
-        assert_eq!(lp.get(b"missing"), None);
-        assert!(!lp.contains_key(b"missing"));
-        for i in 0..pairs.len() {
-            assert_eq!(lp.get_index(i), packed.get_index(i));
-        }
-        let lp_iter: Vec<(&[u8], &[u8])> = lp.iter().collect();
-        let pk_iter: Vec<(&[u8], &[u8])> = packed.iter().collect();
-        assert_eq!(lp_iter, pk_iter, "iteration order identical");
-        assert_eq!(lp, packed, "map equality across encodings");
-
-        // First mutation materializes Listpack -> Packed.
-        let mut m = lp.clone();
-        assert_eq!(m.insert(b"f0".to_vec(), b"newval".to_vec()), Some(b"v0".to_vec()));
-        assert!(matches!(m, HashFieldMap::Packed(_)), "materialized on insert");
-        assert_eq!(m.get(b"f0"), Some(&b"newval"[..]));
-        assert_eq!(m.len(), pairs.len());
-        for (f, v) in &pairs {
-            if *f != b"f0" {
-                assert_eq!(m.get(f), Some(&v[..]), "kept {f:?} after materialize");
-            }
-        }
-        // delete materializes + removes.
-        let mut d = HashFieldMap::try_from_listpack_blob(&blob).unwrap();
-        assert!(d.delete(b"f3"));
-        assert!(matches!(d, HashFieldMap::Packed(_)));
-        assert_eq!(d.get(b"f3"), None);
-        assert_eq!(d.len(), pairs.len() - 1);
     }
 
     #[test]
