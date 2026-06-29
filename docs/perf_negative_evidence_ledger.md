@@ -2728,6 +2728,35 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: GEOADD gap CONFIRMED dispatch-bound by profile (geo_encode <1%) — fast path ~parity-reachable; exact impl recipe worked out
+
+perf record GEOADD -c50 -P16 on the live binary, fr SELF-time: process_buffered_frames
+**19.82%** (vs SET's 3.26% — generic path does the work inline), then the FAILED
+fast-path-parser cascade parse_borrowed_plain_key_arg1/arg2/arg3_packet (~7% combined,
+tried + rejected because GEOADD isn't wired to any), parse_command_args_borrowed_into
+2.25% (generic argv Vec build), execute_frame_internal 1.98% + dispatch_with_client_context
+1.65%. **geo_encode is NOT in the top fns (<1%).** So GEOADD 0.36x is ~ENTIRELY the
+generic-dispatch tax (no borrowed fast path) — NOT the geo math. A fast path closes nearly
+all of it → ~0.36x should reach ~PARITY (revises the earlier ~0.6-0.7x estimate UP).
+
+EXACT IMPL RECIPE (worked out, ready to build next turn — conformance-SAFE via deferral):
+- GEOADD `key lon lat member` = 5 multibulk elems = the arg3 packet shape (key + 3 args);
+  reuse `parse_borrowed_plain_key_arg3_packet`, add a GEOADD dispatch branch in fr-server.
+- `pub` `geo_encode_wgs84` in fr-command (precedent: parse_f64_arg was pub'd for INCRBYFLOAT).
+- `execute_plain_geoadd_borrowed(key, lon_b, lat_b, member)`: parse lon_b/lat_b as f64
+  (DEFER→None on non-numeric, for redis's exact "not a valid float"); geo_encode_wgs84
+  (DEFER on None = out-of-range, for "invalid longitude,latitude pair"); score = bits as
+  f64 (geohash u64 is exactly f64-representable, 52<53 mantissa); store zadd-single; reply
+  = new-added count (GEOADD builds a ZADD argv + zaddGenericCommand upstream). Gate via the
+  default-write-gate (defers when notify/repl/AOF/tracking/etc active, like 6s9dx).
+- DEFER everything else (NX/XX/CH options, multi-triple, non-5-elem) to the generic path
+  → byte-exact (only the bare happy path is fast). Verify: GEOADD/GEOPOS/GEODIST conformance
+  + A/B fast-vs-generic binary.
+
+This is the FIRST confirmed-high-value per-turn-shippable throughput lever since the
+buildable surface closed — profile-confirmed, ~parity-reachable, conformance-safe by
+construction. XADD gap stays structural (multi-hour). No source this turn (profile + recipe).
+
 ## 2026-06-28 CrimsonHawk: NEW gaps found on the last unmeasured families — XADD ~0.37x (structural) + GEOADD 0.36x (NO fast path = lever candidate); ZADD-grow PARITY, interleave optimal
 
 Measured the last-unmeasured families (streams/geo) on the live binary; redis-benchmark
