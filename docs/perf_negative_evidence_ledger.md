@@ -2728,6 +2728,26 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: write-command dispatch vein DONE — SADD/LPUSH/HDEL/SREM all parity-or-faster; memory's "HDEL/SREM 7.5x/3.3x" is STALE (now 0.909x/0.96x)
+
+After GEOADD+XADD, scanned the remaining no-fast-path write commands (reliable check:
+`execute_plain_<cmd>_borrowed` absent for HDEL/SREM/ZREM/SADD/LPUSH/RPUSH/PFADD; present
+for APPEND/SETRANGE/GETDEL/LREM/LSET/HINCRBYFLOAT). Measured the no-fast-path ones vs
+redis 7.2.4 on the live binary (load <10):
+- SADD 0.98x, LPUSH 1.11x (fr faster), RPUSH ~parity — single-element dispatch test (still
+  valid: GEOADD/XADD showed their 0.36x tax even on 1-element keys). NO dispatch tax.
+- HDEL (real, 632k-field hash, -r): fr 671k / redis 739k = **0.909x**; SREM (632k-member
+  set): fr 727k / redis 758k = **0.96x**. Near-parity on REAL removals.
+
+So the long-flagged n8ct0 "missing HDEL/SREM borrowed fast-path (7.5x/3.3x)" is STALE/wrong
+— HDEL/SREM are 0.909x/0.96x, NOT 7.5x/3.3x (that figure was an A/B fast-vs-generic or a
+pre-build artifact). GEOADD (0.36x) + XADD (0.37x) were the UNIQUE write-dispatch outliers
+(both now fixed, parity-ish). Every other common write is parity-or-faster — the
+write-command dispatch vein is EXHAUSTED. (Residual: HDEL ~9% store-side hash-removal,
+small, not a dispatch lever.) NOTE redis-benchmark needs `-r N` for `__rand_int__` to vary
+(else 1-element keys); the dispatch ratio is structure-independent but store-work ratios
+need -r. No source change.
+
 ## 2026-06-29 CrimsonHawk: LANDED XADD borrowed fast path — 0.37x → 0.715x (~1.9x), byte-exact (11th win)
 
 Implemented the profiled XADD dispatch lever. `execute_plain_xadd_borrowed` for the bare
