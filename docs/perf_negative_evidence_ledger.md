@@ -5168,3 +5168,22 @@ find a true asymmetry, or a structural insertion-path change — both different-
 per-crate bench. Per-turn levers on the biggest gap are exhausted; the genuine validated session
 work (4 store wins, broken-main fix, full surface measurement = fr at-or-ahead online + DUMP)
 stands. keep-listpack was the one confounded claim, now reverted.
+
+## 2026-06-29 cc: RESTORE gap CHARACTERIZED via redis-vs-fr COMPARISON profile — asymmetry = fr RESP-arg-copy + decode + dedup vs redis's lzf-dominated/cheap-else; biggest piece is ARCHITECTURAL
+
+Profiled BOTH servers under the same RESTORE workload (20-field string hash, pipelined REPLACE):
+- REDIS self-time: lzf_decompress 14.6% (DUMP payloads are LZF-compressed) + crcspeed64 1.6% +
+  small memmove/malloc — object creation + dbAdd are CHEAP (not in top). redis RESTORE ~ decompress
+  + CRC + cheap insert.
+- FR self-time: process_buffered_frames 15% (RESP parse/dispatch) + decode_rdb_string 7% +
+  crc64 3% + dedup HashSet 3%; lzf NOT prominent (fr's lzf already parity-optimized, g9h0v).
+ASYMMETRY: redis's time is in unavoidable LZF decompress (everything else cheap); fr's time is in
+RESP-arg handling + rdb-string extraction + dedup that redis does cheaper. The dominant fr-side
+chunk = process_buffered_frames COPYING the large RESTORE payload arg into owned argv (Vec<Vec<u8>>),
+whereas redis references args ZERO-COPY in its query buffer. This is fine for small SET/GET args
+(fr WINS those 1.18-1.22x) but proportionally costly for RESTORE's large payload. FIX = zero-copy
+RESP args = ARCHITECTURAL (the whole command-dispatch uses owned argv), not a per-turn lever; helps
+all large-arg commands. decode_rdb_string borrow = mimalloc-~0-gain (proven); dedup = load-bearing.
+CONCLUSION: the RESTORE-command gap is now fully characterized — no clean per-turn codec/dispatch
+lever; the real lever (zero-copy large-arg RESP) is an architectural dispatch change for a dedicated
+slice. Biggest gap is now DATA-characterized, not ceiling-asserted.
