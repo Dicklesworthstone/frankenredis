@@ -4845,3 +4845,27 @@ CONCLUSIONS (data, not guesses):
 Harness: scripts/collection_reload_headtohead.py <redis_port> <fr_port>; reference server =
 legacy_redis_code/redis/src/redis-server; binary via legacy-unignore release build (retrieved
 to .rch-targets/frankenredis-cc/release/frankenredis).
+
+## 2026-06-29 cc: CHARACTERIZED the RESTORE-decode gap (measured) — UNIFORM eager-build-vs-lazy-hold across all types; NO bounded sub-fix, keep-listpack is the sole lever
+
+Followed up the head-to-head with per-type + member-scaling RESTORE measurements (release
+binary vs vendored redis 7.2.4, interleaved trials):
+- Per-type RESTORE decode ratio(redis/fr): hash 0.336x, set-str 0.368x, set-int 0.352x,
+  zset 0.310x — UNIFORM ~3x across ALL collection types (not a type-specific bug).
+- Member scaling (hash): m=2 -> 0.408x, m=8 -> 0.398x, m=40 -> 0.385x, m=200 -> 0.284x.
+  The ratio WORSENS with element count (=> a per-element rebuild component) BUT is already
+  0.408x (redis 2.5x faster) at m=2 (=> a large per-COLLECTION component too).
+
+ROOT CAUSE (both components, one cause): redis RESTORE of a small collection just holds the
+decoded LISTPACK bytes as the object backing (lazy; no structure build, no per-element work);
+fr EAGERLY builds the live structure (allocates the CompactFieldMap/SetValue/zset arena +
+inserts element-by-element) even for a 2-element collection. The per-collection 2.5x = eager
+structure allocation; the per-element worsening = the element-by-element rebuild. CRC64 (sb16,
+already fast) + RESP parse are sub-us, not the cause.
+
+IMPLICATION: there is NO separable bounded per-command win here (decode presize / integer-score
+/ span-build / bulk-build are all SHIPPED and the residual is purely eager-build-vs-lazy-hold).
+The ONE lever is keep-listpack (RdbValue/Value listpack-backed variant, decode-on-demand) — it
+addresses ALL collection types uniformly (~3x on every collection RESTORE). Multi-day,
+all-or-nothing fr-store value-representation change; needs a dedicated slice. This is now the
+single data-ranked top priority for the perf campaign.
