@@ -4538,3 +4538,20 @@ recorded BEFORE the reap while the value is read AFTER — inherently two `entri
 `exists_no_touch` is already single-lookup (only `record_keyspace_lookup`). Cache-read
 single-lookup vein now spans 10 reads: GET, MGET, EXISTS, STRLEN, TYPE, PTTL, GETRANGE,
 GETBIT, SORT-weight, BITFIELD-GET. Vein effectively complete for clean reads.
+
+## 2026-06-29 cc: REJECTED hget single-lookup collapse — byte-exact + monotonic but NOT a distinguishable win (field-lookup-dominated); reverted per REVERT-~0-gain
+
+Reconsidered the earlier "hash reads non-viable" verdict: HGET *is* collapsible when
+`hash_field_expires.is_empty()` (no HEXPIRE anywhere — the common case), because then
+`drop_hash_field_if_expired` is a guaranteed no-op (can't empty the key), so the
+key-expiry peek + single `get_mut` collapses the double lookup. Implemented it gated on
+`!lfu && hash_field_expires.is_empty()` and routed through `lookup_live_for_read_mut`.
+BYTE-EXACT (`cargo test -p fr-store --lib` 659/0). But MEASURED it is NOT a clean win like
+the 10 shipped reads: candidate swung 52–92 ns across runs while the slow-path baseline was
+stable 77–80 ns — the candidate CIs OVERLAP the baseline (no non-overlapping separation).
+Cause: HGET's cost is dominated by the FIELD lookup (`m.get(field)`) + the value
+`to_vec` clone, so saving one *key*-level `entries` probe is a small fraction of the total
+and is swamped by run-to-run variance. Monotonic-in-theory but ~0-gain by measurement →
+REVERTED (source + bench restored byte-for-byte; no source change retained). Don't
+re-attempt hget for this lever — the saving is real but immeasurably small relative to the
+field-access cost. The clean cache-read single-lookup vein stands at the 10 shipped reads.
