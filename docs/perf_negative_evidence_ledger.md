@@ -2728,6 +2728,20 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: sha1_hex ruled out as a per-EVAL micro-lever — scripting 4-5x gap is FULLY structural (no per-turn slice)
+
+Checked the last potential per-turn scripting slice — the per-EVAL `sha1_hex` (2.74%).
+It's a STANDARD scalar SHA1 (80-round compression loop) + a SINGLE `format!("{:08x}"×5)`
+for the 40-char hex (not per-byte) + a small `data.to_vec()` (mimalloc-cheap). The 2.74%
+is the inherent SHA1 computation per script-cache lookup; no clean opt without unsafe
+SHA-NI intrinsics (excluded by the safe-Rust constraint), and the alloc is mimalloc-neutral.
+NOT a lever.
+
+So EVERY component of the scripting 4-5x gap is either inherent (sha1) or structural
+(per-EVAL Lua-state setup/teardown). There is NO per-turn slice — the ONLY lever is the
+persistent/COW Lua-state refactor (multi-hour, conformance-sensitive). Scripting
+investigation CLOSED: confirmed #1 remaining throughput lever, structural-only. No source.
+
 ## 2026-06-29 CrimsonHawk: EVALSHA CONFIRMS the scripting gap is SETUP-bound (not parse) — fr EVAL≈EVALSHA, redis EVALSHA>EVAL; unified ~4-5x structural scripting lever
 
 Follow-up to the EVAL 4.1x finding. EVALSHA `return 1` (load 51, ratio robust): fr 123k
