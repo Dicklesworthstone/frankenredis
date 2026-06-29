@@ -37849,28 +37849,6 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::SetListpack(ref blob) => {
-                // (frankenredis-cc keep-listpack) Keep the raw all-string listpack lazily
-                // (no transcode) when it fits listpack under the live config; otherwise
-                // fall back to exploding it into members so the encoding re-derives.
-                if !store.restore_set_listpack(&key, blob, now_ms) {
-                    let members: Vec<Vec<u8>> = fr_persist::listpack::decode_listpack(blob)
-                        .map_err(|_| PersistError::InvalidFrame)?
-                        .into_iter()
-                        .map(fr_persist::listpack::ListpackEntry::into_bytes)
-                        .collect();
-                    store
-                        .sadd(&key, &members, now_ms)
-                        .map_err(|_| PersistError::InvalidFrame)?;
-                }
-                if let Some(expires_at_ms) = entry.expire_ms {
-                    store.expire_at_milliseconds(
-                        &key,
-                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
-                        now_ms,
-                    );
-                }
-            }
             RdbValue::SetHashtable(ref members) => {
                 // (frankenredis-nom8d) Replicate redis rdbLoadObject's RDB_TYPE_SET
                 // decision exactly: a plain set with MORE than set-max-intset-
@@ -55450,9 +55428,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.db == 3
                     && entry.key == b"db3:set"
-                    // (frankenredis-cc keep-listpack) an all-string small set now decodes to
-                    // the lazily-held SetListpack variant; either shape carries the members.
-                    && matches!(entry.value, RdbValue::Set(_) | RdbValue::SetListpack(_))),
+                    && matches!(entry.value, RdbValue::Set(_))),
             "SAVE manifest base RDB must include DB 3 set, got {:?}",
             loaded_manifest.base_rdb_entries
         );

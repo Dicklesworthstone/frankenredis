@@ -6326,43 +6326,6 @@ impl Store {
         entry
     }
 
-    /// (frankenredis-cc keep-listpack) Store a SET_LISTPACK RESTORE/RDB-load payload
-    /// LAZILY: keep the raw listpack bytes as `GenericSet::Listpack` (no per-member
-    /// transcode into the packed set) when the blob is all-string AND fits listpack
-    /// under the LIVE config — the load-side mirror of redis holding the listpack
-    /// object. Returns `false` (caller falls back to the explode path) for an int
-    /// blob or one that no longer fits listpack under the current thresholds, so the
-    /// stored encoding always matches what the explode path would re-derive.
-    /// Byte-identical: members + insertion order are the listpack's, OBJECT ENCODING
-    /// is "listpack" (FORCE_SET_LISTPACK flag, exactly as the explode path sets for a
-    /// non-intset set that fits listpack), and any mutation materializes to `Packed`.
-    #[must_use]
-    pub fn restore_set_listpack(&mut self, key: &[u8], blob: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
-        let Some(ranges) = fr_persist::listpack::decode_string_ranges_if_all_strings(blob)
-            .ok()
-            .flatten()
-        else {
-            return false; // int-bearing listpack → explode for a faithful Set
-        };
-        let n = ranges.len();
-        let max_member = ranges.iter().map(std::ops::Range::len).max().unwrap_or(0);
-        if n > self.set_max_listpack_entries || max_member > self.set_max_listpack_value {
-            return false; // doesn't fit listpack under live config → explode (re-derives encoding)
-        }
-        let gs = GenericSet::Listpack {
-            data: blob.to_vec().into_boxed_slice(),
-            len: n,
-        };
-        let mut entry = Entry::new(Value::Set(Box::new(SetValue::Generic(gs))), now_ms);
-        // All-string + fits-listpack under live config ⇒ "listpack" encoding, exactly
-        // what `refresh_set_encoding_flags` sets here (not intset, fits listpack).
-        entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, true);
-        self.internal_entries_insert(key.to_vec(), entry);
-        self.dirty = self.dirty.saturating_add(1);
-        true
-    }
-
     /// Store a set-algebra result in `destination`.
     ///
     /// Non-empty results overwrite the destination in place through
