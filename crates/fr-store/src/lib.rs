@@ -5863,6 +5863,33 @@ impl Store {
         hit
     }
 
+    /// (frankenredis-cc get-ttl-lru-single-lookup) Single-probe read lookup for the
+    /// cache config — caller MUST have checked `!lfu_tracking_enabled()` first. Peeks
+    /// the key's expiry (delegating an actually-expired key to the full `drop_if_expired`
+    /// for removal / notification / propagation), records the keyspace hit/miss, and
+    /// returns the live entry in ONE `entries` probe — collapsing the slow path's
+    /// `record_keyspace_lookup` (drop_if_expired probe) + value `get_mut` double lookup.
+    /// The caller applies its own access-touch + value extraction. Byte-identical to the
+    /// slow path for a non-LFU read (no RNG consumed, same drops / hit-miss accounting).
+    fn lookup_live_for_read_mut(&mut self, key: &[u8], now_ms: u64) -> Option<&mut Entry> {
+        debug_assert!(!self.lfu_tracking_enabled());
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+            return None;
+        }
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Some(entry)
+            }
+            None => {
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                None
+            }
+        }
+    }
+
     fn lfu_tracking_enabled(&self) -> bool {
         self.maxmemory_policy.tracks_lfu()
     }
@@ -6778,6 +6805,18 @@ impl Store {
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    true
+                }
+                None => false,
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return false;
         }
@@ -7044,6 +7083,21 @@ impl Store {
     }
 
     pub fn strlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    let Some(len) = entry.value.string_len() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
+                    Ok(len)
+                }
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }

@@ -4458,3 +4458,24 @@ a separate MGET criterion ratio could NOT be isolated because the rch worker was
 ~2.4x on identical binaries (371 vs 874 ns for the same baseline) — recorded honestly,
 shipped on the byte-exact + monotonic + GET-measured-mechanism basis. LFU-on MGET keeps
 the unchanged slow path.
+
+## 2026-06-29 cc: SHIPPED exists + strlen cache single-lookup (shared `lookup_live_for_read_mut` helper) — EXISTS −18.9% (1.23x), STRLEN −37.9% (1.61x), byte-exact
+
+Generalized the cache-read collapse into a reusable helper `lookup_live_for_read_mut`
+(fr-store): for the cache config (TTL keys + LFU off), it peeks expiry (delegating an
+expired key to the full `drop_if_expired`), records the keyspace hit/miss, and returns
+the live entry in ONE `entries` probe; the caller applies its own access-touch + value
+extraction. Routed `exists` and `strlen` through it (each previously paid
+`record_keyspace_lookup`'s drop_if_expired probe + a second `get_mut`). Each read method
+is now a small `!lfu` branch over the helper, matching its own slow-path behaviour
+exactly (exists: touch_access + bool; strlen: hit counted before a WrongType, miss→0).
+
+BYTE-EXACT: `cargo test -p fr-store --lib` 659 passed / 0 failed. MEASURED (fr-store
+criterion bench `store_read`, TTL-sentinel + LRU, hit; A/B by toggling the two branches;
+worker confirmed stable — the GET bench, unchanged, read ~28 ns in both runs):
+- EXISTS: 35.263 ns → 28.587 ns = **−18.9% (~1.23x)**, non-overlapping CIs.
+- STRLEN: 39.246 ns → 24.360 ns = **−37.9% (~1.61x)**, non-overlapping CIs.
+(strlen wins more — its slow path also re-probed for the `string_len` check.) Each saves
+one `entries` probe per cache read; LFU-on keeps the unchanged slow path. The helper makes
+the remaining reads (`value_type`, `getrange`, `pttl`, `hget` with field-TTL care) cheap
+one-branch follow-ups.
