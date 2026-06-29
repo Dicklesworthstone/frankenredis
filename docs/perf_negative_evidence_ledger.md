@@ -5092,3 +5092,19 @@ conformance GREEN; zset declined on mechanical ~0-gain evidence. The structural 
 gap's high-value chips are taken; the residual is command-overhead (CRC64+RESP+dispatch+store-
 insertion), a dispatch-bound load-time lever needing server profiling (perf/flamegraph), not a
 per-crate codec bench — a different investigation mode for a future slice.
+
+## 2026-06-29 cc: RESTORE command-overhead residual INVESTIGATED — distributed, no single bounded hotspot; micro-reductions ~0-gain (per-crate bench can't isolate; needs server profiling)
+
+Read the RESTORE path (fr-command::restore_cmd -> fr-persist decode_rdb -> fr-runtime apply)
+to find the post-keep-listpack residual (set 0.44x / hash 0.39x vs redis). It is DISTRIBUTED,
+not one hotspot: per RESTORE fr does rdb_decode_string + decode_string_ranges (fit check) + TWO
+blob copies (decode -> RdbValue::SetListpack(to_vec), apply -> GenericSet::Listpack(to_vec)) +
+Entry::new + internal_entries_insert bookkeeping (encoding flags / dirty / digest-stale), vs
+redis's tight memcpy-listpack + dbAdd. No SINGLE redundancy dominates — and the earlier
+single-decode A/B already proved decode/copy micro-reductions are ~0-gain here (mimalloc
+recycles the small blobs, sub-noise under cv~16%). fr is FASTER than redis on SET/GET dispatch,
+so it is the RESTORE-specific per-key work that is collectively heavier. NOT a per-crate-benchable
+codec lever; closing it meaningfully needs server perf/flamegraph profiling of the RESTORE
+workload (a different mode) + a possibly-structural insertion-path change. The high-value chips
+(keep-listpack Set+Hash) are taken; this residual is documented load-time work for a future
+profiling slice. RESTORE-decode investigation CLOSED for the per-turn per-crate mode.
