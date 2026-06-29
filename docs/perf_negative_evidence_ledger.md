@@ -4381,3 +4381,35 @@ fr-store core that landed the fast path (CoralOx). With `am` down, extending the
 optimization risks duplicating in-progress work + a subtle determinism bug on the hottest
 command. Correct owner: CoralOx, once `am` is restored. Not a safe per-turn cc lever.
 This supersedes lever #1 in the prior entry. No source change.
+
+## 2026-06-29 cc: PRECISE BLOCKER DIAGNOSIS — `am` needs a SUPERVISOR restart of pid 2093388 (not `am migrate`); this-turn verifications mark more surface covered
+
+Ran the blocker down precisely so an operator can act and agents stop re-scouting:
+
+- **`am` fix is NOT `am migrate`.** `am migrate` fails with "mailbox activity lock is
+  busy" — the wedged daemon **pid 2093388** (deleted-executable, exclusive lock on
+  `/home/ubuntu/.mcp_agent_mail_git_mailbox_repo` since 2026-06-24, ~5 days) blocks ALL
+  mutation incl. migrate. `am reservations` errors on a legacy case-dup row that can
+  only be fixed AFTER the lock is freed. **Required action: supervisor restart of pid
+  2093388** (`am service restart` / `systemctl --user restart mcp-agent-mail`) — NOT a
+  hard kill, NOT `am migrate`. Until then no reservations ⇒ no safe edits to the
+  contested fr-store core (the GET slow-path lever).
+
+- **Newly verified COVERED/blocked this turn (don't re-scout):**
+  - fr-protocol inbound parse is optimal: `parse_i64_strict` is already a direct
+    alloc-free byte parser; `read_line` is scalar but only scans short header lines
+    (values are length-read, not scanned) — memchr wouldn't help.
+  - Live KEYS path `keys_matching_in_db` already FILTERS-before-clone
+    (`push_logical_key_if_match`). The clone-all-then-filter `keys_matching` (L8514) is
+    TEST-ONLY — not worth touching.
+  - GET slow-path single-lookup collapse has a hard borrow+RNG tangle: `next_rand()` is
+    `&mut self` (conflicts with the held `get_mut` entry), and RNG must be consumed
+    only-on-hit (else LFU sampling diverges) — which needs the very lookup being
+    eliminated. Genuinely delicate + contested core; owner = CoralOx post-`am`.
+  - fr-store reply clone-storms (HKEYS L10457, etc.) feed fr-runtime replies; removing
+    them needs a borrow-encode interface spanning fr-runtime = blocked by the
+    `fr-command` build-script issue.
+
+Net: the per-turn safe/testable cc surface is mined (7 wins shipped this session); the
+two remaining unblock-actions are OPERATOR-ONLY (restart am pid 2093388; fix fr-command
+build.rs). No source change.
