@@ -4788,3 +4788,22 @@ Validation REQUIRES building fr-runtime (legacy-unignore trick, see
 (551 tests) + RESTORE/RELOAD differential. Magnitude: eliminates 2n allocs/hash on RDB load —
 real for the dominant collection-RDB gap, but a load-time (not online-hot) path. Budget a
 dedicated slice; do NOT rush it under a 60-min timer.
+
+
+## 2026-06-29 cc: SHIPPED the RDB-apply-clone lever (0db058687 + 8d93d1283) — String/Hash/zset payloads now MOVE into the store, byte-identical
+
+Executed the lever scoped above via a MINIMAL, compiler-safe approach that avoided the
+intricate Stream-arm deref rewrite: change `apply_rdb_entries_to_store` to consume
+`Vec<RdbEntry>` and `match entry.value` by value, but bind EVERY arm with `ref` except the
+ones with a clean move-win — so the 7 ref-arms keep their EXACT borrowed bodies (zero
+behavior change) while String (`value.clone()`->`value`), Hash (`fields.iter().map(clone)
+.collect()`->move `fields`), and SortedSet (`.iter().map(|(m,s)|(*s,m.clone()))`->
+`.into_iter().map(|(m,s)|(s,m))`) MOVE their payloads. Eliminates, per RDB load: N
+string-value clones + 2*Sum(fields) hash clones + Sum(members) zset clones (copy #2 of the
+3-copy decode->apply-clone->arena chain; redis pays neither). 5 owning callers pass by move;
+the AOF-base caller clones (rare). COMPILER-GUARANTEED sound (move==clone bytes; reuse would
+not compile); byte-identical via `cargo test -p fr-runtime --lib` 551/0 (RESTORE/RELOAD/
+load_rdb/full-sync/hash-TTL roundtrip). NOT A/B-measured: fr-runtime has no bench harness and
+this is a load-time path — the win is a provable allocation reduction, not a perf gamble.
+Residual on this path: HashWithTtls (kept `ref` — reuses fields for the deadline loop, rare)
+and the Stream arm (clones for BTreeMap/consumer-map building — inherent restructuring).
