@@ -4761,3 +4761,30 @@ perf campaign: **per-crate `-p fr-store` isolated A/B (benches/store_read.rs) is
 and sufficient measurement path** — which is how all of this session's wins were measured.
 Future sessions: don't re-attempt remote full-binary builds; either accept per-crate A/B or
 budget a dedicated local-build slice for head-to-head on the structural RESTORE-decode/RAM gaps.
+
+
+## 2026-06-29 cc: SCOPED LEVER (biggest gap = collection RESTORE/RDB-load) — eliminate the redundant apply-clone (3-copy chain). NOT a per-turn change (RDB-load-critical)
+
+Traced the hash RESTORE/RDB-load cost precisely. There is a **3-copy chain** per hash field:
+1. `listpack::decode_listpack` / RDB parse allocates a `Vec<u8>` per field+value (decode_entry).
+2. `apply_rdb_entries_to_store` (fr-runtime:37781, takes `&[RdbEntry]`) CLONES every field+value
+   again — `RdbValue::Hash(fields) => fields.iter().map(|(f,v)|(f.clone(),v.clone())).collect()`
+   — because it only holds a BORROW of the decoded value (2n redundant heap allocs/hash).
+3. `Store::hset_many` → `HashFieldMap::from_unique_pairs` COPIES the bytes into the CompactFieldMap
+   arena, then drops the owned Vecs.
+Copy #2 is pure waste. Two clean fixes, BOTH delicate (this is the RDB-load / replication
+full-sync correctness path — a bug here corrupts loaded data):
+  (A) Make `apply_rdb_entries_to_store` CONSUME `Vec<RdbEntry>` (own, not borrow) so the Hash
+      arm MOVES `fields` into `hset_many` — but that's ~15 match arms (Set/SortedSet pass
+      `&members` to borrow-APIs, must stay borrowed; Hash/HashWithTtls move) + 5 callers
+      (5378 borrows from `&base_rdb` → needs ownership/clone; 5439/5470/5537/5828 already own
+      `entries` and don't reuse → safe to move; tests 45581/55666 fine).
+  (B) Add a borrowed bulk-hset that builds the CompactFieldMap arena directly from
+      `&[(&[u8],&[u8])]` (copy #3 only, skip #2) and route the Hash arm through it — needs
+      byte-exact RESTORE encoding/digest semantics vs hset_many (NOT hset_borrowed_many, which
+      is the command path with different encoding/LFU handling).
+Validation REQUIRES building fr-runtime (legacy-unignore trick, see
+[[feedback_validate_fr_runtime_via_legacy_unignore]]) + full `cargo test -p fr-runtime --lib`
+(551 tests) + RESTORE/RELOAD differential. Magnitude: eliminates 2n allocs/hash on RDB load —
+real for the dominant collection-RDB gap, but a load-time (not online-hot) path. Budget a
+dedicated slice; do NOT rush it under a 60-min timer.
