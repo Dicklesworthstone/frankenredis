@@ -4479,3 +4479,21 @@ worker confirmed stable — the GET bench, unchanged, read ~28 ns in both runs):
 one `entries` probe per cache read; LFU-on keeps the unchanged slow path. The helper makes
 the remaining reads (`value_type`, `getrange`, `pttl`, `hget` with field-TTL care) cheap
 one-branch follow-ups.
+
+## 2026-06-29 cc: SHIPPED value_type (TYPE) + pttl (PTTL/TTL) cache single-lookup via the helper — TYPE −28.5% (1.40x), PTTL −25% (1.33x), byte-exact
+
+Two more cache-read collapses through `lookup_live_for_read_mut`. `value_type` (TYPE)
+was a PURE double-lookup with no touch — `record_keyspace_lookup` (drop_if_expired probe)
++ `entries.get` for the type tag — so its `!lfu` branch is just `helper.map(|e| type-of
+e.value)` (no touch). `pttl` (PTTL/TTL) is also no-touch; its branch consumes the helper's
+entry borrow via `.is_none()` then re-reads `evaluate_expiry` for `remaining_ms`. Both
+match their slow paths exactly (TYPE/TTL do NOT bump access time — `ttlnotouch`).
+
+BYTE-EXACT: `cargo test -p fr-store --lib` 659 passed / 0 failed. MEASURED (store_read
+bench, TTL+LRU hit, A/B toggle; worker stable — GET bench unchanged read ~25 ns both runs):
+- TYPE: 29.406 ns → 21.007 ns = **−28.5% (~1.40x)**, non-overlapping CIs.
+- PTTL: 39.374 ns → 29.532 ns = **−25.0% (~1.33x)**, non-overlapping CIs.
+Each saves one `entries` probe per cache read; LFU-on keeps the slow path. `expiretime_value`
+was checked and is ALREADY single-lookup (it never re-fetches the entry, only `expiry_ms`)
+— no collapse needed. Cache-read vein now: GET, MGET, EXISTS, STRLEN, TYPE, PTTL all
+single-lookup on the TTL+LRU config; remaining = `getrange`, `getbit`, `hget` (field-TTL).

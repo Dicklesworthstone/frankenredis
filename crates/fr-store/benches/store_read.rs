@@ -44,6 +44,12 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("strlen_ttl_lru_hit", |b| {
         b.iter(|| std::hint::black_box(store.strlen(std::hint::black_box(b"target:key"), 2_000)))
     });
+    g.bench_function("value_type_ttl_lru_hit", |b| {
+        b.iter(|| std::hint::black_box(store.value_type(std::hint::black_box(b"target:key"), 2_000)))
+    });
+    g.bench_function("pttl_ttl_lru_hit", |b| {
+        b.iter(|| std::hint::black_box(store.pttl(std::hint::black_box(b"target:key"), 2_000)))
+    });
     g.finish();
 }
 

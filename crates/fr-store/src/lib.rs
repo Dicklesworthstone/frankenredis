@@ -7026,6 +7026,20 @@ impl Store {
 
     #[must_use]
     pub fn pttl(&mut self, key: &[u8], now_ms: u64) -> PttlValue {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        // PTTL does not touch access time; `is_none()` consumes the helper's entry borrow
+        // so the expiry re-read below is unambiguous.
+        if !self.lfu_tracking_enabled() {
+            if self.lookup_live_for_read_mut(key, now_ms).is_none() {
+                return PttlValue::KeyMissing;
+            }
+            let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
+            return if decision.remaining_ms == -1 {
+                PttlValue::NoExpiry
+            } else {
+                PttlValue::Remaining(decision.remaining_ms)
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return PttlValue::KeyMissing;
         };
@@ -8137,6 +8151,19 @@ impl Store {
 
     #[must_use]
     pub fn value_type(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse;
+        // TYPE does not touch access time, so the helper's entry suffices.
+        if !self.lfu_tracking_enabled() {
+            return self.lookup_live_for_read_mut(key, now_ms).map(|entry| match &entry.value {
+                Value::String(_) => ValueType::String,
+                Value::Integer(_) => ValueType::String,
+                Value::Hash(_) => ValueType::Hash,
+                Value::List(_) => ValueType::List,
+                Value::Set(_) => ValueType::Set,
+                Value::SortedSet(_) => ValueType::ZSet,
+                Value::Stream(_) => ValueType::Stream,
+            });
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
         }
