@@ -4000,3 +4000,55 @@ RDB codec is now FULLY characterized: ENCODE is LZF-bound (parity+), DECODE is
 per-element-`Vec<u8>`-allocation-bound (only keep-listpack avoids it, #1 multi-day,
 borrow-increment defeated by LZF). Both directions have no remaining per-turn lever.
 No source change.
+
+## ============================================================================
+
+## 2026-06-29 cc: clock_gettime residual is ALREADY caught; CLIENT parity beads stale-fixed; per-turn surface re-confirmed saturated (10-stash measured wall, am wedged ~4d)
+
+Land-or-dig with am coordination wedged ~4 days (daemon PID 2093388,
+deleted-executable; storage_root lock age 363486 s; reads work, writes/reservations
+refused by the corruption circuit breaker). No off-main MEASURED win to land
+(stashes are all subnoise/REVERTED — see below), and no clean per-turn lever to dig.
+Findings, all read-verified this session:
+
+1. **clock_gettime (3.7-7% in P16 profiles) is NOT a per-turn lever — the Redis
+   cached-clock design is already implemented.** The hot client path reads the wall
+   clock ONCE per event-loop iteration, not per command: `fr-server/src/main.rs`
+   ~L1297 `let timestamp = now_unix_time(); let ts = timestamp.ms; let ts_us = ...`,
+   then `handle_readable` threads that single `ts`/`ts_us` through every command it
+   drains from a pipelined batch (the `execute_frame_with_unix_time_us(&frame, ts,
+   ts_us)` / `execute_frame(frame, now_ms)` sites in that scope). The per-command
+   *latency* `Instant::now()` is additionally collapsed by the adjacency chain
+   `chained_command_start_pre` (`fr-runtime/src/lib.rs` ~L5164, `prev_seq == seq`),
+   so adjacent pipelined commands reuse one read. Residual = irreducible
+   per-iteration clock + commandstats timing redis also pays. Do NOT re-chase a
+   "cache the clock per batch" lever — it exists.
+
+2. **CLIENT parity beads q3rts / 3kr0t / 61iis / b1urj are ALREADY FIXED in code but
+   stale-OPEN in br (tracker drift, last import 2026-06-25).** Each carries its
+   bead-id comment in `fr-command/src/lib.rs`: L21476-21482 (q3rts: LIST ID
+   nonpositive → empty filter), L21648-21657 (3kr0t: KILL USER unknown-user
+   validation), L21666-21677 (61iis: KILL LADDR), L21639/L21465 (b1urj: TYPE `slave`
+   alias). No code change needed; owners (cod-a/cod-b) should close. Not closed here
+   — closing another agent's beads under am-down risks the silent-revert drift in
+   feedback_br_sync_drift.
+
+3. **Measured saturation wall (this cycle's stash list, 10 entries):** every recent
+   lever attempt is labeled subnoise/REVERTED/REJECTED — decode-foreach-streaming
+   79% SLOWER, rpush_owned 1.07-1.09x mean / 45% win-rate, lua-foldhash 1.00-1.02x,
+   xadd drop_if_expired-guard 1.015x, set-expiry-guard 0-gain, zset-intscore subnoise.
+   Accumulated MEASURED evidence (not a "ceiling" claim) that the per-command CPU
+   surface is exhausted at the micro level. (stash@{0}
+   crimsonhawk-glob-prefix-fastpath is a peer WIP-verifying entry — left untouched.)
+
+**Scoped blocker with a path (not parking):** the two remaining MEASURED gaps are
+both multi-day, all-or-nothing, structural, in contested hot crates — (a) keyspace
+RAM (1.79x after uhthd; KeyDict primitive built 9186a4a0b but UNWIRED, needs a
+hash-order reverse-binary SCAN cursor that conflicts with fr's deliberate sorted-SCAN
+fixtures; a HUMAN keep-deterministic-SCAN-vs-relax-for-RAM decision per the prior
+CrimsonHawk entry above), and (b) pipelined P16 ~2x dispatch CPU (bead ohsk5, flat
+profile, ~200 prior passes, endpoint = per-command-alloc→0 + single metadata lookup,
+an fr-runtime refactor IcyWolf owns). Neither is per-turn landable, and am being down
+means reservations can't gate a safe attempt. No source change. Operator action:
+restart am (`am service restart`) to re-enable reservations, then greenlight uhthd OR
+ohsk5 as a dedicated multi-session branch.
