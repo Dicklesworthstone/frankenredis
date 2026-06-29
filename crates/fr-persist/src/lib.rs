@@ -614,6 +614,32 @@ impl AofRecord {
         }
         Ok(Self { argv })
     }
+
+    /// Same as [`from_resp_frame`](Self::from_resp_frame) but CONSUMES the frame,
+    /// MOVING each `BulkString`'s bytes into `argv` instead of cloning them. The
+    /// AOF/replay decode path owns the freshly-parsed frame and drops it
+    /// immediately, so cloning every argument out of it — on top of the copy the
+    /// RESP parser already made into the frame — doubled the per-record byte copy
+    /// on load (a 256 KiB SET value was copied twice). Byte-for-byte identical argv
+    /// to `from_resp_frame`. (frankenredis-cc aofdec)
+    pub fn from_resp_frame_owned(frame: RespFrame) -> Result<Self, PersistError> {
+        let RespFrame::Array(Some(items)) = frame else {
+            return Err(PersistError::InvalidFrame);
+        };
+        if items.is_empty() {
+            return Err(PersistError::InvalidFrame);
+        }
+        let mut argv = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                RespFrame::BulkString(Some(bytes)) => argv.push(bytes),
+                RespFrame::SimpleString(text) => argv.push(text.into_bytes()),
+                RespFrame::Integer(n) => argv.push(n.to_string().into_bytes()),
+                _ => return Err(PersistError::InvalidFrame),
+            }
+        }
+        Ok(Self { argv })
+    }
 }
 
 #[must_use]
@@ -704,9 +730,10 @@ pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecor
     let parser_config = aof_parser_config();
     while cursor < input.len() {
         let parsed = fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config)?;
-        let record = AofRecord::from_resp_frame(&parsed.frame)?;
+        let consumed = parsed.consumed;
+        let record = AofRecord::from_resp_frame_owned(parsed.frame)?;
         let start_offset = cursor;
-        let end_offset = cursor.saturating_add(parsed.consumed);
+        let end_offset = cursor.saturating_add(consumed);
         out.push(AofReplayRecord {
             record,
             start_offset,
@@ -743,7 +770,8 @@ pub fn classify_aof_replay_tail_repair(
             }
         };
 
-        let record = match AofRecord::from_resp_frame(&parsed.frame) {
+        let consumed = parsed.consumed;
+        let record = match AofRecord::from_resp_frame_owned(parsed.frame) {
             Ok(record) => record,
             Err(error) => {
                 return classify_aof_tail_failure(
@@ -758,7 +786,7 @@ pub fn classify_aof_replay_tail_repair(
         };
 
         let start_offset = cursor;
-        let end_offset = cursor.saturating_add(parsed.consumed);
+        let end_offset = cursor.saturating_add(consumed);
         records.push(AofReplayRecord {
             record,
             start_offset,
@@ -8585,6 +8613,16 @@ mod tests {
                 let expected = &full[start..];
                 let tail = encode_aof_stream_tail_bytes(&records, tail_bytes);
                 prop_assert_eq!(tail.as_slice(), expected);
+            }
+
+            // (frankenredis-cc aofdec) The move-not-clone owned constructor MUST
+            // produce the identical record to the borrow-and-clone one.
+            #[test]
+            fn aof_record_from_resp_frame_owned_matches_borrowed(record in aof_record_strategy()) {
+                let frame = record.to_resp_frame();
+                let borrowed = AofRecord::from_resp_frame(&frame).unwrap();
+                let owned = AofRecord::from_resp_frame_owned(frame).unwrap();
+                prop_assert_eq!(owned, borrowed);
             }
 
             #[test]

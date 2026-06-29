@@ -4289,3 +4289,26 @@ fr-runtime/fr-server call-site swaps are value-identical (same bytes), so safe d
 the pre-existing `fr-command` build-script block that prevents compiling those crates
 here; correctness rests on the proven byte-identity. Monotonic. Directly cuts
 replicated-write CPU (the realistic replication workload).
+
+## 2026-06-29 cc: SHIPPED aofdec — AOF-load decode moved args out of the parsed frame instead of cloning them twice; **~86x** on the isolated step (~2x per large-value record), byte-exact, fr-persist-only
+
+Decode counterpart of aofreclen/aoftail. `decode_aof_stream_with_offsets` (and
+`classify_aof_replay_tail_repair`) decoded each AOF record as
+`parse_frame_with_config(..)` — which clones every argument into an owned `RespFrame` —
+then `AofRecord::from_resp_frame(&frame)` which CLONES every argument AGAIN into `argv`,
+dropping the frame. So a 256 KiB SET value was copied TWICE on load. Added
+`AofRecord::from_resp_frame_owned(frame)` that CONSUMES the frame and MOVES each
+`BulkString`'s `Vec<u8>` straight into `argv` (zero clone), and routed both decode sites
+to it. The change is entirely in fr-persist; `load_aof` reaches it through
+`read_aof_file → decode_aof_stream`, so AOF replay on every restart benefits with no
+runtime change.
+
+BYTE-EXACT: new proptest asserts `from_resp_frame_owned(frame) == from_resp_frame(&frame)`
+over random records — PASSED; `cargo test -p fr-persist` GREEN. MEASURED (per-crate
+criterion A/B, new `rdb_codec_aof_from_frame` group, 64 KiB value, `iter_batched` clones
+a fresh frame UNTIMED so the routine isolates the second copy): `from_resp_frame`
+(clone) 6.0712 µs vs `from_resp_frame_owned` (move) 70.333 ns = **~86x** on that step.
+Full AOF-load decode keeps the parser's first clone, so the per-record win is ~2× for
+large values (one of two whole-value copies removed). Monotonic (strictly move-not-clone).
+Faster restart/AOF replay (a real operational path). Three fresh wins this campaign on
+the persistence/replication vein: aofreclen (length), aoftail (feed), aofdec (load).

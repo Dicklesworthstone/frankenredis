@@ -347,6 +347,28 @@ fn bench_codec(c: &mut Criterion) {
     });
     aoflen.finish();
 
+    // AOF LOAD: decoding a record went parse->RespFrame (parser clones each arg)
+    // then from_resp_frame (clones AGAIN into argv). from_resp_frame_owned MOVES the
+    // args out of the owned frame instead. iter_batched clones a fresh frame UNTIMED
+    // so the timed routine isolates the second clone vs a move. 4 KiB value.
+    let frame_template = aof_set.to_resp_frame();
+    let mut aofdec = c.benchmark_group("rdb_codec_aof_from_frame");
+    aofdec.bench_function("from_resp_frame_clone_64k", |b| {
+        b.iter_batched(
+            || frame_template.clone(),
+            |frame| AofRecord::from_resp_frame(std::hint::black_box(&frame)).unwrap(),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    aofdec.bench_function("from_resp_frame_owned_64k", |b| {
+        b.iter_batched(
+            || frame_template.clone(),
+            |frame| AofRecord::from_resp_frame_owned(std::hint::black_box(frame)).unwrap(),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    aofdec.finish();
+
     // Replica feed: a caught-up replica is one write behind, so the tail to send is
     // the LAST record. Old path encoded the whole backlog then sliced; the tail
     // encoder skips the prefix. 5000-record backlog, send only the final record.
