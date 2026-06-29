@@ -4821,3 +4821,27 @@ spans, or a borrowed `RdbValueRef<'a>`) spanning fr-persist + fr-runtime. UNLIKE
 flagging this as a real bottleneck. NEXT STEP is to MEASURE first (build the binary via the
 legacy-unignore workflow, time SAVE/DEBUG-RELOAD of a large dataset vs redis-server) before
 committing to the refactor — do not assume it's the biggest gap without data.
+
+## 2026-06-29 cc: MEASURED head-to-head vs vendored redis 7.2.4 (collection_reload_headtohead.py) — RESTORE-decode IS the biggest gap (0.33x); SAVE-materialize candidate REFUTED (DUMP at parity)
+
+Built the release binary (rch, retrieved locally) + started fr (26811) and vendored
+redis-server 7.2.4 (26812), ran the existing head-to-head harness on a 6000-key
+collection-heavy DB (2000 each hash/set/zset, 40 members), interleaved 9 trials (ratio
+robust to host contention). **WITH this session's RDB-apply-clone lever in the binary:**
+- **RESTORE (decode half): fr 62.4ms vs redis 20.4ms = 0.328x — redis ~3x faster. THE biggest gap.**
+- DEBUG RELOAD (save+load): fr 50.7ms vs redis 40.1ms = 0.764x.
+- **DUMP (encode half): fr 32.4ms vs redis 33.2ms = 1.026x — PARITY.**
+
+CONCLUSIONS (data, not guesses):
+1. The SAVE-materialize candidate I scoped last turn is REFUTED: DUMP/encode is at PARITY,
+   so the store->RdbValue full-copy is NOT a measured bottleneck. Do NOT pursue the
+   borrowed-encode refactor — "measure first" paid off, it would have been wasted effort.
+2. RESTORE-decode (0.328x) is confirmed the dominant collection-RDB gap. The apply-clone
+   lever (now shipped) is in this binary, so the residual is the DECODE itself
+   (listpack/intset -> live structure per-element rebuild), NOT the apply. The right lever
+   is keep-listpack (store the listpack bytes as the small-collection backing, decode-on-
+   demand) — fr-store value-representation, multi-day, all-or-nothing.
+3. DEBUG RELOAD 0.764x = save(parity) + load(0.33x) combined, consistent.
+Harness: scripts/collection_reload_headtohead.py <redis_port> <fr_port>; reference server =
+legacy_redis_code/redis/src/redis-server; binary via legacy-unignore release build (retrieved
+to .rch-targets/frankenredis-cc/release/frankenredis).
