@@ -2728,7 +2728,35 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
-## 2026-06-29 CrimsonHawk: SET hot path has redundant no-TTL expiry lookups (real fr-CPU waste) but PROVABLY SUB-NOISE — concretely confirms hot levers are syscall-bound; only structural levers move the needle
+## 2026-06-29 CrimsonHawk: ⛔ DECISION REQUEST — per-turn perf surface exhausted; every remaining lever needs a HUMAN DESIGN DECISION or a multi-day refactor (pick one to unblock)
+
+The per-turn-committable perf surface is fully harvested (11 wins + the FR_ALLOW_STUB_COMMANDS
+build-unblock + GEOADD 2.5x + XADD 1.9x). Three independent walls now meet:
+- HOT path is SYSCALL-bound (GET/SET 93% syscall; perf+strace) → ANY fr-CPU lever is
+  sub-noise by construction (confirmed again via the SET no-TTL redundant-lookup probe).
+- DISPATCH vein harvested — GEOADD/XADD were the only no-fast-path outliers; all other
+  common cmds parity-or-faster.
+- BUILDABLE leaf crates (fr-store/persist/protocol) saturated (glob/CRC/HLL/decode-presize/
+  encode/lzf all done).
+
+The biggest MEASURED gaps that remain are each blocked on something a per-turn loop cannot
+do — they need a HUMAN to pick ONE and authorize a dedicated session:
+
+  (A) KEYSPACE RAM ~1.5-1.7x (universal, every workload). Lever = wire the shipped KeyDict
+      primitive. BLOCKER: requires REVERSING SCAN from fr's deliberate sorted/deterministic
+      order to redis-style hash-order (conformant, but a DESIGN reversal) + regen core_scan
+      fixtures + test 32939. All-or-nothing, ~multi-day, fr-store core. NEEDS DESIGN SIGN-OFF.
+  (B) SCRIPTING EVAL/EVALSHA 4-5x (raw throughput). Lever = persistent/overlay Lua state
+      (vs per-EVAL globals clone). Multi-hour, conformance-heavy (Lua test suite), lua_eval
+      core. NEEDS A DEDICATED SESSION.
+  (C) RESTORE-decode 3.1x + list-DUMP ~5x (non-hot, migration). Lever = keep-listpack /
+      lazy-materialize RdbValue. BLOCKER: new Value variant → blast radius across EVERY
+      Value::Hash/List match (TYPE/OBJECT/DUMP/MEMORY/...). Multi-day. NEEDS A SESSION.
+
+ASK: the autonomous per-turn loop has extracted all incrementally-committable wins; further
+progress requires (A) a SCAN-semantics design decision, (B) a multi-hour scripting session,
+or (C) a multi-day RdbValue-encoding session — OR redirect the loop's objective. This is the
+genuine blocker, not a re-verification. No source.
 
 Dug a NEW hot-path lever (not re-verification): `set_plain_borrowed` (fr-store 6512, the
 hottest write) runs `self.expiry_ms` + `set_existing_expiry_ms(None)` +
