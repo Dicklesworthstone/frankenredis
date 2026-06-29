@@ -634,6 +634,47 @@ pub fn encode_aof_stream(records: &[AofRecord]) -> Vec<u8> {
     out
 }
 
+/// Encode only the LAST `tail_bytes` bytes of `encode_aof_stream(records)`,
+/// walking from the END so the cost is O(records in the tail), NOT O(backlog).
+/// Byte-for-byte identical to
+/// `encode_aof_stream(records)[len-tail_bytes..]` (asserted in tests).
+///
+/// The replica feed re-derived the tail every event-loop iteration by encoding the
+/// ENTIRE backlog and slicing — O(backlog) work to ship O(one record) when a
+/// caught-up replica is one write behind, i.e. O(n²) across a replicated write
+/// stream. Replication offsets advance by whole records (alloc-free
+/// `encoded_resp_len`), so summing record lengths backward until they cover
+/// `tail_bytes` finds the start record in O(tail) — O(1) for a caught-up replica
+/// — and only those records are encoded. (frankenredis-cc aoftail)
+#[must_use]
+pub fn encode_aof_stream_tail_bytes(records: &[AofRecord], tail_bytes: usize) -> Vec<u8> {
+    // Walk back from the end, accumulating alloc-free per-record lengths until they
+    // cover `tail_bytes`. `records[idx..]` then holds at least `tail_bytes` bytes.
+    let mut acc = 0usize;
+    let mut idx = records.len();
+    while idx > 0 && acc < tail_bytes {
+        idx -= 1;
+        acc += records[idx].encoded_resp_len();
+    }
+    let mut out = Vec::new();
+    for record in &records[idx..] {
+        fr_protocol::encode_aggregate_header(record.argv.len(), false, &mut out);
+        for arg in &record.argv {
+            fr_protocol::encode_bulk_string_slice(Some(arg), false, &mut out);
+        }
+    }
+    // `records[idx..]` may overshoot the requested tail at the front (the start
+    // record boundary sits before `len-tail_bytes`); drop the overshoot so the
+    // bytes match a raw `[len-tail_bytes..]` slice exactly.
+    let overshoot = acc.saturating_sub(tail_bytes);
+    if overshoot >= out.len() {
+        out.clear();
+    } else if overshoot > 0 {
+        out.drain(..overshoot);
+    }
+    out
+}
+
 pub fn decode_aof_stream(input: &[u8]) -> Result<Vec<AofRecord>, PersistError> {
     Ok(decode_aof_stream_with_offsets(input)?
         .into_iter()
@@ -3992,8 +4033,8 @@ mod tests {
         AofManifest, AofManifestFileType, AofRecord, AofReplaySegmentPosition,
         AofReplayTailFailure, AofReplayTailRepairOutcome, AofReplayTailRepairPolicy, PersistError,
         classify_aof_replay_tail_repair, decode_aof_replay_stream, decode_aof_stream,
-        decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest, parse_aof_manifest,
-        trim_incomplete_multi_replay,
+        decode_aof_stream_with_offsets, encode_aof_stream, encode_aof_stream_tail_bytes,
+        format_aof_manifest, parse_aof_manifest, trim_incomplete_multi_replay,
     };
 
     #[test]
@@ -8527,6 +8568,23 @@ mod tests {
             #[test]
             fn aof_record_encoded_resp_len_matches_to_bytes(record in aof_record_strategy()) {
                 prop_assert_eq!(record.encoded_resp_len(), record.to_resp_frame().to_bytes().len());
+            }
+
+            // (frankenredis-cc aoftail) The back-walking tail encoder MUST be
+            // byte-for-byte identical to encoding the whole stream and taking the
+            // last `tail_bytes`.
+            #[test]
+            fn encode_aof_stream_tail_matches_full_slice(
+                records in prop::collection::vec(aof_record_strategy(), 0..=8),
+                tail_frac in 0_usize..=130,
+            ) {
+                let full = encode_aof_stream(&records);
+                // Probe boundary AND mid-record tail lengths, plus past-the-start.
+                let tail_bytes = (full.len().saturating_add(2)).saturating_mul(tail_frac) / 128;
+                let start = full.len().saturating_sub(tail_bytes);
+                let expected = &full[start..];
+                let tail = encode_aof_stream_tail_bytes(&records, tail_bytes);
+                prop_assert_eq!(tail.as_slice(), expected);
             }
 
             #[test]

@@ -4260,3 +4260,32 @@ could NOT be run here because of the PRE-EXISTING `fr-command` build-script bloc
 (environmental — fr-command untouched by this change; same blocker noted in
 [[project_fr_store_percrate_build_unblocks_campaign]]); correctness rests on the proven
 value-identity, not on running fr-runtime.
+
+## 2026-06-29 cc: SHIPPED aoftail — replica feed re-encoded the WHOLE backlog every iteration; encode only the missing tail = **~1700x** on a 5000-record backlog, byte-exact
+
+Follow-on from aofreclen, found by auditing the replica-feed path. `propagate_writes_to_replicas`
+(fr-server) fed each behind-replica by calling `runtime.encoded_aof_stream()` — which
+RE-ENCODES THE ENTIRE AOF/replication backlog — then slicing `[sent_offset-aof_base..]`
+and sending the tail. That runs EVERY event-loop iteration while any replica is behind,
+so a caught-up replica one write behind costs O(full backlog) to ship O(one record):
+O(n²) across a replicated write stream. (`encoded_aof_stream_from_offset`, used by PSYNC
+partial-resync, had the same encode-all-then-slice shape.)
+
+Added `encode_aof_stream_tail_bytes(records, tail_bytes)` in fr-persist: walks record
+lengths BACKWARD from the end (alloc-free `encoded_resp_len`) until they cover the
+requested tail, then encodes ONLY those records — O(records in the tail), i.e. O(1) for
+a caught-up replica. The stream is a pure per-record concatenation and offsets advance
+by whole records, so this is exact. Rewired `encoded_aof_stream_from_offset` (tail_bytes
+= primary_offset − offset) and the hot `propagate_writes_to_replicas` feed (per replica,
+drop the whole-backlog re-encode + memo) to it — both BYTE-IDENTICAL substitutions.
+
+BYTE-EXACT: new proptest asserts `encode_aof_stream_tail_bytes(records, tb) ==
+encode_aof_stream(records)[len-tb..]` over random records × random tail lengths
+(boundary, mid-record, past-the-start) — PASSED; full `cargo test -p fr-persist` GREEN.
+MEASURED (per-crate criterion A/B, new `rdb_codec_aof_feed_tail` group, 5000-record
+backlog, send last record): `full_encode_then_slice` 225.67 µs vs `encode_tail_bytes`
+133.07 ns = **~1696x** (scales with backlog size — old O(n), new O(tail)). The
+fr-runtime/fr-server call-site swaps are value-identical (same bytes), so safe despite
+the pre-existing `fr-command` build-script block that prevents compiling those crates
+here; correctness rests on the proven byte-identity. Monotonic. Directly cuts
+replicated-write CPU (the realistic replication workload).

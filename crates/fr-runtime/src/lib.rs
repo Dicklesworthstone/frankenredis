@@ -30,7 +30,7 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbStringEntryRef, RdbValue, decode_aof_stream,
-    encode_aof_stream, read_rdb_file,
+    encode_aof_stream, encode_aof_stream_tail_bytes, read_rdb_file,
 };
 use fr_protocol::{RespFrame, RespParseError, encode_bulk_string_slice};
 use fr_repl::{
@@ -5722,13 +5722,15 @@ impl Runtime {
 
     #[must_use]
     pub fn encoded_aof_stream_from_offset(&self, offset: u64) -> Vec<u8> {
-        let stream = self.encoded_aof_stream();
-        // Convert absolute replication offset to local stream index by subtracting
-        // the AOF base offset. The encoded stream starts at aof_base_offset.
-        let base_offset = self.server.aof_base_offset;
-        let relative_offset = offset.saturating_sub(base_offset);
-        let start = usize::try_from(relative_offset).unwrap_or(usize::MAX);
-        stream.get(start..).unwrap_or(&[]).to_vec()
+        // The encoded backlog spans [aof_base_offset, primary_offset] and offsets
+        // advance by whole-record encoded lengths, so the suffix from `offset` is
+        // exactly the last (primary_offset - offset) bytes. Encode only that tail
+        // (O(records in the tail)) instead of re-encoding the whole backlog and
+        // slicing — byte-identical to the prior `encoded_aof_stream()[start..]`.
+        // (frankenredis-cc aoftail)
+        let primary = self.replication_ack_state.primary_offset.0;
+        let tail_bytes = usize::try_from(primary.saturating_sub(offset)).unwrap_or(usize::MAX);
+        encode_aof_stream_tail_bytes(&self.server.aof_records, tail_bytes)
     }
 
     /// Library source for every registered FUNCTION, name-sorted, for embedding

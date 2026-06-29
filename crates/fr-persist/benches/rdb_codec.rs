@@ -14,7 +14,10 @@
 //! docs/RELEASE_READINESS_SCORECARD.md (DEBUG RELOAD).
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use fr_persist::{AofRecord, RdbEntry, RdbValue, decode_rdb, encode_rdb};
+use fr_persist::{
+    AofRecord, RdbEntry, RdbValue, decode_rdb, encode_aof_stream, encode_aof_stream_tail_bytes,
+    encode_rdb,
+};
 
 fn build_entries() -> Vec<RdbEntry> {
     let mut entries = Vec::new();
@@ -343,6 +346,40 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(&aof_set).encoded_resp_len())
     });
     aoflen.finish();
+
+    // Replica feed: a caught-up replica is one write behind, so the tail to send is
+    // the LAST record. Old path encoded the whole backlog then sliced; the tail
+    // encoder skips the prefix. 5000-record backlog, send only the final record.
+    let backlog: Vec<AofRecord> = (0..5000)
+        .map(|i| AofRecord {
+            argv: vec![
+                b"SET".to_vec(),
+                format!("key:{i:08}").into_bytes(),
+                format!("val:{i:08}").into_bytes(),
+            ],
+        })
+        .collect();
+    let full_len = encode_aof_stream(&backlog).len();
+    let last_record_len = backlog[4999].encoded_resp_len();
+    let last_record_start = full_len - last_record_len;
+    let mut feed = c.benchmark_group("rdb_codec_aof_feed_tail");
+    feed.bench_function("full_encode_then_slice", |b| {
+        b.iter(|| {
+            let s = encode_aof_stream(std::hint::black_box(&backlog));
+            s.get(std::hint::black_box(last_record_start)..)
+                .unwrap_or(&[])
+                .to_vec()
+        })
+    });
+    feed.bench_function("encode_tail_bytes", |b| {
+        b.iter(|| {
+            encode_aof_stream_tail_bytes(
+                std::hint::black_box(&backlog),
+                std::hint::black_box(last_record_len),
+            )
+        })
+    });
+    feed.finish();
 }
 
 fn build_big_hashtable_entries() -> Vec<RdbEntry> {
