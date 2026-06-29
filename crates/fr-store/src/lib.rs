@@ -6901,9 +6901,20 @@ impl Store {
         delta: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-cc incr-single-lookup) `drop_if_expired` probes `entries` + checks
+        // expiry on EVERY incr, but for a live (non-expired) key it is a pure no-op probe.
+        // Read the deadline ONCE: only invoke `drop_if_expired` (which removes + propagates
+        // + notifies) when the key is actually due, and reuse the deadline for
+        // `has_existing_expiry` (== `key_has_expiry`; both read `expiry_deadlines`). This
+        // drops the redundant `entries.get` + a second expiry probe. Byte-identical: a
+        // non-expired key's `drop_if_expired` had no side effect, and an evicted key falls
+        // to the create branch below where `has_existing_expiry` is unused.
+        let deadline = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, deadline).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
 
-        let has_existing_expiry = self.key_has_expiry(key);
+        let has_existing_expiry = deadline.is_some();
         let (next, has_expiry) = match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {

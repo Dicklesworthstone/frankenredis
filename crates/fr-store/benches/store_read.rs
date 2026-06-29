@@ -22,6 +22,9 @@ fn bench_get(c: &mut Criterion) {
     }
     let mget_keys: Vec<Vec<u8>> = (0..8u32).map(|i| format!("mk:{i}").into_bytes()).collect();
 
+    // An integer key (no TTL) for the INCR write-path single-lookup collapse.
+    store.set(b"counter:key".to_vec(), b"0".to_vec(), None, 1_000);
+
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
         b.iter(|| {
@@ -75,6 +78,9 @@ fn bench_get(c: &mut Criterion) {
                 2_000,
             ))
         })
+    });
+    g.bench_function("incr_no_ttl", |b| {
+        b.iter(|| std::hint::black_box(store.incr(std::hint::black_box(b"counter:key"), 2_000)))
     });
     g.finish();
 }

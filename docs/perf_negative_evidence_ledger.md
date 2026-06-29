@@ -4555,3 +4555,24 @@ and is swamped by run-to-run variance. Monotonic-in-theory but ~0-gain by measur
 REVERTED (source + bench restored byte-for-byte; no source change retained). Don't
 re-attempt hget for this lever — the saving is real but immeasurably small relative to the
 field-access cost. The clean cache-read single-lookup vein stands at the 10 shipped reads.
+
+## 2026-06-29 cc: SHIPPED incr-single-lookup — INCR/INCRBY/DECR write-path double-probe collapse; **−49% (~1.97x)**, byte-exact
+
+Opened the WRITE-path analog of the cache-read vein. `incrby_existing_or_insert` (the core
+of INCR/INCRBY/DECR/DECRBY) called `drop_if_expired` (probes `entries` + checks expiry) on
+EVERY incr, THEN `key_has_expiry` (a second expiry probe), THEN `entries.get_mut` — but for
+a live (non-expired) key, `drop_if_expired` is a pure no-op probe. Collapse: read the
+deadline ONCE (`expiry_ms`), invoke `drop_if_expired` ONLY when actually due, and reuse the
+deadline for `has_existing_expiry` (verified `expiry_ms(k).is_some()` == `key_has_expiry(k)`
+— both read `expiry_deadlines`). Drops a redundant `entries.get` + an expiry probe per incr.
+Unconditional (no gate) — INCR does no LFU `touch_access`/RNG and no `record_keyspace_lookup`.
+
+BYTE-EXACT: a non-expired key's `drop_if_expired` had no side effect; an evicted key falls
+to the create branch where `has_existing_expiry` is unused; identical create/modify/
+volatile-tracking/dirty. `cargo test -p fr-store --lib` 659 passed / 0 failed. MEASURED
+(store_read bench, integer key no-TTL, A/B toggle; candidate on a slightly SLOWER worker —
+GET 26.6 vs 23.8 ns — so the gain is conservative): incr 85.719 ns → 43.474 ns = **−49.3%
+(~1.97x)**, non-overlapping CIs. Covers all INCR-family commands (top counter workload).
+First WRITE-path single-lookup collapse; the same pattern (read deadline once, conditional
+drop_if_expired, single get_mut/insert) should extend to APPEND / SETRANGE / SETBIT /
+GETSET / GETDEL — future per-crate follow-ups.
