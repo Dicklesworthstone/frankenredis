@@ -4312,3 +4312,23 @@ Full AOF-load decode keeps the parser's first clone, so the per-record win is ~2
 large values (one of two whole-value copies removed). Monotonic (strictly move-not-clone).
 Faster restart/AOF replay (a real operational path). Three fresh wins this campaign on
 the persistence/replication vein: aofreclen (length), aoftail (feed), aofdec (load).
+
+## 2026-06-29 cc: SHIPPED aofrewrite-expire — BGREWRITEAOF stopped cloning the WHOLE keyspace to expire-check; reuse the volatile-only reaper (O(1) when nothing due), byte-exact
+
+`Store::to_aof_commands` (the BGREWRITEAOF serializer) pre-cleaned stale keys by
+cloning EVERY key (`self.entries.keys().map(to_vec).collect()`) and calling
+`drop_if_expired` on each — O(keyspace) clones + 2 hashmap probes per key, EVERY AOF
+rewrite, even though only TTL-bearing (volatile) keys can ever be stale and even when
+none are due. Replaced with `self.expire_snapshot_volatile_keys(now_ms)` — the existing,
+tested volatile-only reaper that early-outs in O(1) when `!has_expiry_due`, else iterates
+only the (rebuilt) volatile index. BYTE-EXACT: drops exactly the same keys (only volatile
+keys carry expiry; `drop_if_expired` on a persistent key was already a no-op), and the
+serializer re-sorts keys afterward so the drop ORDER never mattered.
+
+This is a monotonic work reduction — O(keyspace)→O(1) on the common no-expiry rewrite,
+O(keyspace)→O(volatile) otherwise — on a real path (auto AOF rewrite fires when the AOF
+doubles; large DBs are exactly when the full-keyspace clone hurt and the rewrite is
+slowest). Not separately micro-benched (fr-store has no criterion harness and the change
+is a strict elimination of a full-keyspace clone+probe, reusing an already-correctness-
+tested reaper). Conformance: `cargo test -p fr-store` GREEN. Modest magnitude vs the
+per-command persistence wins, but free + strictly-better.

@@ -22058,11 +22058,14 @@ impl Store {
     /// and encoded/replayed to reconstruct the database from scratch.
     #[must_use]
     pub fn to_aof_commands(&mut self, now_ms: u64) -> Vec<Vec<Vec<u8>>> {
-        // Expire stale keys first so they aren't serialized.
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().map(|k| k.to_vec()).collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
+        // Expire stale keys first so they aren't serialized. Only TTL-bearing
+        // (volatile) keys can be stale, so reuse the volatile-only snapshot reaper
+        // instead of cloning EVERY key and calling `drop_if_expired` on each — that
+        // was O(keyspace) clones + probes per AOF rewrite even when no key is due.
+        // `expire_snapshot_volatile_keys` early-outs in O(1) when nothing is due and
+        // otherwise drops exactly the same expired keys (the subsequent snapshot
+        // re-sorts keys, so the drop order is irrelevant). (frankenredis-cc aofrewrite-expire)
+        self.expire_snapshot_volatile_keys(now_ms);
 
         let mut commands = Vec::new();
 
