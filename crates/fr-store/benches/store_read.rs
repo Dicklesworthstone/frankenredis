@@ -50,6 +50,16 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("pttl_ttl_lru_hit", |b| {
         b.iter(|| std::hint::black_box(store.pttl(std::hint::black_box(b"target:key"), 2_000)))
     });
+    g.bench_function("getrange_ttl_lru_hit", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.getrange(std::hint::black_box(b"target:key"), 0, 31, 2_000))
+        })
+    });
+    g.bench_function("getbit_ttl_lru_hit", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.getbit(std::hint::black_box(b"target:key"), 100, 2_000))
+        })
+    });
     g.finish();
 }
 

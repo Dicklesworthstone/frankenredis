@@ -4497,3 +4497,19 @@ Each saves one `entries` probe per cache read; LFU-on keeps the slow path. `expi
 was checked and is ALREADY single-lookup (it never re-fetches the entry, only `expiry_ms`)
 — no collapse needed. Cache-read vein now: GET, MGET, EXISTS, STRLEN, TYPE, PTTL all
 single-lookup on the TTL+LRU config; remaining = `getrange`, `getbit`, `hget` (field-TTL).
+
+## 2026-06-29 cc: SHIPPED getrange (GETRANGE) + getbit (GETBIT) cache single-lookup via the helper — GETRANGE −37.3% (1.60x), GETBIT −26.6% (1.36x), byte-exact
+
+Two more string-read collapses through `lookup_live_for_read_mut`. Both matched their slow
+paths exactly: GETRANGE touches unconditionally on a present entry (then WrongType for a
+non-string); GETBIT touches ONLY when `is_string_like()` (then WrongType) — preserved
+verbatim in each `!lfu` branch. Miss returns: GETRANGE `Ok(Vec::new())`, GETBIT `Ok(false)`.
+
+BYTE-EXACT: `cargo test -p fr-store --lib` 659 passed / 0 failed. MEASURED (store_read
+bench, TTL+LRU hit, A/B toggle; worker stable — GET bench unchanged ~24–27 ns both runs):
+- GETRANGE: 50.794 ns → 31.816 ns = **−37.3% (~1.60x)**, non-overlapping CIs.
+- GETBIT: 36.734 ns → 26.949 ns = **−26.6% (~1.36x)**, non-overlapping CIs.
+Each saves one `entries` probe per cache read; LFU-on keeps the slow path. The cache-read
+single-lookup vein is now broad: GET, MGET, EXISTS, STRLEN, TYPE, PTTL, GETRANGE, GETBIT.
+Remaining: `hget` (needs care around the hash-field-TTL `drop_hash_field_if_expired` layer
+between the key probe and the field read — a future careful follow-up).

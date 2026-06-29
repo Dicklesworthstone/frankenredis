@@ -7339,6 +7339,22 @@ impl Store {
         end: i64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    let Some(v) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    match Self::resolve_getrange_bounds(v.len(), start, end) {
+                        Some((s, e_idx)) => Ok(v[s..=e_idx].to_vec()),
+                        None => Ok(Vec::new()),
+                    }
+                }
+                None => Ok(Vec::new()),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
@@ -7595,6 +7611,27 @@ impl Store {
     }
 
     pub fn getbit(&mut self, key: &[u8], offset: usize, now_ms: u64) -> Result<bool, StoreError> {
+        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    if entry.value.is_string_like() {
+                        entry.touch(now_ms);
+                    }
+                    let Some(v) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    let byte_idx = offset / 8;
+                    let bit_idx = 7 - (offset % 8);
+                    if byte_idx >= v.len() {
+                        Ok(false)
+                    } else {
+                        Ok((v[byte_idx] >> bit_idx) & 1 == 1)
+                    }
+                }
+                None => Ok(false),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(false);
         }
