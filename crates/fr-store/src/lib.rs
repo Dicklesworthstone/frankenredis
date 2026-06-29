@@ -693,6 +693,19 @@ const SORTED_SET_COMPACT_FULL_MAX_ENTRIES: usize = 2048;
 const ZSET_INDEX_TREE_WARM_MIN_LEN: usize = 4096;
 const ZSET_INDEX_TREE_WARM_MIN_SKIP: usize = 1024;
 const ZSET_INDEX_TREE_WARM_HITS: u8 = 2;
+// (CrimsonHawk) Separate, lower warm threshold for the O(log n) COUNT paths
+// (ZCOUNT / ZLEXCOUNT). Index warming needs a large set AND a deep skip
+// (>= ZSET_INDEX_TREE_WARM_MIN_SKIP), so 4096 is right there; but a range COUNT
+// over the BTreeMap is O(range), which already loses to redis's skiplist rank-diff
+// at far smaller cardinalities (measured: a 2000-member set, mid-range ZLEXCOUNT/
+// ZCOUNT = ~0.25x redis 7.2.4 cold, 1.0x once the rank treap is warm). Redis keeps
+// every zset > 128 entries on a skiplist (O(log n) zslGetRank count), so fr's
+// 4096 gate left the entire common 512..4096 band scanning. Warm the treap for
+// COUNT at >= 512: the adaptive 2-hit gate (ZSET_INDEX_TREE_WARM_HITS) still means
+// a one-off count never builds, so only *repeatedly* counted mid-size zsets pay the
+// one-time O(n log n) build, amortized over every later O(log n) count. Below 512
+// the BTreeMap range scan is already ~parity (tiny absolute cost), so no build.
+const ZSET_COUNT_TREE_WARM_MIN_LEN: usize = 512;
 type SharedZSetMember = Arc<[u8]>;
 type StoreKey = Box<[u8]>;
 
@@ -1257,7 +1270,7 @@ impl FullSortedSet {
     /// cold set still pays only the O(range) scan (cheaper than building the
     /// tree once), so cold zsets never regress. (frankenredis-p94tu)
     fn maybe_warm_rank_tree_for_count(&mut self) {
-        if self.rank_tree.is_some() || self.dict.len() < ZSET_INDEX_TREE_WARM_MIN_LEN {
+        if self.rank_tree.is_some() || self.dict.len() < ZSET_COUNT_TREE_WARM_MIN_LEN {
             return;
         }
         self.deep_index_reads = self.deep_index_reads.saturating_add(1);

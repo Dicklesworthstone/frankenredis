@@ -7132,3 +7132,23 @@ next work into `Store::pfmerge`/HLL merge+re-encode or a less-degenerate source 
 parser/executor fast path. Final kept-state recheck through `rch exec -- cargo bench --profile release -p fr-bench --bench
 keyed_write_vs_redis -- PFMERGE_1v --noplot` fell back local due worker preflight slots and measured Redis 96.925 Kelem/s vs
 FrankenRedis 17.759 Kelem/s, FR/Redis 0.183x.
+
+### 2026-06-29 SHIP: ZCOUNT/ZLEXCOUNT mid-size sets — lower COUNT rank-treap warm threshold 4096→512 (CrimsonHawk)
+Found via a fresh extended head-to-head sweep (`scripts/extended_headtohead_ch.py`, fr:17811 vs vendored redis-server
+7.2.4:17812) that ZLEXCOUNT measured **0.28x** and ZCOUNT **0.75x** on a 2000-member zset — a real ALGORITHMIC loss, not
+dispatch: fr scaled O(range) while redis is O(log n) (skiplist `zslGetRank` diff). Confirmed by scaling: narrow ~2-elem
+range = 0.95x (parity), mid ~1000-elem = 0.26x, full ~2000 = 0.25x; and by forcing the treap warm via a ZRANK, which
+dropped fr ZLEXCOUNT from 10.36µs→3.01µs. ROOT CAUSE: `maybe_warm_rank_tree_for_count` was gated by
+`ZSET_INDEX_TREE_WARM_MIN_LEN = 4096`, so the entire 128..4096 band (where redis is already on a skiplist) never built
+the O(log n) order-statistic treap. FIX: dedicated `ZSET_COUNT_TREE_WARM_MIN_LEN = 512` for the COUNT-warm path only
+(index-warm keeps 4096, since it also requires a deep skip >= 1024). The adaptive 2-hit gate (`ZSET_INDEX_TREE_WARM_HITS`)
+is unchanged, so a one-off count never builds — only repeatedly-counted mid-size zsets pay the one-time build, amortized.
+MEASURED A/B (candidate=this change vs control=ORIG main c475f6261, same fresh rch release binary, interleaved best-of-9,
+pipe=500):
+  - n=2000 ZLEXCOUNT: ORIG 10.34µs (0.25x) → NEW 3.32µs (0.77x) = **~3.1x faster**, near parity
+  - n=2000 ZCOUNT:    ORIG ~ (0.75x sweep)  → NEW 2.90µs (0.87x)
+  - n=512..4096 all land 0.77–0.97x (was 0.25–0.75x); below 512 unchanged (scan already ~parity).
+Residual 0.77–0.87x is a small constant factor (two `rank_of` calls clone the member via `to_vec` + dispatch), no longer
+the O(range) scan. BYTE-EXACT: 2772/2772 live differential checks vs redis 7.2.4 across sizes 130..5000 (bracket `[`/`(`,
+-inf/+inf, -/+) = 0 mismatches; fr-store `lex_count`/`score_bound_count`/`7uonw` isomorphism unit tests green. Corrects the
+prior memory note that called the ZLEXCOUNT loss "dispatch-bound" — it was a warm-threshold gate.
