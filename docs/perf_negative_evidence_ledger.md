@@ -4940,3 +4940,20 @@ fr DOMINATES or matches every hot command. Combined with the broad scorecard (pa
 + DUMP parity, the ENTIRE online + encode surface is fr-at-or-ahead-of redis 7.2.4. The SOLE
 place redis is faster is RESTORE-decode (keep-listpack structural, ~3x, multi-hour dedicated
 slice). The perf campaign has WON the hot path; the remaining gap is a cold load-time codec rep.
+
+## 2026-06-29 cc: MEASURED RAM vs redis 7.2.4 (completes the surface) — RSS 1.62x (fr heavier), used_memory 0.68x (fr undercounts); structural #2 gap
+
+Loaded an identical 65k-key mixed dataset (50k strings + 5k hashes + 5k sets + 5k zsets, 20
+elems each) into fr + vendored redis 7.2.4, compared INFO memory:
+- used_memory: fr 10.3MB vs redis 15.1MB = 0.68x (fr's modeled accounting reports LESS).
+- used_memory_rss: fr 29.4MB vs redis 18.1MB = **1.62x (fr's ACTUAL process RAM is heavier)**.
+Confirms the documented structural RAM gap (~1.6-1.74x RSS): fr's keyspace dict + per-object
+overhead + mimalloc page retention exceed redis's. used_memory MODELS redis (0.68x here) so it
+doesn't reflect the real RSS cost — the gap is real RSS, not the estimate.
+
+FULL SURFACE NOW MEASURED vs redis 7.2.4:
+  WINS: hot cmds (SET/GET/HSET/ZADD/LPUSH 1.18-1.22x), broad cmds (parity+/fr-faster), DUMP (parity).
+  LOSES (both STRUCTURAL/multi-day): RESTORE-decode 0.31-0.41x (keep-listpack) + RSS 1.62x
+  (keyspace dict RAM, KeyDict lever blocked on SCAN-semantics reversal per project_keyspace_ram_gap).
+fr dominates throughput; the two residual losses are a cold load-time codec rep + memory
+footprint, each a dedicated multi-day structural effort. Per-turn surface is EXHAUSTED.
