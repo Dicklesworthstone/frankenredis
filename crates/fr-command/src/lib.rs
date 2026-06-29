@@ -7414,7 +7414,11 @@ pub fn format_stream_id(id: StreamId) -> Vec<u8> {
 }
 
 #[inline]
-fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamId> {
+// (CrimsonHawk) pub for the fr-runtime XADD borrowed fast path
+// (`execute_plain_xadd_borrowed`) — reused verbatim so the auto-id `*` resolution
+// is byte-identical to the generic handler. `None` = ID space exhausted (the
+// fast path then defers to the generic path for the exact error).
+pub fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamId> {
     let id = match last_id {
         Some((last_ms, last_seq)) => {
             if now_ms > last_ms {

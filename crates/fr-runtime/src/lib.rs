@@ -10463,6 +10463,163 @@ impl Runtime {
         }
     }
 
+    /// (CrimsonHawk) Borrowed fast path for the bare `XADD key * field value`
+    /// (auto-id, exactly one field/value, no NOMKSTREAM/MAXLEN/MINID). Mirrors the
+    /// generic handler's happy path by REUSING its helpers verbatim — so the
+    /// auto-id and reply are byte-identical: `store.xlast_id_no_stat` (write-lookup,
+    /// no keyspace_hits bump) → `fr_command::next_auto_stream_id` → `store.xadd`
+    /// (which bumps dirty once + maintains the last_id/entries_added side-maps) →
+    /// reply `fr_command::format_stream_id(id)`. Profiled as ~22% generic-dispatch
+    /// tax (no fast path); this removes it (the structural 3-hash-lookup + the
+    /// used_memory estimate remain). DEFERS (None → generic, exact error/behavior)
+    /// on: id != "*", a wrongtype/lookup error, id-space exhaustion, or any
+    /// disabling state (notify/repl/AOF/etc via the default-write-gate). The parser
+    /// only matches the 5-element form, so NOMKSTREAM/MAXLEN/MINID/explicit-id/
+    /// multi-field never reach here.
+    pub fn execute_plain_xadd_borrowed(
+        &mut self,
+        key: &[u8],
+        id_arg: &[u8],
+        field: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if id_arg != b"*"
+            || self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"XADD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || field.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        // Resolve the auto-id BEFORE any state change (xlast_id_no_stat is a
+        // read-only write-lookup); bail to the generic path on a wrongtype/lookup
+        // error (exact reply) or id-space exhaustion.
+        let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
+        let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("xadd");
+        self.session.last_argv_len_sum =
+            b"XADD".len() + key.len() + id_arg.len() + field.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = vec![(field.to_vec(), value.to_vec())];
+        let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
+            Ok(()) => RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_xadd_borrowed_metrics(
+            key, field, value, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_xadd_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = |key: &[u8], field: &[u8], value: &[u8]| -> Vec<Vec<u8>> {
+            vec![
+                b"XADD".to_vec(),
+                key.to_vec(),
+                b"*".to_vec(),
+                field.to_vec(),
+                value.to_vec(),
+            ]
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("xadd", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'XADD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     /// Conservative borrowed runtime fast path for `ZINCRBY key delta member`:
     /// mirrors `execute_plain_zadd_borrowed`. Parses the delta BEFORE any state
     /// change (bailing to the generic path — which produces the exact "value is

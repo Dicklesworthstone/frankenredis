@@ -2728,6 +2728,31 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: LANDED XADD borrowed fast path — 0.37x → 0.715x (~1.9x), byte-exact (11th win)
+
+Implemented the profiled XADD dispatch lever. `execute_plain_xadd_borrowed` for the bare
+`XADD key * field value` (arg3 shape, prefix `*5\r\n$4\r\n`): REUSES the generic handler's
+helpers verbatim for byte-exactness — `store.xlast_id_no_stat` (write-lookup, no
+keyspace_hits bump) → `fr_command::next_auto_stream_id` (now pub) → `store.xadd` (bumps
+dirty once + maintains last_id/entries_added side-maps) → reply `fr_command::
+format_stream_id(id)` (already pub). Behind the default-write-gate. DEFERS (None →
+generic, exact behavior) on id != "*", wrongtype/lookup error, id-space exhaustion, or
+disabling state; the 5-element parser never matches NOMKSTREAM/MAXLEN/MINID/explicit-id/
+multi-field.
+
+MEASURED (live binary, -c50 -P16, single growing stream): XADD **0.37x → 0.715x** (fr 402k
+vs redis 563k) = **~1.9x improvement**. Residual 0.715x (1.4x slower) = the STRUCTURAL
+3-hash-lookup + the used_memory estimate (multi-hour, unchanged) — the dispatch tax is now
+gone, as predicted. CONFORMANCE GREEN: deterministic XADD cases (explicit-id, smaller-id
+error, WRONGTYPE, NOMKSTREAM nil, multi-field XLEN/XRANGE) byte-exact vs redis; fast-path
+auto-ids valid + strictly increasing with correct stored data; edge_sweep 1+2 byte-exact
+(E1=E2=0). Gated full-binary build clean.
+
+2nd build-unblock-pipeline throughput win (after GEOADD). The arg3-shape borrowed fast
+path now covers GEOADD + XADD; remaining geo/stream residuals are structural (XADD
+3-hash-lookup, estimate_stream O(n) recompute 3.59%). Next candidates: profile other
+no-fast-path write commands for the same dispatch tax.
+
 ## 2026-06-29 CrimsonHawk: XADD profiled — dispatch-dominated (no fast path, ~22%) like GEOADD; fast path = next lever (~2.7x→~1.5x). GEODIST/GEOPOS already fast-pathed
 
 Followed the GEOADD win by checking the other gaps. Findings on the live binary:
