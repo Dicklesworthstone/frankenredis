@@ -2728,7 +2728,34 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
-## 2026-06-29 CrimsonHawk: sha1_hex ruled out as a per-EVAL micro-lever — scripting 4-5x gap is FULLY structural (no per-turn slice)
+## 2026-06-29 CrimsonHawk: BLOCKER — scripting Rc-COW lever defeated by per-EVAL KEYS/ARGV globals write; working design = overlay refactor (multi-hour); no clean per-turn lever remains
+
+Attempted to design the radical per-crate lever for the #1 gap (scripting 4-5x): Rc-COW
+globals (share the cached `lua_base_globals_template` via `Rc`, `make_mut` only on the rare
+script-level global write → read-only scripts pay an Rc bump, not a deep clone). Reads need
+no change (`Rc<HashMap>` auto-derefs); only 7 script-assignment write sites need make_mut.
+DEFEATED: `LuaState::set_keys_argv` (lua_eval.rs 3694) does `self.globals.insert("KEYS"/
+"ARGV", …)` on EVERY EVAL — so make_mut would clone the whole globals every call, same as
+today. No win.
+
+WORKING DESIGN (recorded for the structural session): an OVERLAY — `globals: Rc<HashMap>`
+(shared, never written) + a per-EVAL `globals_overlay: HashMap` holding KEYS/ARGV and any
+script-set globals; global READS check overlay→globals (~15 read sites, or a centralized
+`lookup_global` helper); writes/set_keys_argv → overlay. Read-only scripts then pay only a
+tiny overlay (KEYS/ARGV) + an Rc bump instead of the full ~50-entry globals clone.
+COST/RISK: ~22 sites (reads+writes), conformance-sensitive (a missed read site → KEYS not
+found; a missed write → shared-template contamination across scripts; Lua tests catch
+both), and the payoff is only ~7-10% of EVAL — a NON-HOT command — so end-to-end it is
+borderline-~0 (would trigger the REVERT rule). The full 4-5x requires reusing the whole
+per-EVAL Lua machinery (persistent state), multi-hour.
+
+NET BLOCKER: every remaining measured gap is structural/multi-hour or borderline-~0 on a
+non-hot path — scripting (overlay/persistent-state, conformance-heavy), keyspace RAM
+(KeyDict, SCAN-semantics), RESTORE-decode (keep-listpack, non-hot), XADD 3-hash-lookup.
+The HOT per-turn surface is exhausted (GET/SET syscall floor; all common cmds parity-or-
+faster; GEOADD/XADD dispatch wins landed). No clean per-turn lever remains; the next real
+win needs a dedicated structural session (scripting overlay = #1 by throughput, but pick a
+HOT target for end-to-end impact). No source.
 
 Checked the last potential per-turn scripting slice — the per-EVAL `sha1_hex` (2.74%).
 It's a STANDARD scalar SHA1 (80-round compression loop) + a SINGLE `format!("{:08x}"×5)`
