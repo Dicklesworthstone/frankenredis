@@ -2728,6 +2728,35 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-28 CrimsonHawk: NEW gaps found on the last unmeasured families — XADD ~0.37x (structural) + GEOADD 0.36x (NO fast path = lever candidate); ZADD-grow PARITY, interleave optimal
+
+Measured the last-unmeasured families (streams/geo) on the live binary; redis-benchmark
+sustained single-key (interleaved re-verify at load 13.7, 3 reps):
+- **XADD ~0.37x (redis ~2.7x faster)** — STABLE (0.362/0.393/0.368). Real gap. Stream
+  append: 3 hash lookups (entries + 2 side-maps) + packed-field encode per XADD vs redis's
+  listpack-tail append. = the documented structural in-object-metadata lever (multi-hour,
+  fr-store core, [[project_xadd_sidemap_alloc_gap]]); the sustained bench exposes it as ~2.7x
+  (bigger than the ~1.5x single-conn figure).
+- **ZADD-to-growing-zset ~1.05x = PARITY** (1.04/1.04/1.08, fr faster) — IMPORTANT: fr's
+  zset/treap INSERT is parity at scale. So the treap is NOT slow for insert (only ZRANK-class
+  rank ops are). Refutes a blanket "treap slow" assumption.
+- **GEOADD 0.36x / GEODIST 0.46x / GEOSEARCH 1.31x(fr faster)** — since ZADD is parity and
+  `geo_interleave64`/`geo_deinterleave64` are ALREADY optimal (standard magic-number Morton
+  spread = redis), the GEO gap is NOT the zset or the interleave. ROOT: **GEOADD has ZERO
+  borrowed fast path** (grep: geoadd 0 refs vs zadd 28+11; dispatches generic-argv at
+  fr-runtime 28040) → it pays the full generic-dispatch tax PLUS geo_encode. GEODIST (0.46x,
+  HAS partial borrowed refs 3+5) is less bad — supporting the dispatch hypothesis + a residual
+  geo decode/haversine compute cost.
+
+LEVER CANDIDATE (newly buildable via the unblock): a **GEOADD borrowed fast path** (6s9dx
+pattern: parse key+(lon,lat,member) triples borrowed → geo_encode_wgs84 → store zadd),
+~2x on the dispatch portion (won't reach full parity — geo_encode float math remains, so
+expect ~0.36x→~0.6-0.7x). Partial but real; GEOADD currently lacks one while ZADD has it.
+NEXT: implement + isolated A/B (fast-vs-generic binary) behind the gate. XADD gap is
+structural (multi-hour). This is the first sizable per-turn-addressable throughput gap
+surfaced since the buildable surface closed — found by measuring the families the broad
+sweep misses. No source this turn (measurement + lever identification).
+
 ## 2026-06-28 CrimsonHawk: gap #2 RESTORE-decode measured 3.1x on live binary (DUMP-encode PARITY) — CORRECTS my own keep-listpack ~3-6% down-pricing (that was a smaller lever)
 
 Measured the #2 documented gap (collection RDB codec) on the live binary,
