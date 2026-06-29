@@ -4628,3 +4628,18 @@ is ~25 ns of EXPIRE's ~112 ns), distinct from append's ~2% (~0). Shipped on byte
 monotonic + worker-adjusted-directional. INFRA NOTE: the rch worker is oscillating 1.3–3.4x
 this session — marginal A/Bs need a calm window or best-of-N; obvious wins (this, INCR)
 still resolve. Write-path lookup-dominated wins now: INCR-family, SETNX, EXPIRE-family.
+
+## 2026-06-29 cc: SHIPPED persist lazy-drop + deadline-reuse — PERSIST is near-pure-lookup; **−73% (~3.7x)**, byte-exact (cleanest same-worker A/B this session)
+
+`persist` (PERSIST/PERSIST-via-SET-KEEPTTL paths) did `drop_if_expired` (discarded) + a
+SECOND `expiry_ms` for `old_expiry` + the (light) TTL removal. Collapsed like INCR: read
+the deadline ONCE, only `drop_if_expired` when due (then the key is gone → return false),
+reuse the deadline for `old_expiry`. Elides 2 of the path's 3 lookups (the `entries.get`
++ the redundant `expiry_ms`). BYTE-EXACT (an evicted key would have read `expiry_ms ==
+None` → false anyway; a non-evicted key's deadline is unchanged): `cargo test -p fr-store
+--lib` 659/0. MEASURED — a genuinely CLEAN same-worker A/B (GET read ~60 ns in BOTH runs,
+so the worker factor cancels in the ratio): persist-no-ttl 65.868 ns → 17.640 ns = **−73.2%
+(~3.7x)**, non-overlapping CIs ([64.4,67.1] vs [17.2,18.1]). Largest single-lookup-collapse
+win to date — because PERSIST's return-false path is PURE lookups (no mutation) and we cut
+2 of 3. The TTL'd path (actual TTL removal) saves the same 2 probes atop a light mutation.
+Write-path lookup-dominated wins now: INCR-family, SETNX, EXPIRE-family, PERSIST.

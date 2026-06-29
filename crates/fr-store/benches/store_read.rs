@@ -104,6 +104,11 @@ fn bench_get(c: &mut Criterion) {
             ))
         })
     });
+    // PERSIST on a no-TTL key (returns false, no mutation): stable, exercises the
+    // lazy-drop + deadline-reuse lookup elision.
+    g.bench_function("persist_no_ttl", |b| {
+        b.iter(|| std::hint::black_box(store.persist(std::hint::black_box(b"target:key"), 2_000)))
+    });
     g.finish();
 }
 

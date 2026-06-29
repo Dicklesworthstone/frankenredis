@@ -8231,8 +8231,18 @@ impl Store {
     }
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
-        let Some(old_expiry) = self.expiry_ms(key) else {
+        // (frankenredis-cc incr-single-lookup) Read the deadline ONCE: only invoke
+        // `drop_if_expired` (probe + remove) when actually due (and then the key is gone →
+        // PERSIST returns false), and reuse the peeked deadline for `old_expiry` instead of
+        // a second `expiry_ms`. Skips drop_if_expired's redundant `entries.get` + the second
+        // expiry probe. Byte-identical: an evicted key would have read `expiry_ms == None`
+        // and returned false anyway; a non-evicted key's deadline is unchanged.
+        let deadline = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, deadline).should_evict {
+            self.drop_if_expired(key, now_ms);
+            return false;
+        }
+        let Some(old_expiry) = deadline else {
             return false;
         };
         self.with_mutated_entry(key, |_| {});
