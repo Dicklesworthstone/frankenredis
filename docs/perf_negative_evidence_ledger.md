@@ -4957,3 +4957,19 @@ FULL SURFACE NOW MEASURED vs redis 7.2.4:
   (keyspace dict RAM, KeyDict lever blocked on SCAN-semantics reversal per project_keyspace_ram_gap).
 fr dominates throughput; the two residual losses are a cold load-time codec rep + memory
 footprint, each a dedicated multi-day structural effort. Per-turn surface is EXHAUSTED.
+
+## 2026-06-29 cc: keep-listpack feasibility UNLOCK — fr-store depends on fr-persist, so the redis-listpack parser is FREE (no codec relocation); lever is more tractable than scoped
+
+Checked the decisive architectural gate I'd flagged as a risk: fr-store's Cargo.toml lists
+`fr-persist = { path = "../fr-persist" }` (fr-store -> fr-persist), and fr-persist does NOT
+depend on fr-store. So the dependency direction PERMITS fr-store to call
+`fr_persist::listpack::decode_value_spans` / `decode_listpack` DIRECTLY for a
+`GenericSet::Listpack(Box<[u8]>)` variant's read methods (len/contains/iter/get_index) and
+its materialize-on-write. NO circular dependency, NO need to relocate the listpack codec to a
+shared crate — the parser is FREE. This removes the biggest obstacle in the prior blast-radius
+note. Revised keep-listpack-Set scope: add GenericSet::Listpack + ~34 arm cases (most route
+through a single `materialize()` that decodes the listpack to Packed/Hash on mutation), read
+methods delegate to fr_persist::listpack (free), RESTORE_SET_LISTPACK stores the raw bytes.
+Still multi-hour (the 34 arms + byte-exact gates: DEBUG DIGEST iteration-order parity, SSCAN
+cursor, OBJECT ENCODING "listpack", set-algebra) so NOT a 60-min slice, but materially more
+tractable now that the parser is in-reach. This is the green light for the dedicated session.
