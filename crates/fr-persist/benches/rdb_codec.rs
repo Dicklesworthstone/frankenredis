@@ -310,6 +310,42 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| decode_rdb(std::hint::black_box(&big_string_encoded)).unwrap())
     });
     big_string.finish();
+
+    // Large HASHTABLE-encoded hashes (> 512 fields ⇒ RDB_TYPE_HASH) — the decode
+    // pre-sizes the outer field Vec at RDB_COLLECTION_PRESIZE_CAP; below the cap it
+    // grew log2(count/1024) times. 40 x 8000 fields.
+    let big_hash_entries = build_big_hashtable_entries();
+    let big_hash_encoded = encode_rdb(&big_hash_entries, &[]);
+    let mut big_hash = c.benchmark_group("rdb_codec_big_hashtable");
+    big_hash.throughput(Throughput::Elements(big_hash_entries.len() as u64));
+    big_hash.bench_function("decode_big_hashtable_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&big_hash_encoded)).unwrap())
+    });
+    big_hash.finish();
+}
+
+fn build_big_hashtable_entries() -> Vec<RdbEntry> {
+    // Hashes ABOVE hash_max_listpack_entries (512) encode as the plain hashtable
+    // RDB_TYPE_HASH, whose decode pre-sizes the outer field Vec at a cap — the
+    // realloc-on-grow case for large collections. 40 hashes x 8000 short fields.
+    let mut entries = Vec::with_capacity(40);
+    for key in 0..40 {
+        let fields = (0..8000)
+            .map(|j| {
+                (
+                    format!("f{j:05}").into_bytes(),
+                    format!("v{j:05}:{}", key % 9).into_bytes(),
+                )
+            })
+            .collect();
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("h:{key:06}").into_bytes(),
+            value: RdbValue::Hash(fields),
+            expire_ms: None,
+        });
+    }
+    entries
 }
 
 fn build_big_compressible_string_entries() -> Vec<RdbEntry> {

@@ -4117,3 +4117,26 @@ CIs.** Gain scales with blob size (a 1 MiB compressible blob elides ~7 grows vs 
 Conformance/correctness GREEN: full `cargo test -p fr-persist` exit 0 (incl.
 `lzf_compress_decompress_round_trips`, `lzf_decompress_chunked_matches_bytewise`).
 Bench coverage for the previously-untested large-compressible case added alongside.
+
+## 2026-06-29 cc: SHIPPED lzfcap sibling — collection decode pre-size cap 1024 → 65536; +11.23% large-hashtable RDB decode (measured, byte-identical, OOM-bound preserved)
+
+Same vein as lzfcap, larger win. Every non-listpack collection decode arm in
+`fr-persist/src/lib.rs` (RDB_TYPE_LIST/SET/HASH/HASH_WITH_TTLS/ZSET_2/stream/
+quicklist-nodes) pre-sized its outer element `Vec` at `count.min(1024)` — an
+OOM-amplification guard since `count` is an untrusted RDB-header varint. But these
+arms are precisely the LARGE-collection encodings (a hash only uses RDB_TYPE_HASH
+above hash_max_listpack_entries=512; set above 128; etc.), so any real large
+collection grew its outer Vec ~log2(count/1024) realloc+copy times during load.
+Introduced `const RDB_COLLECTION_PRESIZE_CAP = 1 << 16` (65536) and routed all 10
+sites through it: real large collections now pre-size in one allocation; worst-case
+speculative reserve against a hostile header stays bounded (~1.5 MiB list / ~3 MiB
+hash-pair element structs). Capacity never affects content ⇒ byte-identical.
+
+MEASURED (per-crate criterion A/B via `rch exec -- cargo bench -p fr-persist --bench
+rdb_codec`, new `rdb_codec_big_hashtable` case = 40 × 8000-field hashes ⇒
+RDB_TYPE_HASH): baseline (cap 1024) 38.726 ms [38.124, 39.446]; candidate (cap 65536)
+34.375 ms [33.702, 35.155]; **change −11.23% [−13.50%, −8.84%], p=0.00, non-overlapping
+CIs.** This directly narrows the dominant vs-redis codec deficit (collection RESTORE
+≈ 0.36–0.46x = redis 2.2–2.8x faster) on the large-collection RDB-load / RESTORE path.
+Conformance GREEN: full `cargo test -p fr-persist` exit 0. Large-hashtable bench
+coverage added alongside.
