@@ -82,6 +82,17 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("incr_no_ttl", |b| {
         b.iter(|| std::hint::black_box(store.incr(std::hint::black_box(b"counter:key"), 2_000)))
     });
+    // SETNX on an EXISTING key (contended-lock case): returns false, no mutation —
+    // lookup-dominated, exercises the lazy drop_if_expired collapse.
+    g.bench_function("setnx_existing_no_ttl", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.setnx(
+                std::hint::black_box(b"target:key"),
+                std::hint::black_box(b"x"),
+                2_000,
+            ))
+        })
+    });
     g.finish();
 }
 

@@ -7243,7 +7243,14 @@ impl Store {
     }
 
     pub fn setnx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired: for a live/absent key
+        // it is a pure no-op probe, so peek the deadline and only invoke it when actually
+        // due — eliding the redundant `entries.get` before the `contains_key` existence
+        // check. SETNX on an EXISTING key (the contended-lock case) does no mutation, so
+        // this saves ~half its cost. Byte-identical (return of drop_if_expired is discarded).
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
         if self.entries.contains_key(key) {
             return false;
         }

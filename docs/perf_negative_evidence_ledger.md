@@ -4595,3 +4595,19 @@ probe is a small fraction → ~0. COROLLARY: don't bother applying lazy-drop to 
 mutation-heavy writes (SETRANGE/SETBIT/GETSET/APPEND); it only pays where the op is
 lookup-dominated like INCR (and INCR's extra `key_has_expiry` reuse was key). Write-path
 single-lookup vein is effectively just INCR-family (shipped). No source change this entry.
+
+## 2026-06-29 cc: SHIPPED setnx lazy-drop — SETNX-on-existing (contended-lock) is lookup-dominated, so the collapse pays; byte-exact, monotonic
+
+The append boundary finding pointed the way: SETNX on an EXISTING key (`drop_if_expired`
++ `contains_key` → return false, NO mutation) is LOOKUP-dominated — the favorable class.
+Applied the inline lazy-`drop_if_expired` (peek deadline; only call `drop_if_expired` when
+due; eliding the redundant `entries.get` before `contains_key`). BYTE-EXACT (return is
+discarded; non-expired/absent key's drop_if_expired is side-effect-free): `cargo test -p
+fr-store --lib` 659/0. MEASURED (store_read bench, existing no-TTL key → returns false):
+candidate **20.645 ns** on a clean worker (GET 23.5 ns). The slow-path baseline could NOT
+be isolated cleanly — the rch worker spiked to ~2.3–2.6x mid-run (GET 55–62 ns, baseline
+setnx 73–87 ns); worker-normalized the baseline is ~28–37 ns, so the candidate (20.6) is
+clearly below it (directional ~1.3–1.8x), NOT ~0-gain. Shipped on byte-exact + monotonic
+(one fewer `entries` probe) + lookup-dominated INCR-class + candidate-clearly-below-
+normalized-baseline. SETNX-on-absent (insert) is mutation and unaffected-to-marginal.
+Write-path single-lookup wins now: INCR-family + SETNX (the two lookup-dominated writes).
