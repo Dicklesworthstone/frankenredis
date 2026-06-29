@@ -4995,3 +4995,20 @@ Final method-level scoping of GenericSet (packed_set.rs, 15 methods) for the Lis
 The parser is FREE (fr-store->fr-persist). The lever is now BLUEPRINTED to method granularity;
 only execution (a focused multi-hour session, the GenericSetIter::Listpack cursor + byte-exact
 validation being the real work) remains. Repeat per type after Set: Hash (HashFieldMap), zset.
+
+## 2026-06-29 cc: keep-listpack-Set DESIGN COMPLETE — all-string-only variant sidesteps the int-entry Cow problem; borrowing iterator, clean
+
+Final design subtlety resolved: a RDB_TYPE_SET_LISTPACK can hold INT-encoded entries, which
+would force GenericSetIter's Item to Cow<[u8]> (int members render to owned decimal bytes) —
+rippling through the iterator + all read methods. SIDESTEP: make `GenericSet::Listpack` hold
+ONLY all-string listpacks. RESTORE gates on `fr_persist::listpack::decode_string_ranges_if_all_strings`
+(returns None on any int entry => take the normal transcode path; int-member sets are rarer and
+usually intset-encoded anyway). Then `GenericSetIter::Listpack { data: &'a [u8], cursor }` walks
+the listpack and yields BORROWED `&'a [u8]` member spans — no Cow, no owned formatting, uniform
+Item type with Packed/Hash. contains/get_index/len/iter all read directly. This is the last
+design obstacle; the keep-listpack-Set lever is now design-complete AND blueprinted to method
+granularity (materialize-guard mutators + ~6 borrowing read-arms + the span-cursor iterator +
+RESTORE all-string gate + DUMP-emit-bytes + OBJECT ENCODING). Clean, free parser, byte-exact by
+construction (iter order == insertion order == Packed). Ready to execute in a dedicated session;
+the only remaining cost is the implementation + full byte-exact validation (set/scan/digest/
+conformance/head-to-head), which is multi-hour, not a 60-min slice. Repeat for Hash, then zset.
