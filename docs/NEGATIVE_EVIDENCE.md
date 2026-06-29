@@ -7168,3 +7168,20 @@ get_score per WITHSCORE call) so it is sound in principle, but per the "REVERT ~
 it is NOT shipped — stashed (`CrimsonHawk-zrankws-combined-CORRECT-but-UNVERIFIED-under-load-444diff-pass`) for a re-bench on a
 quiet machine. The reusable sweep scripts (`extended_headtohead_ch.py` round-1 found the SHIPPED ZLEXCOUNT 4096→512 win
 bdcc79a02; `extended2_headtohead_ch.py` round-2) are kept. BLOCKER for measurement: machine load — interleaved A/B needs a quiet host.
+
+### 2026-06-29 SHIP (CONFIRMED via perf-stat instructions): ZRANK/ZREVRANK WITHSCORE one-pass rank+score (CrimsonHawk)
+UPDATE to the prior NO-SHIP entry above: the WITHSCORE combined rank+score path IS a real win, confirmed by the
+LOAD-INDEPENDENT server-side instruction count (throughput A/B was noise-dominated under load avg ~11-17; instructions
+retired over a FIXED command count is the correct metric — cf. generic_dispatch_clock_chaining). Driver
+`scripts/zrank_ws_blast.py` blasts N=400000 pipelined `ZRANK z m1000 WITHSCORE` while `perf stat -e instructions:u -p
+<server_pid>` measures the candidate (/tmp/fr_cand) and control (/tmp/fr_ctrl, HEAD 8344b5098) binaries:
+  - ZRANK WITHSCORE: CONTROL 9.230 G instr vs CANDIDATE 8.945 G instr over 400k cmds (two runs, swapped order, identical
+    to 0.01%) = ~712 fewer instructions/command = **-3.1% server instructions**, -6% cycles. This is the eliminated
+    redundant second keyspace `entries` probe + second `get_score(member)` (the old path = store.zrank THEN store.zmscore).
+  - plain ZRANK regression guard (untouched hot path): CONTROL 2.2776 G vs CANDIDATE 2.2767 G = 0.04% (noise) — proves the
+    change is ISOLATED to WITHSCORE and does not perturb the plain-rank fast path.
+Implementation: `rank_with_score`/`rev_rank_with_score` at FullSortedSet + PackedZSet + SortedSet dispatcher, and
+`Store::zrank_withscore(reverse)` (ONE record_keyspace_lookup), wired into fr-command `zrank_generic`. Byte-exact: 444/444
+live differential vs redis 7.2.4 (RESP2+RESP3, packed n=5..128 + full n=129..2000, missing key/member) = 0 mismatches;
+fr-store+fr-command `zrank` tests compile+pass. LESSON: when a perf change reduces a FIXED per-command work item, measure
+`perf stat instructions:u` over a fixed-count blast — it sees the win through machine load that swamps wall-clock A/B.

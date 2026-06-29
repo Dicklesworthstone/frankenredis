@@ -1305,6 +1305,24 @@ impl FullSortedSet {
         let asc = self.ensure_rank_tree().rank_of(&target);
         Some(len - 1 - asc)
     }
+
+    /// (CrimsonHawk) Combined rank + score in ONE traversal for `ZRANK ... WITHSCORE`.
+    /// `rank` already fetches the member's score to build the rank-tree target key, so
+    /// returning it costs nothing — vs the old WITHSCORE path that called `rank` and
+    /// then a *second* `get_score`/`zmscore` (a redundant member lookup + keyspace probe).
+    fn rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
+        let score = self.get_score(member)?;
+        let target = ScoreMember::actual(score, member.to_vec());
+        Some((self.ensure_rank_tree().rank_of(&target), score))
+    }
+
+    fn rev_rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
+        let score = self.get_score(member)?;
+        let len = self.dict.len();
+        let target = ScoreMember::actual(score, member.to_vec());
+        let asc = self.ensure_rank_tree().rank_of(&target);
+        Some((len - 1 - asc, score))
+    }
 }
 
 impl SortedSet {
@@ -1878,6 +1896,24 @@ impl SortedSet {
         match &mut self.inner {
             SortedSetInner::Packed(p) => p.rank(member).map(|rank| p.len() - 1 - rank),
             SortedSetInner::Full(f) => f.rev_rank(member),
+        }
+    }
+
+    /// (CrimsonHawk) Rank + score in one pass — see `FullSortedSet::rank_with_score`.
+    fn rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.rank_with_score(member),
+            SortedSetInner::Full(f) => f.rank_with_score(member),
+        }
+    }
+
+    fn rev_rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => {
+                let len = p.len();
+                p.rank_with_score(member).map(|(rank, s)| (len - 1 - rank, s))
+            }
+            SortedSetInner::Full(f) => f.rev_rank_with_score(member),
         }
     }
 
@@ -14703,6 +14739,51 @@ impl Store {
                         let rank = zs.rev_rank(member);
                         entry.touch(now_ms);
                         Ok(rank)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// (CrimsonHawk) `ZRANK`/`ZREVRANK key member WITHSCORE` — returns `(rank, score)`
+    /// from a SINGLE keyspace lookup + single zset traversal. The previous handler called
+    /// `zrank` then `zmscore`, doubling both the `entries` probe and the member lookup;
+    /// since `rank` already decodes the score to form the rank-tree key, this folds the
+    /// two into one. Stat accounting mirrors `zrank` exactly (one `record_keyspace_lookup`).
+    pub fn zrank_withscore(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        reverse: bool,
+        now_ms: u64,
+    ) -> Result<Option<(usize, f64)>, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let res = if reverse {
+                            zs.rev_rank_with_score(member)
+                        } else {
+                            zs.rank_with_score(member)
+                        };
+                        entry.touch(now_ms);
+                        Ok(res)
                     }
                     _ => Err(StoreError::WrongType),
                 }

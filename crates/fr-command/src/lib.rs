@@ -5553,41 +5553,34 @@ fn zrank_generic(
         false
     };
     let _ = cmd_name;
-    let rank_opt = if reverse {
-        store.zrevrank(&argv[1], &argv[2], now_ms)?
-    } else {
-        store.zrank(&argv[1], &argv[2], now_ms)?
-    };
-    match rank_opt {
-        Some(rank) => {
-            let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
-            if withscore {
-                // store.zrank already recorded the keyspace lookup; use the
-                // no-stat zmscore for the score read so WITHSCORE does not
-                // double-count keyspace_hits (upstream looks the key up once).
-                let score =
-                    store.zmscore(&argv[1], &[argv[2].as_slice()], now_ms)?[0].unwrap_or(0.0);
+    if withscore {
+        // (CrimsonHawk) Single keyspace lookup + single zset traversal returns BOTH
+        // rank and score — the old path did store.zrank THEN store.zmscore (a redundant
+        // entries probe + member lookup). One record_keyspace_lookup, matching upstream.
+        return match store.zrank_withscore(&argv[1], &argv[2], reverse, now_ms)? {
+            Some((rank, score)) => {
+                let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
                 // The score element honors the negotiated protocol: a RESP3 Double
                 // (`,<score>`) under HELLO 3, a bulk string under RESP2 — matching
-                // upstream t_zset.c zrankGenericCommand's addReplyDouble. (Was always
-                // a bulk string, which diverged from redis only in RESP3.)
+                // upstream t_zset.c zrankGenericCommand's addReplyDouble.
                 let score_frame =
                     zpop_score_frame(score, store.dispatch_client_ctx.resp_protocol_version);
                 Ok(RespFrame::Array(Some(vec![
                     RespFrame::Integer(rank_i),
                     score_frame,
                 ])))
-            } else {
-                Ok(RespFrame::Integer(rank_i))
             }
-        }
-        None => {
-            if withscore {
-                Ok(RespFrame::Array(None))
-            } else {
-                Ok(RespFrame::BulkString(None))
-            }
-        }
+            None => Ok(RespFrame::Array(None)),
+        };
+    }
+    let rank_opt = if reverse {
+        store.zrevrank(&argv[1], &argv[2], now_ms)?
+    } else {
+        store.zrank(&argv[1], &argv[2], now_ms)?
+    };
+    match rank_opt {
+        Some(rank) => Ok(RespFrame::Integer(i64::try_from(rank).unwrap_or(i64::MAX))),
+        None => Ok(RespFrame::BulkString(None)),
     }
 }
 

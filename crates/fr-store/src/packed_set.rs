@@ -3897,6 +3897,23 @@ impl PackedZSet {
         None
     }
 
+    /// (CrimsonHawk) Rank + score in one scan for `ZRANK ... WITHSCORE` — the score is
+    /// already decoded per record, so returning it avoids a second `get_score` pass.
+    #[must_use]
+    pub fn rank_with_score(&self, member: &[u8]) -> Option<(usize, f64)> {
+        let mut pos = 0;
+        let mut idx = 0;
+        while pos < self.buf.len() {
+            let (m, s, end) = self.record_at(pos);
+            if m == member {
+                return Some((idx, s));
+            }
+            idx += 1;
+            pos = end;
+        }
+        None
+    }
+
     /// Iterate `(member, score)` in ascending `(score, member)` order.
     #[must_use]
     pub fn iter(&self) -> PackedZSetIter<'_> {
