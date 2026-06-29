@@ -5149,3 +5149,22 @@ restore_*_listpack + decode/encode/apply wiring). LESSON (reinforced): clean sam
 A/B BEFORE landing; "byte-exact + conformance-green" proves correctness, NOT that it's a win.
 The biggest gap (RESTORE-command) is command-overhead-bound (decode+dedup+insertion), not the
 codec build — needs a different lever entirely.
+
+## 2026-06-29 cc: RESTORE-command residual has NO clean bounded lever (post keep-listpack revert) — components analyzed
+
+After reverting keep-listpack (~0-gain), analyzed each RESTORE-command profile component for a
+bounded win — none is clean:
+- dedup HashSet<&[u8]> (3%): LOAD-BEARING — from_unique_str_members assumes uniqueness, so the
+  check can't be dropped without corrupting duplicate-field/member sets; and it's already the
+  optimized shape (O(n) hash-dedup + O(n) bulk-build is FASTER than O(n^2) insert-build). Can't
+  match redis's sanitize=no skip cleanly (the builder relies on the validation).
+- decode_rdb_string blob copy (7%): eliminable via borrowed return, but the single-decode/copy
+  A/Bs proved these are mimalloc-recycled ~0-gain on this path.
+- process_buffered_frames (15%): shared RESP/dispatch (fr is FASTER than redis on SET/GET), so
+  not isolable as the gap without a redis-comparison profile.
+CONCLUSION: the RESTORE-command gap (set ~2.5x fr/redis) is distributed command-overhead with no
+single bounded codec/dispatch lever; closing it needs either a redis-vs-fr COMPARISON profile to
+find a true asymmetry, or a structural insertion-path change — both different-mode from a per-turn
+per-crate bench. Per-turn levers on the biggest gap are exhausted; the genuine validated session
+work (4 store wins, broken-main fix, full surface measurement = fr at-or-ahead online + DUMP)
+stands. keep-listpack was the one confounded claim, now reverted.
