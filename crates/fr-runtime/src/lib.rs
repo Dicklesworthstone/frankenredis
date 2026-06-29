@@ -37942,7 +37942,7 @@ fn apply_rdb_entries_to_store(
                 }
             }
             RdbValue::Stream(
-                ref stream_entries,
+                stream_entries,
                 ref watermark,
                 ref groups,
                 ref _metadata,
@@ -37954,15 +37954,14 @@ fn apply_rdb_entries_to_store(
                 // xadd-re-clone), one BTreeMap build, watermark/added set once —
                 // instead of N individual `xadd`s. The metadata follow-up below
                 // overwrites the bookkeeping, so the final state is unchanged.
+                // (frankenredis-cc rdb-apply-move) Own `stream_entries` (drop `ref`) so each
+                // entry's `fields` (already `Vec<StreamField>`) MOVES straight into the
+                // bulk-load vec instead of cloning every field+value byte-string per stream
+                // entry on RDB load. Byte-identical; (ms,seq) are owned Copy now.
                 let owned_entries: Vec<(fr_store::StreamId, Vec<fr_store::StreamField>)> =
                     stream_entries
-                        .iter()
-                        .map(|(ms, seq, fields)| {
-                            (
-                                (*ms, *seq),
-                                fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                            )
-                        })
+                        .into_iter()
+                        .map(|(ms, seq, fields)| ((ms, seq), fields))
                         .collect();
                 store.load_stream_entries(&key, owned_entries, now_ms);
                 if let Some((wm_ms, wm_seq)) = watermark {
