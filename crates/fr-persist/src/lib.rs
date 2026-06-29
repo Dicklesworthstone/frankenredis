@@ -572,6 +572,30 @@ impl AofRecord {
         RespFrame::Array(Some(args))
     }
 
+    /// Byte length of this record's RESP multibulk wire encoding, computed
+    /// WITHOUT materializing the frame or the encoded bytes. Exactly equals
+    /// `self.to_resp_frame().to_bytes().len()` (asserted in tests). The hot
+    /// AOF/replication propagation path only needs this length for offset
+    /// accounting; the prior `to_resp_frame().to_bytes().len()` cloned EVERY
+    /// argument's bytes into a `Vec<RespFrame>` AND allocated+encoded the full
+    /// wire `Vec<u8>` per write — for a replicated/AOF 256 KiB SET that is
+    /// ~2× the value bytes copied solely to be counted and dropped. This is
+    /// O(argc) arithmetic, zero allocation. (frankenredis-cc aofreclen)
+    #[must_use]
+    pub fn encoded_resp_len(&self) -> usize {
+        // Decimal digit count, matching `push_usize`'s output width.
+        fn decimal_len(n: usize) -> usize {
+            if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+        }
+        // Header: `*<argc>\r\n`
+        let mut len = 1 + decimal_len(self.argv.len()) + 2;
+        // Each element: `$<len>\r\n<bytes>\r\n`
+        for arg in &self.argv {
+            len += 1 + decimal_len(arg.len()) + 2 + arg.len() + 2;
+        }
+        len
+    }
+
     pub fn from_resp_frame(frame: &RespFrame) -> Result<Self, PersistError> {
         let RespFrame::Array(Some(items)) = frame else {
             return Err(PersistError::InvalidFrame);
@@ -8496,6 +8520,13 @@ mod tests {
                 let encoded = encode_aof_stream(&records);
                 let decoded = decode_aof_stream(&encoded).expect("generated AOF stream should decode");
                 prop_assert_eq!(decoded, records);
+            }
+
+            // (frankenredis-cc aofreclen) The alloc-free length MUST exactly equal
+            // the materialized-and-encoded length it replaces on the propagation path.
+            #[test]
+            fn aof_record_encoded_resp_len_matches_to_bytes(record in aof_record_strategy()) {
+                prop_assert_eq!(record.encoded_resp_len(), record.to_resp_frame().to_bytes().len());
             }
 
             #[test]

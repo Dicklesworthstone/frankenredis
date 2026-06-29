@@ -4552,7 +4552,7 @@ impl ServerState {
             argv: argv.to_vec(),
         };
         let encoded_len =
-            u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+            u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
         self.aof_records.push(record);
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state
@@ -4611,7 +4611,7 @@ impl ServerState {
             if aof_active && i >= self.aof_disk_flushed_records {
                 break;
             }
-            let len = u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+            let len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
             let record_end = cursor.saturating_add(len);
             // Stop once a record reaches into the live backlog window — keeping
             // it (and everything after) means `aof_base_offset <= start_offset`.
@@ -4656,7 +4656,7 @@ impl ServerState {
             argv: argv.to_vec(),
         };
         let encoded_len =
-            u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+            u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
         self.aof_records.push(record);
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state

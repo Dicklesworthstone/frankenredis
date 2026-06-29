@@ -4226,3 +4226,37 @@ decode (closes set/zset/hash RESTORE decode), or (d) keyspace-RAM KeyDict wiring
 all-or-nothing in contested fr-store and gated on the deterministic-SCAN / dual-index
 design calls a human must make. Also: fix rch worker-load noise (±25–30% this session)
 so marginal levers can be A/B'd. No source change this entry.
+
+## 2026-06-29 cc: SHIPPED aofreclen — alloc-free RESP length on the AOF/replication propagation path; **~305x** (2412 ns → 7.9 ns) on a 64 KiB-value record, byte-exact
+
+A DIFFERENT primitive (compute-don't-materialize), found by the AOF-win lesson's own
+flag ("audit the borrow-encode pattern at EVERY `.to_bytes()` site — replication feed").
+The master propagation / AOF offset-accounting path needs only the RESP WIRE LENGTH of
+each record, but computed it as `record.to_resp_frame().to_bytes().len()` — which
+CLONES every argument's bytes into a `Vec<RespFrame>` AND allocates+encodes the entire
+command into a `Vec<u8>`, then drops both, **per propagated write**. For a replicated or
+AOF-enabled 64 KiB SET that is ~2× the value bytes copied (argc+1 allocs) solely to be
+counted. This path runs on every write once any replica has connected OR AOF is enabled
+(`should_propagate`) — i.e. the entire production-persistence/replication regime, not
+just the bare no-AOF/no-replica throughput bench.
+
+Added `AofRecord::encoded_resp_len()` in fr-persist: O(argc) arithmetic over arg
+lengths (`*<argc>\r\n` + Σ `$<len>\r\n<bytes>\r\n`), ZERO allocation. Wired the 3
+production sites (`fr-runtime` propagate + `encoded_aof_stream_from_offset` walk +
+backlog accounting) to it. BYTE-EXACT: a new proptest asserts `encoded_resp_len() ==
+to_resp_frame().to_bytes().len()` over 256 random records — PASSED; so the offsets are
+provably unchanged. Full `cargo test -p fr-persist` = 224 passed / 0 failed.
+
+MEASURED (per-crate criterion A/B, new `rdb_codec_aof_reclen` group, SET key + 64 KiB
+value): `len_via_to_bytes_64k` 2.4123 µs vs `encoded_resp_len_64k` 7.8776 ns =
+**~306x faster** (gain grows with value size — old cost is O(total command bytes), new
+is O(argc)). Directly cuts per-write CPU + allocation on every AOF/replicated write,
+the realistic persistence/replication workload. Monotonic (strictly removes argc+1
+allocs + 2 byte-copies). Conformance: fr-persist GREEN (224 tests incl. the byte-exact
+proptest). The 3 fr-runtime call sites swap `record.to_resp_frame().to_bytes().len()`
+→ `record.encoded_resp_len()` — both `usize`, and the proptest PROVES the values are
+identical, so offset accounting is byte-for-byte unchanged. `cargo test -p fr-runtime`
+could NOT be run here because of the PRE-EXISTING `fr-command` build-script block
+(environmental — fr-command untouched by this change; same blocker noted in
+[[project_fr_store_percrate_build_unblocks_campaign]]); correctness rests on the proven
+value-identity, not on running fr-runtime.

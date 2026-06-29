@@ -14,7 +14,7 @@
 //! docs/RELEASE_READINESS_SCORECARD.md (DEBUG RELOAD).
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use fr_persist::{RdbEntry, RdbValue, decode_rdb, encode_rdb};
+use fr_persist::{AofRecord, RdbEntry, RdbValue, decode_rdb, encode_rdb};
 
 fn build_entries() -> Vec<RdbEntry> {
     let mut entries = Vec::new();
@@ -322,6 +322,27 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| decode_rdb(std::hint::black_box(&big_hash_encoded)).unwrap())
     });
     big_hash.finish();
+
+    // AOF/replication propagation: the offset-accounting path needs only the RESP
+    // wire LENGTH of each record. `encoded_resp_len` computes it alloc-free vs the
+    // prior `to_resp_frame().to_bytes().len()` which clones every arg + encodes the
+    // whole command just to count + drop it. Representative SET with a 64 KiB value
+    // (the large-value case where the clone+encode dominates). (aofreclen)
+    let aof_set = AofRecord {
+        argv: vec![
+            b"SET".to_vec(),
+            b"some:key:000001".to_vec(),
+            vec![b'x'; 64 * 1024],
+        ],
+    };
+    let mut aoflen = c.benchmark_group("rdb_codec_aof_reclen");
+    aoflen.bench_function("len_via_to_bytes_64k", |b| {
+        b.iter(|| std::hint::black_box(&aof_set).to_resp_frame().to_bytes().len())
+    });
+    aoflen.bench_function("encoded_resp_len_64k", |b| {
+        b.iter(|| std::hint::black_box(&aof_set).encoded_resp_len())
+    });
+    aoflen.finish();
 }
 
 fn build_big_hashtable_entries() -> Vec<RdbEntry> {
