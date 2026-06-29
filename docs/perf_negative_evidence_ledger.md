@@ -2728,6 +2728,28 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
+## 2026-06-29 CrimsonHawk: XADD residual estimate_stream O(n) assessed MARGINAL — invasive + MEMORY-USAGE-parity-constrained, not worth it; dispatch-lever vein closed
+
+Assessed the last XADD-residual lever (estimate_stream_memory_usage_bytes, 3.59% of XADD).
+ROOT: `cached_entry_memory_usage_bytes` caches expensive value estimates keyed by the
+entry's `modification_count` — which BUMPS every XADD, so an actively-written stream ALWAYS
+cache-misses → `estimate_stream` re-iterates `entries.values()` (O(n)) on each used_memory
+recompute (every 64 mutations) = O(n²/64) for a growing stream.
+FIX would be incremental payload tracking in PackedStreamLog (insert adds / trim subtracts
+the per-entry listpack-byte contribution) → estimate_stream O(1). But: (a) it must produce
+the BYTE-EXACT same value (MEMORY USAGE is conformance-gated, used_memory models redis), so
+no approximation allowed; (b) it's an invasive PackedStreamLog change; (c) the gain is
+MARGINAL — 3.59% of XADD (0.715x→~0.74x) + MEMORY-USAGE-on-large-streams (rare); bounded
+(MAXLEN) streams stay small so it barely bites the common case. NOT worth the invasive
+rewrite for ~3.6%. Recorded as a known fr-store candidate for a future stream-storage
+session (incremental-tracking primitive), not a per-turn lever.
+
+NET: the dispatch-tax lever vein is now fully closed — GEOADD (2.5x) + XADD (1.9x) landed
+(the only two write commands without a fast path / not fitting the shared keyed_values
+shape); all other writes parity-or-faster; the remaining residuals (XADD 3-hash-lookup,
+estimate_stream O(n), keyspace RAM, RESTORE-decode) are structural/multi-hour/marginal,
+not per-turn dispatch levers. The build-unblock pipeline yielded 2 throughput wins. No source.
+
 ## 2026-06-29 CrimsonHawk: write-command dispatch vein DONE — SADD/LPUSH/HDEL/SREM all parity-or-faster; memory's "HDEL/SREM 7.5x/3.3x" is STALE (now 0.909x/0.96x)
 
 After GEOADD+XADD, scanned the remaining write commands. CORRECTION: my first check
