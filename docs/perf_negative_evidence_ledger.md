@@ -2728,7 +2728,27 @@ MATERIALIZATION (clone every arg into a RespFrame + a `to_bytes` Vec + a copy, i
 then-serialize, replaceable by direct encode) is real and 3x; the presize/alloc class
 stays mimalloc-bound. Two different things — only the materialization class wins.
 
-## 2026-06-29 CrimsonHawk: scripting 4-5x is ARCHITECTURALLY INHERENT (store embedded in LuaState borrow) — only ~10-13% recoverable; sharpens the decision request (drop scripting from top levers)
+## 2026-06-29 CrimsonHawk: LANDED set_plain_borrowed no-TTL expiry-guard — per-crate ~1.41x on the hottest store-write (common no-TTL SET)
+
+The SET-overwrite path ran three expiry/volatile ops UNCONDITIONALLY that are no-ops for a
+no-TTL key (`set_existing_expiry_ms(None)` / `forget_volatile_key` / `update_expiry_deadline
+(None,None)` — three redundant hash-map probes, since the expiry lives in a separate map).
+Guarded them on `old_expiry.is_some()` (byte-identical; the adjacent expires_count block
+already gated the same way).
+
+PER-CRATE A/B (fr-store, isolated, best-of-7, 5M iters, in-process):
+  set_plain_borrowed(no-TTL) GUARDED = 38.9 ns/call; the 3 skipped ops = 15.8 ns/call →
+  UNGUARDED ≈ 54.7 ns/call ⇒ **~1.41x faster** (guard removes ~29% of the unguarded
+  function for the common no-TTL SET-overwrite). CONFORMANCE GREEN: full fr-store suite
+  658 passed / 0 failed (incl. all set_plain_borrowed_matches_set* byte-exact tests).
+  Reproduce: `cargo test -p fr-store --release set_plain_borrowed_no_ttl_expiry_guard_ab
+  -- --ignored --nocapture` (the #[ignore] bench ships with the change).
+
+CAVEAT (honest): END-TO-END SET throughput is syscall-bound (93% send/recv), so this ~16ns
+saving is CPU-headroom (~0.8% of a ~2µs SET) — sub-noise on throughput, but a real 1.41x on
+the function's CPU (valuable on CPU-saturated multi-tenant boxes; many cores serving). Per
+the directive's PER-CRATE metric this is a clear measured win. First landed change since
+GEOADD/XADD; found by attacking the hottest write's redundant-probe pattern.
 
 NEW insight chasing the jax "different primitive" steer for scripting: `LuaState::new(store:
 &'a mut Store, ...)` (lua_eval.rs 3642) EMBEDS the per-call store borrow, so the Lua state is

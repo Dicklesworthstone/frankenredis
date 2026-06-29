@@ -6556,9 +6556,17 @@ impl Store {
             (old_expiry, old_was_stream)
         };
 
-        self.set_existing_expiry_ms(key, None);
-        self.forget_volatile_key(key);
-        self.update_expiry_deadline(old_expiry, None);
+        // (CrimsonHawk) These three only have an effect when the key actually carried a
+        // TTL: set_existing_expiry_ms(None) is a no-op when no expiry is present,
+        // forget_volatile_key is a no-op (a no-TTL key is never in the volatile set), and
+        // update_expiry_deadline(None, None) is a no-op. Guarding on old_expiry.is_some()
+        // skips three hash-map probes on the common SET-overwrite-of-a-no-TTL-key path
+        // (byte-identical; the existing expires_count block below already gates the same way).
+        if old_expiry.is_some() {
+            self.set_existing_expiry_ms(key, None);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(old_expiry, None);
+        }
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
             self.stream_groups.remove(key);
@@ -29293,6 +29301,46 @@ mod tests {
         assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
         assert_eq!(actual.dirty, expected.dirty);
         assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    // (CrimsonHawk) Per-crate A/B for the no-TTL expiry-guard in set_plain_borrowed:
+    // measures the cost of the three expiry/volatile ops the guard skips for a no-TTL key
+    // (set_existing_expiry_ms + forget_volatile_key + update_expiry_deadline) as a fraction
+    // of the full set_plain_borrowed call. Run:
+    //   cargo test -p fr-store --release set_plain_borrowed_no_ttl_expiry_guard_ab -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn set_plain_borrowed_no_ttl_expiry_guard_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut store = Store::new();
+        store.set_plain_borrowed(b"k", b"v0", 1000); // a no-TTL key
+        let iters = 5_000_000u64;
+        for _ in 0..iters / 10 {
+            store.set_plain_borrowed(black_box(b"k"), black_box(b"v"), 1000);
+        }
+        let mut best_set = u128::MAX;
+        let mut best_ops = u128::MAX;
+        for _ in 0..7 {
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                store.set_plain_borrowed(black_box(b"k"), black_box(b"v"), 1000);
+            }
+            best_set = best_set.min(t0.elapsed().as_nanos());
+            let t1 = Instant::now();
+            for _ in 0..iters {
+                store.set_existing_expiry_ms(black_box(b"k"), None);
+                store.forget_volatile_key(black_box(b"k"));
+                store.update_expiry_deadline(None, None);
+            }
+            best_ops = best_ops.min(t1.elapsed().as_nanos());
+        }
+        let set_ns = best_set as f64 / iters as f64;
+        let ops_ns = best_ops as f64 / iters as f64;
+        eprintln!(
+            "set_plain_borrowed(no-TTL)={set_ns:.1} ns/call; 3-ops-skipped-by-guard={ops_ns:.1} ns/call; guard saves {:.1}% of set_plain_borrowed",
+            100.0 * ops_ns / set_ns
+        );
     }
 
     #[test]
