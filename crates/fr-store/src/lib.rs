@@ -9470,6 +9470,15 @@ impl Store {
     /// Returns the count of fields that were reaped.
     /// (br-frankenredis-b8ut)
     fn drop_expired_hash_fields(&mut self, key: &[u8], now_ms: u64) -> usize {
+        // (frankenredis-cc hdel-fieldttl-guard) Fast exit when NO hash anywhere carries a
+        // per-field TTL: the range probe below allocates `key.to_vec()` and walks the
+        // BTreeMap on EVERY hash read (HGETALL/HKEYS/HVALS/HLEN/HMGET/HRANDFIELD) for
+        // nothing. An O(1) `is_empty` check skips the alloc + probe. Byte-exact: an empty
+        // map yields no expired fields → 0. (HEXPIRE/HPEXPIRE are rare, so this is the
+        // overwhelmingly common path.)
+        if self.hash_field_expires.is_empty() {
+            return 0;
+        }
         // Collect expired (key, field) pairs via the BTreeMap prefix range.
         let expired_fields: Vec<Vec<u8>> = self
             .hash_field_expires
@@ -18725,6 +18734,13 @@ impl Store {
     /// hashes, or for non-hash keys.
     #[must_use]
     pub fn hash_field_is_expired(&self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        // (frankenredis-cc hdel-fieldttl-guard) Skip the `(Vec, Vec)` composite alloc + probe
+        // (2 allocations per HGET/HEXISTS field-expiry check via drop_hash_field_if_expired)
+        // when no hash anywhere carries a per-field TTL. Byte-exact: empty map → get is None
+        // → false.
+        if self.hash_field_expires.is_empty() {
+            return false;
+        }
         self.hash_field_expires
             .get(&(key.to_vec(), field.to_vec()))
             .is_some_and(|&at| at <= now_ms)

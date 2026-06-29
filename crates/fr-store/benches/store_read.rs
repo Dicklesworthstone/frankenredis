@@ -26,6 +26,12 @@ fn bench_get(c: &mut Criterion) {
     store.set(b"counter:key".to_vec(), b"0".to_vec(), None, 1_000);
     // A key for the EXPIRE write-path lazy-drop (TTL refreshed each iter).
     store.set(b"expire:key".to_vec(), b"v".to_vec(), None, 1_000);
+    // A hash with a few fields and NO per-field TTLs, for the HGET field-expiry-check
+    // allocation-elision guard (hash_field_is_expired fast-exits on an empty TTL map).
+    {
+        let pairs: &[&[u8]] = &[b"f0", b"v0", b"f1", b"v1", b"f2", b"v2"];
+        store.hset_borrowed_many(b"hh", pairs, 1_000).unwrap();
+    }
 
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
@@ -130,6 +136,13 @@ fn bench_get(c: &mut Criterion) {
     // TOUCH on a live no-TTL key (non-LFU): lazy-drop single `get_mut` access-touch.
     g.bench_function("touch_no_ttl", |b| {
         b.iter(|| std::hint::black_box(store.touch_key(std::hint::black_box(b"target:key"), 2_000)))
+    });
+    // HGET on a hash field with NO per-field TTLs (the common case): the candidate elides
+    // the 2-Vec composite alloc + BTree probe in hash_field_is_expired.
+    g.bench_function("hget_no_fieldttl", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.hget(std::hint::black_box(b"hh"), std::hint::black_box(b"f0"), 2_000))
+        })
     });
     // HDEL of 50 fields on a hashtable with NO field TTLs (the common case): the candidate
     // skips the per-field `hash_field_ttl_clear_for_field` loop (2 Vec allocs + BTree probe

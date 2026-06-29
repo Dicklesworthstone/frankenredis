@@ -4699,3 +4699,21 @@ hdel_50_no_fieldttl 3.035 µs -> 1.716 µs = **~−43% (~1.77x)** (worker-cancel
 change CI [+71%,+82%] p=0.00, non-overlapping. The eliminated 2-alloc-per-field tax.
 Generalizable check: scan other multi-element write paths for unconditional per-element
 side-map clears that allocate composite keys when the side map is empty.
+
+
+## 2026-06-29 cc: SHIPPED hash-READ field-TTL fast-exit (HGET/HGETALL/HMGET…) **−28.5% (~1.4x)** on HGET, byte-exact — same alloc-elision primitive, hotter path
+
+Generalized the HDEL field-TTL guard to the (much hotter) hash READ surface, as the prior
+ledger note flagged. TWO per-read waste sites both probed `hash_field_expires` with a freshly
+allocated composite key on EVERY hash read even when no field TTL exists anywhere:
+(1) `drop_expired_hash_fields` (HGETALL/HKEYS/HVALS/HLEN/HMGET/HRANDFIELD) allocated
+`key.to_vec()` + walked a BTree range; (2) `hash_field_is_expired`
+(HGET/HEXISTS via drop_hash_field_if_expired) allocated a `(Vec, Vec)` composite = 2 allocs.
+Guarded both behind an O(1) `hash_field_expires.is_empty()`. BYTE-EXACT (empty map → range/
+get empty → 0/false; whenever ANY field TTL exists the guard is false and the original path
+runs verbatim): `cargo test -p fr-store` lib 659/0 + all integration (incl. hash_field_ttl).
+MEASURED — A/B normalized by the get-ref control (candidate ran on a ~12%-SLOWER worker, so
+conservative): hget_no_fieldttl candidate/get 2.261 vs baseline/get 3.161 = **−28.5%
+(~1.4x)** (raw 169.09→136.96 ns), p=0.00 non-overlapping. HGET is among the hottest hash ops;
+the 2-alloc-per-read tax was ~28% of its cost. Alloc-elision primitive (composite-key probe
+fast-exit on empty side-map) now applied across HDEL + the full hash-read surface.
