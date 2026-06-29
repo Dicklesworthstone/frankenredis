@@ -2901,8 +2901,14 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     if expected_len > 536_870_912 {
         return None;
     }
-    // Cap initial allocation to avoid OOM from malicious RDB payloads.
-    let mut output = Vec::with_capacity(expected_len.min(8192));
+    // Cap initial allocation to avoid OOM from malicious RDB payloads. The cap
+    // bounds the speculative reservation against a hostile header while still
+    // pre-sizing legitimate blobs in one allocation — at 8 KiB any compressible
+    // value/listpack that decompresses past 8 KiB paid ~log2(len/8K) realloc+copy
+    // grows; 1 MiB covers the overwhelming majority of real blobs in a single
+    // alloc and keeps the malicious-header reservation bounded. Capacity never
+    // affects content, so decoded bytes are identical. (frankenredis-cc lzfcap)
+    let mut output = Vec::with_capacity(expected_len.min(1 << 20));
     let mut cursor = 0usize;
 
     while cursor < input.len() && output.len() < expected_len {

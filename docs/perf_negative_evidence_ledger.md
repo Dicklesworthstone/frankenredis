@@ -4086,3 +4086,34 @@ eager-vs-lazy + deterministic-SCAN tradeoff class as the keyspace-RAM lever abov
 No source change. Also confirmed this cycle: every .scratch/.worktrees worktree
 (~90) belongs to another agent (blackthrush/bluefalcon/cod-a/cod-b/coralox/
 ivorycoyote) — no `cc`-owned off-main MEASURED win exists to land.
+
+## ============================================================================
+
+## 2026-06-29 cc: SHIPPED lzfcap — lzf_decompress output pre-size cap 8 KiB → 1 MiB; +4.96% large-compressible-blob RDB decode (measured, byte-identical, OOM-bound preserved)
+
+A POSITIVE result, not negative evidence — recorded here so the codec ledger stays
+the single source of truth. The prior CrimsonHawk entries characterized RDB DECODE as
+"per-element-Vec-alloc-bound"; that holds for the small-listpack collections in the
+existing bench, but a separate decode cost was unmeasured: `lzf_decompress`
+(`fr-persist/src/lib.rs`) pre-sized its output `Vec` at `expected_len.min(8192)` as a
+malicious-header OOM guard, so ANY LZF-compressed blob that decompresses past 8 KiB
+(large compressible string VALUES — JSON/text blobs — and big compressible listpacks,
+common in real RDBs) paid ~log2(len/8K) realloc+copy grows. The existing bench never
+exercised this: quicklist payloads are PRNG/non-compressible (stored RAW, skip LZF),
+and the collection listpacks are < 8 KiB.
+
+LEVER: raise the pre-size cap to `expected_len.min(1 << 20)` (1 MiB). Real blobs now
+get a single exact allocation; the speculative reservation against a hostile header
+stays bounded (≤ 1 MiB, and the existing `> 512 MiB → None` reject is untouched).
+Capacity never affects content ⇒ decoded bytes are byte-identical.
+
+MEASURED (per-crate criterion A/B via `rch exec -- cargo bench -p fr-persist --bench
+rdb_codec`, new `rdb_codec_big_compressible_string` case = 200 × 64 KiB compressible
+string values): baseline (8 KiB cap) 5.4621 ms [5.4228, 5.5042]; candidate (1 MiB cap)
+5.1913 ms [5.1623, 5.2214]; **change −4.96% [−5.87%, −4.10%], p=0.00, non-overlapping
+CIs.** Gain scales with blob size (a 1 MiB compressible blob elides ~7 grows vs ~3 at
+64 KiB). This recovers part of fr's vs-redis decode deficit (collection/string RESTORE
+≈ 0.36–0.46x = redis 2.2–2.8x faster) specifically on the large-compressible-blob path.
+Conformance/correctness GREEN: full `cargo test -p fr-persist` exit 0 (incl.
+`lzf_compress_decompress_round_trips`, `lzf_decompress_chunked_matches_bytewise`).
+Bench coverage for the previously-untested large-compressible case added alongside.

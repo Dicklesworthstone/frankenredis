@@ -298,6 +298,36 @@ fn bench_codec(c: &mut Criterion) {
         b.iter(|| decode_rdb(std::hint::black_box(&set_intset_encoded)).unwrap())
     });
     set_intset.finish();
+
+    // Large, highly-compressible string VALUES (repetitive blobs that LZF shrinks
+    // and that decompress back to >8 KiB) — common in real RDBs (JSON/text blobs)
+    // and the case the lzf_decompress initial-capacity cap exercises. 200 x 64 KiB.
+    let big_string_entries = build_big_compressible_string_entries();
+    let big_string_encoded = encode_rdb(&big_string_entries, &[]);
+    let mut big_string = c.benchmark_group("rdb_codec_big_compressible_string");
+    big_string.throughput(Throughput::Elements(big_string_entries.len() as u64));
+    big_string.bench_function("decode_big_compressible_string_rdb", |b| {
+        b.iter(|| decode_rdb(std::hint::black_box(&big_string_encoded)).unwrap())
+    });
+    big_string.finish();
+}
+
+fn build_big_compressible_string_entries() -> Vec<RdbEntry> {
+    let mut entries = Vec::with_capacity(200);
+    for key in 0..200 {
+        let unit = format!("field-{}-value-{};", key % 13, key % 7).into_bytes();
+        let mut value = Vec::with_capacity(64 * 1024);
+        while value.len() < 64 * 1024 {
+            value.extend_from_slice(&unit);
+        }
+        entries.push(RdbEntry {
+            db: 0,
+            key: format!("big:{key:06}").into_bytes(),
+            value: RdbValue::String(value),
+            expire_ms: None,
+        });
+    }
+    entries
 }
 
 criterion_group!(benches, bench_codec);
