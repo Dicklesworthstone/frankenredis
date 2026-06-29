@@ -4807,3 +4807,17 @@ load_rdb/full-sync/hash-TTL roundtrip). NOT A/B-measured: fr-runtime has no benc
 this is a load-time path — the win is a provable allocation reduction, not a perf gamble.
 Residual on this path: HashWithTtls (kept `ref` — reuses fields for the deadline loop, rare)
 and the Stream arm (clones for BTreeMap/consumer-map building — inherent restructuring).
+
+## 2026-06-29 cc: CANDIDATE (symmetric to the shipped apply-clone lever) — SAVE materializes a full dataset copy; MEASURE before refactoring
+
+`store_to_rdb_entries` (fr-runtime:37620, the SAVE/BGSAVE/DUMP bridge) copies EVERY value out
+of the store into an intermediate `RdbValue` (`v.to_vec()` / `l.iter().map(to_vec)` /
+`s.iter().map(into_owned)` / hash+zset field copies) before `encode_rdb(&entries)` writes
+bytes. That's a transient whole-keyspace copy redis avoids (fork/COW + encode straight from
+the object). Symmetric to the just-shipped LOAD-side apply-clone elimination (0db058687…
+ede4c8de9), but the fix is BIGGER: a borrowed-encode path (encode_rdb taking `&Value`/borrowed
+spans, or a borrowed `RdbValueRef<'a>`) spanning fr-persist + fr-runtime. UNLIKE the load gap
+(RESTORE-decode 0.36-0.46x is a MEASURED gap), there is NO SAVE/DUMP head-to-head datapoint
+flagging this as a real bottleneck. NEXT STEP is to MEASURE first (build the binary via the
+legacy-unignore workflow, time SAVE/DEBUG-RELOAD of a large dataset vs redis-server) before
+committing to the refactor — do not assume it's the biggest gap without data.
