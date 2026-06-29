@@ -4332,3 +4332,31 @@ slowest). Not separately micro-benched (fr-store has no criterion harness and th
 is a strict elimination of a full-keyspace clone+probe, reusing an already-correctness-
 tested reaper). Conformance: `cargo test -p fr-store` GREEN. Modest magnitude vs the
 per-command persistence wins, but free + strictly-better.
+
+## 2026-06-29 cc: next-lever map after 7 persistence/codec wins — accessible testable vein mined; highest-value remaining lever (GET lookup-collapse) is blocked on coordination + the build-block
+
+This turn's dig swept the remaining accessible surface and confirmed where the next
+real levers are and why each is blocked (so they aren't re-scouted):
+
+1. **GET keyspace double-lookup (HIGHEST value, contested core).** `record_keyspace_lookup`
+   (fr-store L5853) calls `drop_if_expired` (one `entries.get`), then the read method
+   (`get_string_bytes` etc., ~10 callers) does a SECOND `entries.get` to read the value —
+   2 entries-map probes per GET hit. A combined `get_for_read(key,now) -> Option<&Entry>`
+   (peek expiry via `expiry_ms`, evict-or-return-ref, stats before the ref) collapses it
+   to ~1 probe — directly attacks the P16 per-command-CPU gap (ohsk5, the headline ~2x).
+   BLOCKED: it's the contested hot core (CoralOx/CobaltCove already removed one probe,
+   `shewy`), a borrow-delicate refactor across ~10 read methods, and `am` coordination is
+   down — unsafe to touch without reservations. Needs am restored + an owner handshake.
+2. **fr-runtime/fr-server hot wiring** (replica-apply stream decode, GET handler) — blocked
+   by the pre-existing `fr-command` build-script issue (can't compile/test those crates).
+3. **expiry clone-storms** (`expire_snapshot_volatile_keys` L22038, `randomkey_with_prefix`
+   L19040) — clone all volatile keys to drop the expired subset; a `evaluate_expiry`-filtered
+   clone-subset is byte-exact + testable but MARGINAL (save/rare-frequency, and the clone is
+   a fraction of the save/scan it sits in) → would be ~0-gain, not shipped.
+4. **Structural multi-day** (keep-listpack RESTORE decode, uybhq zset dual-structure, 99fwc
+   ChunkedList, keyspace-RAM KeyDict) — contested fr-store, human design decision.
+
+`notify_keyspace_event` confirmed already cheaply gated (`flags == 0` early-out) — covered.
+OPERATOR ACTION to unblock the next round: (a) restart `am` so the GET-core lever (#1, the
+biggest remaining per-command lever) can be safely claimed/coordinated; (b) fix the
+`fr-command` build-script block to open #2. No source change this entry.
