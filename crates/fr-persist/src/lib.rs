@@ -1164,11 +1164,6 @@ pub enum RdbValue {
     /// by re-deriving from content. (frankenredis-39is8)
     SetHashtable(Vec<Vec<u8>>),
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
-    /// (frankenredis-cc keep-listpack) Raw redis HASH_LISTPACK blob kept VERBATIM for
-    /// an all-string hash (load-side mirror of holding the listpack object). Only
-    /// produced when every field+value is a string (the apply layer applies the
-    /// final Packed-fit gate); an int-bearing listpack falls back to `Hash`.
-    HashListpack(Vec<u8>),
     /// Redis 7.4 hash with per-field TTLs. Each tuple is
     /// (field, value, Some(abs_deadline_ms)) for a TTL'd field or
     /// (field, value, None) for a field without a TTL. Encoded via
@@ -1750,13 +1745,6 @@ fn encode_rdb_internal(
                             rdb_encode_string(&mut buf, value);
                         }
                     }
-                }
-                RdbValue::HashListpack(blob) => {
-                    // (frankenredis-cc keep-listpack) Re-emit the kept all-string hash listpack
-                    // blob verbatim as HASH_LISTPACK (rdb-string-wrapped, matching decode).
-                    buf.push(RDB_TYPE_HASH_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_string(&mut buf, blob);
                 }
                 RdbValue::HashWithTtls(fields) => {
                     buf.push(RDB_TYPE_HASH_WITH_TTLS);
@@ -3746,33 +3734,21 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        // (frankenredis-cc keep-listpack) Keep the raw blob verbatim when every
-                        // field AND value is a string, so the store holds it lazily instead of
-                        // transcoding. A hash with any int-encoded field/value falls back to the
-                        // explode path for a faithful Hash.
-                        if listpack::decode_string_ranges_if_all_strings(&listpack)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                        {
-                            RdbValue::HashListpack(listpack.to_vec())
-                        } else {
-                            // Pair owned decoded entries straight into `fields`.
-                            // Moving string payloads avoids a clone+drop allocation;
-                            // integer entries still render to canonical decimal bytes.
-                            let decoded = listpack::decode_listpack(&listpack)
-                                .map_err(|_| PersistError::InvalidFrame)?;
-                            if !decoded.len().is_multiple_of(2) {
-                                return Err(PersistError::InvalidFrame);
-                            }
-                            let mut fields = Vec::with_capacity(decoded.len() / 2);
-                            let mut it = decoded.into_iter();
-                            while let Some(field) = it.next() {
-                                let value = it.next().ok_or(PersistError::InvalidFrame)?;
-                                fields.push((field.into_bytes(), value.into_bytes()));
-                            }
-                            RdbValue::Hash(fields)
+                        // Pair owned decoded entries straight into `fields`.
+                        // Moving string payloads avoids a clone+drop allocation;
+                        // integer entries still render to canonical decimal bytes.
+                        let decoded = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?;
+                        if !decoded.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
                         }
+                        let mut fields = Vec::with_capacity(decoded.len() / 2);
+                        let mut it = decoded.into_iter();
+                        while let Some(field) = it.next() {
+                            let value = it.next().ok_or(PersistError::InvalidFrame)?;
+                            fields.push((field.into_bytes(), value.into_bytes()));
+                        }
+                        RdbValue::Hash(fields)
                     }
                     RDB_TYPE_ZSET_LISTPACK => {
                         // Listpack of m1, score1, m2, score2, ... where each
