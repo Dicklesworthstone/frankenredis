@@ -7313,3 +7313,16 @@ no-TTL blasts vs control=HEAD 9750196a0: LSET **-1.98%**, LINSERT **-1.21%** (lo
 dominates; the ~135 instr/cmd drop saving is the same). Byte-exact: 600 live differential vs redis 7.2.4 (plain/expired/
 other-key-TTL/wrongtype/missing) = 0 mismatches; LRANGE state identical. VEIN now substantially closed (~15 hot cmds
 guarded); residual bare-drop sites are cold/rare (getset/smove/pfadd/getdel use a different expiry pattern).
+
+### 2026-06-29 NO-SHIP (~0-gain): central drop_if_expired expires_count fast-exit (CrimsonHawk)
+Tried the "radical" central version of the drop-guard vein: add `if self.expires_count == 0 { return entries.contains_key }`
+at the top of drop_if_expired itself, to save the expiry_ms probe for ALL ~88 record_keyspace_lookup read callers at once
+(vs hand-guarding each write method). MEASURED via perf-stat instructions over 400k-cmd no-TTL blasts (candidate vs control
+HEAD ffcd99c5a) across 10 hot reads: hget +0.28%, zscore +0.12%, sismember +0.29%, llen +0.63%, scard/zcard +0.39%, hexists
++0.55%, getrange/type +0.00%, exists +0.36% — i.e. candidate was NOT faster on any (all within hash-seed instruction noise,
+ratios slightly >1.0). ROOT CAUSE: the hot cheap reads are ALREADY collapsed to a single lookup via lookup_live_for_read_mut
+(STRLEN/SORT-weight) or the get-single-lookup path (GET) — they DON'T call drop_if_expired at all. The remaining
+drop_if_expired callers in a no-TTL workload are cold/rare; the hot write methods are already hand-guarded
+(c3edfedfb..ffcd99c5a). So the central fast-exit helps only paths that don't show on the hot surface → REVERTED (no measured
+gain). The per-method guard remains the right tool (it skips the WHOLE drop = 2 lookups; the central one only saved 1 and the
+beneficiaries are already collapsed). VEIN is now genuinely closed for measurable per-turn wins.
