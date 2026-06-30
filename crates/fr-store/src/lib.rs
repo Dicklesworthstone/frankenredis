@@ -14648,6 +14648,61 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) ZINTER (non-store) data core: iterate the FIRST source by
+    /// reference and probe the rest, cloning only the intersection survivors.
+    ///
+    /// This is byte-for-byte the prior command-level ZINTER loop — same first-key
+    /// iteration, same argv aggregation order (`weights[0]` on the first source,
+    /// `weights[i+1]` on `keys[1..][i]`), same `normalize_weighted_score` /
+    /// `aggregate_scores` (which are identical to the command's `*_for_cmd`
+    /// variants) — but it elides the `O(|keys[0]|)` member-clone that the old
+    /// path paid via `zget_members_with_scores_no_stats(keys[0])` only to discard
+    /// every non-survivor (e.g. a disjoint intersection clones the entire first
+    /// set, then drops all of it). `ZSetAlgebraInput::score` matches
+    /// `zget_score_or_set_member_no_stats` exactly (SortedSet → `get_score`,
+    /// Set → `1.0`). First-source visitation order is irrelevant because the
+    /// caller re-sorts the result by (score, member) before emitting.
+    ///
+    /// Stats / `touch` / LFU bumps / WRONGTYPE stay in the command via
+    /// `record_source_key_lookups` + `ensure_zset_or_set_source`; this is a pure
+    /// no-stats read, so a `None` source here means "missing key" (an absent
+    /// member of the intersection), not a type error.
+    pub fn zinter_members_argv_order_no_stats(
+        &self,
+        keys: &[&[u8]],
+        weights: &[f64],
+        aggregate: &[u8],
+    ) -> Vec<(Vec<u8>, f64)> {
+        let inputs: Vec<Option<ZSetAlgebraInput<'_>>> = keys
+            .iter()
+            .map(|key| {
+                self.entries
+                    .get(*key)
+                    .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+            })
+            .collect();
+        let Some(Some(first)) = inputs.first().copied() else {
+            return Vec::new();
+        };
+        let w0 = weights.first().copied().unwrap_or(1.0);
+        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+        first.for_each(|member, score| {
+            let mut combined = normalize_weighted_score(score, w0);
+            for (i, input) in inputs[1..].iter().enumerate() {
+                let Some(input) = input else {
+                    return;
+                };
+                let Some(other) = input.score(member) else {
+                    return;
+                };
+                let weight = weights.get(i + 1).copied().unwrap_or(1.0);
+                combined = aggregate_scores(combined, other * weight, aggregate);
+            }
+            result.push((member.to_vec(), combined));
+        });
+        result
+    }
+
     fn zintercard_cache_hit(&self, keys: &[&[u8]], limit: u64) -> Option<u64> {
         let cache = self.zintercard_cache.as_ref()?;
         if cache.dirty != self.dirty || cache.limit != limit || cache.keys.len() != keys.len() {

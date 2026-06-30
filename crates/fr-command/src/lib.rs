@@ -23686,28 +23686,17 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
-    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
-    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-    let w0 = weights.first().copied().unwrap_or(1.0);
-    for (member, score) in first_members {
-        let mut combined = normalize_weighted_score_cmd(score, w0);
-        let mut in_all = true;
-        for (i, &key) in keys[1..].iter().enumerate() {
-            match store.zget_score_or_set_member_no_stats(key, &member)? {
-                Some(s) => {
-                    let w = weights.get(i + 1).copied().unwrap_or(1.0);
-                    combined = aggregate_scores_for_cmd(combined, s * w, &aggregate);
-                }
-                None => {
-                    in_all = false;
-                    break;
-                }
-            }
-        }
-        if in_all {
-            result.push((member, combined));
-        }
-    }
+    // (CrimsonHawk) Borrow-only intersection: iterate the first source by
+    // reference and clone only the survivors, instead of materializing every
+    // first-key member (and its bytes) up front via
+    // `zget_members_with_scores_no_stats` only to discard the non-survivors. The
+    // type-checks above (`ensure_zset_or_set_source`) already rejected WRONGTYPE,
+    // so the store core can treat an absent source as an empty intersection
+    // member. Byte-identical: same argv aggregation order + same SUM/MIN/MAX/NaN
+    // helpers (`aggregate_scores`/`normalize_weighted_score` mirror the `*_for_cmd`
+    // variants), and the result is re-sorted below so first-key visitation order
+    // does not matter.
+    let mut result = store.zinter_members_argv_order_no_stats(&keys, &weights, &aggregate);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
     result.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
@@ -40922,6 +40911,171 @@ mod tests {
             other => panic!("expected error, got {other:?}"),
         };
         assert_eq!(got, "ERR hash value is not an integer".to_string());
+    }
+
+    #[test]
+    fn zinter_borrowed_core_matches_materialized_reference_crimsonhawk() {
+        // (CrimsonHawk) ZINTER now iterates the first source by reference and
+        // clones only survivors via `zinter_members_argv_order_no_stats`. Prove
+        // the visible reply is byte-identical to an independent reference that
+        // materializes the first source, then filters/aggregates in argv order,
+        // across SortedSet/Set mixes, WEIGHTS, AGGREGATE SUM/MIN/MAX, WITHSCORES,
+        // a disjoint pair, a single key, and a missing key.
+        fn seed() -> Store {
+            let mut store = Store::new();
+            // zset za: a=1, b=2, c=3, d=4
+            for (m, s) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"za".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            // zset zb: b=10, c=20, e=30
+            for (m, s) in [("b", "10"), ("c", "20"), ("e", "30")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"zb".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            // plain set sc: {c, d, f}  (membership score 1.0)
+            dispatch_argv(
+                &[
+                    b"SADD".to_vec(),
+                    b"sc".to_vec(),
+                    b"c".to_vec(),
+                    b"d".to_vec(),
+                    b"f".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            // disjoint zset zx: x=1, y=2
+            for (m, s) in [("x", "1"), ("y", "2")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"zx".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            store
+        }
+
+        // Independent reference DATA mirroring the OLD ZINTER loop exactly.
+        // Returns sorted (member, score) pairs; the reply byte-format/emit code is
+        // unchanged by this refactor, so comparing data is the right invariant.
+        fn reference(
+            store: &mut Store,
+            keys: &[&[u8]],
+            weights: &[f64],
+            aggregate: &[u8],
+        ) -> Vec<(Vec<u8>, f64)> {
+            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let w0 = weights.first().copied().unwrap_or(1.0);
+            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (member, score) in first {
+                let ws = score * w0;
+                let mut combined = if ws.is_nan() { 0.0 } else { ws };
+                let mut in_all = true;
+                for (i, &key) in keys[1..].iter().enumerate() {
+                    match store
+                        .zget_score_or_set_member_no_stats(key, &member)
+                        .unwrap()
+                    {
+                        Some(s) => {
+                            let w = weights.get(i + 1).copied().unwrap_or(1.0);
+                            let b = s * w;
+                            combined = if aggregate.eq_ignore_ascii_case(b"MIN") {
+                                combined.min(b)
+                            } else if aggregate.eq_ignore_ascii_case(b"MAX") {
+                                combined.max(b)
+                            } else {
+                                let r = combined + b;
+                                if r.is_nan() { 0.0 } else { r }
+                            };
+                        }
+                        None => {
+                            in_all = false;
+                            break;
+                        }
+                    }
+                }
+                if in_all {
+                    result.push((member, combined));
+                }
+            }
+            result.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            result
+        }
+
+        // Parse a ZINTER ... WITHSCORES reply into (member, score) pairs.
+        fn pairs_from_reply(reply: &RespFrame) -> Vec<(Vec<u8>, f64)> {
+            let RespFrame::Array(Some(items)) = reply else {
+                panic!("expected array reply, got {reply:?}");
+            };
+            let mut out = Vec::new();
+            let mut it = items.iter();
+            while let Some(m) = it.next() {
+                let RespFrame::BulkString(Some(member)) = m else {
+                    panic!("expected bulk member, got {m:?}");
+                };
+                let s = it.next().expect("withscores: score follows member");
+                let RespFrame::BulkString(Some(score)) = s else {
+                    panic!("expected bulk score, got {s:?}");
+                };
+                let score: f64 = std::str::from_utf8(score).unwrap().parse().unwrap();
+                out.push((member.clone(), score));
+            }
+            out
+        }
+
+        let scenarios: &[(&[&[u8]], Vec<f64>, &[u8])] = &[
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za", b"zb"], vec![2.0, 3.0], b"SUM"),
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"MIN"),
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"MAX"),
+            (&[b"za", b"sc"], vec![1.0, 1.0], b"SUM"),
+            (&[b"sc", b"za"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za", b"zb", b"sc"], vec![1.0, 1.0, 1.0], b"SUM"),
+            (&[b"za", b"zx"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za"], vec![1.0], b"SUM"),
+            (&[b"za", b"missing"], vec![1.0, 1.0], b"SUM"),
+        ];
+
+        for (keys, weights, aggregate) in scenarios {
+            let mut argv: Vec<Vec<u8>> = vec![b"ZINTER".to_vec(), keys.len().to_string().into()];
+            for k in *keys {
+                argv.push(k.to_vec());
+            }
+            argv.push(b"WEIGHTS".to_vec());
+            for w in weights {
+                argv.push(format!("{w}").into_bytes());
+            }
+            argv.push(b"AGGREGATE".to_vec());
+            argv.push(aggregate.to_vec());
+            argv.push(b"WITHSCORES".to_vec());
+
+            let mut store = seed();
+            let got = dispatch_argv(&argv, &mut store, 0).expect("zinter dispatch");
+            let got_pairs = pairs_from_reply(&got);
+            let mut ref_store = seed();
+            let want = reference(&mut ref_store, keys, weights, aggregate);
+            assert_eq!(
+                got_pairs,
+                want,
+                "ZINTER diverged for keys={keys:?} weights={weights:?} aggregate={}",
+                String::from_utf8_lossy(aggregate),
+            );
+        }
     }
 
     #[test]
