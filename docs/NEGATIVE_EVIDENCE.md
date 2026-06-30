@@ -7326,3 +7326,20 @@ drop_if_expired callers in a no-TTL workload are cold/rare; the hot write method
 (c3edfedfb..ffcd99c5a). So the central fast-exit helps only paths that don't show on the hot surface → REVERTED (no measured
 gain). The per-method guard remains the right tool (it skips the WHOLE drop = 2 lookups; the central one only saved 1 and the
 beneficiaries are already collapsed). VEIN is now genuinely closed for measurable per-turn wins.
+
+### 2026-06-29 SHIP (perf-stat instructions): GETRANGE zero-copy dispatch — finish the _into migration (CrimsonHawk)
+NEW lever (not the drop-guard vein): found via fresh broad head-to-head that GETRANGE SCALES badly — tiny 1.14x, 1k 1.06x,
+10k 0.76x, full-20k **0.39x** vs redis 7.2.4 (an O(range) copy). ROOT CAUSE: the zero-copy path already existed
+(execute_plain_getrange_borrowed_into → getrange_with → encode_bulk_string_slice straight into the write buffer, returning
+FastEncodedReply) and parse_borrowed_multibulk_action used it, but the TWO getrange sites in process_buffered_frames still
+called the allocating execute_plain_getrange_borrowed (substring.to_vec() → RespFrame::BulkString(Vec) → encode = a full
+O(range) malloc+memcpy + a 2nd copy). Incomplete migration. FIX: route both process_buffered_frames sites through _into +
+FastEncodedReply (conn.write_buf is in scope; _into writes nothing before returning None on a deferred range, so the
+fallback is safe).
+MEASURED via perf-stat instructions over fixed 100k-cmd GETRANGE blasts, candidate vs control=HEAD 799d9d80e:
+  - 1k range: -2.58% (~90 instr/cmd); 10k: **-14.63%** (~851/cmd); 20k: **-13.08%** (~2325/cmd) — savings scale with range
+    (the eliminated alloc+copy). Wall-clock confirmed the direction (10k cand-vs-redis 0.82x→0.99x) but was load-noisy;
+    instructions are the load-independent signal.
+Byte-exact: 1364 live differential vs redis 7.2.4 — 364 exhaustive (RESP2+RESP3, individual + pipelined; empty/1-byte/binary/
+40KB strings; ranges incl negative/out-of-range/inverted/full; missing/wrongtype) + 1000 MIXED-pipeline (GETRANGE interleaved
+with GET/SET/INCR/HGET/PING/APPEND, verifying FastEncodedReply mid-pipeline doesn't corrupt the buffer) = 0 mismatches.
