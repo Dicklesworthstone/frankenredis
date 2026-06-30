@@ -7220,3 +7220,24 @@ control grow the key identically so the realloc/extend cost cancels in the A/B),
 Byte-exact: 403 live differential vs redis 7.2.4 (fresh/existing/wrongtype/empty/binary/re-append) = 0 mismatches;
 proto-max-bulk-len cap path returns byte-identical error to redis (verified at the 1 MiB CONFIG minimum); keyspace_hits/
 misses +0 and GET-after values identical to redis; fr-store append unit tests 11/11 green.
+
+### 2026-06-29 VEIN EXHAUSTED (hot-path): redundant probe-then-relookup — remaining instances entangled (CrimsonHawk)
+After shipping the 3 clean hot-path wins this session (ZRANK WITHSCORE 374d82db4, LMPOP/ZMPOP f4ff99699, APPEND
+7973d2454), audited every remaining handler/fast-path that does a no-stat probe (peek_value_type / *_no_stat / *_no_touch)
+then re-looks-up the same key. NONE is a clean per-turn win — do NOT re-chase without a deeper refactor:
+- SETRANGE: the borrowed fast path (execute_plain_setrange_borrowed) is ALREADY optimal — it declines empty/negative/
+  oversized and calls store.setrange once with no peek; store.setrange does WRONGTYPE internally. Only the COLD generic
+  handler keeps a peek_value_type, and valid SETRANGEs take the fast path, so optimizing generic ≈ 0 measurable gain.
+- SPOP: the common `SPOP key` form is already a single store.spop. The COUNT form's peek/scard/exists probes encode
+  the exact upstream single-keyspace-hit accounting for the whole-set-removal branch (934ax) — load-bearing, not redundant.
+- INCRBYFLOAT (measured 0.85x): the peek_value_type is LOAD-BEARING for error ordering — the handler/fast-path pre-parse
+  the delta (f80 long-double fallback) BEFORE the store call, so without the type peek `INCRBYFLOAT <list-key> abc` would
+  leak "value is not a valid float" instead of WRONGTYPE (the incrbyfloatorder fix). Removing it cleanly needs the float
+  parse refactored INTO store.incrbyfloat_text (risks the f80 decimal-range path). incrbyfloat_text's own expiry_ms +
+  entries.get are lookups into DIFFERENT maps (expiry_deadlines vs entries) — not collapsible.
+- GETDEL: only a single extra entries.get (typecheck) after record_keyspace_lookup; eliminating it needs a remove-then-
+  reinsert on the rare WRONGTYPE branch (must perfectly restore entry metadata + cached-memory accounting) — risk > 1-lookup reward.
+- GETEX expiry path: rare + correctness-sensitive (notify/dirty/del-vs-expire events).
+CONCLUSION: the clean hot-path redundant-probe wins are shipped; the residue is cold-path, stat-accounting-load-bearing,
+or error-ordering-load-bearing. Next levers need a different technique (store-internal multi-map lookup fusion, or the
+architectural zero-copy-RESP / RAM gaps), not another probe removal.
