@@ -7629,7 +7629,11 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -7696,7 +7700,11 @@ impl Store {
         value: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         // (frankenredis-uwhyl) Mirror redis setbitCommand: reject when the byte
         // index reaches proto-max-bulk-len (config knob, not a hardcoded 512 MiB).
         if offset >> 3 >= self.proto_max_bulk_len {
@@ -12091,7 +12099,11 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12388,7 +12400,11 @@ impl Store {
         values: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12440,7 +12456,11 @@ impl Store {
         values: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -14391,7 +14411,11 @@ impl Store {
     }
 
     pub fn zrem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;

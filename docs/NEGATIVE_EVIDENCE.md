@@ -7295,3 +7295,13 @@ path, per the store.hset cold-path lesson): zadd_plain_owned (the borrowed-fastp
   - ZADD plain (zadd_plain_owned): **-3.7%** (~150 instr/cmd); ZADD GT CH (zadd_with_options): **-2.1%** (~155 instr/cmd).
 Byte-exact: 800 live differential vs redis 7.2.4 (plain + NX/XX/GT/LT/CH/INCR flags × plain/expired/other-key-TTL/wrongtype/
 missing) = 0 mismatches; ZRANGE WITHSCORES state identical; fr-store zadd tests 5/5 green.
+
+### 2026-06-29 SHIP (perf-stat instructions): ZREM/SETRANGE/SETBIT/LREM/LPUSHX/RPUSHX expires_count drop guard (CrimsonHawk)
+Continued the expires_count drop-guard vein into 6 more hot store writes with a bare unconditional drop_if_expired + entries
+re-probe; all perf-verified on the command path. Guarded each with `if self.expires_count != 0`. MEASURED via perf-stat
+instructions over 400k-cmd no-TTL blasts vs control=HEAD 1a97fe1aa:
+  - ZREM **-5.05%**, LPUSHX **-3.92%**, RPUSHX **-3.90%**, SETRANGE **-3.35%**, SETBIT **-1.87%**, LREM **-1.09%**
+    (~135-160 instr/cmd on the bigger ones). Byte-exact: 1500 live differential vs redis 7.2.4 (plain/expired[TTL elapsed]/
+    other-key-TTL[expires_count>0,target live]/wrongtype/missing × all 6 cmds) = 0 mismatches; EXISTS/TYPE identical;
+    fr-store tests 22/22 green. Running vein tally: ~13 hot commands now guarded (incrbyfloat/hincrbyfloat/sadd/srem/hdel/
+    hincrby/hsetnx/zadd×2/zrem/setrange/setbit/lrem/lpushx/rpushx). Remaining bare-drop sites are rarer/cold — perf-verify before guarding.
