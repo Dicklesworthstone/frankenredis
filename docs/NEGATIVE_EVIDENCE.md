@@ -7305,3 +7305,11 @@ instructions over 400k-cmd no-TTL blasts vs control=HEAD 1a97fe1aa:
     other-key-TTL[expires_count>0,target live]/wrongtype/missing × all 6 cmds) = 0 mismatches; EXISTS/TYPE identical;
     fr-store tests 22/22 green. Running vein tally: ~13 hot commands now guarded (incrbyfloat/hincrbyfloat/sadd/srem/hdel/
     hincrby/hsetnx/zadd×2/zrem/setrange/setbit/lrem/lpushx/rpushx). Remaining bare-drop sites are rarer/cold — perf-verify before guarding.
+
+### 2026-06-29 SHIP (perf-stat instructions): LSET/LINSERT expires_count drop guard (CrimsonHawk)
+Closed the expires_count drop-guard vein's remaining hot-ish list-element writes: store.lset, linsert_before, linsert_after.
+Guarded each bare drop_if_expired with `if self.expires_count != 0`. MEASURED via perf-stat instructions over 400k-cmd
+no-TTL blasts vs control=HEAD 9750196a0: LSET **-1.98%**, LINSERT **-1.21%** (lower % because LINSERT's pivot scan
+dominates; the ~135 instr/cmd drop saving is the same). Byte-exact: 600 live differential vs redis 7.2.4 (plain/expired/
+other-key-TTL/wrongtype/missing) = 0 mismatches; LRANGE state identical. VEIN now substantially closed (~15 hot cmds
+guarded); residual bare-drop sites are cold/rare (getset/smove/pfadd/getdel use a different expiry pattern).
