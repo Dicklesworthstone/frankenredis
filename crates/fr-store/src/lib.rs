@@ -10600,6 +10600,46 @@ impl Store {
         }
     }
 
+    /// Zero-copy HGET: borrows the field value bytes (or `None` for a missing
+    /// key/field) into the closure instead of `m.get(field).map(<[u8]>::to_vec)`,
+    /// letting the runtime `_into` fast path encode straight into the write buffer
+    /// (skips the per-read field-value `Vec` alloc + a second copy at encode).
+    /// Side effects (keyspace stats, per-field TTL reap, LFU/LRU touch) match
+    /// `hget` exactly. (TealHeron — zero-copy `_into` migration vein)
+    pub fn hget_with<R>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(f(None));
+        }
+        self.drop_hash_field_if_expired(key, field, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => Ok(f(m.get(field))),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(f(None)),
+        }
+    }
+
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the get_mut below re-probes entries). Byte-identical; see sadd.

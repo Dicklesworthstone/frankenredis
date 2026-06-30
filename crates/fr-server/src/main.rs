@@ -4365,12 +4365,23 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hget_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_hget_borrowed(packet.key, packet.member, ts)
+                    // (TealHeron) Zero-copy HGET: encode the borrowed field-value
+                    // slice straight into conn.write_buf instead of the allocating
+                    // execute_plain_hget_borrowed (to_vec -> BulkString(Vec) -> encode
+                    // = O(value) malloc+memcpy + a 2nd copy). Mirrors GETRANGE _into.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hget_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7121,12 +7132,20 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hget_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_hget_borrowed(packet.key, packet.member, ts)
+                    // (TealHeron) Zero-copy HGET — see the matching site above.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hget_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

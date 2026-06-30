@@ -5206,3 +5206,36 @@ DEFINITIVE: the RESTORE-command gap is SOLELY the owned-argv large-payload copy 
 zero-copy-RESP lever (helps every large-arg command), the only structural cold-path item left
 besides RAM. Every per-turn per-crate codec/kernel lever is shipped or eliminated. fr remains
 at-or-ahead of redis 7.2.4 on the entire online surface + DUMP.
+
+## 2026-06-30 TealHeron: SHIPPED zero-copy HGET `_into` — −9..11% server instructions at 4KB–64KB field values (scales with value size, byte-exact)
+
+Continued the zero-copy `_into` dispatch-migration vein (after GETRANGE 0a6ac17fc). The two hot
+HGET sites in `fr-server process_buffered_frames` called the ALLOCATING
+`execute_plain_hget_borrowed` (store.hget did `m.get(field).map(<[u8]>::to_vec)` -> a full
+O(value) malloc+memcpy, then `RespFrame::BulkString(Vec)` -> FastReply encode = a 2nd O(value)
+copy). Added `store.hget_with<R>` (borrows the field-value slice into a closure, side effects
+identical to `hget`) + `execute_plain_hget_borrowed_into` (encodes via `encode_bulk_string_slice`
+straight into `conn.write_buf`, FastEncodedReply). Eliminates the per-read field-value alloc + one
+of the two O(value) copies. Mirrors `execute_plain_get_borrowed_into` exactly.
+
+MEASURED (pinned interleaved A/B vs HEAD=0a6ac17fc, perf-stat instructions:u over fixed 300k-HGET
+blast):
+  vs=256B    0.985  (−1.5%)
+  vs=4KB     0.896  (−10.4%, ±0.0001 across 3 rounds)
+  vs=16KB    0.906–0.941
+  vs=64KB    0.889–0.942 (−6..11%)
+Win SCALES with field-value size = the eliminated O(value) copy, exactly as predicted.
+Byte-exact: ctrl-vs-cand IDENTICAL on 12-reply RESP2 + RESP3 battery (nil field, missing key,
+WRONGTYPE, empty value, binary value, 100KB value, mixed pipeline).
+
+METHODOLOGY LESSON (re-confirms [[feedback_perfstat_instructions_beats_wallclock_under_load]]): the
+UNPINNED interleaved A/B was pure noise (0.89–1.01, mean 0.97 — looked like a possible REGRESSION).
+CPU-pinning server+client to distinct cores (`taskset -c`) collapsed the variance to ±0.0001 and
+exposed the clean −10% signal. For these large-copy levers the dominant cost is the unavoidable
+encode memcpy present in BOTH binaries; the alloc-elimination delta is ~10% and only visible once
+scheduler jitter is pinned out. ALWAYS pin both processes before concluding on a copy-elimination
+lever — un-pinned jitter can flip a real −10% win into an apparent +3% loss.
+
+NEXT in this vein (need their own `_into` written; perf-verify each SCALES with payload): LINDEX
+(large list element), GETSET (old value), GETDEL (value-then-delete; trickier — encode before
+removal). GET + GETRANGE + HGET now all zero-copy `_into`.
