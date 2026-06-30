@@ -7258,3 +7258,16 @@ Byte-exact: 437 live differential vs redis 7.2.4 (fresh/int/floatstr/ttl/wrongty
 scientific, f80 1e500 range, 0xff, inf/nan/abc rejections, large-int precision) = 0 mismatches; TTL preserved across the
 incr; keyspace_hits/misses +0 and value/TTL identical to redis; fr-store incrbyfloat tests 11/11 green. OPENS new vein:
 store methods that hash the same key across entries + expiry_deadlines + side-maps (hincrbyfloat_text next candidate).
+
+### 2026-06-29 SHIP (perf-stat instructions): HINCRBYFLOAT conditional-drop fusion (CrimsonHawk)
+Same store-internal fusion vein as the incrbyfloat win (c3edfedfb), applied to store.hincrbyfloat_text: replaced the
+unconditional `drop_if_expired(key)` (a no-op entries probe for a live key, redundant with the `internal_entry` that
+immediately re-probes entries) with `if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict { drop_if_expired }`.
+No expiry-reuse needed (it mutates the hash in place; the key TTL is untouched). MEASURED via perf-stat instructions over
+a 300k-cmd `HINCRBYFLOAT h f 0.0` blast, candidate vs control=HEAD c3edfedfb:
+  - no-TTL: control 2.6065 G vs candidate 2.5660 G = **-1.55%** (~135 instr/cmd, reproduced swapped to 0.0000)
+  - TTL:    control 2.7563 G vs candidate 2.7156 G = -1.48% (~136 instr/cmd). Smaller % than incrbyfloat (hincrbyfloat's
+    total work is larger — hash-field ops — so the one saved lookup is a smaller fraction), but consistent + real.
+Byte-exact: 428 live differential vs redis 7.2.4 (fresh/field-exists/ttl/wrongtype/expired/multi-field; negative/
+scientific/f80/0xff/inf/nan deltas; new vs existing fields) = 0 mismatches; TTL preserved; keyspace_hits/misses +0;
+HGET value + TTL identical; fr-store hincrbyfloat tests 3/3 green.

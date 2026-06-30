@@ -11098,7 +11098,12 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Conditional drop: for a live key drop_if_expired is a pure no-op
+        // entries probe, and `internal_entry` below re-probes entries anyway — read the
+        // deadline once and only drop when actually due, eliding the redundant probe.
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
