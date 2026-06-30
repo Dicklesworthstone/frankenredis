@@ -11861,6 +11861,56 @@ impl Store {
         }
     }
 
+    /// Zero-copy LINDEX: borrows the addressed list element (or `None` for a
+    /// missing key / out-of-range index) into the closure instead of
+    /// `l.get(idx).map(<[u8]>::to_vec)`, letting the runtime `_into` fast path
+    /// encode straight into the write buffer (skips the per-read element `Vec`
+    /// alloc + a second copy). Side effects (no-stat `drop_if_expired`, LFU bump,
+    /// touch-only-on-valid-index) match `lindex` exactly. (TealHeron — zero-copy
+    /// `_into` migration vein)
+    pub fn lindex_with<R>(
+        &mut self,
+        key: &[u8],
+        index: i64,
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                let idx = match &entry.value {
+                    Value::List(l) => {
+                        let len = l.len() as i64;
+                        if index < -len || index >= len {
+                            return Ok(f(None));
+                        }
+                        normalize_index(index, len) as usize
+                    }
+                    _ => return Err(StoreError::WrongType),
+                };
+                entry.touch(now_ms);
+                let Value::List(l) = &entry.value else {
+                    unreachable!("value type cannot change between borrows")
+                };
+                Ok(f(l.get(idx)))
+            }
+            None => Ok(f(None)),
+        }
+    }
+
     pub fn lset(
         &mut self,
         key: &[u8],

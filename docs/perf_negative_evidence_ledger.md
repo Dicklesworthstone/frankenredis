@@ -5239,3 +5239,25 @@ lever — un-pinned jitter can flip a real −10% win into an apparent +3% loss.
 NEXT in this vein (need their own `_into` written; perf-verify each SCALES with payload): LINDEX
 (large list element), GETSET (old value), GETDEL (value-then-delete; trickier — encode before
 removal). GET + GETRANGE + HGET now all zero-copy `_into`.
+
+## 2026-06-30 TealHeron: SHIPPED zero-copy LINDEX `_into` — −10.7% server instructions @4KB element (byte-exact)
+
+Third command in the zero-copy `_into` vein (after GETRANGE 0a6ac17fc, HGET a4a2cab43). The two
+hot LINDEX sites in process_buffered_frames called the allocating execute_plain_lindex_borrowed
+(store.lindex did `l.get(idx).map(<[u8]>::to_vec)` -> BulkString(Vec) -> FastReply encode = O(elem)
+malloc+memcpy + a 2nd copy). Added `store.lindex_with<R>` (closure borrows the addressed element;
+PRESERVES the no-stat drop_if_expired + touch-only-on-valid-index semantics of lindex exactly) +
+`execute_plain_lindex_borrowed_into` (PRESERVES the key_type WRONGTYPE-before-index precheck, then
+routes the "list" arm through lindex_with + encode_bulk_string_slice into conn.write_buf,
+FastEncodedReply). Generic borrowed-args site (~10731) left allocating (cold).
+
+MEASURED (pinned interleaved A/B vs HEAD=a4a2cab43, perf-stat instructions:u, fixed 300k-LINDEX):
+  vs=256B   0.982 (−1.8%, ±0.0006/3 rounds)
+  vs=4KB    0.893 (−10.7%, ±0.0001/3 rounds — the clean stable signal)
+  vs=16KB   noisy this run (0.83/0.97/1.14 — CTRL's own count swung ±10% from concurrent machine
+            load; the candidate still lands below CTRL on the median)
+  vs=64KB   0.97/0.88/0.93 (mean ~0.93)
+Same magnitude + scaling as HGET (the eliminated O(elem) copy). Byte-exact: ctrl-vs-cand IDENTICAL
+on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONGTYPE, binary,
+empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
+NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
