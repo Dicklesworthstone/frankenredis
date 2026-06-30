@@ -14133,7 +14133,11 @@ impl Store {
         members: Vec<(f64, Vec<u8>)>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the contains_key/get_mut below re-probe entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
 
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
@@ -14234,7 +14238,11 @@ impl Store {
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<(usize, usize), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the contains_key/get_mut below re-probe entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
 
         // ZADD XX on a missing key should not create an empty sorted set
         if opts.xx && !self.entries.contains_key(key) {

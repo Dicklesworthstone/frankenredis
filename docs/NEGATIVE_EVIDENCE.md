@@ -7286,3 +7286,12 @@ sadd/srem/hdel/hincrby/hsetnx tests 21/21 green.
 REVERTED store.hset (measured 0.00% — the HSET command routes through hset_borrowed_many, so store.hset is cold). NOTE: the
 remaining ~70 unconditional drop_if_expired sites are a broad follow-on vein — guard the hot ones whose command path uses
 the plain store method (verify via perf, not assumption: store.hset looked identical but was cold).
+
+### 2026-06-29 SHIP (perf-stat instructions): ZADD expires_count drop guard (both hot paths) (CrimsonHawk)
+Continued the expires_count-drop-guard vein into ZADD's two HOT store methods (verified via perf they're on the command
+path, per the store.hset cold-path lesson): zadd_plain_owned (the borrowed-fastpath/plain ZADD) and zadd_with_options
+(NX/XX/GT/LT/CH/INCR). Both did an unconditional drop_if_expired then re-probed entries via contains_key — guarded with
+`if self.expires_count != 0`. MEASURED via perf-stat instructions over 400k-cmd no-TTL blasts vs control=HEAD 9cde58e14:
+  - ZADD plain (zadd_plain_owned): **-3.7%** (~150 instr/cmd); ZADD GT CH (zadd_with_options): **-2.1%** (~155 instr/cmd).
+Byte-exact: 800 live differential vs redis 7.2.4 (plain + NX/XX/GT/LT/CH/INCR flags × plain/expired/other-key-TTL/wrongtype/
+missing) = 0 mismatches; ZRANGE WITHSCORES state identical; fr-store zadd tests 5/5 green.
