@@ -3975,19 +3975,12 @@ fn append(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("APPEND"));
     }
-    // APPEND is a write (lookupKeyWrite + checkType + checkStringLength), so the
-    // current-length/WRONGTYPE precheck must NOT bump keyspace_hits — use the
-    // non-counting length read. (frankenredis-934ax)
-    let current_len = store.string_len_no_stats(&argv[1], now_ms)?;
-    let added_len = argv[2].len();
-    if current_len.saturating_add(added_len) > store.proto_max_bulk_len {
-        // (frankenredis-ga4j1) Upstream t_string.c::checkStringLength
-        // line 48 names the *config knob* (proto_max_bulk_len), not a
-        // fixed byte size. Matches SETRANGE wording at line 9422 above.
-        return Err(CommandError::Custom(
-            "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
-        ));
-    }
+    // (CrimsonHawk) APPEND is a write (lookupKeyWrite + checkType + checkStringLength).
+    // The WRONGTYPE check and the checkStringLength (proto-max-bulk-len) cap now live
+    // INSIDE store.append, which already materializes the string — so the old separate
+    // `string_len_no_stats` probe (a redundant second keyspace lookup) is gone. append is
+    // a no-stat write (no keyspace_hits bump), matching the old no-counting probe; the cap
+    // error byte string is identical (rendered verbatim via GenericError).
     let new_len = store.append(&argv[1], &argv[2], now_ms)?;
     let new_len = i64::try_from(new_len).unwrap_or(i64::MAX);
     Ok(RespFrame::Integer(new_len))

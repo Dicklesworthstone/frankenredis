@@ -7182,6 +7182,16 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        // (CrimsonHawk) Enforce the proto-max-bulk-len cap INSIDE append so callers no
+        // longer need a separate `string_len_no_stats` probe before it (one keyspace
+        // lookup saved per APPEND, both the generic handler and the borrowed fast path).
+        // WRONGTYPE still takes precedence (materialize_string runs first), and the cap
+        // error is byte-identical to upstream checkStringLength. The closure returns Err
+        // BEFORE mutating the value, so a rejected append never changes the key, never
+        // bumps `dirty`, never touches LRU — only the unread digest-mutation counter ticks
+        // (same as the existing WRONGTYPE error path), and the value is unchanged so DEBUG
+        // DIGEST stays byte-identical. The cap trips only on >512 MiB strings.
+        let max_len = self.proto_max_bulk_len;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -7194,6 +7204,11 @@ impl Store {
             let Some(v) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
             };
+            if v.len().saturating_add(value.len()) > max_len {
+                return Err(StoreError::GenericError(
+                    "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                ));
+            }
             v.extend_from_slice(value);
             let len = v.len();
             entry.touch_write(now_ms, lfu_tracking_enabled);
@@ -7206,6 +7221,11 @@ impl Store {
             }
             result
         } else {
+            if value.len() > max_len {
+                return Err(StoreError::GenericError(
+                    "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                ));
+            }
             let len = value.len();
             self.internal_entries_insert(
                 key.to_vec(),

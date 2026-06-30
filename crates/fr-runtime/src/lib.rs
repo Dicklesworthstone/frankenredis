@@ -9334,24 +9334,12 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror the generic `append` handler exactly: no-stat length read (which
-        // surfaces WRONGTYPE for a non-string key), then the checkStringLength
-        // guard, then the append. (frankenredis-ga4j1 string-length cap = 512MiB)
-        let reply = match self.server.store.string_len_no_stats(key, now_ms) {
-            Ok(current_len) => {
-                if current_len.saturating_add(value.len()) > self.server.proto_max_bulk_len {
-                    RespFrame::Error(
-                        "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
-                    )
-                } else {
-                    match self.server.store.append(key, value, now_ms) {
-                        Ok(new_len) => {
-                            RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX))
-                        }
-                        Err(err) => CommandError::Store(err).to_resp(),
-                    }
-                }
-            }
+        // (CrimsonHawk) Mirror the generic `append` handler: store.append now enforces
+        // both the WRONGTYPE check and the checkStringLength (proto-max-bulk-len) cap
+        // internally, so the old separate no-stat length probe is gone — one keyspace
+        // lookup instead of two. (frankenredis-ga4j1 string-length cap = 512MiB)
+        let reply = match self.server.store.append(key, value, now_ms) {
+            Ok(new_len) => RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);

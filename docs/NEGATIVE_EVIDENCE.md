@@ -7203,3 +7203,20 @@ nil-path confound), candidate=this change vs control=8344b5098 (identical mpop c
 Byte-exact: 1800 live differential checks vs redis 7.2.4 (RESP2 + RESP3 with correct map parser; 1/2/3 keys, COUNT 1/2/5/7,
 LEFT/RIGHT, MIN/MAX, missing keys mixed with non-empty, WrongType first/second key) = 0 mismatches; keyspace_hits/misses +0
 and DBSIZE identical to redis. (BLMPOP/BZMPOP left on the old path — blocking, rarer — no regression.)
+
+### 2026-06-29 SHIP (perf-stat instructions): APPEND fold checkStringLength into store.append, drop probe (CrimsonHawk)
+Same redundant-double-keyspace-lookup vein as ZRANK WITHSCORE / LMPOP. APPEND did a `string_len_no_stats` probe (for the
+WRONGTYPE surface + the checkStringLength proto-max-bulk-len cap) THEN `store.append` re-looked-up the same key — two
+keyspace lookups, in BOTH the generic fr-command handler and the fr-runtime borrowed fast path. FIX: move the WRONGTYPE
+check (already present via materialize_string) and the proto-max-bulk-len cap INTO store.append (reads the existing
+self.proto_max_bulk_len field, returns GenericError with the byte-identical "ERR string exceeds maximum allowed size
+(proto-max-bulk-len)" string). No signature change → test callers unaffected. The cap closure returns Err BEFORE mutating,
+so a rejected append never changes the value / bumps dirty / touches LRU (only the unread digest-mutation counter ticks,
+same as the pre-existing WRONGTYPE error path; value unchanged → DEBUG DIGEST byte-identical); the cap only trips on
+>512 MiB strings.
+MEASURED load-independent via perf-stat instructions over a fixed 300k-cmd APPEND blast (scripts/append_blast.py; cand and
+control grow the key identically so the realloc/extend cost cancels in the A/B), candidate vs control=HEAD f4ff99699:
+  - control 1.1587 G vs candidate 1.1059 G instr / 300k = **-4.5%** (~176 instr/cmd), reproduced swapped-order to 0.01%.
+Byte-exact: 403 live differential vs redis 7.2.4 (fresh/existing/wrongtype/empty/binary/re-append) = 0 mismatches;
+proto-max-bulk-len cap path returns byte-identical error to redis (verified at the 1 MiB CONFIG minimum); keyspace_hits/
+misses +0 and GET-after values identical to redis; fr-store append unit tests 11/11 green.
