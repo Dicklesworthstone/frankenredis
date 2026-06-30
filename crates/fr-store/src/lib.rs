@@ -10593,7 +10593,11 @@ impl Store {
     }
 
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the get_mut below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -10956,7 +10960,11 @@ impl Store {
         delta: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -11015,7 +11023,11 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the entry access below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12664,7 +12676,14 @@ impl Store {
         members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) drop_if_expired always probes entries + expiry_deadlines (it has
+        // no expires_count fast-exit); when NO key in the DB carries a TTL the target key
+        // cannot be expired, so skip it (mirrors lpush/rpush/setnx). The get_mut below
+        // re-probes entries anyway, so this elides 2 redundant lookups in the common
+        // no-TTL workload. Byte-identical (expires_count==0 ⇒ drop is a guaranteed no-op).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
@@ -12772,7 +12791,11 @@ impl Store {
     }
 
     pub fn srem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (the get_mut below re-probes entries). Byte-identical; see sadd.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;

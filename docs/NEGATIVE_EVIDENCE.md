@@ -7271,3 +7271,18 @@ a 300k-cmd `HINCRBYFLOAT h f 0.0` blast, candidate vs control=HEAD c3edfedfb:
 Byte-exact: 428 live differential vs redis 7.2.4 (fresh/field-exists/ttl/wrongtype/expired/multi-field; negative/
 scientific/f80/0xff/inf/nan deltas; new vs existing fields) = 0 mismatches; TTL preserved; keyspace_hits/misses +0;
 HGET value + TTL identical; fr-store hincrbyfloat tests 3/3 green.
+
+### 2026-06-29 SHIP (perf-stat instructions): SADD/SREM/HDEL/HINCRBY/HSETNX expires_count drop guard (CrimsonHawk)
+drop_if_expired has NO expires_count fast-exit — it ALWAYS does entries.get + expiry_ms (2 lookups) even when the DB has
+zero TTL keys. These 5 hot set/hash writes called it unconditionally at entry, then re-probed entries via get_mut — so in
+the common no-TTL workload the drop was 2 pure-redundant lookups. Guarded each with `if self.expires_count != 0 {
+drop_if_expired }` (the established lpush/rpush/setnx pattern). Byte-identical: expires_count==0 ⇒ no key carries a TTL ⇒
+the target cannot be expired ⇒ drop is a guaranteed no-op.
+MEASURED via perf-stat instructions over fixed 400k-cmd no-TTL blasts, candidate vs control=HEAD 7bf86b558:
+  - SADD **-5.0%** (~155 instr/cmd), SREM **-5.0%**, HDEL **-4.8%**, HINCRBY **-2.1%**, HSETNX **-2.3%**.
+Byte-exact: 1200 live differential vs redis 7.2.4 (plain/target-expired[TTL elapsed]/other-key-has-TTL[expires_count>0,
+target live]/wrongtype/missing × SADD/SREM/HSET/HSETNX/HDEL/HINCRBY) = 0 mismatches; EXISTS/TYPE state identical; fr-store
+sadd/srem/hdel/hincrby/hsetnx tests 21/21 green.
+REVERTED store.hset (measured 0.00% — the HSET command routes through hset_borrowed_many, so store.hset is cold). NOTE: the
+remaining ~70 unconditional drop_if_expired sites are a broad follow-on vein — guard the hot ones whose command path uses
+the plain store method (verify via perf, not assumption: store.hset looked identical but was cold).
