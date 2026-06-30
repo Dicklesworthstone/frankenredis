@@ -7428,14 +7428,21 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        let existing_expiry = self.expiry_ms(key);
+        // (CrimsonHawk) Mirror the incr-single-lookup fusion (incrby_existing_or_insert):
+        // read the deadline ONCE from expiry_deadlines and only call drop_if_expired
+        // (which probes entries + evicts + propagates) when the key is actually due.
+        // For a live key drop_if_expired was a pure no-op probe, so this drops both that
+        // redundant entries probe and the second expiry read — and the live deadline is
+        // reused as the TTL to preserve on the re-insert. Byte-identical: an evicted key
+        // falls to the None create branch (expires_at_ms = None) exactly as before.
+        let deadline = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, deadline).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (Cow::Borrowed(v.as_slice()), existing_expiry),
-                Value::Integer(value) => {
-                    (Cow::Owned(integer_decimal_bytes(*value)), existing_expiry)
-                }
+                Value::String(v) => (Cow::Borrowed(v.as_slice()), deadline),
+                Value::Integer(value) => (Cow::Owned(integer_decimal_bytes(*value)), deadline),
                 _ => return Err(StoreError::WrongType),
             },
             None => (Cow::Borrowed(b"0".as_slice()), None),

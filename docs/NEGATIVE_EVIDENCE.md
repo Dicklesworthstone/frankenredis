@@ -7241,3 +7241,20 @@ then re-looks-up the same key. NONE is a clean per-turn win — do NOT re-chase 
 CONCLUSION: the clean hot-path redundant-probe wins are shipped; the residue is cold-path, stat-accounting-load-bearing,
 or error-ordering-load-bearing. Next levers need a different technique (store-internal multi-map lookup fusion, or the
 architectural zero-copy-RESP / RAM gaps), not another probe removal.
+
+### 2026-06-29 SHIP (perf-stat instructions): INCRBYFLOAT store-internal expiry-lookup fusion (CrimsonHawk)
+NEW technique after the redundant-probe vein exhausted: fuse the multiple same-key lookups INSIDE a store method.
+store.incrbyfloat_text did `drop_if_expired` (probes entries + expiry, evicts) THEN a separate `expiry_ms` read THEN
+`entries.get` — for a LIVE (non-expired) key the drop_if_expired was a pure no-op probe and the expiry was read twice.
+Applied the proven incr-single-lookup fusion (incrby_existing_or_insert): read the deadline ONCE, call drop_if_expired
+only when `evaluate_expiry(now_ms, deadline).should_evict`, and reuse that deadline as the TTL to preserve on re-insert.
+Drops the redundant entries probe (live keys) + the second expiry read.
+MEASURED load-independent via perf-stat instructions over a fixed 300k-cmd `INCRBYFLOAT k 0.0` blast, candidate vs
+control=HEAD 8f442420e (old incrbyfloat code):
+  - no-TTL key: control 2.5608 G vs candidate 2.5097 G instr = **-2.0%** (~170 instr/cmd)
+  - TTL key:    control 2.8435 G vs candidate 2.7584 G instr = **-3.0%** (~284 instr/cmd, reproduced swapped to 0.0001) —
+    bigger because the TTL path is where the second expiry_ms read was eliminated.
+Byte-exact: 437 live differential vs redis 7.2.4 (fresh/int/floatstr/ttl/wrongtype/expired keys; deltas incl negative,
+scientific, f80 1e500 range, 0xff, inf/nan/abc rejections, large-int precision) = 0 mismatches; TTL preserved across the
+incr; keyspace_hits/misses +0 and value/TTL identical to redis; fr-store incrbyfloat tests 11/11 green. OPENS new vein:
+store methods that hash the same key across entries + expiry_deadlines + side-maps (hincrbyfloat_text next candidate).
