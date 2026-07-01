@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP SMISMEMBER borrowed fast-path cap 8→32 — 1.34x @9 members vs ORIG (7.2.4), byte-exact
+
+Broad sweep + focused member-count A/B found a dispatch CLIFF: SMISMEMBER at 4/8
+members is at parity (1.01–1.03x, the borrowed fast path), but 9–32 members dropped
+to the slow generic borrowed dispatch — 16 members measured 0.64x vs Redis 7.2.4.
+The borrowed multi parser only recognized literal array headers `*6`..`*10` (4–8
+members) into a `[&[u8]; 8]` array. Rewrote it to parse the array count generically
+(with a non-canonical leading-zero guard, matching the other exact-N parsers) into a
+`[&[u8]; 32]` array, serving 4..=32 members on the same lean stack-array fast path
+via the unchanged byte-exact `execute_plain_smismember_borrowed`; >32 falls to
+generic; 1–3 keep their dedicated paths.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (control = same source
+with the hunk stashed, both `taskset`-pinned, P200, interleaved median):
+**9 members control 1.79ms → candidate 1.34ms = 1.34x**; 16 = 1.065x, 24 = 1.165x,
+32 = 1.087x; 8 unchanged (0.99x), 33 unchanged (0.99x, correct >cap), 100 = 0.976x
+(noise — both use generic). fr-vs-Redis-7.2.4 differential byte-exact at 4/8/9/16/32/33
+members incl. present/absent mix, missing key, and a hand-crafted leading-zero count.
+Guarded by `borrowed_plain_smismember_multi_packet_parses_9_to_32_and_defers_boundaries`
+(fr-server unit test, green via rch).
+
 ## 2026-07-01 CrimsonHawk: KEEP ZDIFFSTORE resolve-source-views-once — 1.90x exclusion-heavy / 1.24x full-output vs ORIG (7.2.4), byte-exact
 
 Third command on the resolve-once lever, and the last production caller of the

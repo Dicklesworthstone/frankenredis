@@ -4088,7 +4088,7 @@ fn process_buffered_frames(
                 {
                     if let Some(response) = runtime.execute_plain_smismember_borrowed(
                         packet.key,
-                        &packet.fields[..packet.len],
+                        &packet.members[..packet.len],
                         ts,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
@@ -16898,55 +16898,91 @@ fn parse_borrowed_plain_smismember3_packet<'a>(
 // cheap, so this is dispatch-bound); only the parser was capped at 3. 9+ members fall
 // to the generic. Mirrors parse_borrowed_plain_zmscore_multi_packet; `fields[..len]`
 // holds the borrowed member bulks.
+/// Max members served by the SMISMEMBER borrowed multi fast path. Beyond this a
+/// `SMISMEMBER` packet falls through to the generic borrowed dispatch.
+const SMISMEMBER_MULTI_MAX: usize = 32;
+
+struct BorrowedPlainSmismemberMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    members: [&'a [u8]; SMISMEMBER_MULTI_MAX],
+    len: usize,
+}
+
+// (CrimsonHawk) SMISMEMBER borrowed multi fast path. The previous version only
+// recognized literal array headers `*6`..`*10` (4-8 members) via fixed prefixes
+// into a [;8] array, so a 9..=32-member SMISMEMBER dropped to the much slower
+// generic borrowed dispatch — measured 0.64x vs Redis 7.2.4 at 16 members (a hard
+// cliff: 4/8 members are at parity on the fast path). This parses the array count
+// generically and serves 4..=32 members on the same lean stack-array fast path,
+// reusing the byte-exact execute_plain_smismember_borrowed executor. 1-3 members
+// keep their dedicated 2/3 packet paths (arr_len >= 6 preserves them).
 fn parse_borrowed_plain_smismember_multi_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
-) -> Option<BorrowedPlainHmgetMultiPacket<'a>> {
+) -> Option<BorrowedPlainSmismemberMultiPacket<'a>> {
     if config.max_bulk_len < b"SMISMEMBER".len() {
         return None;
     }
-    let smismember_at = |pfx: &[u8]| {
-        input.strip_prefix(pfx).and_then(|rest| {
-            rest.get(..10)
-                .filter(|c| c.eq_ignore_ascii_case(b"SMISMEMBER"))
-                .map(|_| input.len() - rest.len() + 10)
-        })
-    };
-    // nmembers = array_count - 2 (SMISMEMBER + key). 1-3 members use dedicated paths.
-    let (mut cursor, nmembers, arr_len) = if let Some(c) = smismember_at(b"*6\r\n$10\r\n") {
-        (c, 4usize, 6)
-    } else if let Some(c) = smismember_at(b"*7\r\n$10\r\n") {
-        (c, 5usize, 7)
-    } else if let Some(c) = smismember_at(b"*8\r\n$10\r\n") {
-        (c, 6usize, 8)
-    } else if let Some(c) = smismember_at(b"*9\r\n$10\r\n") {
-        (c, 7usize, 9)
-    } else if let Some(c) = smismember_at(b"*10\r\n$10\r\n") {
-        (c, 8usize, 10)
-    } else {
-        return None;
-    };
-    if config.max_array_len < arr_len {
+    // Array header: `*<N>\r\n`, N = arr_len = 2 + nmembers. Reject a non-canonical
+    // leading-zero count (e.g. `*06`) so it defers to the generic parser exactly as
+    // the other exact-N borrowed parsers do (valid arr_len is always >= 6, never
+    // starts with '0').
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
         return None;
     }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None; // arr_len would exceed the SMISMEMBER_MULTI_MAX window
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    // nmembers in 4..=MAX; 1-3 are handled by dedicated paths, larger falls to generic.
+    if arr_len < 6 {
+        return None;
+    }
+    let nmembers = arr_len - 2;
+    if nmembers > SMISMEMBER_MULTI_MAX || config.max_array_len < arr_len {
+        return None;
+    }
+    // Command bulk: `$10\r\nSMISMEMBER\r\n` (case-insensitive name).
+    let mut cursor = 1 + i + 2;
+    if input.get(cursor..cursor + 5)? != b"$10\r\n" {
+        return None;
+    }
+    cursor += 5;
+    if !input.get(cursor..cursor + 10)?.eq_ignore_ascii_case(b"SMISMEMBER") {
+        return None;
+    }
+    cursor += 10;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
     }
     cursor += 2;
     let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let empty: &[u8] = &[];
-    let mut fields = [empty; 8];
+    let mut members = [empty; SMISMEMBER_MULTI_MAX];
     let mut consumed = next;
-    for slot in fields.iter_mut().take(nmembers) {
+    for slot in members.iter_mut().take(nmembers) {
         let (m, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
         *slot = m;
         next = n2;
         consumed = n2;
     }
-    Some(BorrowedPlainHmgetMultiPacket {
+    Some(BorrowedPlainSmismemberMultiPacket {
         consumed,
         key,
-        fields,
+        members,
         len: nmembers,
     })
 }
@@ -25221,6 +25257,58 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_smismember_multi_packet_parses_9_to_32_and_defers_boundaries() {
+        let cfg = ParserConfig::default();
+        let build = |nm: usize| -> Vec<u8> {
+            let mut v = format!("*{}\r\n$10\r\nSMISMEMBER\r\n$4\r\nsetA\r\n", nm + 2).into_bytes();
+            for j in 0..nm {
+                let m = format!("m{j}");
+                v.extend_from_slice(format!("${}\r\n{m}\r\n", m.len()).as_bytes());
+            }
+            v
+        };
+        // 9 members (the old cliff, > the former 8-cap) now parses on the fast path.
+        for nm in [4usize, 9, 16, 32] {
+            let input = build(nm);
+            let p = crate::parse_borrowed_plain_smismember_multi_packet(&input, &cfg)
+                .unwrap_or_else(|| panic!("{nm}-member SMISMEMBER should parse"));
+            assert_eq!(p.len, nm, "len for {nm}");
+            assert_eq!(p.key, b"setA".as_slice());
+            assert_eq!(p.members[0], b"m0".as_slice());
+            assert_eq!(p.members[nm - 1], format!("m{}", nm - 1).into_bytes().as_slice());
+            assert_eq!(p.consumed, input.len(), "consumed all bytes for {nm}");
+        }
+        // > 32 members defers to the generic parser.
+        assert!(
+            crate::parse_borrowed_plain_smismember_multi_packet(&build(33), &cfg).is_none(),
+            "33 members must defer to generic"
+        );
+        // < 4 members keep their dedicated 2/3 packet paths.
+        assert!(
+            crate::parse_borrowed_plain_smismember_multi_packet(&build(3), &cfg).is_none(),
+            "3 members deferred to the dedicated path"
+        );
+        // Non-canonical leading-zero count defers (matches other exact-N parsers).
+        assert!(
+            crate::parse_borrowed_plain_smismember_multi_packet(
+                b"*011\r\n$10\r\nSMISMEMBER\r\n$4\r\nsetA\r\n$2\r\nm0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "leading-zero array count must defer to generic"
+        );
+        // Wrong command name (same 10-byte length) defers.
+        assert!(
+            crate::parse_borrowed_plain_smismember_multi_packet(
+                b"*11\r\n$10\r\nSMEMBERSXX\r\n$4\r\nsetA\r\n$2\r\nm0\r\n$2\r\nm1\r\n$2\r\nm2\r\n$2\r\nm3\r\n$2\r\nm4\r\n$2\r\nm5\r\n$2\r\nm6\r\n$2\r\nm7\r\n$2\r\nm8\r\n",
+                &cfg
+            )
+            .is_none(),
+            "non-SMISMEMBER command defers"
         );
     }
 
