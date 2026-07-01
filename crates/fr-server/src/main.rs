@@ -18084,6 +18084,89 @@ fn parse_borrowed_plain_mset_eight_packet<'a>(
     })
 }
 
+/// Max key/value pairs served by the MSET borrowed multi fast path. Beyond this
+/// an MSET packet falls through to the generic borrowed dispatch.
+const MSET_MULTI_MAX: usize = 32;
+
+struct BorrowedPlainMsetMultiPacket<'a> {
+    consumed: usize,
+    pairs: [(&'a [u8], &'a [u8]); MSET_MULTI_MAX],
+    len: usize,
+}
+
+// (CrimsonHawk) MSET borrowed multi fast path. The exact-N parsers only cover 2-8
+// pairs, so a 9..=32-pair MSET dropped to the much slower generic borrowed
+// dispatch — measured 0.55x @9 pairs vs Redis 7.2.4 (8 pairs are at parity). Parses
+// the array count generically (with a non-canonical leading-zero guard) into a
+// `[(&[u8], &[u8]); 32]` array, reusing the byte-exact
+// `execute_plain_mset_borrowed` executor. Serves 9..=32 pairs; <=8 keep their
+// exact-N paths; >32 defers.
+fn parse_borrowed_plain_mset_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainMsetMultiPacket<'a>> {
+    if config.max_bulk_len < b"MSET".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None;
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    // arr_len = 1 (MSET) + 2*npairs, always ODD; serve 9..=MAX pairs (arr_len >= 19).
+    if arr_len < 19 || arr_len % 2 == 0 {
+        return None;
+    }
+    let npairs = (arr_len - 1) / 2;
+    if npairs > MSET_MULTI_MAX || config.max_array_len < arr_len {
+        return None;
+    }
+    // Command bulk: `$4\r\nMSET\r\n` (case-insensitive name).
+    let mut cursor = 1 + i + 2;
+    if input.get(cursor..cursor + 4)? != b"$4\r\n" {
+        return None;
+    }
+    cursor += 4;
+    if !input.get(cursor..cursor + 4)?.eq_ignore_ascii_case(b"MSET") {
+        return None;
+    }
+    cursor += 4;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let empty: &[u8] = &[];
+    let mut pairs = [(empty, empty); MSET_MULTI_MAX];
+    let mut next = cursor;
+    let mut consumed = cursor;
+    for slot in pairs.iter_mut().take(npairs) {
+        let (k, n1) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (v, n2) = parse_borrowed_plain_set_bulk(input, n1, config.max_bulk_len)?;
+        *slot = (k, v);
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainMsetMultiPacket {
+        consumed,
+        pairs,
+        len: npairs,
+    })
+}
+
 enum BorrowedPlainMsetPacket<'a> {
     Two(BorrowedPlainMsetTwoPacket<'a>),
     Three(BorrowedPlainMsetThreePacket<'a>),
@@ -18092,6 +18175,7 @@ enum BorrowedPlainMsetPacket<'a> {
     Six(BorrowedPlainMsetSixPacket<'a>),
     Seven(BorrowedPlainMsetSevenPacket<'a>),
     Eight(BorrowedPlainMsetEightPacket<'a>),
+    Multi(BorrowedPlainMsetMultiPacket<'a>),
 }
 
 impl<'a> BorrowedPlainMsetPacket<'a> {
@@ -18104,6 +18188,7 @@ impl<'a> BorrowedPlainMsetPacket<'a> {
             Self::Six(packet) => packet.consumed,
             Self::Seven(packet) => packet.consumed,
             Self::Eight(packet) => packet.consumed,
+            Self::Multi(packet) => packet.consumed,
         }
     }
 
@@ -18116,6 +18201,7 @@ impl<'a> BorrowedPlainMsetPacket<'a> {
             Self::Six(packet) => &packet.pairs,
             Self::Seven(packet) => &packet.pairs,
             Self::Eight(packet) => &packet.pairs,
+            Self::Multi(packet) => &packet.pairs[..packet.len],
         }
     }
 }
@@ -18144,7 +18230,7 @@ fn parse_borrowed_plain_mset_packet<'a>(
     } else if input.starts_with(b"*17\r\n") {
         parse_borrowed_plain_mset_eight_packet(input, config).map(BorrowedPlainMsetPacket::Eight)
     } else {
-        None
+        parse_borrowed_plain_mset_multi_packet(input, config).map(BorrowedPlainMsetPacket::Multi)
     }
 }
 

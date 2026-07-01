@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP MSET borrowed multi fast-path (9-32 pairs) — 0.55x→1.145x vs ORIG (7.2.4), byte-exact
+
+Extends the >8 dispatch-cliff fix to the first WRITE command. MSET had exact-N
+parsers only up to 8 pairs, so a 9..=32-pair MSET dropped to the generic borrowed
+dispatch — measured 0.55x @9 pairs vs Redis 7.2.4 (8 pairs are at parity, a sharp
+cliff). Added a `BorrowedPlainMsetPacket::Multi` variant + `parse_borrowed_plain_mset_multi_packet`:
+generic array-count parse (leading-zero guard; arr_len must be odd = 1 + 2·npairs)
+into a `[(&[u8], &[u8]); 32]` array, wired as the enum builder's `else` arm, reusing
+the byte-exact `execute_plain_mset_borrowed` executor. <=8 keep their exact-N paths;
+>32 defers.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (control = hunk stashed,
+both `taskset`-pinned, P300, interleaved ×21 median): **MSET_9 cand/ctl 2.215x (now
+1.145x vs Redis — was 0.55x), MSET_16 2.012x (1.446x vs Redis), MSET_32 1.795x
+(1.607x vs Redis)**; MSET_8 0.983x and MSET_33 0.991x both unchanged (correct
+boundaries). fr-vs-Redis-7.2.4 differential byte-exact at 8/9/16/32/33 pairs on both
+the MSET reply and an MGET readback of the stored values.
+
 ## 2026-07-01 CrimsonHawk: KEEP MGET + EXISTS borrowed multi fast-path (9-32 keys) — 1.15x/1.14x @9 vs ORIG (7.2.4), byte-exact
 
 Completes the >8 dispatch-cliff sweep. MGET/EXISTS had per-N exact parsers only up
