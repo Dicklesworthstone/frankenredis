@@ -20416,29 +20416,24 @@ impl Runtime {
                 return CommandError::Store(err).to_resp();
             }
         }
-        let first = match self.server.store.zget_members_with_scores_no_stats(keys[0]) {
-            Ok(members) => members,
-            Err(err) => return CommandError::Store(err).to_resp(),
-        };
-        let nan0 = |x: f64| if x.is_nan() { 0.0 } else { x };
-        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-        'members: for (member, score) in first {
-            // normalize_weighted_score_cmd(score, 1.0)
-            let mut combined = nan0(score);
-            for &k in &keys[1..] {
-                match self
-                    .server
-                    .store
-                    .zget_score_or_set_member_no_stats(k, &member)
-                {
-                    // aggregate_scores_for_cmd(combined, s*1.0, SUM)
-                    Ok(Some(s)) => combined = nan0(combined + s),
-                    Ok(None) => continue 'members,
-                    Err(err) => return CommandError::Store(err).to_resp(),
-                }
-            }
-            result.push((member, combined));
-        }
+        // (CrimsonHawk) Resolve every source view ONCE and probe them directly,
+        // instead of re-looking-up each key in the keyspace on every member probe.
+        // The prior loop called `zget_score_or_set_member_no_stats(k, member)` per
+        // (member, key) pair — each call re-did `entries.get(k)` (the dominant
+        // ~43% profiled cost on a 2000×2000 intersection: 2000 redundant keyspace
+        // hashmap lookups for the second key), and it materialized every member of
+        // keys[0] via `zget_members_with_scores_no_stats` only to discard the
+        // non-survivors. `zinter_members_argv_order_no_stats` builds the borrowed
+        // ZSetAlgebraInput views once, iterates the first by reference, and clones
+        // only survivors. Byte-exact for this no-option ZINTER: implicit weights=1.0
+        // + AGGREGATE SUM, and the store-level `normalize_weighted_score`/
+        // `aggregate_scores` are the same nan0(a)/nan0(a+b) this loop inlined;
+        // wrong-type was already rejected by `ensure_zset_or_set_source` above and
+        // the result is re-sorted below, so first-key visitation order is invisible.
+        let mut result = self
+            .server
+            .store
+            .zinter_members_argv_order_no_stats(keys, &[], b"SUM");
         result.sort_by(|a, b| {
             a.1.partial_cmp(&b.1)
                 .unwrap_or(std::cmp::Ordering::Equal)

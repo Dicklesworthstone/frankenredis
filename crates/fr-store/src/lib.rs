@@ -34636,6 +34636,106 @@ mod tests {
     }
 
     #[test]
+    fn zinter_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio() {
+        // (CrimsonHawk) The prior ZINTER core probed each survivor candidate with
+        // `zget_score_or_set_member_no_stats(k, member)`, which re-ran
+        // `entries.get(k)` (a full keyspace hashmap lookup) on EVERY (member, key)
+        // pair — profiled as ~43% of a 2000×2000 intersection. The new
+        // `zinter_members_argv_order_no_stats` resolves each source view once.
+        // Prove byte-identical output and report the speedup.
+        let seed = || {
+            let mut s = Store::new();
+            let mut z0: Vec<(f64, Vec<u8>)> = Vec::new();
+            let mut z1: Vec<(f64, Vec<u8>)> = Vec::new();
+            let mut z1_overlap: Vec<(f64, Vec<u8>)> = Vec::new();
+            for j in 0..2000u32 {
+                z0.push((j as f64, format!("zm{j}").into_bytes()));
+                z1.push((j as f64 + 0.5, format!("zn{j}").into_bytes()));
+                // overlapping second set: shares the even zm* members
+                if j % 2 == 0 {
+                    z1_overlap.push((j as f64 + 0.25, format!("zm{j}").into_bytes()));
+                }
+            }
+            s.zadd(b"z0", &z0, 0).unwrap();
+            s.zadd(b"z1disjoint", &z1, 0).unwrap();
+            s.zadd(b"z1overlap", &z1_overlap, 0).unwrap();
+            s
+        };
+
+        // Reference: exact replica of the prior execute_plain_zinter_core loop.
+        fn old_core(store: &Store, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
+            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let nan0 = |x: f64| if x.is_nan() { 0.0 } else { x };
+            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+            'members: for (member, score) in first {
+                let mut combined = nan0(score);
+                for &k in &keys[1..] {
+                    match store.zget_score_or_set_member_no_stats(k, &member).unwrap() {
+                        Some(s) => combined = nan0(combined + s),
+                        None => continue 'members,
+                    }
+                }
+                result.push((member, combined));
+            }
+            result.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            result
+        }
+
+        let norm = |mut v: Vec<(Vec<u8>, f64)>| {
+            v.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            v
+        };
+
+        // Byte-equivalence on both a disjoint pair (empty result) and an
+        // overlapping pair (1000 survivors), for k[0]=z0.
+        let store = seed();
+        for pair in [
+            [b"z0".as_slice(), b"z1disjoint".as_slice()],
+            [b"z0".as_slice(), b"z1overlap".as_slice()],
+        ] {
+            let want = old_core(&store, &pair);
+            let got = norm(store.zinter_members_argv_order_no_stats(&pair, &[], b"SUM"));
+            assert_eq!(got, norm(want), "zinter resolve-once diverged for {pair:?}");
+        }
+
+        // A/B on the disjoint pair (worst case: every probe re-looks-up the key).
+        let store = seed();
+        let keys = [b"z0".as_slice(), b"z1disjoint".as_slice()];
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_core(&store, &keys).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1
+                .wrapping_add(store.zinter_members_argv_order_no_stats(&keys, &[], b"SUM").len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "ZINTER resolve-once A/B (2000×2000 disjoint, x{reps}): per-probe-relookup={old_ns}ns resolve-once={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 1.15 || cfg!(debug_assertions),
+            "expected >1.15x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
     fn setvalue_intset_semantics_and_fuzz_vs_reference() {
         use super::{SetValue, parse_i64};
         use std::collections::HashSet;

@@ -4,6 +4,42 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP ZINTER (non-store) resolve-source-views-once — 0.72x → 1.44x vs ORIG (7.2.4), byte-exact
+
+The extended head-to-head sweep (`scripts/extended_headtohead_ch.py`, P200,
+2000×2000 disjoint zsets, fr:17811 vs vendored Redis 7.2.4:17812, both
+`taskset`-pinned) showed **ZINTER 0.72x** — the largest remaining compute-bound
+loss. A `perf record` of the fr server under a ZINTER blast pinned the cause: the
+LIVE 2-key pipelined path is `fr-runtime::execute_plain_zinter_core` (NOT the
+generic `fr-command::zinter`), and it probed each survivor candidate with
+`Store::zget_score_or_set_member_no_stats(k, member)`, which re-ran `entries.get(k)`
+— a full keyspace hashmap lookup — on **every** (member, key) pair. That redundant
+per-probe key resolution was ~43% of ZINTER CPU (26% `zget_score_or_set_member_no_stats`
+self + 17% the zset-dict `IndexMap::get`). It also materialized every member of
+`keys[0]` up front only to discard the non-survivors.
+
+Fix (source kept): route the core through the existing
+`Store::zinter_members_argv_order_no_stats`, which resolves each source into a
+borrowed `ZSetAlgebraInput` view ONCE, iterates the first by reference, probes the
+rest directly, and clones only survivors. No-option ZINTER ⇒ implicit weights=1.0 +
+AGGREGATE SUM; the store-level `normalize_weighted_score`/`aggregate_scores` are the
+same `nan0(a)`/`nan0(a+b)` the old loop inlined, wrong-type is still rejected by
+`ensure_zset_or_set_source` first, and the result is re-sorted, so first-key
+visitation order is invisible.
+
+Evidence: per-crate in-crate A/B (`cargo test -p fr-store --release
+zinter_resolve_once ...` via `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cc
+rch exec`) measured **per-probe-relookup=34.0ms vs resolve-once=6.07ms = 5.61x**
+on the 2000×2000 disjoint intersection, with byte-identical results on both the
+disjoint (empty) and 1000-survivor overlap cases. End-to-end the sweep moved
+**ZINTER fr 6.86ms vs Redis 9.86ms = 1.44x** (was 0.72x). fr-vs-Redis-7.2.4
+differential (7 cases incl. WEIGHTS/AGGREGATE MIN/MAX, set+zset mix, missing key,
+WITHSCORES) all byte-exact. Gates: fr-conformance GREEN via rch (194 lib + all
+conformance bins + 99 smoke, 0 failed). Guarded by
+`zinter_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio`. NOTE: this
+supersedes the ~0-gain `fr-command::zinter` clone-elision (ba77180fe) whose path
+the pipelined benchmark never took — the LIVE win is here in fr-runtime.
+
 ## 2026-06-28 BlackThrush: REJECTED PFMERGE missing-source no-reencode path — 1.007x vs ORIG / no stable Redis-ratio win
 
 Land-or-dig scan: no unlanded measured source win was found in
