@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP ZDIFF (non-store) resolve-source-views-once — 2.01x exclusion-heavy / 1.07x full-output vs ORIG (7.2.4), byte-exact
+
+Same resolve-once lever as the ZINTER row below, applied to the twin ZDIFF path.
+`fr-runtime::execute_plain_zdiff2_core` (and `fr-command::zdiff`) kept members of
+keys[0] absent from the others by probing each with
+`Store::zget_score_or_set_member_no_stats(k, member)`, which re-ran `entries.get(k)`
+(a full keyspace hashmap lookup) on EVERY (member, key) pair, and it materialized
+all of keys[0] up front. New `Store::zdiff_members_no_stats` resolves each source to
+a borrowed `ZSetAlgebraInput` view ONCE, iterates the first by reference, keeps only
+members absent from every other (carrying keys[0]'s raw score — ZDIFF applies no
+weight/aggregate), and clones only survivors.
+
+Evidence: per-crate in-crate A/B (`cargo test -p fr-store --release
+zdiff_resolve_once ...` via `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cc
+rch exec`) = per-probe-relookup 44.8ms vs resolve-once 14.7ms = **3.05x** on the
+2000×2000 compute, byte-identical on disjoint / 1000-survivor overlap / missing key.
+Clean control-vs-candidate end-to-end binary A/B (same commit stashed for control,
+both `taskset`-pinned, P200, interleaved ×15 median): **exclusion-heavy ZDIFF (k1⊆k2,
+empty result) control 21.62ms → candidate 10.74ms = 2.01x**; disjoint full-output
+control 677.7ms → candidate 631.5ms = 1.073x (output-dominated, so the relookup is a
+smaller fraction — this is the shape the extended sweep happened to use, hence its
+flat 1.07x→1.08x reading did NOT reflect the real win on the exclusion-heavy shape).
+fr-vs-Redis-7.2.4 differential (8 cases incl WITHSCORES, set+zset mix, missing +
+duplicate keys) all byte-exact. Gates: fr-conformance GREEN via rch (194 lib + all
+bins + 99 smoke, 0 failed). Guarded by
+`zdiff_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio`.
+
 ## 2026-07-01 CrimsonHawk: KEEP ZINTER (non-store) resolve-source-views-once — 0.72x → 1.44x vs ORIG (7.2.4), byte-exact
 
 The extended head-to-head sweep (`scripts/extended_headtohead_ch.py`, P200,

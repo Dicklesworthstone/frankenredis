@@ -20318,22 +20318,13 @@ impl Runtime {
                 return CommandError::Store(err).to_resp();
             }
         }
-        let first = match self.server.store.zget_members_with_scores_no_stats(k1) {
-            Ok(members) => members,
-            Err(err) => return CommandError::Store(err).to_resp(),
-        };
-        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-        for (member, score) in first {
-            match self
-                .server
-                .store
-                .zget_score_or_set_member_no_stats(k2, &member)
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => result.push((member, score)),
-                Err(err) => return CommandError::Store(err).to_resp(),
-            }
-        }
+        // (CrimsonHawk) Resolve k2's view ONCE and probe it directly instead of
+        // re-running `entries.get(k2)` (a full keyspace lookup) on every member of
+        // k1 via `zget_score_or_set_member_no_stats` — the same per-probe re-lookup
+        // that dominated ZINTER. Byte-exact: keeps k1's members absent from k2 with
+        // k1's score, and the result is re-sorted below. Wrong-type was already
+        // rejected by `ensure_zset_or_set_source` above.
+        let mut result = self.server.store.zdiff_members_no_stats(&keys);
         result.sort_by(|a, b| {
             a.1.partial_cmp(&b.1)
                 .unwrap_or(std::cmp::Ordering::Equal)

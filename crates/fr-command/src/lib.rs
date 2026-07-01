@@ -23572,24 +23572,12 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::SyntaxError);
         }
     }
-    // Compute difference: members in first set not in any other
-    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
-    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-    for (member, score) in first_members {
-        let mut in_other = false;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member_no_stats(key, &member)?
-                .is_some()
-            {
-                in_other = true;
-                break;
-            }
-        }
-        if !in_other {
-            result.push((member, score));
-        }
-    }
+    // Compute difference: members in first set not in any other. Resolve each
+    // source view ONCE (borrow-only) rather than re-looking-up every other key in
+    // the keyspace on each member probe; wrong-type was rejected by
+    // ensure_zset_or_set_source above. Byte-identical: keeps keys[0]'s members
+    // absent from all others with keys[0]'s score, re-sorted below.
+    let mut result = store.zdiff_members_no_stats(&keys);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
     result.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)

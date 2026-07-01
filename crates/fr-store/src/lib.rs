@@ -14703,6 +14703,49 @@ impl Store {
         result
     }
 
+    /// (CrimsonHawk) ZDIFF (non-store) data core: iterate the FIRST source by
+    /// reference and keep only members absent from every other source, carrying
+    /// keys[0]'s raw score (ZDIFF applies no weight/aggregate).
+    ///
+    /// Byte-for-byte the prior command / runtime `zdiff` loop (members of keys[0]
+    /// not present in any keys[1..], keys[0]'s score) but it resolves each source
+    /// view ONCE instead of re-running `entries.get(other)` on every member probe
+    /// via `zget_score_or_set_member_no_stats` — the same per-probe keyspace
+    /// re-lookup that dominated ZINTER — and clones only survivors instead of
+    /// materializing all of keys[0]. `ZSetAlgebraInput::score`/`for_each` match
+    /// `zget_score_or_set_member_no_stats` / `zget_members_with_scores_no_stats`
+    /// exactly (SortedSet → score/`iter`, Set → `1.0`). A missing other source is
+    /// `None` and never excludes a member (a member cannot be "in" an absent set),
+    /// matching the old `Ok(None)` branch. Wrong-type is rejected by the caller's
+    /// `ensure_zset_or_set_source`; the caller re-sorts, so first-source
+    /// visitation order is invisible.
+    pub fn zdiff_members_no_stats(&self, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
+        let inputs: Vec<Option<ZSetAlgebraInput<'_>>> = keys
+            .iter()
+            .map(|key| {
+                self.entries
+                    .get(*key)
+                    .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+            })
+            .collect();
+        let Some(Some(first)) = inputs.first().copied() else {
+            return Vec::new();
+        };
+        let others = &inputs[1..];
+        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+        first.for_each(|member, score| {
+            for other in others.iter() {
+                if let Some(other) = other
+                    && other.score(member).is_some()
+                {
+                    return;
+                }
+            }
+            result.push((member.to_vec(), score));
+        });
+        result
+    }
+
     fn zintercard_cache_hit(&self, keys: &[&[u8]], limit: u64) -> Option<u64> {
         let cache = self.zintercard_cache.as_ref()?;
         if cache.dirty != self.dirty || cache.limit != limit || cache.keys.len() != keys.len() {
@@ -34728,6 +34771,113 @@ mod tests {
         let ratio = old_ns as f64 / new_ns as f64;
         println!(
             "ZINTER resolve-once A/B (2000×2000 disjoint, x{reps}): per-probe-relookup={old_ns}ns resolve-once={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 1.15 || cfg!(debug_assertions),
+            "expected >1.15x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn zdiff_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio() {
+        // (CrimsonHawk) Same resolve-once lever as ZINTER, applied to ZDIFF: the
+        // old core re-ran `entries.get(other)` on every member probe via
+        // `zget_score_or_set_member_no_stats`. Prove byte-identical output and
+        // report the speedup.
+        let seed = || {
+            let mut s = Store::new();
+            let mut z0: Vec<(f64, Vec<u8>)> = Vec::new();
+            let mut z1_disjoint: Vec<(f64, Vec<u8>)> = Vec::new();
+            let mut z1_overlap: Vec<(f64, Vec<u8>)> = Vec::new();
+            for j in 0..2000u32 {
+                z0.push((j as f64, format!("zm{j}").into_bytes()));
+                z1_disjoint.push((j as f64 + 0.5, format!("zn{j}").into_bytes()));
+                if j % 2 == 0 {
+                    z1_overlap.push((j as f64 + 0.25, format!("zm{j}").into_bytes()));
+                }
+            }
+            s.zadd(b"z0", &z0, 0).unwrap();
+            s.zadd(b"z1disjoint", &z1_disjoint, 0).unwrap();
+            s.zadd(b"z1overlap", &z1_overlap, 0).unwrap();
+            s
+        };
+
+        // Reference: exact replica of the prior zdiff loop.
+        fn old_core(store: &Store, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
+            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (member, score) in first {
+                let mut in_other = false;
+                for &k in &keys[1..] {
+                    if store
+                        .zget_score_or_set_member_no_stats(k, &member)
+                        .unwrap()
+                        .is_some()
+                    {
+                        in_other = true;
+                        break;
+                    }
+                }
+                if !in_other {
+                    result.push((member, score));
+                }
+            }
+            result.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            result
+        }
+        let norm = |mut v: Vec<(Vec<u8>, f64)>| {
+            v.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            v
+        };
+
+        let store = seed();
+        for pair in [
+            // disjoint: all 2000 of z0 survive
+            [b"z0".as_slice(), b"z1disjoint".as_slice()],
+            // overlap: the even zm* are removed, 1000 survive
+            [b"z0".as_slice(), b"z1overlap".as_slice()],
+        ] {
+            let want = old_core(&store, &pair);
+            let got = norm(store.zdiff_members_no_stats(&pair));
+            assert_eq!(got, norm(want), "zdiff resolve-once diverged for {pair:?}");
+        }
+        // missing other key never excludes → full z0 survives
+        {
+            let keys = [b"z0".as_slice(), b"nope".as_slice()];
+            let want = old_core(&store, &keys);
+            let got = norm(store.zdiff_members_no_stats(&keys));
+            assert_eq!(got.len(), 2000, "missing other must not exclude");
+            assert_eq!(got, norm(want));
+        }
+
+        let store = seed();
+        let keys = [b"z0".as_slice(), b"z1disjoint".as_slice()];
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_core(&store, &keys).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(store.zdiff_members_no_stats(&keys).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "ZDIFF resolve-once A/B (2000×2000 disjoint, x{reps}): per-probe-relookup={old_ns}ns resolve-once={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(
             ratio > 1.15 || cfg!(debug_assertions),
