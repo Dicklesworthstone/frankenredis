@@ -23625,23 +23625,11 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 3_usize.saturating_add(numkeys) {
         return Err(CommandError::SyntaxError);
     }
-    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
-    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-    for (member, score) in first_members {
-        let mut in_other = false;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member_no_stats(key, &member)?
-                .is_some()
-            {
-                in_other = true;
-                break;
-            }
-        }
-        if !in_other {
-            result.push((member, score));
-        }
-    }
+    // (CrimsonHawk) Resolve each source view ONCE (see zdiff_members_no_stats)
+    // rather than re-looking-up every other key in the keyspace per member probe;
+    // wrong-type was rejected by ensure_zset_or_set_source above. Byte-identical:
+    // same (member, score) survivors feed the order-independent dest-set build.
+    let result = store.zdiff_members_no_stats(&keys);
     let count = result.len();
     store.store_sorted_set_from_pairs(dest, result, now_ms);
     Ok(RespFrame::Integer(count as i64))

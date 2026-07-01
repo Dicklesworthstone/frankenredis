@@ -21284,25 +21284,12 @@ impl Runtime {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
-            let first = match self.server.store.zget_members_with_scores_no_stats(keys[0]) {
-                Ok(members) => members,
-                Err(err) => break 'reply CommandError::Store(err).to_resp(),
-            };
-            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-            'members: for (member, score) in first {
-                for &k in &keys[1..] {
-                    match self
-                        .server
-                        .store
-                        .zget_score_or_set_member_no_stats(k, &member)
-                    {
-                        Ok(Some(_)) => continue 'members,
-                        Ok(None) => {}
-                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
-                    }
-                }
-                result.push((member, score));
-            }
+            // (CrimsonHawk) Resolve each source view ONCE (see zdiff_members_no_stats)
+            // instead of re-running entries.get(k) on every member probe. Wrong-type
+            // was already rejected by ensure_zset_or_set_source above, so the diff
+            // core cannot error here. Byte-exact: same (member, score) pairs feed the
+            // order-independent dest-set build.
+            let result = self.server.store.zdiff_members_no_stats(keys);
             let count = result.len();
             self.server
                 .store

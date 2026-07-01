@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP ZDIFFSTORE resolve-source-views-once — 1.90x exclusion-heavy / 1.24x full-output vs ORIG (7.2.4), byte-exact
+
+Third command on the resolve-once lever, and the last production caller of the
+per-probe `Store::zget_score_or_set_member_no_stats`. `execute_plain_zdiffstore_borrowed`
+(fr-runtime) and `fr-command::zdiffstore` computed the diff members with the same
+per-member × per-key `entries.get(k)` re-lookup + keys[0] materialization, then built
+the dest set via `store_sorted_set_from_pairs`. Both now call the existing
+`Store::zdiff_members_no_stats` (resolve each source view once, keep survivors); the
+survivor pairs feed the order-independent dest-set build unchanged.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (control = same source with
+the two hunks stashed, both `taskset`-pinned, P200, interleaved ×15 median):
+**exclusion-heavy ZDIFFSTORE (k1⊆k2, empty result) control 21.39ms → candidate 11.27ms
+= 1.90x**; disjoint full-output control 35.68ms → candidate 28.78ms = 1.24x (full-output
+wins more than ZDIFF's 1.07x here because the dest is a set build, not a 2000-member RESP
+array, so the relookup is a larger share). fr-vs-Redis-7.2.4 differential (6 cases incl
+set+zset mix, missing key, self-diff→dest-deleted) byte-exact on count, stored ZRANGE
+WITHSCORES, TYPE, and OBJECT ENCODING. Gates: fr-conformance GREEN via rch (194 lib + all
+bins + 99 smoke, 0 failed). Reuses the ZDIFF-row store method + its guard test.
+
 ## 2026-07-01 CrimsonHawk: KEEP ZDIFF (non-store) resolve-source-views-once — 2.01x exclusion-heavy / 1.07x full-output vs ORIG (7.2.4), byte-exact
 
 Same resolve-once lever as the ZINTER row below, applied to the twin ZDIFF path.
