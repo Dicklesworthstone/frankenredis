@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP HMGET + ZMSCORE borrowed fast-path cap 8→32 — 1.19x / 1.11x @9 vs ORIG (7.2.4), byte-exact
+
+Same >8 dispatch-cliff fix as the SMISMEMBER row below, generalized to the two
+other borrowed multi parsers (they shared the `[&[u8]; 8]`
+`BorrowedPlainHmgetMultiPacket`). HMGET/ZMSCORE at 9..=32 fields dropped to the
+generic borrowed dispatch (measured HMGET 0.77x, ZMSCORE ~0.79x vs Redis 7.2.4 at
+16). Rewrote both parsers to read the array count generically (leading-zero guard)
+into a `[&[u8]; 32]` array, serving 4..=32 on the same fast path via the unchanged
+executors.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (control = hunk stashed,
+both `taskset`-pinned, P200, interleaved ×15 median): **HMGET_9 cand/ctl 1.187x,
+ZMSCORE_9 1.110x**, HMGET_32 1.059x, ZMSCORE_16 1.069x; HMGET_16 1.018x (near-noise
+— 16 field VALUES make the reply encode dominate, so the dispatch saving is a
+smaller share; the residual HMGET 0.72x-vs-Redis at 16+ is a separate value-encode
+gap, not dispatch). fr-vs-Redis-7.2.4 differential byte-exact at 4/8/9/16/32/33
+fields incl. a missing field. Reuses the SMISMEMBER `HMGET_MULTI_MAX` pattern.
+
 ## 2026-07-01 CrimsonHawk: KEEP SMISMEMBER borrowed fast-path cap 8→32 — 1.34x @9 members vs ORIG (7.2.4), byte-exact
 
 Broad sweep + focused member-count A/B found a dispatch CLIFF: SMISMEMBER at 4/8

@@ -14345,13 +14345,23 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
 // multi-field object reads. Reuses the variadic execute_plain_hmget_borrowed (HGET
 // is fast, so this is dispatch-bound); only the parser was capped at 3. 9+ fields
 // fall through to the generic. `fields[..len]` holds the borrowed field bulks.
+/// Max fields served by the HMGET borrowed multi fast path. Beyond this an HMGET
+/// packet falls through to the generic borrowed dispatch.
+const HMGET_MULTI_MAX: usize = 32;
+
 struct BorrowedPlainHmgetMultiPacket<'a> {
     consumed: usize,
     key: &'a [u8],
-    fields: [&'a [u8]; 8],
+    fields: [&'a [u8]; HMGET_MULTI_MAX],
     len: usize,
 }
 
+// (CrimsonHawk) HMGET borrowed multi fast path. Previously matched only literal
+// array headers `*6`..`*10` (4-8 fields) into a [;8] array, so a 9..=32-field HMGET
+// dropped to the much slower generic borrowed dispatch — measured 0.77x vs Redis
+// 7.2.4 at 16 fields (4/8 fields are at parity). Parses the array count generically
+// (with a non-canonical leading-zero guard) and serves 4..=32 fields on the same
+// lean stack-array fast path. 1-3 fields keep their dedicated paths; >32 defers.
 fn parse_borrowed_plain_hmget_multi_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -14359,37 +14369,50 @@ fn parse_borrowed_plain_hmget_multi_packet<'a>(
     if config.max_bulk_len < b"HMGET".len() {
         return None;
     }
-    let hmget_at = |pfx: &[u8]| {
-        input.strip_prefix(pfx).and_then(|rest| {
-            rest.get(..5)
-                .filter(|c| c.eq_ignore_ascii_case(b"HMGET"))
-                .map(|_| input.len() - rest.len() + 5)
-        })
-    };
-    // nfields = array_count - 2 (HMGET + key). 1-3 fields use dedicated paths.
-    let (mut cursor, nfields, arr_len) = if let Some(c) = hmget_at(b"*6\r\n$5\r\n") {
-        (c, 4usize, 6)
-    } else if let Some(c) = hmget_at(b"*7\r\n$5\r\n") {
-        (c, 5usize, 7)
-    } else if let Some(c) = hmget_at(b"*8\r\n$5\r\n") {
-        (c, 6usize, 8)
-    } else if let Some(c) = hmget_at(b"*9\r\n$5\r\n") {
-        (c, 7usize, 9)
-    } else if let Some(c) = hmget_at(b"*10\r\n$5\r\n") {
-        (c, 8usize, 10)
-    } else {
-        return None;
-    };
-    if config.max_array_len < arr_len {
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
         return None;
     }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None;
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    // nfields = arr_len - 2 (HMGET + key); 4..=MAX here, 1-3 use dedicated paths.
+    if arr_len < 6 {
+        return None;
+    }
+    let nfields = arr_len - 2;
+    if nfields > HMGET_MULTI_MAX || config.max_array_len < arr_len {
+        return None;
+    }
+    // Command bulk: `$5\r\nHMGET\r\n` (case-insensitive name).
+    let mut cursor = 1 + i + 2;
+    if input.get(cursor..cursor + 4)? != b"$5\r\n" {
+        return None;
+    }
+    cursor += 4;
+    if !input.get(cursor..cursor + 5)?.eq_ignore_ascii_case(b"HMGET") {
+        return None;
+    }
+    cursor += 5;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
     }
     cursor += 2;
     let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let empty: &[u8] = &[];
-    let mut fields = [empty; 8];
+    let mut fields = [empty; HMGET_MULTI_MAX];
     let mut consumed = next;
     for slot in fields.iter_mut().take(nfields) {
         let (f, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -17056,37 +17079,51 @@ fn parse_borrowed_plain_zmscore_multi_packet<'a>(
     if config.max_bulk_len < b"ZMSCORE".len() {
         return None;
     }
-    let zmscore_at = |pfx: &[u8]| {
-        input.strip_prefix(pfx).and_then(|rest| {
-            rest.get(..7)
-                .filter(|c| c.eq_ignore_ascii_case(b"ZMSCORE"))
-                .map(|_| input.len() - rest.len() + 7)
-        })
-    };
-    // nmembers = array_count - 2 (ZMSCORE + key). 1-3 members use dedicated paths.
-    let (mut cursor, nmembers, arr_len) = if let Some(c) = zmscore_at(b"*6\r\n$7\r\n") {
-        (c, 4usize, 6)
-    } else if let Some(c) = zmscore_at(b"*7\r\n$7\r\n") {
-        (c, 5usize, 7)
-    } else if let Some(c) = zmscore_at(b"*8\r\n$7\r\n") {
-        (c, 6usize, 8)
-    } else if let Some(c) = zmscore_at(b"*9\r\n$7\r\n") {
-        (c, 7usize, 9)
-    } else if let Some(c) = zmscore_at(b"*10\r\n$7\r\n") {
-        (c, 8usize, 10)
-    } else {
-        return None;
-    };
-    if config.max_array_len < arr_len {
+    // (CrimsonHawk) Generic array-count parse (with leading-zero guard) serving
+    // 4..=32 members on the fast path — same >8 dispatch-cliff fix as HMGET /
+    // SMISMEMBER. 1-3 members keep their dedicated paths; >32 defers to generic.
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
         return None;
     }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None;
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    if arr_len < 6 {
+        return None;
+    }
+    let nmembers = arr_len - 2;
+    if nmembers > HMGET_MULTI_MAX || config.max_array_len < arr_len {
+        return None;
+    }
+    let mut cursor = 1 + i + 2;
+    if input.get(cursor..cursor + 4)? != b"$7\r\n" {
+        return None;
+    }
+    cursor += 4;
+    if !input.get(cursor..cursor + 7)?.eq_ignore_ascii_case(b"ZMSCORE") {
+        return None;
+    }
+    cursor += 7;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
     }
     cursor += 2;
     let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let empty: &[u8] = &[];
-    let mut fields = [empty; 8];
+    let mut fields = [empty; HMGET_MULTI_MAX];
     let mut consumed = next;
     for slot in fields.iter_mut().take(nmembers) {
         let (m, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
