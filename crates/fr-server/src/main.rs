@@ -3346,6 +3346,32 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"MGET")
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_mget_borrowed_into(
+                            &packet.keys[..packet.len],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_bitcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -10163,6 +10189,30 @@ fn process_buffered_frames(
                 {
                     if runtime
                         .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"EXISTS")
+                {
+                    if runtime
+                        .execute_plain_exists_borrowed_into(
+                            &packet.keys[..packet.len],
+                            ts,
+                            &mut conn.write_buf,
+                        )
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -18300,6 +18350,92 @@ fn parse_borrowed_plain_mget_seven_packet<'a>(
 struct BorrowedPlainMgetEightPacket<'a> {
     consumed: usize,
     keys: [&'a [u8]; 8],
+}
+
+/// Max keys served by the all-keys borrowed multi fast path (MGET / EXISTS).
+/// Beyond this the packet falls through to the generic borrowed dispatch.
+const KEYS_MULTI_MAX: usize = 32;
+
+struct BorrowedPlainKeysMultiPacket<'a> {
+    consumed: usize,
+    keys: [&'a [u8]; KEYS_MULTI_MAX],
+    len: usize,
+}
+
+// (CrimsonHawk) Borrowed multi fast path for the all-keys commands MGET / EXISTS.
+// The exact-N parsers only cover 1-8 keys, so a 9..=32-key MGET/EXISTS dropped to
+// the much slower generic borrowed dispatch — measured EXISTS 0.69x @9 keys,
+// MGET 0.80x @16 vs Redis 7.2.4. Parses the array count generically (with a
+// non-canonical leading-zero guard, matching the exact-N parsers) into a
+// `[&[u8]; 32]` array, reusing the byte-exact `_borrowed_into` executor. Serves
+// 9..=32 keys; <=8 keep their exact-N paths; >32 defers. `name` is single-digit
+// length (MGET=4, EXISTS=6).
+fn parse_borrowed_plain_keys_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    name: &[u8],
+) -> Option<BorrowedPlainKeysMultiPacket<'a>> {
+    if config.max_bulk_len < name.len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None;
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    // nkeys = arr_len - 1 (command + keys). Serve 9..=MAX; <=8 uses exact-N parsers.
+    if arr_len < 10 {
+        return None;
+    }
+    let nkeys = arr_len - 1;
+    if nkeys > KEYS_MULTI_MAX || config.max_array_len < arr_len {
+        return None;
+    }
+    // Command bulk `$<len>\r\n<NAME>\r\n`; name length is single-digit (4/6).
+    let clen = name.len();
+    let hdr = [b'$', b'0' + clen as u8, b'\r', b'\n'];
+    let mut cursor = 1 + i + 2;
+    if input.get(cursor..cursor + 4)? != hdr {
+        return None;
+    }
+    cursor += 4;
+    if !input.get(cursor..cursor + clen)?.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    cursor += clen;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let empty: &[u8] = &[];
+    let mut keys = [empty; KEYS_MULTI_MAX];
+    let mut next = cursor;
+    let mut consumed = cursor;
+    for slot in keys.iter_mut().take(nkeys) {
+        let (k, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = k;
+        next = n2;
+        consumed = n2;
+    }
+    Some(BorrowedPlainKeysMultiPacket {
+        consumed,
+        keys,
+        len: nkeys,
+    })
 }
 
 fn parse_borrowed_plain_mget_eight_packet<'a>(

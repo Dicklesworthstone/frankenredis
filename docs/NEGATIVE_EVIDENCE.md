@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP MGET + EXISTS borrowed multi fast-path (9-32 keys) — 1.15x/1.14x @9 vs ORIG (7.2.4), byte-exact
+
+Completes the >8 dispatch-cliff sweep. MGET/EXISTS had per-N exact parsers only up
+to 8 keys (no multi parser), so 9..=32-key forms dropped to the generic borrowed
+dispatch — measured EXISTS 0.69x @9 / MGET 0.80x @16 vs Redis 7.2.4. Added ONE
+shared `parse_borrowed_plain_keys_multi_packet(name)` (both are all-keys commands):
+generic array-count parse (leading-zero guard) into a `[&[u8]; 32]` array, wired
+after each command's eight-key site, reusing the existing byte-exact
+`execute_plain_{mget,exists}_borrowed_into` zero-copy executors. <=8 keep their
+exact-N paths; >32 defers.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (control = hunk stashed,
+both `taskset`-pinned, P400, interleaved ×31 median): **MGET_9 cand/ctl 1.153x
+(now 1.058x vs Redis — FASTER), EXISTS_9 1.140x**; MGET_16 1.131x, MGET_32 1.061x,
+EXISTS_32 1.071x; EXISTS_12 1.012x (near-noise). A first noisy P200 pass read
+EXISTS_9 at 0.859x — refuted by the P400×31 interleaved rerun (EXISTS is sub-ms and
+noise-prone; always interleave with more trials). fr-vs-Redis-7.2.4 differential
+byte-exact at 8/9/16/32/33 keys incl. missing keys for both commands.
+
 ## 2026-07-01 CrimsonHawk: KEEP HMGET + ZMSCORE borrowed fast-path cap 8→32 — 1.19x / 1.11x @9 vs ORIG (7.2.4), byte-exact
 
 Same >8 dispatch-cliff fix as the SMISMEMBER row below, generalized to the two
