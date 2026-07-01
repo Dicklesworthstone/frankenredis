@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: SURFACE — >8 borrowed-parser dispatch-cliff vein EXHAUSTED; remaining sub-ms losses are dispatch-chain / structural / measurement-artifact
+
+After shipping the cliff fix across 6 commands (SMISMEMBER/HMGET/ZMSCORE/MGET/EXISTS
+reads + MSET write, all this date), swept the remaining vs-Redis-7.2.4 losses. No
+further CLEAN borrowed-parser cliff lever remains; documenting so the next agent
+does not re-chase:
+
+- **Write cliffs are a measurement trap.** A naive idempotent pipeline (re-adding
+  the SAME members/pairs) read SADD 0.41x, ZADD 0.52x @8 — but a CLEAN fresh-state
+  A/B (DEL+cmd pairs, or preexisting-set idempotent for SADD) shows SADD 1.05x/0.96x,
+  ZADD fresh 0.88-0.94x @4/8/16, HDEL 0.92x — all near-parity. The apparent 0.4-0.5x
+  were IDEMPOTENT-no-op-path artifacts, NOT real gaps. Only MSET had a true >8 cliff
+  (0.55x @9, shipped b8c9ebaf6). ALWAYS measure writes fresh (DEL between) and
+  interleaved; never trust a same-key idempotent write loop.
+- **pfcount 0.63x (worst residual) is dispatch-CHAIN-bound, not executor-bound.**
+  `perf record` of a cached single-key PFCOUNT blast: `process_buffered_frames`
+  23.5% (the linear chain of `parse_borrowed_plain_*_packet` matchers tried before
+  PFCOUNT's), `execute_plain_cardinality_borrowed` only 1.18% (the HLL cardinality
+  cache hit is ~free). Same shape for zcount/object_enc/bitpos/setrange (all sub-ms).
+  This is the ohsk5 per-command-dispatch frontier; the only lever is a structural
+  chain reorder / first-byte or command-hash dispatch, not a per-command fast path
+  (both PFCOUNT and OBJECT ENCODING ALREADY have borrowed fast paths).
+- **zlexcount 0.76x residual** = 2 small `x.to_vec()` clones in
+  `SortedSet::lex_count` building `ScoreMember::actual(s, x.to_vec())` for
+  `tree.rank_of` on the min/max bounds. Bounds are short; mimalloc absorbs the 2
+  small allocs → eliding them is sub-noise (not worth a borrowed-rank_of refactor).
+- **RPUSH/LPUSH 0.77-0.83x** = the known structural ChunkedList per-element gap
+  (bead 99fwc); prior rpush_owned attempt was sub-noise-reverted.
+
+No source shipped; this is a route-closing surface. The productive next levers are
+NOT in the sub-ms command tail — they are structural (ChunkedList packed nodes 99fwc,
+keyspace/hashtable RAM) or a dispatch-chain reorder.
+
 ## 2026-07-01 CrimsonHawk: KEEP MSET borrowed multi fast-path (9-32 pairs) — 0.55x→1.145x vs ORIG (7.2.4), byte-exact
 
 Extends the >8 dispatch-cliff fix to the first WRITE command. MSET had exact-N
