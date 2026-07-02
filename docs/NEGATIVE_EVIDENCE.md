@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: BUG FOUND (correctness, not a ratio) — SAVE/BGSAVE are a SILENT NO-OP on a bare-launched fr; fix diagnosed, code unbuilt (turn cut off), NOT pushed.
+
+Digging RDB SAVE throughput (a fresh CPU-bound area) surfaced a real data-loss
+bug, not a perf number. Repro: launch fr with NO config file and NO --rdb
+(`frankenredis --port P`), write keys, `SAVE` → returns OK, `rdb_last_bgsave_status:ok`,
+`rdb_changes_since_last_save:0` — but NO rdb file is written (verified: `find` shows
+nothing touched; restart loses all data). redis ALWAYS writes dump.rdb to
+cwd/dir even under `save ""` (oracle verified). DEBUG RELOAD works (RDB
+encode/decode is fine) — only the SAVE-to-named-file path is dead.
+ROOT CAUSE: `rdb_path` defaults to None (main.rs:907) and is set ONLY from a
+`--rdb` CLI arg or a config FILE's dir/dbfilename (`configured_rdb_path`, reached
+only inside `if let Some(path) = &config_path` at main.rs:1060). Bare launch =
+neither → rdb_path stays None → `persist_snapshot_to_disk`'s
+`if let Some(path) = self.server.rdb_path` (fr-runtime lib.rs:34935) writes
+nothing. SHUTDOWN(save) hits the same no-op.
+FIX (diagnosed, minimal): after all config/CLI parsing, before set_rdb_path
+(main.rs:~1186), add `if rdb_path.is_none() { rdb_path = Some("dump.rdb".into()); }`
+so a bare launch defaults to cwd/dump.rdb like redis (write + startup-load +
+shutdown-save). BLAST RADIUS to validate next cycle: startup now auto-loads a
+stray ./dump.rdb (redis-matching) and SHUTDOWN(save) now writes it — confirm the
+binary/integration harness uses per-test dirs so this doesn't pollute. 103
+fr-server rdb/save/persist unit tests passed with a sibling variant; end-to-end
+(SAVE writes file + restart reloads) NOT re-confirmed after the final refactor —
+build was interrupted, so NOT committed/pushed (won't push unbuilt persistence
+code). Next cycle: apply the 3-line fix, build, e2e-verify, ship.
+
 ## 2026-07-02 CrimsonHawk: CORRECT (supersedes prior repl entry) — the replication write gap is SYSCALL-BOUND (__send in the event-loop I/O), NOT the argv-clone; DO NOT do the aof_records refactor for it. Gap is real under a FAIR comparison.
 
 Re-verified with a STABLE oracle replica (prior 0.53x compared fr-with-replica vs
