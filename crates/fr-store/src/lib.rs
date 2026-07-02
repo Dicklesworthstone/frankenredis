@@ -19393,11 +19393,19 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        // Collect values, treating missing keys as empty strings.
+        // (CrimsonHawk) Validate + touch each operand in a mutable pass but do NOT
+        // clone the value bytes: BITOP on large strings previously did
+        // `v.into_owned()` per key (N x value_len of memcpy+alloc per call, which
+        // made BITOP AND/XOR ~1.2-1.3x slower than redis, which reads operands in
+        // place). Instead we record each operand's length here, then read the bytes
+        // by BORROWED Cow (Value::String -> Cow::Borrowed, zero-copy) in the SWAR
+        // pass below. The values are single-threaded-stable between the two passes
+        // (touch/LFU don't change the string bytes), and the result is computed in
+        // a separate buffer so a dest==source alias is still correct.
         // Enforce a total memory limit for the operation to prevent DoS.
         const MAX_BITOP_TOTAL_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
         let mut total_bytes = 0usize;
-        let mut values: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        let mut lens: Vec<usize> = Vec::with_capacity(keys.len());
         for &key in keys {
             self.drop_if_expired(key, now_ms);
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
@@ -19422,36 +19430,53 @@ impl Store {
                                     "BITOP total input size exceeds limit".to_string(),
                                 ));
                             }
-                            values.push(v.into_owned());
+                            lens.push(v.len());
                         }
                         None => return Err(StoreError::WrongType),
                     }
                 }
-                None => values.push(Vec::new()),
+                None => lens.push(0),
             }
         }
 
-        let max_len = values.iter().map(|v| v.len()).max().unwrap_or(0);
+        // Read an operand's bytes by borrowed ref (missing key => empty). Safe
+        // after the mutable pass above: no `&mut self` is held here, and
+        // Value::String yields a Cow::Borrowed so large strings are zero-copy.
+        macro_rules! operand {
+            ($key:expr) => {
+                self.entries
+                    .get($key)
+                    .and_then(|e| e.value.string_bytes())
+            };
+        }
+
+        let max_len = lens.iter().copied().max().unwrap_or(0);
         let mut result = vec![0u8; max_len];
 
         if eq_ascii_ci(op, b"NOT") {
-            if values.len() != 1 {
+            if keys.len() != 1 {
                 return Err(StoreError::WrongType);
             }
             // `result` is `max_len == values[0].len()` zeros; NOT every byte.
-            Self::swar_not_into(&mut result, &values[0]);
+            if let Some(v) = operand!(keys[0]) {
+                Self::swar_not_into(&mut result, &v);
+            }
         } else {
             // Initialize with the first value (shorter operands zero-extend, and
             // `result` is already zeroed beyond `first.len()`).
-            if let Some(first) = values.first() {
-                result[..first.len()].copy_from_slice(first);
+            if let Some(&first_key) = keys.first()
+                && let Some(first) = operand!(first_key)
+            {
+                result[..first.len()].copy_from_slice(&first);
             }
 
             let is_and = eq_ascii_ci(op, b"AND");
             let is_or = eq_ascii_ci(op, b"OR");
             let is_xor = eq_ascii_ci(op, b"XOR");
 
-            for val in values.iter().skip(1) {
+            for &key in keys.iter().skip(1) {
+                let val = operand!(key).unwrap_or(std::borrow::Cow::Borrowed(&[]));
+                let val = val.as_ref();
                 if is_and {
                     Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
                     // Bytes beyond a shorter operand are AND-ed with implicit 0.

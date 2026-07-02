@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — BITOP AND/OR/XOR read operands zero-copy instead of cloning each input; BITOP 0.74-0.87x → 1.21-1.37x vs redis 7.2.4 (now FASTER), byte-exact.
+
+Probing CPU-heavy commands on large collections (all parity-or-faster: SORT
+2.5x, SRANDMEMBER/ZRANDMEMBER/HRANDFIELD 1.3-2x, BITCOUNT 2.5-3.8x via SIMD
+popcount) surfaced ONE loser: BITOP AND/XOR on ~1MB strings = 0.74-0.87x
+(fr ~1.2-1.3x SLOWER). Cause: Store::bitop did `v.into_owned()` on EVERY operand
+(N x value_len memcpy+alloc per call) before the SWAR, while redis reads operands
+in place. Fix: split into a mutable pass (expiry/LFU/touch/type-validate, record
+lengths only) + a SWAR pass that reads each operand by BORROWED Cow
+(Value::String -> Cow::Borrowed = zero-copy; single-threaded-stable between passes;
+result in a separate buffer so dest==source aliasing stays correct).
+MEASURED (redis-benchmark, 2x 1MB inputs): AND 0.77x→**1.31x**, XOR 0.77x→**1.27x**,
+OR 0.85x→**1.31x** — fr now FASTER than redis. BYTE-EXACT: AND/OR/XOR/NOT dest md5
+identical to oracle; 15 fr-store bitop/swar tests green (incl swar-matches-scalar).
+CPU-heavy read/compute surface now fully parity-or-faster.
+
 ## 2026-07-02 CrimsonHawk: MEASURED/REJECT — RDB SAVE is only ~1.4x vs redis 7.2.4 (NOT 3x — first read was cold/stale-process confounded), byte-size parity; expiry-map fast-exit = byte-identical but NO measurable win (reverted).
 
 Now that SAVE writes (79018d064), benchmarked RDB SAVE on 310k mixed keys
