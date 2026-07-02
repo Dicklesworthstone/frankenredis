@@ -8730,3 +8730,29 @@ MEASURED via perf-stat instructions over fixed 100k-cmd GETRANGE blasts, candida
 Byte-exact: 1364 live differential vs redis 7.2.4 — 364 exhaustive (RESP2+RESP3, individual + pipelined; empty/1-byte/binary/
 40KB strings; ranges incl negative/out-of-range/inverted/full; missing/wrongtype) + 1000 MIXED-pipeline (GETRANGE interleaved
 with GET/SET/INCR/HGET/PING/APPEND, verifying FastEncodedReply mid-pipeline doesn't corrupt the buffer) = 0 mismatches.
+
+### 2026-07-02 NEGATIVE (saturation re-confirm after 3 wins): command-throughput surface exhausted; residuals are dispatch-chain / peer-owned structural (CrimsonHawk)
+Landed this session (measured, byte-exact, on main+master): a67a6b86c SMISMEMBER direct-encode _into (0.62x->1.10x vs redis
+7.2.4), aa26d8dae plain-SINTER direct sorted-Vec (0.83x->1.01x), a0a62534a encode_redis_double stack-buffer framing (kills
+per-score memmove, +1-4% multi-score, byte-exact 80/80). After those, a fresh extended_headtohead_ch.py sweep vs vendored
+redis 7.2.4 (pipe=200, trials=9) shows the surface SATURATED — every command at parity or fr-faster EXCEPT two sub-ms
+dispatch-bound residuals:
+  - pfcount (single-key) 0.37x — fr 0.65ms vs redis 0.24ms/200-pipe.
+  - object_enc (OBJECT ENCODING) 0.62x — fr 0.56ms vs redis 0.35ms/200-pipe.
+Both PROFILED (perf record -g -p PID -- sleep, 500-rep blast): cost is process_buffered_frames (OBJECT-ENCODING 32% incl 13.5%
+self) + __memcmp_avx2_movbe (~9%) — i.e. the LINEAR inline parse_borrowed_plain_*_packet matcher chain that a
+non-fast-set command falls through before reaching generic dispatch. NO local executor inefficiency (both already have borrowed
+fast paths). The only lever is a structural dispatch-chain reorder / command-hash jump in the single hottest function
+(process_buffered_frames) — bead ohsk5, high-risk, already circled by multiple agents; NOT a safe small per-turn win. Adding
+PFCOUNT/OBJECT to the front of the chain would tax GET/SET (net loss).
+Also checked + ruled out (measured/read): ZMSCORE residual ~0.7x@16-32 is the per-member IndexMap<Arc<[u8]>,f64>::get zset
+score lookup (~19% profile) — store.zmscore ALREADY resolves the zset ONCE (optimal, no resolve-once bug), so the residual is
+the zset-dict representation (peer-owned RAM rework uybhq/peni2), not a command-path lever. Plain SDIFF (1.02x) / SUNION (1.03-
+1.04x) are PARITY (SINTER's direct-Vec win does NOT generalize — their output is large/encode-bound). No remaining SINTER-class
+small-output build-then-copy patterns in fr-store (grep of into_owned().collect(): sinter fixed, sdiff/sunion parity, rest are
+unavoidable single-copy set materializations).
+CONCLUSION: command-throughput levers that are BOTH safe and measurable are exhausted for this agent. Remaining gaps are (a)
+dispatch-chain-structural (ohsk5, hot-path, risky) and (b) peer-owned structural — ChunkedList packed nodes (99fwc), keyspace
+RAM (uhthd), zset/hash dict RAM (uybhq). BLOCKER: agent-mail reservations DOWN all session (sqlite "database disk image is
+malformed", recovery mode wants `am doctor repair`) — coordinated via wedged-daemon playbook (single-author diffs, sentinel
+re-verified pre-commit).
