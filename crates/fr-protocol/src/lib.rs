@@ -207,10 +207,97 @@ pub fn push_redis_double_ascii(out: &mut Vec<u8>, value: f64) {
     fpconv_dtoa_into(value, out);
 }
 
+/// Write the `push_i64` decimal representation of `n` into the front of `buf`,
+/// returning the byte length. Byte-identical to [`push_i64`] (same
+/// `write_u64_digits` core, same leading `-`), but into a caller-owned stack
+/// slice so a length-prefixed reply can be framed without a memmove.
+fn write_i64_to_slice(n: i64, buf: &mut [u8]) -> usize {
+    let (neg, val) = if n < 0 {
+        (true, (n as i128).unsigned_abs() as u64)
+    } else {
+        (false, n as u64)
+    };
+    let mut tmp = [0u8; 20];
+    let pos = write_u64_digits(&mut tmp, 20, val);
+    let digits = &tmp[pos..];
+    let mut i = 0;
+    if neg {
+        buf[0] = b'-';
+        i = 1;
+    }
+    buf[i..i + digits.len()].copy_from_slice(digits);
+    i + digits.len()
+}
+
+/// Fast d2string cases that format into a fixed stack `buf` (returning the byte
+/// length): NaN/±inf, signed zero, and any integer-valued double in the i64
+/// fast-range. Byte-identical to the matching arms of [`push_redis_double_ascii`].
+/// Returns `None` for a genuinely fractional value, which needs `fpconv`.
+fn try_format_redis_double_simple(value: f64, buf: &mut [u8; 24]) -> Option<usize> {
+    if value.is_nan() {
+        buf[..3].copy_from_slice(b"nan");
+        return Some(3);
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
+            buf[..3].copy_from_slice(b"inf");
+            Some(3)
+        } else {
+            buf[..4].copy_from_slice(b"-inf");
+            Some(4)
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            buf[..2].copy_from_slice(b"-0");
+            Some(2)
+        } else {
+            buf[0] = b'0';
+            Some(1)
+        };
+    }
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if value >= lo && value <= hi {
+        let truncated = value as i64;
+        if truncated as f64 == value {
+            return Some(write_i64_to_slice(truncated, buf));
+        }
+    }
+    None
+}
+
 /// Encode a Redis double reply directly into `out`: RESP3 Double when `resp3`
 /// is true, RESP2 bulk string otherwise. This is the allocation-free score
 /// reply primitive for hot zset paths.
 pub fn encode_redis_double(value: f64, resp3: bool, out: &mut Vec<u8>) {
+    // Fast path — the overwhelmingly common zset scores (integer-valued) plus
+    // the special constants format into a stack buffer, so the length-prefixed
+    // RESP2 reply can be written header-then-body IN ORDER. The prior code
+    // formatted the body into `out` first, then `resize`-zero-filled and
+    // `copy_within`-shifted the whole body forward to prepend `$<len>\r\n` — a
+    // per-score memmove that dominated multi-score replies (ZMSCORE/ZRANGE
+    // WITHSCORES/ZPOPMIN...). Redis's addReplyHumanLongDouble frames the same
+    // way (stack buffer, then bulk write). Byte-identical output.
+    let mut buf = [0u8; 24];
+    if let Some(n) = try_format_redis_double_simple(value, &mut buf) {
+        let body = &buf[..n];
+        if resp3 {
+            out.reserve(1 + n + 2);
+            out.push(b',');
+        } else {
+            out.reserve(1 + 2 + n + 2 + 2);
+            out.push(b'$');
+            push_usize(out, n);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\r\n");
+        return;
+    }
+
+    // Fractional fallback: fpconv writes into `out`, so keep the format-then-
+    // frame path for these rarer values (unchanged, byte-exact).
     if resp3 {
         out.reserve(27);
         out.extend_from_slice(b",");
