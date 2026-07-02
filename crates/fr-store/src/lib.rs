@@ -13168,28 +13168,82 @@ impl Store {
     }
 
     pub fn sinter(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        let Some(result) = self.sinter_value(keys, now_ms)? else {
+        // Plain SINTER (no destination): unlike SINTERSTORE, the reply is a
+        // sorted Vec, so the intermediate result *set* that `sinter_value` builds
+        // is pure overhead here — the smallest set's members are already unique
+        // (membership-filtering can't introduce duplicates) and the final sort
+        // discards the set's iteration order anyway. Building the survivors
+        // straight into a Vec skips the whole GenericSet insert/rehash/append_entry
+        // path AND the second per-member copy the old `sinter_value().iter()
+        // .into_owned()` collect paid (survivors were copied once into the result
+        // set's arena, then again into this Vec). SINTERSTORE keeps `sinter_value`.
+        // (frankenredis: plain-SINTER direct-Vec)
+        let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
             return Ok(Vec::new());
         };
-        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
-        Ok(v)
+        let Some(smallest) = self.entries.get(keys[min_idx]).and_then(|e| match &e.value {
+            Value::Set(s) => Some(s),
+            _ => None,
+        }) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<Vec<u8>> = match smallest.as_generic() {
+            // String smallest set: walk it once, keep members present in every
+            // other set, copy survivors directly into the output Vec (no result
+            // set). Byte-identical to the prior path after the shared sort.
+            Some(base) if keys.len() >= 2 => {
+                let other_sets: Vec<&SetValue> = keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != min_idx)
+                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                        Value::Set(s) => Some(s.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut v: Vec<Vec<u8>> = Vec::with_capacity(base.len());
+                'member: for member in base.iter() {
+                    for other in &other_sets {
+                        if !other.contains(member) {
+                            continue 'member;
+                        }
+                    }
+                    v.push(member.to_vec());
+                }
+                v
+            }
+            // Intset (or single-key) smallest: keep the galloping clone+retain on
+            // the sorted-i64 representation, then flatten to the Vec.
+            _ => {
+                let mut res = smallest.as_ref().clone();
+                for (i, key) in keys.iter().enumerate() {
+                    if i == min_idx || res.is_empty() {
+                        continue;
+                    }
+                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                        Value::Set(s) => Some(s),
+                        _ => None,
+                    }) {
+                        res.retain_intersect(s);
+                    }
+                }
+                res.iter().map(|m| m.into_owned()).collect()
+            }
+        };
+        out.sort();
+        Ok(out)
     }
 
-    /// (BlackThrush) SINTER result as a `SetValue` (no sorted-`Vec` flatten) so
-    /// SINTERSTORE stores it directly instead of round-tripping the membership
-    /// through a sorted `Vec<Vec<u8>>` + re-collect + re-derive — mirrors the
-    /// sunionstore-direct pattern (was the lone non-parity set-algebra store: the
-    /// `sinter()` path sorts a Vec the stored set never needs, then rebuilds the
-    /// set from it). The preamble (expiry drop, WRONGTYPE, LFU bump, touch,
-    /// smallest-as-base, retain_intersect) is identical to the prior inline
-    /// `sinter` body, so SINTER's reply is unchanged. Returns `None` when the
-    /// intersection is empty (a missing source, or an emptied result).
-    fn sinter_value(
-        &mut self,
-        keys: &[&[u8]],
-        now_ms: u64,
-    ) -> Result<Option<Box<SetValue>>, StoreError> {
+    /// Shared SINTER/SINTERSTORE preamble: expire every source key, type-check,
+    /// find the smallest set, and apply the LFU-bump/touch side-effects in the
+    /// exact draw order the prior inline body used (smallest first, then the
+    /// remaining keys in argument order). Returns `Ok(Some(min_idx))` when every
+    /// source set exists (caller builds the intersection), or `Ok(None)` when the
+    /// result is definitively empty — an empty `keys`, or a missing source — in
+    /// which case any existing sets have already been touched. Extracted verbatim
+    /// so `sinter` (Vec reply) and `sinter_value` (SetValue for SINTERSTORE) share
+    /// byte-identical side-effects. (frankenredis: plain-SINTER direct-Vec)
+    fn sinter_prepare(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Option<usize>, StoreError> {
         if keys.is_empty() {
             return Ok(None);
         }
@@ -13204,7 +13258,6 @@ impl Store {
         let mut min_idx = 0;
         let mut has_empty = false;
 
-        // First pass: typecheck and find the smallest set.
         for (i, key) in keys.iter().enumerate() {
             match self.entries.get(*key) {
                 Some(entry) => match &entry.value {
@@ -13223,7 +13276,7 @@ impl Store {
         }
 
         if has_empty {
-            // Touch existing sets to emulate Redis behavior
+            // Touch existing sets to emulate Redis behavior.
             for key in keys {
                 if self.entries.contains_key(*key) {
                     let rand_sample = if lfu_tracking_enabled {
@@ -13244,12 +13297,6 @@ impl Store {
             return Ok(None);
         }
 
-        // Touch/LFU first, preserving the previous clone-then-retain ordering so
-        // the LFU rng draw sequence stays byte-identical: smallest set first, then
-        // the remaining keys in argument order. All keys exist here (the missing
-        // case returned via `has_empty` above) and were already type-checked, so
-        // every set is touched exactly once. The intersection itself is computed
-        // afterwards from immutable borrows. (frankenredis-sinterfresh)
         let rand_sample = if lfu_tracking_enabled {
             self.next_rand()
         } else {
@@ -13279,6 +13326,26 @@ impl Store {
                 entry.touch(now_ms);
             }
         }
+        Ok(Some(min_idx))
+    }
+
+    /// (BlackThrush) SINTER result as a `SetValue` (no sorted-`Vec` flatten) so
+    /// SINTERSTORE stores it directly instead of round-tripping the membership
+    /// through a sorted `Vec<Vec<u8>>` + re-collect + re-derive — mirrors the
+    /// sunionstore-direct pattern (was the lone non-parity set-algebra store: the
+    /// `sinter()` path sorts a Vec the stored set never needs, then rebuilds the
+    /// set from it). The preamble (expiry drop, WRONGTYPE, LFU bump, touch,
+    /// smallest-as-base, retain_intersect) is identical to the prior inline
+    /// `sinter` body, so SINTER's reply is unchanged. Returns `None` when the
+    /// intersection is empty (a missing source, or an emptied result).
+    fn sinter_value(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Option<Box<SetValue>>, StoreError> {
+        let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
+            return Ok(None);
+        };
 
         // Build the intersection without cloning the whole smallest set. Redis's
         // sinterGenericCommand iterates the smallest set and emits only members
