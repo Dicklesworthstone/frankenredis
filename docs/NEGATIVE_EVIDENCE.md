@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — Lua compute path fully structural (to_number optimal); enum-shrink is the sole remaining Lua lever (~200 sites, dedicated cycle). MULTI/EXEC + more fresh probes = parity.
+
+Confirmed the compute-heavy EVAL frontier: `to_number` already fast-returns for
+the Number case (the hot arithmetic operand path), so no contained win there — the
+remaining compute cost is eval_expr (tree-walker dispatch 34%) + LuaValue clone/
+drop (~21%, the 32-byte enum). SOLE remaining Lua lever = shrink LuaValue via
+`Str(Vec<u8>)→Rc<[u8]>` (16B fat ptr → enum 32→24B, ~25% smaller ⇒ ~5-8% off
+compute-heavy). ASSESSED CONCRETELY: ~195 `LuaValue::Str(...)` construction sites
+(wrap via a `LuaValue::str(impl Into<Rc<[u8]>>)` helper) + ~13 move-out sites
+(need `.to_vec()`) + boundary regressions (take_redis_arg `mem::take→to_vec`,
+reply-move `Vec→Rc::from` copy) — favorable net for compute-heavy, ~neutral for
+redis.call-heavy. NOT rushed: a ~200-site EVAL-interpreter change risks a subtle
+correctness bug that passes the 235 unit tests but breaks real scripts; needs a
+dedicated cycle with the full differential harness. FRESH PROBES this cycle (all
+PARITY, no gap): MULTI/EXEC 2000-txn pipelines ~1.0-1.18x (noisy), COPY/GETDEL/
+LMPOP/ZMPOP/SPOP-count/OBJECT-ENCODING/LPOS/SINTERCARD on large values. Command
+surface remains saturated; Lua micro-ops fully mined (8 wins).
+
 ## 2026-07-02 CrimsonHawk: KEEP — LuaValue::RustFunction(String)→Rc<str>; -1.6% EVAL instructions on built-in-heavy scripts, byte-exact. Plus: fresh command probes all parity.
 
 RustFunction holds the built-in name; it's built ONCE in the cached globals
