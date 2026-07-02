@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — deep-saturation confirmed: COPY correct+15x FASTER (arena clone), Lua number-formatting byte-exact (28 edge cases), -0.0 "divergence" was a phantom. No new gap.
+
+Correctness + perf differential this cycle, all clean:
+- COPY of a 2000-field hash: fr **14-17x FASTER** than redis, and VERIFIED CORRECT
+  (dst hlen=2000, f1/f2000 exact, deep/independent after src mutate, DEBUG
+  DIGEST-VALUE == oracle 6caa6f83). fr bulk-clones the CompactFieldMap arena;
+  redis rehashes field-by-field. NOT a gap — fr's advantage. COPY 5KB string
+  ~0.9x (parity, noisy).
+- Lua number formatting: 28 edge cases (tostring of -0.0/0.0*-1/0/-1, 1/0=inf,
+  -1/0=-inf, 0/0=-nan, 2^63/2^53, 1e14/1e15/1e16, 9007199254740993, 1/3, math.huge,
+  ...) ALL byte-exact vs redis 7.2.4. The earlier "tostring(-0.0) fr -0 vs redis 0"
+  was a CONCAT-TEST ARTIFACT — the isolated probe shows BOTH give "-0" (fr's
+  grisu2/lua_number_to_string + the deliberate -0.0 sign preservation are CORRECT).
+CONSEQUENCE: the reachable command + Lua-conformance + config surface is
+comprehensively saturated (parity-or-faster / byte-exact). The remaining levers
+are all structural/multi-day (Lua LuaValue enum-shrink [uncertain real-world EV:
+helps compute-heavy, ~neutral for redis.call-heavy], dispatch-chain command-hash,
+ChunkedList packed nodes, keyspace RAM, bytecode VM). No contained win remains.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — Lua compute path fully structural (to_number optimal); enum-shrink is the sole remaining Lua lever (~200 sites, dedicated cycle). MULTI/EXEC + more fresh probes = parity.
 
 Confirmed the compute-heavy EVAL frontier: `to_number` already fast-returns for
