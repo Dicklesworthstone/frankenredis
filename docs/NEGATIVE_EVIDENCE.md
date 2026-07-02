@@ -8790,3 +8790,23 @@ the i128 replacement competes with grisu (already fast) and wins nothing. REFINE
 pays for HIGH-precision fixed-decimal `format!("{:.N}")` (large N, N>=~15 where grisu can't and dragon is forced); low-N sites
 are already fast. Reverted (byte-exact but zero-gain code + a 2M fuzz test = not worth the complexity). Do NOT re-apply i128 to
 low-precision {:.N} formatters without a profile showing dragon (not grisu) dominates.
+
+### 2026-07-02 REJECT (ZPOPMIN/ZPOPMAX base *2 fast path) + BLOCKER (dispatch-chain ohsk5 is the dominant sub-ms lever) — CrimsonHawk
+After shipping the ZPOPMIN/ZPOPMAX COUNT fast path (4e5bb3836), tried adding the base `ZPOPMIN|ZPOPMAX key` (*2, fully generic
+~0.79x) fast path (execute_plain_zpop_base_borrowed + key_only *2 dispatch, byte-exact 48/48 RESP2+3). REJECTED: cand-vs-ctl
+A/B is pure NOISE — base swung +10.6% / -8.5% and the (unchanged) count path swung -22% / +12.8% across interleaved runs. The
+base form is ~1us; a ~+8% best-case win is unmeasurable below the sub-ms noise floor, and the *2 branch adds 2 failed matchers
+for every later command. Reverted (my own pitfall: sub-ms cmds NOISE-PRONE; never trust a single sub-ms A/B).
+
+**DOMINANT REMAINING LEVER = the process_buffered_frames matcher chain (bead ohsk5).** Profiled HINCRBY (0.323x vs redis 7.2.4,
+common cmd): it HITS its fast path (execute_plain_hincrby_borrowed 6.97%) but process_buffered_frames is 34% (self 19.5%) — the
+LINEAR chain of ~100 `parse_borrowed_plain_*_packet` matchers HINCRBY walks (each a cheap `*N\r\n$M\r\n<CMD>` strip_prefix, ~2-8
+byte reads) before reaching its own. Visible in profile: parse_borrowed_plain_{keys_multi,keyed_values2,key_only,key_arg1/2}_packet
+each 0.7-2% of FAILED rejects. It is DEATH BY A THOUSAND CUTS — no single expensive matcher to fix (checked keys_multi: rejects
+HINCRBY at `arr_len<10` after ~5 bytes). Same root caps GETDEL 0.34x, SETNX 0.51x, TYPE 0.57x, OBJECT 0.58x, APPEND 0.66x,
+INCR 0.80x, GETEX 0.33x, COPY 0.42x, ZPOPMIN 0.79x, LPOP-COUNT 0.53x — DOZENS of sub-ms cmds whose executors are fast but sit
+deep in the chain. The ONLY fix is the structural first-byte / (argcount,cmdlen)-grouped dispatch or a command-hash jump table
+(ohsk5) — a big, risky refactor of THE hottest function; multiple agents have circled it; NOT safe piecemeal (reordering one cmd
+up just shuffles cost). NOT taken unilaterally: agent-mail reservations DOWN this session (sqlite malformed) so a hot-dispatch
+restructure that could strand peers' HEAD is irresponsible now. This is the single highest-value remaining perf item and wants a
+dedicated coordinated cycle. The genuine-missing-fast-path COUNT sub-vein IS exhausted (lmpop/zmpop/zpopmin/zpopmax COUNT shipped).
