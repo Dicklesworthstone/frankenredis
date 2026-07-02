@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: NEW GAP + PARTIAL FIX — writes under `maxmemory` are 3-7x slower vs redis 7.2.4 (redis-as-cache config, untested before); byte-level is_int_encoded_string removed a from_utf8+parse+alloc from the O(N) memory-estimate hot path → SET+maxmemory(headroom) 0.28x→0.37x. Residual = the O(N) used_memory scan per write (needs incremental accounting).
+
+Benchmarked `maxmemory 128mb` + `allkeys-lru` (extremely common redis-as-cache
+config, never tested): SET is 0.145-0.303x. Root cause (perf): with maxmemory>0,
+enforce_maxmemory runs run_bounded_eviction_loop → classify_maxmemory_pressure →
+`estimate_memory_usage_bytes` on EVERY write, which recomputes the O(N) per-entry
+model over the whole keyspace (amortized every 64 mutations). Inside it,
+`is_int_encoded_string` did `from_utf8 + i64::parse + i64::to_string`(heap alloc)
+PER ENTRY = 45% of CPU in the profile.
+FIXES (committed, fr-store):
+1. is_int_encoded_string → byte-level canonical i64 check (redis string2ll), no
+   from_utf8/parse/alloc. Byte-identical boolean (canonical decimal, no leading
+   zeros/-0, i64::MIN incl). MEASURED SET+maxmemory(128mb, headroom, no eviction)
+   0.28x→0.37x (~1.3x); keyspaces matched oracle (~155k both), used_memory
+   reasonable (14.9MB vs 18MB oracle). 68 fr-store memory/int/encoding tests green.
+2. eviction loop: `set(0)` (forced full O(N) rescan per evicted key via the next
+   classify) → `adjust_cached_memory_usage_after_remove` (O(1) decrement, the
+   established remove-path helper). Correct + neutral-to-better on eviction (this
+   branch only runs when active-expire evicted 0, so the +1-mutation fast path
+   holds); not the dominant cost in the headroom case (no eviction there).
+RESIDUAL (still ~0.37x, structural): the O(N) used_memory recompute per ~64
+writes. redis tracks used_memory O(1) (zmalloc counter); fr MODELS it (per-entry
+scan). Real fix = incremental used_memory (increment on insert/modify mirroring
+adjust_*_after_remove) = multi-day, drift-prone (hooks every write path). ALSO
+SURFACED (pre-existing, NOT my change — before-binary identical): under tight
+maxmemory (16mb) fr under-evicts (evicted 72-112 vs oracle 274134) and returns
+OOM while holding MORE keys (174k vs 148k) — fr's modeled per-key ~96B < redis
+actual ~110B + bounded eviction max_cycles can't keep pace with the write rate.
+Separate bead (modeled-memory eviction fidelity).
+
 ## 2026-07-02 CrimsonHawk: MEASURED (completes 950517d17) — AOF fd-cache gives a small real win ~0.55x→~0.60x; residual AOF gap (~0.6x) is the per-write argv deep-clone into AofRecord + re-encode-at-flush (redis encodes to bytes ONCE). Structural: aof_records is dual-purpose (AOF+repl, repl-only filter needs argv).
 
 A/B (SET+AOF everysec, before=pre-fd-cache binary / after=fd-cache / oracle, 3

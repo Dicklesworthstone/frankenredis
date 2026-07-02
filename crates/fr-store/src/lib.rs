@@ -9791,12 +9791,25 @@ impl Store {
                 let Some(candidate) = self.select_eviction_candidate(now_ms, sample_limit) else {
                     break;
                 };
-                if self.internal_entries_remove(candidate.as_slice()).is_some() {
+                if let Some(evicted_entry) = self.internal_entries_remove(candidate.as_slice()) {
                     self.stream_groups.remove(candidate.as_slice());
                     self.stream_last_ids.remove(candidate.as_slice());
                     evicted_keys = evicted_keys.saturating_add(1);
                     self.stat_evicted_keys = self.stat_evicted_keys.saturating_add(1);
-                    self.cached_memory_usage_bytes.set(0); // Force cache invalidation to track exact bytes freed
+                    // (CrimsonHawk) Decrement the cached used_memory by exactly
+                    // this entry in O(1) rather than `set(0)` — the old
+                    // invalidation forced the very next classify_maxmemory_pressure
+                    // (and one per evicted key) to rescan ALL entries O(N), which
+                    // made writes under maxmemory 3-7x slower than redis. This
+                    // branch only runs when the active-expire cycle evicted 0, so
+                    // exactly one mutation (this eviction) has occurred since the
+                    // cache was refreshed and the fast decrement path applies; if
+                    // the cache was not fresh it no-ops and the normal periodic
+                    // O(N) recompute still corrects it.
+                    self.adjust_cached_memory_usage_after_remove(
+                        candidate.as_slice(),
+                        &evicted_entry,
+                    );
                     // Emit evicted keyspace notification (use logical key)
                     let (db, logical_key) = match decode_db_key(&candidate) {
                         Some((db, lk)) => (db, lk.to_vec()),
@@ -24796,13 +24809,40 @@ fn estimate_string_value_memory_usage_bytes(bytes: &[u8], entry: &Entry) -> usiz
 }
 
 fn is_int_encoded_string(bytes: &[u8]) -> bool {
-    let Ok(s) = std::str::from_utf8(bytes) else {
-        return false;
+    // (CrimsonHawk) Byte-level canonical i64 check mirroring redis string2ll,
+    // avoiding str::from_utf8 + i64::parse + i64::to_string (a heap alloc) on the
+    // memory-estimate hot path — this fn is called per entry inside the O(N)
+    // used_memory scan the eviction loop runs on every write under maxmemory.
+    // Must stay byte-identical to the old `parse::<i64>() && to_string()==s`:
+    // canonical decimal, no leading zeros, no "-0", fits i64 (incl i64::MIN).
+    let (neg, digits) = match bytes.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, bytes),
     };
-    let Ok(n) = s.parse::<i64>() else {
+    if digits.is_empty() {
         return false;
-    };
-    n.to_string() == s
+    }
+    if digits[0] == b'0' {
+        // Only the single character "0" is canonical (not "-0", "00", "07", ...).
+        return digits.len() == 1 && !neg;
+    }
+    let mut val: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return false;
+        }
+        let d = i64::from(b - b'0');
+        let next = if neg {
+            val.checked_mul(10).and_then(|v| v.checked_sub(d))
+        } else {
+            val.checked_mul(10).and_then(|v| v.checked_add(d))
+        };
+        match next {
+            Some(v) => val = v,
+            None => return false, // out of i64 range
+        }
+    }
+    true
 }
 
 fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
