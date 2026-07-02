@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: MEASURED (completes 950517d17) — AOF fd-cache gives a small real win ~0.55x→~0.60x; residual AOF gap (~0.6x) is the per-write argv deep-clone into AofRecord + re-encode-at-flush (redis encodes to bytes ONCE). Structural: aof_records is dual-purpose (AOF+repl, repl-only filter needs argv).
+
+A/B (SET+AOF everysec, before=pre-fd-cache binary / after=fd-cache / oracle, 3
+interleaved trials): before/ora 0.425/0.557/0.609, after/ora 0.587/0.571/0.634 —
+the fd-cache (persistent incr fd vs open+close per tick) is a consistent small
+win (~+5-10%, ~0.55x→~0.60x), validating the commit. AOF gap remains ~0.6x
+(1.7x slower).
+
+Residual root cause (perf: memmove ~7% + write/__send syscalls, no single
+dominant hotspot): every write does `AofRecord { argv: argv.to_vec() }`
+(lib.rs:4562) — a DEEP clone of the whole command argv — pushed to `aof_records`,
+then `flush_aof_to_disk` re-encodes them to RESP bytes per tick. redis encodes
+the command to its AOF/repl buffer ONCE at feed time (no structured re-encode).
+The clean fix = encode-to-bytes at write time, but `aof_records` is DUAL-PURPOSE
+(AOF disk flush AND the replication backlog/offset) and `flush_aof` filters
+repl-only commands via `command_is_replication_only(&r.argv)` — which needs the
+structured argv. So encode-at-write requires threading a repl-only flag +
+reworking the repl backlog = structural (multi-day), deferred. Also unverified:
+whether `aof_records` is ever truncated (possible unbounded growth) — check next.
+
 ## 2026-07-02 CrimsonHawk: NEW GAP + FIX — writes with AOF enabled are ~0.55x vs redis 7.2.4 (measured, keyspace-independent = serialization/syscall path); flush_aof_to_disk opened+closed the incr file EVERY tick — now keeps a persistent fd (redis-matching). Throughput A/B interrupted before quantifying.
 
 Benchmarked a common production config not previously tested: `appendonly yes`.
