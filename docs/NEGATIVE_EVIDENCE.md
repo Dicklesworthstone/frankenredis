@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — post-avg_ttl-fix, the data path is at PARITY on large (100k) keyspaces; the sweep's 0.43x was a bulk-load-settling ARTIFACT; INFO now fmt-bound; remaining admin gaps (memory_stats/CLIENT INFO 0.77x) are low-EV fmt-spread
+
+Hunted for more avg_ttl-class hidden-O(n)-at-scale gaps on a 100k-key keyspace.
+CAUTION: a sweep RIGHT AFTER bulk-loading 100k keys read 0.43-0.45x across even
+DBSIZE (which is O(1) — impossible) — a transient bulk-load/rehash-settling
+artifact. After a 2s settle + interleaved re-measure: DBSIZE 0.87-1.04x,
+RANDOMKEY 0.97-1.00x, MEMORY USAGE 0.89-0.98x, OBJECT ENCODING ~1.0x = PARITY.
+SCAN confirmed parity via DIRECT redis-cli timing (fr 4903ms / ora 4874ms over
+2000× `scan 0 count 100`) — the sweep's 0.64x was noise. So NO new data-path
+O(n) gap; only INFO avg_ttl (fixed 03061fb15) had one.
+
+INFO all post-fix `perf` = fmt-bound (core::fmt::write ~7% + float_to_decimal +
+write_str) + the legitimate per-call read_cpu_times (/proc/self/stat; CPU changes,
+redis reads it too). No more O(n). Residual INFO gap = the ~150-field
+genRedisInfoString fmt (inherent; a manual-itoa rewrite of 150 byte-exact fields
+is impractical/low-EV since INFO is polled at ~1Hz). memory_stats 0.77x + CLIENT
+INFO 0.77x are the same fmt/RESP3-map-encoding spread on rarely-polled admin cmds
+= low-EV. METHOD: bench large keyspaces AFTER a settle; DBSIZE-at-0.43x is the
+tell for a bulk-load artifact; confirm suspish ratios with direct redis-cli
+timing, not just redis-benchmark.
+
 ## 2026-07-02 CrimsonHawk: KEEP — cache INFO keyspace avg_ttl deadline-sum (was O(n) full expiry-map scan per INFO); INFO keyspace 0.067x→0.866x, INFO all 0.096x→0.276x on a 100k-expiry keyspace, byte-exact
 
 `perf` of INFO all showed `Store::avg_ttl_in_db` at 22.7% self — it scanned the
