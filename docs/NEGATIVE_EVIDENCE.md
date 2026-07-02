@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE (definitive, code-level) — the stream-reload lever has NO contained slice: BOTH encode and decode materialize owned field pairs, and the save path is build-all-RdbEntry-then-encode. It is a whole-pipeline borrowed-RDB refactor (multi-day). Do not hunt for a shortcut.
+
+Traced the full stream RDB path to settle whether a single-cycle win exists — it
+does not:
+- SAVE is build-all-then-encode: `store_to_rdb_entries(&mut store)` returns an
+  OWNED `Vec<RdbEntry>` (lib.rs:5519), then `encode_rdb_*(&entries)` encodes it.
+  No per-key borrowed seam — the owned `Vec<(Vec,Vec)>` (`to_pairs`, lib.rs:37989)
+  is structural to `RdbValue::Stream`.
+- DECODE mirrors it: `decode_listpack` builds an owned `Vec<((u64,u64),Vec<(Vec,
+  Vec)>)>` (restore_key_with_metadata) which `PackedStreamLog::from_sorted_entries`
+  (packed_set.rs:1786, already borrowed-input `&[(F,V)]`) then re-packs into its
+  arena. So decode ALSO double-represents (RDB listpack → owned pairs → arena).
+- `EncodableStreamEntry<F,V>` and `from_sorted_entries` are already generic over
+  borrowed leaf types; the blockers are the OWNED `RdbValue::Stream` container and
+  the build-all-then-encode orchestration — a cross-crate (fr-runtime ↔ fr-persist
+  ↔ fr-store) borrowed/streaming-RDB refactor. Genuinely multi-day; deliberately
+  not sliced into a short cycle (a half-done lifetime change would break the build).
+
+Correctness surface is not just saturated but heavily GUARDED (dozens of
+scripts/*_differ.py + fr-persist/tests/metamorphic.rs + aof_roundtrip_digest_fuzz)
+— a new fuzzer would be redundant. NET this session: client command surface at
+parity-or-faster everywhere; the only remaining speed gaps (stream/list RDB
+reload, small-value RSS) are all multi-day/structural, each characterized with
+root cause + the specific refactor for a dedicated effort.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — pub/sub + GETEX + EXPIRE-family + TTL/TYPE/EXISTS/PERSIST all parity; client command surface now EXHAUSTIVELY confirmed saturated; sole concrete remaining lever = stream RDB reload (cross-crate, multi-day)
 
 Swept the last distinct un-benchmarked command paths (PUBLISH, GETEX
