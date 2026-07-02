@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — generic-for (pairs/ipairs) loop-var cell reuse, same Rc strong_count trick; -6.3% instructions on ipairs-loop EVAL, byte-exact
+
+Applied the numeric-for loop-var-reuse pattern to `run_generic_for_from_iter_vals`
+(the `for k,v in pairs/ipairs(t) do … end` path — the most common Lua loop). Each
+iteration `env.set_local(name, val)` for every loop var allocated + GC-registered
+a fresh cell; now a per-var `Vec<Option<LuaCell>>` reuses each name's cell unless
+`Rc::strong_count > 1` (a closure captured it → fresh cell for correct
+fresh-per-iteration). Same safety argument as numeric-for (GC registry uses Weak).
+
+MEASURED (perf stat -e instructions:u, fixed 500×`eval "local t={} for i=1,500 do
+t[i]=i end local s=0 for k,v in ipairs(t) do s=s+v end return s"`): 1,065,968,102
+→ 998,874,632 = **-6.3%** (reproduced twice; smaller than numeric-for's -11.4%
+because the iterator function call per iteration is unaffected). Byte-exact vs
+redis 7.2.4: ipairs/pairs sums (60, 6), closure capture over v (1,9,25 = fresh),
+map (2,4,6); full 214-test lua suite green. Benefits all pairs/ipairs/generic-for
+loops.
+
 ## 2026-07-02 CrimsonHawk: KEEP — numeric-for loop-var cell reuse via Rc strong_count; -11.4% instructions on compute-heavy EVAL, byte-exact
 
 The numeric-for loop `env.set_local(name, i)` per iteration allocated a fresh

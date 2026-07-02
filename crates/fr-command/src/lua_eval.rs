@@ -3976,6 +3976,9 @@ impl<'a> LuaState<'a> {
         let iter_fn = iter_vals.first().cloned().unwrap_or(LuaValue::Nil);
         let mut state = iter_vals.get(1).cloned().unwrap_or(LuaValue::Nil);
         let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
+        // (CrimsonHawk) Per-var loop-cell reuse (same Rc::strong_count trick as
+        // numeric-for): reuse each name.s cell unless a closure captured it.
+        let mut loop_cells: Vec<Option<LuaCell>> = vec![None; names.len()];
 
         loop {
             self.iterations += 1;
@@ -3994,7 +3997,17 @@ impl<'a> LuaState<'a> {
             env.push_scope();
             for (i, name) in names.iter().enumerate() {
                 let val = results.get(i).cloned().unwrap_or(LuaValue::Nil);
-                env.set_local(name, val);
+                match loop_cells[i].take() {
+                    Some(cell) if Rc::strong_count(&cell) == 1 => {
+                        *cell.borrow_mut() = val;
+                        env.set_local_cell_top(name, cell.clone());
+                        loop_cells[i] = Some(cell);
+                    }
+                    _ => {
+                        env.set_local(name, val);
+                        loop_cells[i] = env.top_local_cell(name);
+                    }
+                }
             }
             let cf = self.exec_stmts(body, env, varargs)?;
             env.pop_scope();
