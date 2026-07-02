@@ -6034,7 +6034,7 @@ fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
 /// use_nested_array = (c->resp > 2 && count != -1). Under RESP3 with the
 /// COUNT form, each (member, score) is wrapped in a 2-Array; under RESP2
 /// or the no-COUNT form, the wire stays flat. Scores use Double type under RESP3.
-fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
+pub fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
     if resp_protocol_version == 3 {
         let frames = pairs
             .into_iter()

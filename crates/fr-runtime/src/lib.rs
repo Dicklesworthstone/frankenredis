@@ -21176,6 +21176,81 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Borrowed WRITE fast path for `ZPOPMIN key count` /
+    /// `ZPOPMAX key count` (arity `*3`). Neither ZPOPMIN nor ZPOPMAX had any
+    /// borrowed fast path, so the COUNT form fell to the fully-generic owned-argv
+    /// dispatch — measured ZPOPMIN 0.375x / ZPOPMAX 0.310x vs Redis 7.2.4 (same
+    /// class as the shipped LMPOP/ZMPOP COUNT fast paths). `use_min` selects
+    /// ZPOPMIN vs ZPOPMAX. Pops up to `count` via zpopmin_count/zpopmax_count and
+    /// emits via the shared `fr_command::zpop_count_emit` (RESP2 flat [m,s,…] /
+    /// RESP3 array-of-pairs, byte-identical to the generic handler including count
+    /// 0's type-checked empty array). A negative / non-integer count returns `None`
+    /// so the generic path emits the exact
+    /// "value is out of range, must be positive" error.
+    pub fn execute_plain_zpop_count_borrowed(
+        &mut self,
+        use_min: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let (name_lc, name_uc): (&str, &str) = if use_min {
+            ("zpopmin", "ZPOPMIN")
+        } else {
+            ("zpopmax", "ZPOPMAX")
+        };
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < name_uc.len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        // parse_zpop_count accepts count >= 0 (count 0 still type-checks the key);
+        // defer any negative / non-integer count to the generic path for the exact
+        // error wording.
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v >= 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lc,
+            name_uc.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        // Live session RESP version — the store's dispatch_client_ctx is only synced
+        // during generic dispatch, not on this borrowed fast path.
+        let resp_v = self.session.resp_protocol_version;
+        let st = self.chained_command_start();
+        let popped = if use_min {
+            self.server.store.zpopmin_count(key, count, now_ms)
+        } else {
+            self.server.store.zpopmax_count(key, count, now_ms)
+        };
+        let reply = match popped {
+            Ok(pairs) => fr_command::zpop_count_emit(pairs, resp_v),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lc,
+            name_uc,
+            || vec![name_uc.as_bytes().to_vec(), key.to_vec(), count_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// (frankenredis-zmpop1fast) Borrowed WRITE fast path for the common 1-key,
     /// no-COUNT form `ZMPOP 1 key MIN|MAX` (count defaults to 1). Mirrors
     /// fr-command::zmpop for that shape: zcard_no_stat probe (no keyspace bump),
