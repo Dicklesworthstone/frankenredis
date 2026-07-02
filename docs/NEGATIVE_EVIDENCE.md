@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — box the Function variant: LuaValue 144→32 bytes; -20.2% instructions on compute-heavy EVAL (on top of the assign fast-path), byte-exact
+
+`size_of::<LuaValue>()` was 144 bytes — ENTIRELY because `Function(LuaFunc)` was
+stored inline and `LuaFunc` is 144 bytes (params Vec + body Block + self_name
+Option<String> + captured_env + …). So EVERY LuaValue — even a Number — was 144
+bytes, and every clone/move (variable reads, arg passing, Vec<LuaValue> storage,
+lua_to_resp, return values) copied 144 bytes. Changed `Function(LuaFunc)` →
+`Function(Box<LuaFunc>)` (+ a `LuaValue::function()` boxing helper); Box (not Rc)
+preserves the prior deep-clone semantics exactly. `size_of::<LuaValue>()` is now
+**32 bytes** (4.5x smaller), so all value ops move/copy 4.5x less.
+
+MEASURED (perf stat -e instructions:u, fixed 400×`eval "local s=0 for i=1,2000 do
+s=s+i end return s"`, before=assign-fast-path binary / after, pinned):
+1,342,923,221 → 1,072,482,189 = **-20.2%** (reproduced exactly twice), stacking
+on last commit's -23.6% (cumulative ~39% off the original compute-loop cost).
+Byte-exact vs redis 7.2.4: factorial recursion (720), loop-var closure capture
+(1,2,3), coroutine.wrap (1,4,9), compute loop all match the oracle; full 214-test
+lua suite green. Benefits ALL Lua value operations, not just compute loops.
+
 ## 2026-07-02 CrimsonHawk: KEEP — single-target/single-value assign fast-path in the Lua interpreter; -23.6% instructions on compute-heavy EVAL, byte-exact
 
 FOUND A LANDABLE EVAL WIN inside the tree-walker (short of the bytecode VM).

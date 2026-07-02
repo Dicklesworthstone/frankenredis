@@ -152,7 +152,11 @@ pub enum LuaValue {
     Number(f64),
     Str(Vec<u8>),
     Table(LuaTable),
-    Function(LuaFunc),
+    // (CrimsonHawk) Boxed: LuaFunc is 144 bytes; inline it made every LuaValue
+    // (even a Number) 144 bytes, so every clone/move copied 144 bytes. Boxing
+    // shrinks LuaValue to 32 bytes, speeding all value ops interpreter-wide.
+    // Box (not Rc) preserves the prior deep-clone semantics.
+    Function(Box<LuaFunc>),
     RustFunction(String), // name of built-in
     Userdata(LuaUserdata),
     Coroutine(LuaCoroutine),
@@ -998,6 +1002,13 @@ fn lua_check_table(
 }
 
 impl LuaValue {
+    // (CrimsonHawk) Construct a Function value, boxing the 144-byte LuaFunc off
+    // the hot LuaValue (see the enum comment).
+    #[inline]
+    fn function(f: LuaFunc) -> Self {
+        LuaValue::Function(Box::new(f))
+    }
+
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
     }
@@ -4357,7 +4368,7 @@ impl<'a> LuaState<'a> {
             }
             Stmt::DoBlock(body) => self.exec_block(body, env, varargs),
             Stmt::FunctionDecl(names, params, is_variadic, body) => {
-                let func = LuaValue::Function(LuaFunc {
+                let func = LuaValue::function(LuaFunc {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
@@ -4380,7 +4391,7 @@ impl<'a> LuaState<'a> {
             }
             Stmt::LocalFunctionDecl(name, params, is_variadic, body) => {
                 env.set_local(name, LuaValue::Nil);
-                let func = LuaValue::Function(LuaFunc {
+                let func = LuaValue::function(LuaFunc {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
@@ -5257,7 +5268,7 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(LuaValue::Table(table))
             }
-            Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::Function(LuaFunc {
+            Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::function(LuaFunc {
                 params: params.clone(),
                 body: body.clone(),
                 is_variadic: *is_variadic,
@@ -5737,7 +5748,7 @@ impl<'a> LuaState<'a> {
                     continuation,
                 )
             } else {
-                let func_value = LuaValue::Function(func.clone());
+                let func_value = LuaValue::function(func.clone());
                 let (env, func_varargs) = Self::prepare_lua_function_env(func_value, &func, args);
                 (func, env, func_varargs, pc, continuation)
             }
@@ -7002,7 +7013,7 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-5qhz7) Use the located compile path so a
                 // multi-line chunk reports the true error line, not :1:.
                 match parse_lua_chunk_located(&src_bytes) {
-                    Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
+                    Ok(body) => Ok(vec![LuaValue::function(LuaFunc {
                         params: Vec::new(),
                         body,
                         is_variadic: true,
@@ -7110,7 +7121,7 @@ impl<'a> LuaState<'a> {
                             None => "(load)".to_string(),
                         };
                         match parse_lua_chunk_located(&src_bytes) {
-                            Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
+                            Ok(body) => Ok(vec![LuaValue::function(LuaFunc {
                                 params: Vec::new(),
                                 body,
                                 is_variadic: true,
@@ -8150,7 +8161,7 @@ impl<'a> LuaState<'a> {
             // direct calls keep the named/prefixed shape.
             "coroutine.create" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
-                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new(func.clone()))])
+                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new((**func).clone()))])
                 } else {
                     Err(lua_format_argerror(
                         self.current_invocation_name.as_deref(),
@@ -8163,7 +8174,7 @@ impl<'a> LuaState<'a> {
             "coroutine.wrap" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
                     Ok(vec![LuaValue::WrappedCoroutine(LuaCoroutine::new(
-                        func.clone(),
+                        (**func).clone(),
                     ))])
                 } else {
                     Err(lua_format_argerror(
