@@ -5636,6 +5636,31 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*6\r\n$5\r\n",
+                    b"ZMPOP",
+                ) {
+                    // ZMPOP 1 key MIN|MAX COUNT n: key=numkeys, a=key, b=direction,
+                    // c=COUNT keyword, d=count.
+                    if let Some(response) = runtime.execute_plain_zmpop1_count_borrowed(
+                        packet.key, packet.a, packet.b, packet.c, packet.d, ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                     unparsed,
                     &parser_config,
@@ -5645,6 +5670,31 @@ fn process_buffered_frames(
                     if let Some(response) =
                         runtime.execute_plain_zmpop1_borrowed(packet.key, packet.a, packet.b, ts)
                     {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*7\r\n$5\r\n",
+                    b"ZMPOP",
+                ) {
+                    // ZMPOP 2 z1 z2 MIN|MAX COUNT n: key=numkeys, a=z1, b=z2,
+                    // c=direction, d=COUNT keyword, e=count.
+                    if let Some(response) = runtime.execute_plain_zmpop2_count_borrowed(
+                        packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
