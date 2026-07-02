@@ -4,6 +4,49 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — broad differential + release-vs-release perf sweep finds NO new clean lever; correctness saturated, only residual = known pipelined GET/SET/INCR @ -P16 (0.83-0.88x, ohsk5 frontier)
+
+Ran a wide land-or-dig cycle vs vendored Redis 7.2.4. Findings, all measured:
+
+**Correctness (~90 differential probes, ZERO real divergences):**
+- Lua via `eval_script` (real interpreter, no server): stdlib number/format
+  (`tostring(0/0)`=-nan, `1e+16`, `%x -1`=64-bit, `%d 3.5`=3, `%q` nul-escape),
+  patterns (`%b`, `%f`, gsub `%0/%1`/func/table, captures), metatables
+  (__index/__add/__concat/__call/__eq; __len IGNORED per 5.1), errors
+  (assert/error levels, table error objects, xpcall), `tonumber` inf/nan/hex-float
+  — all byte-exact. `redis.call` from Lua: wrong-args / unknown-cmd / WRONGTYPE
+  wording byte-exact; uncaught `script: <sha>, on @user_script:N.` envelope
+  already present (fr-store m7oy8).
+- Server (release binary, redis-cli vs oracle): EXPIRE NX/XX/GT/LT, SET
+  KEEPTTL/GET/EXAT, GETEX, OBJECT ENCODING incl ALL transition thresholds
+  (hash/zset 128, set intset→listpack→hashtable, list quicklist, 64-byte value),
+  LPOS RANK/COUNT, BITCOUNT/BITPOS BYTE|BIT, BITFIELD OVERFLOW, ZADD
+  GT/LT/NX/XX/INCR/CH, ZRANGEBYLEX (equal-score), LCS IDX/MINMATCHLEN/WITHMATCHLEN,
+  streams XADD/XRANGE/XINFO, RESP3 (HELLO 3) maps/doubles, INCRBYFLOAT precision,
+  SETRANGE/APPEND, COPY REPLACE, SINTERCARD LIMIT, HSCAN NOVALUES — all byte-exact.
+  Only "diffs" were non-bugs: SCAN iteration order (hashtable-order, not a
+  contract), `zrandmember -n` (random), XADD `*` (wall-clock id), CLIENT INFO
+  runtime fields (id/fd/addr/mem).
+
+**Perf (VALID release-vs-release, both pinned taskset -c 2 / -c 3, client -c 6,7,
+connected_slaves:0):**
+- Hot single commands at PARITY: SET .98 GET 1.02 INCR .99 LPUSH .99 RPUSH 1.04
+  SADD .99 HSET 1.00 ZADD .96 SPOP .99 LPOP 1.00; MSET 1.02; large-value (100KB)
+  GET .99 / SET 1.11; ZADD -P8 1.02.
+- RESIDUAL: heavily-pipelined single-key GET/SET/INCR @ -P16 = 0.83-0.88x. This
+  is the already-profiled ohsk5 batch-dispatch frontier (see MEMORY: clock is not
+  the gap; next_packet_id atomic is UNSAFE to lazy-ify — observable in
+  FR-P2C-*.golden log goldens; remaining lever = whole dispatch-chain
+  command-hash restructure, structural). NOT a clean/safe per-command lever.
+
+**Useful fact (corrects stale memory):** the `frankenredis` binary builds clean
+end-to-end (debug 12.5s, release 34s via rch) — the pt6/pt13 "full-binary build
+blocker" note is STALE/resolved; server-level differential probing is unblocked.
+
+CONCLUSION: no new byte-exact clean-crate win this cycle. Remaining real levers
+are structural fr-store/dispatch (CoralOx / multi-day) or unsafe — out of scope
+for a clean same-tree land. Recorded as evidence rather than forcing a change.
+
 ## 2026-07-01 CrimsonHawk: REJECT — ChunkedList arena tail REGRESSES 0.63-0.87x end-to-end (CORRECTS the fe62b26ed micro-bench; move-vs-copy, not clone-vs-copy)
 
 FULLY IMPLEMENTED the `OwnedArena{arena,spans}` ChunkedList variant (convert-on-
