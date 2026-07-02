@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: VALIDATE — the 4 EVAL wins moved compute-loop wall-clock 0.07x→0.11x vs redis 7.2.4 (real, ~1.5x ratio gain); glue 0.545x; parity needs the bytecode VM. Globals-overlay for glue assessed = feasible-for-common-case but _G-risky, deferred.
+
+Wall-clock A/B vs redis (pinned, interleaved) confirms the session's 4 EVAL
+instruction wins (~-46% compute) are REAL, not instruction-count artifacts:
+- compute-loop `for i=1,1000 do s=s+i end`: 0.104 / 0.113 / 0.104x (was ~0.07x
+  pre-session). ~1.5x better ratio, but still ~9x off redis — the residual is the
+  tree-walker dispatch (eval_expr/exec_stmt), only closable by a bytecode VM.
+- glue `return redis.call('incr','k')`: 0.545x (≈ unchanged — glue is ~62%
+  syscall-bound + the per-EVAL globals-template clone; the box helped compute more
+  than glue).
+
+GLOBALS-OVERLAY assessment (the glue fr-specific lever): `env.global_env` is None
+at the top script level (set only when a Lua FUNCTION is called, prepare_lua_
+function_env:5425), so top-level global writes go to `self.globals` (not the _G
+table). => a shared-base + per-script-overlay globals WOULD eliminate the 80-entry
+template clone for the common glue script (KEYS/ARGV/coroutine go in the small
+overlay; stdlib base never clones). BUT reads inside called functions + the lazy
+_G/setfenv sync make it subtly risky, for only ~2-5% on a syscall-bound path.
+Deferred (poor risk/reward to rush; correctness of all scripting at stake).
+
+NET session: EVAL compute ~1.5x faster (still VM-bound), everything else
+parity-or-faster. The two remaining EVAL levers — bytecode VM (compute, big) and
+globals-overlay (glue, small+risky) — plus stream/list RDB reload and small-value
+RSS are all multi-day/structural. No clean single-cycle win remains.
+
 ## 2026-07-02 CrimsonHawk: REJECT — LocalBinding.name String→Rc<str> loop-var name reuse measured 0.2% (noise); tree-walker CONTAINED-win vein is EXHAUSTED — remaining EVAL lever is the bytecode VM
 
 After the 4 landed EVAL wins, `Scope::set_local_cell` showed 6.5% self in the
