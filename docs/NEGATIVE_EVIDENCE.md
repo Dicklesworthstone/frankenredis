@@ -4,6 +4,21 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — redis.call moves string-arg bytes instead of cloning them; -5.9% EVAL instructions on value-passing scripts, byte-exact.
+
+Third Lua-profile win: `to_redis_arg` did `s.clone()` for every string arg while
+building the dispatch argv, but the args vector is discarded right after — pure
+overhead (scales with value size). Renamed to `take_redis_arg(&mut self)` using
+`std::mem::take(s)` to MOVE the bytes; `redis_call` now takes `args: &mut
+[LuaValue]` and iterates `iter_mut()` (the only caller already holds `&mut
+[LuaValue]` and discards it after). MEASURED perf stat instructions:u (200 scripts,
+500x `redis.call('set',KEYS[1],vv)` with a 300-byte value): 1.412B → 1.329B =
+**-5.9%** (larger the bigger the value). BYTE-EXACT: string/list/hash values via
+redis.call == oracle; 235 lua/eval tests green. Lua vein tally: foldhash -10.2%
++ itoa -3.6% + move-str -5.9% (all instructions:u, byte-exact). Next profiled
+items: eval_call_args Vec churn + the reply LuaValue alloc; ~9x tree-walker vs
+bytecode-VM compute gap unchanged (multi-week).
+
 ## 2026-07-02 CrimsonHawk: KEEP — manual itoa on the redis.call integer-arg path (was format!); -3.6% EVAL instructions on redis.call-int-heavy scripts, byte-identical.
 
 Same Lua-profile vein as the foldhash win: `redis_call` showed

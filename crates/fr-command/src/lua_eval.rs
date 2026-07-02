@@ -1080,7 +1080,11 @@ impl LuaValue {
         }
     }
 
-    fn to_redis_arg(&self) -> Result<Vec<u8>, String> {
+    /// (CrimsonHawk) Consume this value into a redis.call argument, MOVING the
+    /// bytes of a string arg (`mem::take`) instead of cloning them — the args
+    /// vector is discarded right after argv is built, so the clone was pure
+    /// overhead (bigger the larger the value passed through redis.call).
+    fn take_redis_arg(&mut self) -> Result<Vec<u8>, String> {
         // Upstream src/script_lua.c::luaArgsToRedisArgv only accepts
         // numbers (formatted via %.17g) and strings; lua_tolstring on
         // any other type (nil, boolean, table, function, thread,
@@ -1102,7 +1106,7 @@ impl LuaValue {
                     Ok(format!("{n}").into_bytes())
                 }
             }
-            LuaValue::Str(s) => Ok(s.clone()),
+            LuaValue::Str(s) => Ok(std::mem::take(s)),
             _ => Err("Lua redis lib command arguments must be strings or integers".to_string()),
         }
     }
@@ -6468,6 +6472,8 @@ impl<'a> LuaState<'a> {
         match name {
             "redis.call" => self.redis_call(args, false),
             "redis.pcall" => self.redis_call(args, true),
+            // (note) `args` is already `&mut [LuaValue]`; redis_call moves string
+            // arg bytes out of it, which is fine — args is discarded after.
             "redis.error_reply" => {
                 // Upstream script_lua.c::luaRedisErrorReplyCommand
                 // requires exactly one string argument; non-string
@@ -9590,7 +9596,11 @@ impl<'a> LuaState<'a> {
         }
     }
 
-    fn redis_call(&mut self, args: &[LuaValue], is_pcall: bool) -> Result<Vec<LuaValue>, String> {
+    fn redis_call(
+        &mut self,
+        args: &mut [LuaValue],
+        is_pcall: bool,
+    ) -> Result<Vec<LuaValue>, String> {
         // (frankenredis-sj52g) Upstream's luaPushError prepends "ERR "
         // to the body of the error table that bubbles out of
         // luaRedisGenericCommand — both for the empty-args branch and
@@ -9626,9 +9636,9 @@ impl<'a> LuaState<'a> {
         }
 
         // Build argv for dispatch
-        let mut argv: Vec<Vec<u8>> = Vec::new();
-        for arg in args {
-            match arg.to_redis_arg() {
+        let mut argv: Vec<Vec<u8>> = Vec::with_capacity(args.len());
+        for arg in args.iter_mut() {
+            match arg.take_redis_arg() {
                 Ok(b) => argv.push(b),
                 Err(msg) => return arg_error(&msg, is_pcall),
             }
