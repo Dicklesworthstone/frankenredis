@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP TYPE borrowed zero-copy `_into` — 1.05x cand/ctl, removes per-command String alloc, byte-exact
+
+Probing simple O(1) single-key reads found TYPE/TTL/XLEN/LLEN/SCARD all measure
+0.68-0.83x vs Redis 7.2.4 single-connection — but they ALREADY have borrowed fast
+paths, so the gap is not dispatch. The one fixable slice for TYPE: its fast path
+used `FastReply` returning `RespFrame::SimpleString(key_type.to_string())` — a heap
+`String` alloc per command + the enum-wrap + caller re-match/encode. Added
+`execute_plain_keymeta_borrowed_into` (writes the reply straight into the output
+buffer, `FastEncodedReply`) and routed both TYPE dispatch sites to it; for TYPE it
+writes `+<type>\r\n` directly from the `'static` type name (no String), for the
+Integer keymeta variants it uses `RespFrame::Integer::encode_into`.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (hunk stashed, both
+`taskset`-pinned, P500, interleaved ×25 median): TYPE_list/str/miss cand/ctl
+**1.039x / 1.036x / 1.056x** (ctl 0.674x → cand 0.700x vs Redis). fr-vs-Redis-7.2.4
+differential byte-exact for list/string/zset/missing keys. The residual 0.70x-vs-Redis
+is systematic single-connection/event-loop overhead (all these commands are already
+fast-pathed), NOT further _into-addressable. The Integer keymeta commands (TTL/PTTL/
+EXPIRETIME) have no String alloc to remove, so their `_into` benefit is smaller — left
+on `FastReply` to avoid a near-zero change (the `_into` executor already handles them
+if a future profile justifies wiring).
+
 ## 2026-07-01 CrimsonHawk: SURFACE — GET pipelined hot path (ohsk5 ~2x) profiled: clock is NOT a gap, per-command bookkeeping levers are sub-noise or UNSAFE
 
 Profiled the headline ohsk5 GET P16 gap fresh (3 parallel pre-encoded blasters

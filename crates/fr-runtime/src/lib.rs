@@ -22926,6 +22926,94 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` sibling of [`execute_plain_keymeta_borrowed`]:
+    /// writes the reply straight into `out` (a `FastEncodedReply`) instead of
+    /// building a `RespFrame` for the caller to re-match and encode
+    /// (`FastReply`) — and, for TYPE, skips the `String` alloc that
+    /// `RespFrame::SimpleString(type_str.to_string())` paid on every call. The
+    /// replies are protocol-invariant (Integer / a metachar-free SimpleString), so
+    /// the direct writes are byte-identical to `RespFrame::{Integer,SimpleString}::
+    /// encode_into` in both RESP2 and RESP3 (the type names are clean `'static`
+    /// literals, so `push_inline_sanitized` is a no-op). Same gate/stats/metrics/
+    /// expiry semantics as the `RespFrame` path.
+    pub fn execute_plain_keymeta_borrowed_into(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_keymeta_borrowed(cmd, key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let int_value = match cmd {
+            PlainKeyMetaCmd::Ttl => Some(match self.server.store.pttl(key, now_ms) {
+                fr_store::PttlValue::KeyMissing => -2,
+                fr_store::PttlValue::NoExpiry => -1,
+                fr_store::PttlValue::Remaining(ms) => ms.saturating_add(500) / 1000,
+            }),
+            PlainKeyMetaCmd::Pttl => Some(match self.server.store.pttl(key, now_ms) {
+                fr_store::PttlValue::KeyMissing => -2,
+                fr_store::PttlValue::NoExpiry => -1,
+                fr_store::PttlValue::Remaining(ms) => ms,
+            }),
+            PlainKeyMetaCmd::Expiretime => {
+                Some(match self.server.store.expiretime_value(key, now_ms) {
+                    fr_store::ExpireTimeValue::KeyMissing => -2,
+                    fr_store::ExpireTimeValue::NoExpiry => -1,
+                    fr_store::ExpireTimeValue::ExpiresAt(abs_ms) => {
+                        (abs_ms.saturating_add(500) / 1000) as i64
+                    }
+                })
+            }
+            PlainKeyMetaCmd::Pexpiretime => {
+                Some(match self.server.store.expiretime_value(key, now_ms) {
+                    fr_store::ExpireTimeValue::KeyMissing => -2,
+                    fr_store::ExpireTimeValue::NoExpiry => -1,
+                    fr_store::ExpireTimeValue::ExpiresAt(abs_ms) => abs_ms as i64,
+                })
+            }
+            PlainKeyMetaCmd::Type => {
+                let type_str = self.server.store.key_type(key, now_ms).unwrap_or("none");
+                if !suppress_reply {
+                    out.push(b'+');
+                    out.extend_from_slice(type_str.as_bytes());
+                    out.extend_from_slice(b"\r\n");
+                }
+                None
+            }
+        };
+        if let Some(n) = int_value
+            && !suppress_reply
+        {
+            RespFrame::Integer(n).encode_into(out);
+        }
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_keymeta_borrowed_metrics(cmd, key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
+    }
+
     fn record_plain_keymeta_borrowed_metrics(
         &mut self,
         cmd: PlainKeyMetaCmd,
