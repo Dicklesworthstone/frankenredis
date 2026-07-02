@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — replication writes are ~0.53x vs redis 7.2.4 (SAME shared structural gap as AOF); keyspace notifications are at PARITY. The argv-clone propagation refactor now covers TWO ubiquitous configs (AOF + replication).
+
+Two more production configs benchmarked:
+- notify-keyspace-events KEA: no-subscriber SET 0.88-0.96x / INCR 0.84-0.90x
+  (modest, notify OFF by default = zero cost, short-circuits at flags==0). WITH an
+  ACTIVE psubscribe subscriber: SET 0.89-0.99x = PARITY, identical 2.4M
+  notifications delivered. Notify vein = DEAD END (parity).
+- REPLICATION (fr primary+replica vs redis primary+replica; verified fr replica
+  link up + propagates): fr SET ~37-40k rps vs oracle ~71k = **~0.53x**. Attaching
+  vs detaching the replica barely moved it (37k vs 39.7k) because should_propagate
+  includes `any_replica_ever` (fr keeps feeding the backlog forever after any
+  replica — minor divergence from redis repl-backlog-ttl). 0.53x MATCHES the AOF
+  0.55x: both flow through the shared feed_replication_and_aof →
+  `AofRecord { argv: argv.to_vec() }` deep-clone + backlog Vec push per write.
+
+CONSEQUENCE: the argv-clone propagation refactor (encode-to-RESP-bytes at push
+time, store bytes+repl_only_flag+encoded_len instead of structured argv) is the
+single lever for BOTH ubiquitous configs (AOF + replication). BLOCKER (why not
+this cycle): aof_records{argv} is consumed in ~8 sites — replica feed, AOF flush
+(command_is_replication_only filter needs argv), backlog window, encoded_resp_len
+offset, memory accounting, AND replay/dispatch executes argv — so it's a
+multi-touch refactor with replication+persistence correctness at stake and the
+oracle replica flaps (hard to verify byte-exact). The AOF profile also showed the
+gap SPREAD (memmove ~7% + flush syscalls + backlog mgmt), not a single argv-clone
+hotspot, so payoff is partial/uncertain. High-value but needs a dedicated,
+carefully-tested cycle — not a rushed edit. Next: prototype in a worktree with a
+fr↔fr replication byte-exact harness (DEBUG DIGEST primary vs replica).
+
 ## 2026-07-02 CrimsonHawk: KEEP (parity!) — headroom-adaptive staleness for the maxmemory used_memory scan; SET under maxmemory(128mb, cache-not-full) 0.37x→~1.0x vs redis 7.2.4, eviction accuracy provably preserved
 
 Follow-up that closes the residual from the partial fix below. With maxmemory>0
