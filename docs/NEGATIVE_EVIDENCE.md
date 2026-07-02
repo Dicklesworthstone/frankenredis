@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: REJECT — redis score String→bytes round-trip elision measured 0% (from_utf8 on fresh ASCII is not a real cost); post-XRANGE-fix sweep finds NO new below-parity outlier; ZPOPMIN "gap" was a destructive-exhaustion artifact
+
+Continued the `format!`/reply-formatting vein after the XRANGE win. Two dead ends
++ one artifact, recorded so they aren't re-chased:
+
+1. REJECT score String round-trip: every WITHSCORES/ZSCORE caller does
+   `redis_score_to_string(s).into_bytes()` = Vec→String(from_utf8 scan)→Vec.
+   Added `format_redis_double_bytes`/`redis_score_to_bytes` and routed all 16
+   hot call sites to skip the from_utf8 + into_bytes round-trip. A/B (perf stat
+   instructions:u, fixed 800×`ZRANGE bz 0 -1 WITHSCORES`, 5000-elem zset,
+   before/after both fr): 3,509,777,428 → 3,509,767,464 = **0.1% (noise)**.
+   from_utf8 on a freshly-built ASCII Vec is essentially free (LLVM fast-path);
+   score formatting (grisu2) dominates. REVERTED — perf-neutral, not worth the
+   16-site churn. Score formatting is already optimal; don't chase it.
+
+2. ZPOPMIN "0.71-0.87x" from the sweep was a DESTRUCTIVE-EXHAUSTION artifact
+   (`-n 40000` on a 3000-elem zset = 3k real pops + 37k empty pops). Isolated:
+   empty-ZPOPMIN = 1.00-1.02x, populated (repopulated per trial) = 0.96-1.05x =
+   PARITY. Not a real gap.
+
+3. Broad sweep (zrange_ws, zrangebyscore_ws, sort_num, sort_alpha, lpos_count,
+   object_enc, lmpop, zadd_gtlt) after the XRANGE fix: NO new below-parity
+   outlier. fr is FASTER on SORT (2.1-2.5x num / 1.3-2.0x alpha), LPOS COUNT
+   (1.8-2.3x); parity elsewhere. Command surface remains saturated at
+   parity-or-faster. NOTE: benchmark host got noisy mid-cycle (stray peer
+   redis-server on a pinned core dropped a 2-server XRANGE run to ~160 rps) —
+   absolute rps unreliable; interleaved A/B ratios + perf-stat instructions
+   remain the trustworthy signals.
+
 ## 2026-07-02 CrimsonHawk: KEEP — format_stream_id manual u64→ASCII (drop format!); -19.3% instructions on XRANGE full-scan, byte-exact
 
 Family sweep (streams/geo/bitfield/HLL) found XRANGE full-scan the sole outlier
