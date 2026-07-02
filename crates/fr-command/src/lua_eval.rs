@@ -186,7 +186,7 @@ pub enum LuaValue {
     // shrinks LuaValue to 32 bytes, speeding all value ops interpreter-wide.
     // Box (not Rc) preserves the prior deep-clone semantics.
     Function(Box<LuaFunc>),
-    RustFunction(String), // name of built-in
+    RustFunction(std::rc::Rc<str>), // name of built-in
     Userdata(LuaUserdata),
     Coroutine(LuaCoroutine),
     WrappedCoroutine(LuaCoroutine),
@@ -3507,7 +3507,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
         "loadstring",
         "load",
     ] {
-        globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
+        globals.insert(name.to_string(), LuaValue::RustFunction(std::rc::Rc::from(*name)));
     }
 
     let math_table = LuaTable::new_shared_template();
@@ -3547,7 +3547,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
             if *name == "huge" {
                 LuaValue::Number(f64::INFINITY)
             } else {
-                LuaValue::RustFunction(format!("math.{name}"))
+                LuaValue::RustFunction(std::rc::Rc::from(format!("math.{name}")))
             },
         );
     }
@@ -3564,7 +3564,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     ] {
         string_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("string.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("string.{name}"))),
         );
     }
     globals.insert("string".to_string(), LuaValue::Table(string_table));
@@ -3575,7 +3575,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     ] {
         table_lib.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("table.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("table.{name}"))),
         );
     }
     globals.insert("table".to_string(), LuaValue::Table(table_lib));
@@ -3584,7 +3584,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     for name in &["encode", "decode"] {
         cjson_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("cjson.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("cjson.{name}"))),
         );
     }
     cjson_table.set(
@@ -3597,7 +3597,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
         cmsgpack_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("cmsgpack.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("cmsgpack.{name}"))),
         );
     }
     for (name, value) in &[
@@ -3617,7 +3617,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     for name in &["pack", "unpack", "size"] {
         struct_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("struct.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("struct.{name}"))),
         );
     }
     globals.insert("struct".to_string(), LuaValue::Table(struct_table));
@@ -3625,15 +3625,15 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
     globals.insert(
         "rawequal".to_string(),
-        LuaValue::RustFunction("rawequal".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("rawequal")),
     );
     globals.insert(
         "gcinfo".to_string(),
-        LuaValue::RustFunction("gcinfo".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("gcinfo")),
     );
     globals.insert(
         "collectgarbage".to_string(),
-        LuaValue::RustFunction("collectgarbage".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("collectgarbage")),
     );
 
     let bit_table = LuaTable::new_shared_template();
@@ -3643,7 +3643,7 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     ] {
         bit_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
-            LuaValue::RustFunction(format!("bit.{name}")),
+            LuaValue::RustFunction(std::rc::Rc::from(format!("bit.{name}"))),
         );
     }
     globals.insert("bit".to_string(), LuaValue::Table(bit_table));
@@ -3666,51 +3666,51 @@ fn lua_redis_table_template() -> LuaTable {
     let redis_table = LuaTable::new_shared_template();
     redis_table.set(
         LuaValue::Str(b"call".to_vec()),
-        LuaValue::RustFunction("redis.call".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.call")),
     );
     redis_table.set(
         LuaValue::Str(b"pcall".to_vec()),
-        LuaValue::RustFunction("redis.pcall".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.pcall")),
     );
     redis_table.set(
         LuaValue::Str(b"error_reply".to_vec()),
-        LuaValue::RustFunction("redis.error_reply".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.error_reply")),
     );
     redis_table.set(
         LuaValue::Str(b"status_reply".to_vec()),
-        LuaValue::RustFunction("redis.status_reply".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.status_reply")),
     );
     redis_table.set(
         LuaValue::Str(b"log".to_vec()),
-        LuaValue::RustFunction("redis.log".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.log")),
     );
     redis_table.set(
         LuaValue::Str(b"sha1hex".to_vec()),
-        LuaValue::RustFunction("redis.sha1hex".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.sha1hex")),
     );
     redis_table.set(
         LuaValue::Str(b"replicate_commands".to_vec()),
-        LuaValue::RustFunction("redis.replicate_commands".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.replicate_commands")),
     );
     redis_table.set(
         LuaValue::Str(b"set_repl".to_vec()),
-        LuaValue::RustFunction("redis.set_repl".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.set_repl")),
     );
     redis_table.set(
         LuaValue::Str(b"breakpoint".to_vec()),
-        LuaValue::RustFunction("redis.breakpoint".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.breakpoint")),
     );
     redis_table.set(
         LuaValue::Str(b"debug".to_vec()),
-        LuaValue::RustFunction("redis.debug".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.debug")),
     );
     redis_table.set(
         LuaValue::Str(b"setresp".to_vec()),
-        LuaValue::RustFunction("redis.setresp".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.setresp")),
     );
     redis_table.set(
         LuaValue::Str(b"acl_check_cmd".to_vec()),
-        LuaValue::RustFunction("redis.acl_check_cmd".to_string()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.acl_check_cmd")),
     );
     redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
     redis_table.set(
@@ -3810,7 +3810,7 @@ impl<'a> LuaState<'a> {
         for name in &["create", "resume", "yield", "status", "wrap", "running"] {
             coroutine_table.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("coroutine.{name}")),
+                LuaValue::RustFunction(std::rc::Rc::from(format!("coroutine.{name}"))),
             );
         }
         self.globals
@@ -5188,7 +5188,7 @@ impl<'a> LuaState<'a> {
                 #[allow(clippy::collapsible_if, clippy::collapsible_match)]
                 if let LuaValue::RustFunction(ref name) = func
                     && matches!(
-                        name.as_str(),
+                        name.as_ref(),
                         "table.sort" | "table.insert" | "table.remove" | "rawset"
                     )
                 {
@@ -6015,11 +6015,11 @@ impl<'a> LuaState<'a> {
         let mt = LuaTable::new();
         mt.set(
             LuaValue::Str(b"__index".to_vec()),
-            LuaValue::RustFunction("__fr_g_protected_index".to_string()),
+            LuaValue::RustFunction(std::rc::Rc::from("__fr_g_protected_index")),
         );
         mt.set(
             LuaValue::Str(b"__newindex".to_vec()),
-            LuaValue::RustFunction("__fr_g_readonly_newindex".to_string()),
+            LuaValue::RustFunction(std::rc::Rc::from("__fr_g_readonly_newindex")),
         );
         g_table.inner.borrow_mut().metatable = Some(mt);
         self.globals
@@ -7386,7 +7386,7 @@ impl<'a> LuaState<'a> {
                 }
                 // Return next, table, nil
                 Ok(vec![
-                    LuaValue::RustFunction("next".to_string()),
+                    LuaValue::RustFunction(std::rc::Rc::from("next")),
                     table,
                     LuaValue::Nil,
                 ])
@@ -7401,7 +7401,7 @@ impl<'a> LuaState<'a> {
                     ));
                 }
                 Ok(vec![
-                    LuaValue::RustFunction("__ipairs_iter".to_string()),
+                    LuaValue::RustFunction(std::rc::Rc::from("__ipairs_iter")),
                     table,
                     LuaValue::Number(0.0),
                 ])
@@ -7921,9 +7921,9 @@ impl<'a> LuaState<'a> {
                         if level == 0 {
                             Ok(Vec::new())
                         } else {
-                            Ok(vec![LuaValue::RustFunction(
-                                "__fr_current_chunk_env".to_string(),
-                            )])
+                            Ok(vec![LuaValue::RustFunction(std::rc::Rc::from(
+                                "__fr_current_chunk_env",
+                            ))])
                         }
                     }
                     None => Err(lua_bad_number_arg(inv, 1, None)),
@@ -8702,7 +8702,7 @@ impl<'a> LuaState<'a> {
                 let mt = LuaTable::new();
                 mt.set(
                     LuaValue::Str(b"__call".to_vec()),
-                    LuaValue::RustFunction("__gmatch_iter".to_string()),
+                    LuaValue::RustFunction(std::rc::Rc::from("__gmatch_iter")),
                 );
                 iter_state.inner.borrow_mut().metatable = Some(mt);
                 Ok(vec![
@@ -17711,7 +17711,7 @@ end
             );
         }
         assert_eq!(
-            lua_value_to_json(&LuaValue::RustFunction("noop".to_string())).unwrap_err(),
+            lua_value_to_json(&LuaValue::RustFunction(std::rc::Rc::from("noop"))).unwrap_err(),
             "Cannot serialise function: type not supported"
         );
         // Wrap an unsupported value inside a table; encoder must propagate

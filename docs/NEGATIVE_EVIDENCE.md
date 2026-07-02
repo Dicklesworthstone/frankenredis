@@ -4,6 +4,21 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — LuaValue::RustFunction(String)→Rc<str>; -1.6% EVAL instructions on built-in-heavy scripts, byte-exact. Plus: fresh command probes all parity.
+
+RustFunction holds the built-in name; it's built ONCE in the cached globals
+template but CLONED (String alloc) every time a script resolves a built-in
+(`redis.call`, `math.floor`, `string.format`, ...). Changed the variant to
+`Rc<str>` so the resolution clone is an Rc-bump, not a heap alloc (~54 construction
+sites, mechanical; fixed `Rc::from(*name)` for a `&&str` loop + `.as_ref()` vs the
+unstable `str::as_str`). MEASURED perf stat instructions:u (300 built-in-heavy
+scripts: redis.call + math.floor + string.format in a loop): 1.886B → 1.856B =
+**-1.6%**. BYTE-EXACT: before==after==oracle; 235 lua/eval tests green. (Note:
+Rc<str> is a 16-byte fat ptr so this does NOT shrink LuaValue — Str(Vec<u8>) is
+still 24B/largest; the full enum-shrink needs Str→Rc too + Userdata box, multi-day.)
+Also this cycle: FRESH command probes (COPY/GETDEL/LMPOP/ZMPOP/SPOP-count/
+OBJECT-ENCODING/LPOS/SINTERCARD on large values) all PARITY — no BITOP-class gap.
+
 ## 2026-07-02 CrimsonHawk: KEEP — table_lookup_with_index_meta fast path skips the per-lookup table.clone(); -0.9% EVAL instructions on compute (more on table-read-heavy), byte-exact.
 
 Profiled a compute-heavy EVAL (no redis.call): eval_expr 34% + LuaValue::clone
