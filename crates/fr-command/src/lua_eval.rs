@@ -9728,7 +9728,7 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(vec![resp_to_lua_command_result(
                     &argv,
-                    &frame,
+                    frame,
                     self.resp_version == 3,
                 )])
             }
@@ -10769,13 +10769,28 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
 
 // ── Type conversions ────────────────────────────────────────────────────
 
-fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: &RespFrame, resp3: bool) -> LuaValue {
+fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: RespFrame, resp3: bool) -> LuaValue {
     if config_get_returns_map_in_lua(argv)
-        && let Some(table) = config_get_resp_to_lua_map(frame, resp3)
+        && let Some(table) = config_get_resp_to_lua_map(&frame, resp3)
     {
         return LuaValue::Table(table);
     }
-    resp_to_lua(frame, resp3)
+    // (CrimsonHawk) MOVE the bytes of the common top-level BulkString reply
+    // (GET/HGET/LINDEX/... via redis.call) straight into the Lua string instead
+    // of cloning them (resp_to_lua's `data.clone()`); scales with the read value
+    // size. Complex shapes (arrays/maps/sets) fall back to the borrowed converter,
+    // which stays byte-identical.
+    match frame {
+        RespFrame::BulkString(Some(data)) => LuaValue::Str(data),
+        RespFrame::BulkString(None) => {
+            if resp3 {
+                LuaValue::Nil
+            } else {
+                LuaValue::Bool(false)
+            }
+        }
+        other => resp_to_lua(&other, resp3),
+    }
 }
 
 fn config_get_returns_map_in_lua(argv: &[Vec<u8>]) -> bool {

@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — redis.call MOVES the top-level BulkString reply bytes into the Lua string instead of cloning; -2.7% EVAL instructions on read-heavy scripts, byte-exact.
+
+Reply-side counterpart to the arg-move: `resp_to_lua` did `data.clone()` for a
+BulkString reply (GET/HGET/LINDEX/... via redis.call), but the dispatched
+`RespFrame` is owned by redis_call and this is its last use. Made
+`resp_to_lua_command_result` CONSUME the frame with a top-level fast path
+(`BulkString(Some(d)) => LuaValue::Str(d)` moves; `None` => resp2 false / resp3
+nil); complex shapes (Array/Map/Set/nested) fall back to the borrowed `resp_to_lua`
+(can't be made consuming — config_get_resp_to_lua_map borrows a frame element).
+MEASURED perf stat instructions:u (200 read-heavy scripts, 1000x `redis.call('get',
+KEYS[1])` of a 300-byte value): 1.166B → 1.134B = **-2.7%** (scales with read
+size). BYTE-EXACT: md5 of a mixed bulk/nil/array/integer/hgetall/exists reply ==
+oracle; RESP3 hgetall-map + resp2 nil-false paths == oracle; 235 lua/eval tests
+green. Lua vein tally: foldhash -10.2%, itoa -3.6%, arg-move -5.9%, reply-move
+-2.7% (all instructions:u, byte-exact). Next: eval_call_args Vec churn; ~9x
+tree-walker compute gap = VM (multi-week).
+
 ## 2026-07-02 CrimsonHawk: KEEP — redis.call moves string-arg bytes instead of cloning them; -5.9% EVAL instructions on value-passing scripts, byte-exact.
 
 Third Lua-profile win: `to_redis_arg` did `s.clone()` for every string arg while
