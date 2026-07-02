@@ -4940,6 +4940,14 @@ pub struct Store {
     /// Cached memory usage to avoid O(N) calculation on every command.
     pub cached_memory_usage_bytes: std::cell::Cell<usize>,
     pub cached_memory_usage_dirty: std::cell::Cell<u64>,
+    /// (CrimsonHawk) Per-db cache of the raw deadline-sum for INFO's `avg_ttl`,
+    /// so a large expiry keyspace is not fully scanned on EVERY INFO. Entry is
+    /// `(deadline_sum, expiring_count_at_compute, computed_ms)`; recomputed when
+    /// the db's expiring-key count changes or the sample is >=1s old. `avg_ttl`
+    /// is a documented estimate (see `avg_ttl_in_db`), so a sub-second-stale
+    /// deadline-sum is acceptable — this matches redis reporting a cron-sampled
+    /// avg_ttl rather than an exact per-call scan.
+    avg_ttl_deadline_sum_cache: std::cell::RefCell<Vec<Option<(u128, usize, u64)>>>,
 
     /// Keyspace notification flags (parsed from notify-keyspace-events config).
     pub notify_keyspace_events: u32,
@@ -5348,6 +5356,7 @@ impl Default for Store {
             expires_count: 0,
             cached_memory_usage_bytes: std::cell::Cell::new(0),
             cached_memory_usage_dirty: std::cell::Cell::new(0),
+            avg_ttl_deadline_sum_cache: std::cell::RefCell::new(Vec::new()),
             notify_keyspace_events: 0,
             last_del_removed: Vec::new(),
             keyspace_notifications: Vec::new(),
@@ -9093,25 +9102,55 @@ impl Store {
 
     #[must_use]
     pub fn avg_ttl_in_db(&self, db: usize, now_ms: u64) -> u64 {
-        if db >= self.database_count || self.db_expires_counts[db] == 0 {
+        if db >= self.database_count {
+            return 0;
+        }
+        let count = self.db_expires_counts[db];
+        if count == 0 {
             return 0;
         }
 
-        let mut ttl_sum = 0u128;
-        let mut ttl_count = 0u128;
-        for (key, deadline_ms) in &self.expiry_deadlines {
-            let key_db = decode_db_key(key).map(|(key_db, _)| key_db).unwrap_or(0);
-            if key_db != db {
-                continue;
+        // (CrimsonHawk) Report avg(deadline) - now from a cached raw deadline-sum
+        // instead of scanning the whole expiry map on every INFO. The sum is
+        // recomputed (O(expiring keys)) only when this db's expiring-key count
+        // changes or the cached sample is >=1s old; otherwise it is O(1). Uses
+        // the aggregate mean (sum/count - now) rather than a per-key TTL clamp —
+        // byte-identical for the all-live and all-expired cases and a bounded
+        // estimate otherwise (active expiry keeps expired-but-present keys
+        // transient, and avg_ttl is a documented estimate).
+        const AVG_TTL_SAMPLE_TTL_MS: u64 = 1000;
+        let deadline_sum = {
+            let mut cache = self.avg_ttl_deadline_sum_cache.borrow_mut();
+            if cache.len() < self.database_count {
+                cache.resize(self.database_count, None);
             }
+            let cached = match cache[db] {
+                Some((sum, cached_count, at))
+                    if cached_count == count
+                        && now_ms.saturating_sub(at) < AVG_TTL_SAMPLE_TTL_MS =>
+                {
+                    Some(sum)
+                }
+                _ => None,
+            };
+            match cached {
+                Some(sum) => sum,
+                None => {
+                    let mut sum = 0u128;
+                    for (key, deadline_ms) in &self.expiry_deadlines {
+                        if decode_db_key(key).map(|(key_db, _)| key_db).unwrap_or(0) == db {
+                            sum = sum.saturating_add(u128::from(deadline_ms.get()));
+                        }
+                    }
+                    cache[db] = Some((sum, count, now_ms));
+                    sum
+                }
+            }
+        };
 
-            ttl_sum = ttl_sum.saturating_add(u128::from(deadline_ms.get().saturating_sub(now_ms)));
-            ttl_count += 1;
-        }
-
-        ttl_sum
-            .checked_div(ttl_count)
-            .map_or(0, |avg| u64::try_from(avg).unwrap_or(u64::MAX))
+        let avg_deadline = deadline_sum / count as u128;
+        let avg = avg_deadline.saturating_sub(u128::from(now_ms));
+        u64::try_from(avg).unwrap_or(u64::MAX)
     }
 
     #[must_use]

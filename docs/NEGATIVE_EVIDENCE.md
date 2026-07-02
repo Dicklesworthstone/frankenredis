@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — cache INFO keyspace avg_ttl deadline-sum (was O(n) full expiry-map scan per INFO); INFO keyspace 0.067x→0.866x, INFO all 0.096x→0.276x on a 100k-expiry keyspace, byte-exact
+
+`perf` of INFO all showed `Store::avg_ttl_in_db` at 22.7% self — it scanned the
+ENTIRE expiry map (+ `decode_db_key` per entry) on EVERY INFO to average TTLs.
+On a large-expiry keyspace this is a per-INFO O(n) latency spike that stalls the
+single-threaded server; redis reports an O(1) cron-sampled avg_ttl estimate.
+Cached the raw deadline-sum per db (recompute only when the db's expiring-key
+count changes or the sample is >=1s old) and switched to the aggregate mean
+`sum(deadline)/count - now` (O(1) from cache). `count` uses the already-O(1)
+`db_expires_counts[db]`. avg_ttl is a DOCUMENTED estimate (fr never matched
+redis's sampled value byte-for-byte — see the avg_ttl_in_db_reports_exact test
+comment); aggregate vs per-key-clamp is byte-identical for all-live / all-expired
+(the test's cases) and a bounded estimate otherwise.
+
+MEASURED (redis-benchmark, pinned, 100k keys each with a TTL):
+- INFO keyspace: 0.067x → **0.866x** (~13x; avg_ttl scan was nearly its whole cost)
+- INFO all:      0.096x → **0.276x** (~2.9x)
+avg_ttl value consistent (fr 149999706 before / 149999966 after — same, correct;
+oracle 153955500 differs as expected = its sampled estimate). fr-store 30
+avg_ttl/expires/keyspace tests green incl the exactness test. Real latency fix:
+INFO no longer scans millions of expiry entries per call on big keyspaces.
+
+Session INFO wins (3): immutable /proc cache + cron-RSS + avg_ttl cache. INFO on
+a large-expiry keyspace went ~0.1x → ~0.28x (all), keyspace 0.067x→0.87x, memory
+0.37x→0.86x. Residual INFO-all = genRedisInfoString fmt (inherent).
+
 ## 2026-07-02 CrimsonHawk: KEEP — INFO reports the cron-sampled RSS instead of reading /proc/self/status every call; INFO memory 0.367x→0.856x vs redis 7.2.4, byte-exact
 
 Follow-up to the INFO /proc caching. `perf` of INFO memory showed
