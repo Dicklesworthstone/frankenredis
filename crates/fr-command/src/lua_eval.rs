@@ -405,6 +405,15 @@ enum LuaCoroutineContinuation {
         cond: Expr,
         body: Block,
     },
+    /// (CrimsonHawk 7lmle) A top-level `repeat ... until <coroutine.yield(...)>`
+    /// whose loop condition is a bare yield. The body runs first, then the
+    /// condition suspends (still inside the body's scope, so the yield args see
+    /// body locals): a truthy resume exits the loop, a falsy resume re-runs the
+    /// body and re-yields. Additive — a body-level yield still errors as before.
+    Repeat {
+        body: Block,
+        cond: Expr,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4151,13 +4160,38 @@ impl<'a> LuaState<'a> {
                     }
                     env.push_scope();
                     let cf = self.exec_stmts(body, env, varargs)?;
-                    let cv = self.eval_expr(cond, env, varargs)?;
-                    env.pop_scope();
+                    // A `break`/`return` in the body exits before the until
+                    // condition is ever evaluated (matches Lua 5.1).
                     match cf {
-                        ControlFlow::Break => break,
-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                        ControlFlow::Break => {
+                            env.pop_scope();
+                            break;
+                        }
+                        ControlFlow::Return(v) => {
+                            env.pop_scope();
+                            return Ok(ControlFlow::Return(v));
+                        }
                         ControlFlow::None => {}
                     }
+                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
+                    // condition suspends here. The body scope stays pushed so the
+                    // yield args see body locals; it is saved with the env on
+                    // yield and popped in the resume handler. Top-level only;
+                    // deeper it errors as before.
+                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                        return self.start_coroutine_yield(
+                            yield_args,
+                            LuaCoroutineContinuation::Repeat {
+                                body: body.clone(),
+                                cond: cond.clone(),
+                            },
+                            false,
+                            env,
+                            varargs,
+                        );
+                    }
+                    let cv = self.eval_expr(cond, env, varargs)?;
+                    env.pop_scope();
                     if cv.is_truthy() {
                         break;
                     }
@@ -5535,6 +5569,34 @@ impl<'a> LuaState<'a> {
                 // Condition read falsy (or the loop broke): continue with the
                 // statements following the while.
                 self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+            }
+            LuaCoroutineContinuation::Repeat { body, cond } => {
+                // We suspended at the until-condition with the just-run
+                // iteration's body scope still on the env; pop it now.
+                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
+                env.pop_scope();
+                if cond_val.is_truthy() {
+                    // until-condition true → exit the loop.
+                    return self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs);
+                }
+                // Falsy → run another iteration by re-executing the repeat,
+                // which suspends again at its bare-yield until-condition. Chain
+                // the re-yield as a fresh CoroutineRun::Yield; next_pc stays at
+                // outer_pc so post-loop statements run once it finally reads true.
+                match self.exec_stmt(&Stmt::Repeat(body, cond), env, varargs) {
+                    Ok(ControlFlow::Return(vals)) => Ok(CoroutineRun::Complete(vals)),
+                    Ok(ControlFlow::Break | ControlFlow::None) => {
+                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+                    }
+                    Err(e) if is_lua_yield_signal(&e) && self.pending_yield.is_some() => {
+                        let values = self.pending_yield.take().unwrap_or_default();
+                        Ok(CoroutineRun::Yield {
+                            values,
+                            next_pc: outer_pc,
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
             }
         }
     }
@@ -18518,6 +18580,51 @@ end
         assert_eq!(
             eval_script(script, &[], &[], &mut store, 0),
             Ok(RespFrame::BulkString(Some(b"0,1,after:2".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_as_repeat_until_condition_resumes_each_iteration_7lmle() {
+        // Verified against redis 7.2.4: `repeat n=n+1 until coroutine.yield(n)`
+        // runs the body then yields n; a falsy resume loops, a truthy resume
+        // exits. Result: "1,2,done:2".
+        let mut store = Store::new();
+        let script = b"
+            local co=coroutine.create(function()
+                local n=0
+                repeat n=n+1 until coroutine.yield(n)
+                return 'done:'..n
+            end)
+            local _,a=coroutine.resume(co)
+            local _,b=coroutine.resume(co,false)
+            local _,c=coroutine.resume(co,true)
+            return tostring(a)..','..tostring(b)..','..tostring(c)
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"1,2,done:2".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_repeat_until_return_in_body_completes_7lmle() {
+        // Verified against redis 7.2.4: a `return` in the repeat body completes
+        // the coroutine before the until-condition is reached. Result:
+        // "1,true,ret:2".
+        let mut store = Store::new();
+        let script = b"
+            local co=coroutine.create(function()
+                local n=0
+                repeat n=n+1; if n==2 then return 'ret:'..n end until coroutine.yield(n)
+                return 'done:'..n
+            end)
+            local _,a=coroutine.resume(co)
+            local o2,b=coroutine.resume(co,false)
+            return tostring(a)..','..tostring(o2)..','..tostring(b)
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"1,true,ret:2".to_vec())))
         );
     }
 
