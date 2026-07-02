@@ -3795,6 +3795,12 @@ pub struct ServerState {
     last_save_time_sec: u64,
     /// Path for AOF persistence file (used by SAVE/BGSAVE).
     aof_path: Option<std::path::PathBuf>,
+    /// (CrimsonHawk) Persistent append handle to the current incr AOF file,
+    /// tagged with the `aof_current_seq` it was opened for. Avoids an
+    /// open()+close() syscall pair on EVERY `flush_aof_to_disk` tick (redis keeps
+    /// the AOF fd open); reopened only when the seq changes (rewrite/rotation) or
+    /// after a write error. Never serialised.
+    aof_incr_file: Option<(u64, std::fs::File)>,
     /// Configured AOF target path, preserved even when appendonly is disabled.
     aof_config_path: Option<std::path::PathBuf>,
     /// CONFIG SET appendfsync policy used for WAITAOF local fsync visibility.
@@ -3948,6 +3954,7 @@ impl Default for ServerState {
             latency_tracking: true,
             latency_percentiles: vec![50.0, 99.0, 99.9],
             aof_path: None,
+            aof_incr_file: None,
             aof_config_path: None,
             appendfsync_mode: AppendFsyncMode::Everysec,
             rdb_bgsave_pid: None,
@@ -34989,6 +34996,8 @@ impl Runtime {
         // Respect a runtime `CONFIG SET appendonly no`: stop appending, but
         // leave the files and cursor intact for a later re-enable/rewrite.
         if !self.server.store.aof_enabled {
+            // Close the cached handle so a later re-enable/rewrite reopens cleanly.
+            self.server.aof_incr_file = None;
             return;
         }
         // (frankenredis-oe6qt) An incremental flush appends to the current base's
@@ -35022,16 +35031,23 @@ impl Runtime {
         if pending.is_empty() && !want_fsync {
             return;
         }
-        let mut file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&incr_path)
-        {
-            Ok(file) => file,
-            Err(_) => {
-                self.server.store.record_aof_write_status(false);
-                return;
-            }
+        // (CrimsonHawk) Reuse the cached append handle when it is still for the
+        // current incr seq; otherwise open (and cache) it. Saves an open()+close()
+        // per flush tick. On any write/sync error below we leave the cache empty
+        // so the next flush reopens.
+        let mut file = match self.server.aof_incr_file.take() {
+            Some((seq, cached)) if seq == self.server.aof_current_seq => cached,
+            _ => match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&incr_path)
+            {
+                Ok(file) => file,
+                Err(_) => {
+                    self.server.store.record_aof_write_status(false);
+                    return;
+                }
+            },
         };
         if !pending.is_empty() {
             // Repl-only records (PUBLISH / SPUBLISH) ride the in-memory backlog
@@ -35064,6 +35080,8 @@ impl Runtime {
             }
             self.server.aof_last_fsync_ms = now_ms;
         }
+        // Keep the handle open for the next flush (persistent-fd like redis).
+        self.server.aof_incr_file = Some((self.server.aof_current_seq, file));
     }
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {

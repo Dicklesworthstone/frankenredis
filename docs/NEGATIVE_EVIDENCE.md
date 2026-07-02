@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: NEW GAP + FIX — writes with AOF enabled are ~0.55x vs redis 7.2.4 (measured, keyspace-independent = serialization/syscall path); flush_aof_to_disk opened+closed the incr file EVERY tick — now keeps a persistent fd (redis-matching). Throughput A/B interrupted before quantifying.
+
+Benchmarked a common production config not previously tested: `appendonly yes`.
+Writes are 2-3x slower than redis with AOF on (both `appendfsync everysec`):
+SET 0.51-0.63x, INCR 0.48-0.50x, RPUSH 0.47-0.50x, HSET 0.35x; steady ~0.55x.
+Isolated the cause:
+- NOT fsync: with `appendfsync no` still ~0.26-0.42x.
+- NOT the estimate O(N): SET+AOF small keyspace (-r 100) ≈ large (-r 100000),
+  both ~0.55x → keyspace-independent → per-write serialization/syscall path, not
+  the memory-estimate scan (the 61%-estimate profile was a low-throughput
+  amplification artifact of the fixed 100ms record_ops_sec_sample estimate).
+- NOT auto-rewrite: still slow with auto-aof-rewrite-percentage 0.
+Code-level cause: `flush_aof_to_disk` (called every event-loop tick) did
+`OpenOptions::open(incr_path)` + drop(close) on EVERY flush — 2 extra syscalls
+per tick vs redis's persistent AOF fd.
+
+FIX (committed): cache the incr-file handle tagged by `aof_current_seq`; reuse
+across flushes, reopen only on seq change (rewrite/rotation) or write error, drop
+on `appendonly no`. Compiles; fr-runtime 57 AOF tests green (durability/roundtrip
+preserved). NOTE: the fd-cache's specific throughput delta was NOT A/B-measured —
+the bench was interrupted at the turn cutoff; committed as a verified-correct,
+redis-matching architectural fix against the measured 0.55x gap. Residual AOF
+gap (per-record encode/copy) likely remains — re-measure next cycle.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — post-avg_ttl-fix, the data path is at PARITY on large (100k) keyspaces; the sweep's 0.43x was a bulk-load-settling ARTIFACT; INFO now fmt-bound; remaining admin gaps (memory_stats/CLIENT INFO 0.77x) are low-EV fmt-spread
 
 Hunted for more avg_ttl-class hidden-O(n)-at-scale gaps on a 100k-key keyspace.
