@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — CompactFieldMap::lookup_slot field-only decode (skip the discarded value-length varint per probe); -6.0% instructions on the set-membership hot path, byte-exact
+
+Follow-up to the 2-key SINTER fresh-build. `perf record` of SINTER
+compute-isolated (two 5000-member sets, 100-elem result) showed the cost is now
+~65% `CompactFieldMap::lookup_slot` + ~22% its arena decode. lookup_slot only
+needs the FIELD bytes to compare, but called `cfm_decode` which reads BOTH the
+field-length AND value-length varints (then discards the value range). Added
+`cfm_field_range` (reads only the field varint) and used it in lookup_slot.
+
+MEASURED (perf stat -e instructions:u over a FIXED 3000×`SINTER s1 s4`,
+before=fr-rel2 / after binary, pinned): 7,200,145,753 → 6,770,444,752
+instructions = **-6.0%, reproduced exactly twice** (wall-clock A/B stayed ~0.75
+-0.89x = unchanged within noise, because the path is also memory-latency bound;
+instruction count is the reliable signal here per the perf-stat method). Applies
+to EVERY `lookup_slot` caller (all set/hash `contains`/point lookups) since the
+value range was always discarded there. Byte-exact: fr-store 180 set/hash/sinter
+/sdiff/hget/compact tests green; `sinter|sort|md5` identical to redis 7.2.4.
+HGET A/B unchanged (no regression on the shared path).
+
+RESIDUAL: SINTER stays ~0.8x wall-clock vs redis — the deeper gap is the
+lookup_slot indirection chain (slot→order→arena) + memcmp per probe, which redis
+avoids by storing key pointers directly in dict entries. Closing it needs a
+hashbrown-style h2 tag to skip decode+memcmp on tag mismatch — a larger, riskier
+change to a structure that also backs hashes (RAM-tuned, ideww) + HGET; deferred,
+needs multi-metric (SINTER speed + HGET speed + hash RAM) validation.
+
 ## 2026-07-02 CrimsonHawk: KEEP — 2-key SINTER on large string sets fresh-build (drop clone+retain-rebuild); 0.61-0.65x → ~0.75-0.94x toward parity, byte-exact
 
 Found via correct redis-benchmark (options BEFORE the command — a prior sweep put

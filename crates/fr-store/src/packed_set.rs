@@ -822,6 +822,19 @@ fn cfm_decode(buf: &[u8], off: u32) -> (std::ops::Range<usize>, std::ops::Range<
     (fs..fe, vs..ve)
 }
 
+/// (CrimsonHawk) Decode ONLY the field byte-range of an entry, skipping the
+/// value-length varint that `cfm_decode` also reads. Membership probing
+/// (`lookup_slot`) compares only the field, so reading the value varint per
+/// probe is wasted — and for the set encoding (members carry an empty value)
+/// it is pure overhead on the SINTER/SDIFF/`contains` hot loops. Byte-identical
+/// field range to `cfm_decode(..).0`.
+#[inline]
+fn cfm_field_range(buf: &[u8], off: u32) -> std::ops::Range<usize> {
+    let off = off as usize;
+    let (flen, p) = read_varint(buf, off);
+    p..p + flen
+}
+
 #[allow(dead_code)]
 impl CompactFieldMap {
     #[must_use]
@@ -892,7 +905,7 @@ impl CompactFieldMap {
             }
             if s != CFM_TOMB {
                 let pos = (s - 2) as usize;
-                let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
+                let fr = cfm_field_range(&self.buf, self.order[pos]);
                 if &self.buf[fr] == field {
                     return Some((pos, slot));
                 }
