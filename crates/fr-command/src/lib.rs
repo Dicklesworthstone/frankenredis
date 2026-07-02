@@ -15809,9 +15809,18 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if section_requested("memory") {
         let used_memory = store.estimate_memory_usage_bytes();
         let used_memory_human = format_bytes_human(used_memory);
-        // Refresh the RSS sample so INFO remains accurate even outside the server main loop.
-        let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
-        store.observe_memory_sample(used_memory_rss);
+        // (CrimsonHawk) Report the RSS sampled by `record_ops_sec_sample` (the
+        // ~100ms event-loop tick = redis's serverCron hz=10 equivalent), instead
+        // of reading the 8KB /proc/self/status on EVERY INFO. Matches upstream,
+        // which reports the cron-sampled RSS. Fall back to a fresh read only
+        // before the first sample (cold start), preserving peak tracking there.
+        let used_memory_rss = if store.stat_used_memory_rss != 0 {
+            store.stat_used_memory_rss
+        } else {
+            let rss = read_rss_bytes().unwrap_or(used_memory);
+            store.observe_memory_sample(rss);
+            rss
+        };
         let used_memory_rss_human = format_bytes_human(used_memory_rss);
         let policy_str = store.maxmemory_policy.as_config_str();
         let frag_ratio = if used_memory > 0 {

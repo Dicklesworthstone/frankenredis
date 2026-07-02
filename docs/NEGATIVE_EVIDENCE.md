@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — INFO reports the cron-sampled RSS instead of reading /proc/self/status every call; INFO memory 0.367x→0.856x vs redis 7.2.4, byte-exact
+
+Follow-up to the INFO /proc caching. `perf` of INFO memory showed
+`read_rss_bytes` (reads the ~8KB /proc/self/status + line-scans for VmRSS) as a
+top cost — called fresh on EVERY INFO. But `read_rss_bytes` is ALSO called by
+`record_ops_sec_sample`, which the event loop runs every ~100ms
+(main.rs:1381 `if elapsed >= 100`) = exactly redis's serverCron hz=10. redis's
+INFO reports that cron-sampled RSS, NOT a fresh read. Changed INFO to use the
+periodically-sampled `store.stat_used_memory_rss` (fresh read only on cold start
+before the first sample, which also seeds peak). No /proc read per INFO.
+
+MEASURED (redis-benchmark, pinned): INFO memory 0.367x → **0.856x** (~2.3x, near
+parity — the /proc/self/status read WAS the dominant INFO-memory cost). INFO all
+0.438x → 0.447x (memory is 1 of ~8 sections). Byte-exact: used_memory_rss
+reports a real value (6.49MB vs oracle 7.61MB — both live RSS); 76 info/memory
+tests green. Matches redis semantics (cron-sampled RSS, 100ms granularity).
+Two INFO wins stacked this session: INFO memory now near parity; INFO all
+0.227x→0.447x. Residual INFO-all is the genRedisInfoString fmt across ~8 sections
+(inherent; redis formats too). CLIENT INFO 0.77x remains (per-conn fmt, non-hot).
+
 ## 2026-07-02 CrimsonHawk: KEEP — cache the immutable /proc reads in INFO (uname OS string + /proc/meminfo MemTotal); INFO all 0.227x→0.387x, INFO server 0.315x→0.566x vs redis 7.2.4, byte-exact
 
 NEW gap found by benchmarking introspection commands (previously unmeasured):
