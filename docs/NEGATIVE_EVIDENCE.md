@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE (MAJOR NEW GAP) — EVAL is the biggest remaining gap vs redis 7.2.4: trivial 0.6x, redis.call-glue 0.53x, COMPUTE-HEAVY LOOP 0.07x (~10x slower). Root: fr's tree-walking Lua interpreter vs redis's Lua 5.1 bytecode VM + per-EVAL env clone.
+
+First benchmark of the EVAL/scripting path (previously only correctness-tested).
+Pinned, interleaved, redis-benchmark eval:
+- `return 1` (trivial): 0.57-0.60x
+- `return redis.call('incr','k')` (glue, typical): 0.52-0.55x
+- `local s=0 for i=1,1000 do s=s+i end return s` (compute): **0.07-0.10x = ~10x SLOWER**
+- string-build loop: 0.39-0.73x
+
+TWO root causes (perf record of trivial EVAL — note it is ~48% syscall-bound like
+GET, so the ratio gap is per-op CPU):
+1. PER-EVAL ENV CLONE (~5.5% of trivial CPU: HashMap<String,LuaValue>::clone
+   3.46% + String key clone 2.01%). `LuaState::new` clones the ~80-entry stdlib
+   globals template EVERY EVAL; redis reuses ONE persistent lua_State. eval_script
+   ALREADY caches the parsed AST (compile_lua_chunk_cached), so parsing is NOT the
+   cost. The clean fix = shared-base + per-script-overlay globals (redis's model):
+   `{ base: Rc<HashMap>, overlay: HashMap }`, reads overlay-then-base, writes to
+   overlay. Correctness edges (nil-shadowing = Some(Nil) vs None matches Lua;
+   ensure_g_table iter must merge base+overlay; globals_locked) are manageable but
+   it's a core-interpreter change — deferred, not rushed. NOTE clone-on-write
+   alone does NOT help: set_keys_argv inserts KEYS/ARGV/coroutine per script, so
+   an overlay (not COW) is required. (Rc<str> keys is a smaller ~2-3% safe variant.)
+2. INTERPRETER SPEED (the 10x on compute): fr is a TREE-WALKER (exec_stmt/
+   eval_expr, HashMap var scopes) vs redis's register bytecode VM. This is the
+   dominant gap for compute-in-Lua (rate limiters, complex atomic ops). Closing it
+   = a Lua bytecode compiler + VM — MULTI-WEEK, the single highest-impact perf
+   lever left in the whole codebase.
+
+Verified already-optimal (not levers): LCS is bit-parallel (compute_lcs_len +
+lcs_low_mask), BITCOUNT uses word-wise count_ones (POPCNT). This is now the #1
+remaining gap — bigger than the persistence-reload gaps. Surfaced, characterized;
+the overlay-globals contained win + the bytecode-VM big win are both scoped.
+
 ## 2026-07-02 CrimsonHawk: SURFACE (definitive, code-level) — the stream-reload lever has NO contained slice: BOTH encode and decode materialize owned field pairs, and the save path is build-all-RdbEntry-then-encode. It is a whole-pipeline borrowed-RDB refactor (multi-day). Do not hunt for a shortcut.
 
 Traced the full stream RDB path to settle whether a single-cycle win exists — it
