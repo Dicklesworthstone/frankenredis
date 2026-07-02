@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SATURATED — large-value / large-collection / iterate surface all parity-or-faster vs redis 7.2.4 post-BITOP; no new gap (don't re-probe these).
+
+Swept the previously-under-benchmarked large-input paths chasing the BITOP
+pattern (large input, small output => a clone is pure overhead). ALL parity-or-
+faster, so BITOP was the last real gap there:
+- bit/string on 1MB: BITFIELD-GET parity (small AND 1MB — the earlier "0.87x" was
+  NOISE; profile syscall-bound), SETBIT/GETBIT/BITPOS/APPEND/SETRANGE/GETRANGE/
+  STRLEN parity, BITCOUNT 2.5-3.8x (SIMD popcount), GETEX-large ~0.9-1.0x
+  (send-dominated; store already keeps the value so no pure-overhead clone).
+- large-collection FULL replies: HGETALL/HKEYS parity, SMEMBERS 1.0-1.2x, HVALS
+  1.2-1.5x, ZRANGE WITHSCORES parity (collect-into-Vec double-copy hidden by the
+  send).
+- set-algebra small-output: SINTERCARD 1.4-1.9x, SDIFF-card 1.8x, SINTERSTORE
+  parity, SMISMEMBER parity.
+- iterate/scan: SCAN MATCH 1.8-2.1x, SCAN no-match 1.8-3.7x, LPOS 2.2-2.8x,
+  LPOS rank-all 1.2-2.1x, LREM 2.8x, ZRANGEBYLEX parity. fr is FASTER at
+  iterate+match than redis.
+CONCLUSION: reachable command surface fully saturated (data path, CPU-heavy
+collections, bit ops, set algebra, string, scan/iterate, collection replies — all
+parity-or-faster). Remaining levers are STRUCTURAL/multi-week only: EVAL bytecode
+VM (compute 0.11x), ChunkedList packed nodes, modeled-memory eviction fidelity,
+or syscall-bound (AOF/repl __send batching). No quick per-command win remains.
+
 ## 2026-07-02 CrimsonHawk: KEEP — BITOP AND/OR/XOR read operands zero-copy instead of cloning each input; BITOP 0.74-0.87x → 1.21-1.37x vs redis 7.2.4 (now FASTER), byte-exact.
 
 Probing CPU-heavy commands on large collections (all parity-or-faster: SORT
