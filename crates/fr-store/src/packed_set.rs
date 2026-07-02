@@ -800,6 +800,18 @@ pub struct CompactFieldMap {
     /// Open-addressing slots (linear probe). 0 = EMPTY, 1 = TOMBSTONE, else the
     /// occupant's `pos_in_order + 2`. `slots.len()` is a power of two (or 0).
     slots: Vec<u32>,
+    /// (CrimsonHawk) Per-slot 1-byte hash tag (top byte of the field hash),
+    /// parallel to `slots` (`tags.len() == slots.len()`). Probing compares the
+    /// tag before touching the arena, so a tag mismatch skips the
+    /// `order`→arena decode + `memcmp` entirely — the SwissTable h2 trick. This
+    /// closes the per-probe arena-indirection cost vs redis's pointer-in-dict
+    /// entries on membership-heavy ops (SINTER/SDIFF/`contains`). A slot always
+    /// holds the same field until tombed (swap_remove repoints keep the field),
+    /// and TOMB/EMPTY are checked via `slots` before the tag, so tags only need
+    /// writing where a slot becomes occupied (insert + rehash); deletes leave a
+    /// stale-but-ignored tag. Tag collisions are harmless — the `memcmp` still
+    /// confirms. Stored bytes are transient (never serialised).
+    tags: Vec<u8>,
     /// Dead (unreferenced) bytes in `buf`, from value updates / removals.
     dead: usize,
     /// Tombstone slot count (for the rehash-on-load trigger).
@@ -860,6 +872,7 @@ impl CompactFieldMap {
             m.slot_of.reserve(entries);
             let cap = ((entries + 1) * 2).next_power_of_two().max(8);
             m.slots = vec![CFM_EMPTY; cap];
+            m.tags = vec![0u8; cap];
         }
         m
     }
@@ -897,13 +910,17 @@ impl CompactFieldMap {
             return None;
         }
         let mask = self.slots.len() - 1;
-        let mut slot = (self.hash(field) as usize) & mask;
+        let h = self.hash(field);
+        let tag = (h >> 56) as u8;
+        let mut slot = (h as usize) & mask;
         loop {
             let s = self.slots[slot];
             if s == CFM_EMPTY {
                 return None;
             }
-            if s != CFM_TOMB {
+            // Compare the 1-byte hash tag before the arena decode + memcmp; a
+            // mismatch (the common case for a colliding-slot probe) skips both.
+            if s != CFM_TOMB && self.tags[slot] == tag {
                 let pos = (s - 2) as usize;
                 let fr = cfm_field_range(&self.buf, self.order[pos]);
                 if &self.buf[fr] == field {
@@ -919,10 +936,11 @@ impl CompactFieldMap {
     fn rehash(&mut self, new_cap: usize) {
         let cap = new_cap.next_power_of_two().max(8);
         let mut slots = vec![CFM_EMPTY; cap];
+        let mut tags = vec![0u8; cap];
         let mut slot_of = vec![0u32; self.order.len()];
         let mask = cap - 1;
         for (pos, &off) in self.order.iter().enumerate() {
-            let (fr, _) = cfm_decode(&self.buf, off);
+            let fr = cfm_field_range(&self.buf, off);
             // Re-hash from the field bytes already in `buf`.
             let h = {
                 use std::hash::BuildHasher;
@@ -933,9 +951,11 @@ impl CompactFieldMap {
                 slot = (slot + 1) & mask;
             }
             slots[slot] = (pos as u32) + 2;
+            tags[slot] = (h >> 56) as u8;
             slot_of[pos] = slot as u32;
         }
         self.slots = slots;
+        self.tags = tags;
         self.slot_of = slot_of;
         self.tombs = 0;
     }
@@ -977,7 +997,9 @@ impl CompactFieldMap {
         self.order.push(new_off);
         // Probe for an EMPTY or reusable TOMBSTONE slot.
         let mask = self.slots.len() - 1;
-        let mut slot = (self.hash(field) as usize) & mask;
+        let h = self.hash(field);
+        let tag = (h >> 56) as u8;
+        let mut slot = (h as usize) & mask;
         let mut first_tomb: Option<usize> = None;
         loop {
             let s = self.slots[slot];
@@ -987,6 +1009,7 @@ impl CompactFieldMap {
                     self.tombs -= 1;
                 }
                 self.slots[target] = (pos as u32) + 2;
+                self.tags[target] = tag;
                 self.slot_of.push(target as u32);
                 break;
             }
@@ -1028,7 +1051,9 @@ impl CompactFieldMap {
         let pos = self.order.len();
         self.order.push(new_off);
         let mask = self.slots.len() - 1;
-        let mut slot = (self.hash(field) as usize) & mask;
+        let h = self.hash(field);
+        let tag = (h >> 56) as u8;
+        let mut slot = (h as usize) & mask;
         let mut first_tomb: Option<usize> = None;
         loop {
             let s = self.slots[slot];
@@ -1038,6 +1063,7 @@ impl CompactFieldMap {
                     self.tombs -= 1;
                 }
                 self.slots[target] = (pos as u32) + 2;
+                self.tags[target] = tag;
                 self.slot_of.push(target as u32);
                 break;
             }

@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — CompactFieldMap h2 hash-tag per slot (SwissTable trick): skip arena decode+memcmp on tag mismatch; -22.5% instructions on SINTER, byte-exact
+
+Closes most of the SINTER ~0.8x residual (the deferred lever from the field-only
+-decode entry). Added a 1-byte-per-slot `tags` array (top byte of the field hash)
+parallel to `slots`; lookup_slot compares the tag before touching the arena, so a
+tag mismatch (the common colliding-slot probe) skips the order→arena decode +
+memcmp entirely — exactly what redis gets free by storing key pointers in dict
+entries. A slot always holds the same field until tombed (swap_remove repoints
+keep the field) and EMPTY/TOMB are checked via `slots` before the tag, so tags are
+written only where a slot becomes occupied (insert ×2 + rehash); deletes leave a
+stale-but-ignored tag; tag collisions are harmless (memcmp still confirms).
+
+MEASURED (perf stat -e instructions:u, fixed 3000×`SINTER s1 s4`, two 5000-member
+sets 100-elem result, before=field-only-decode binary / after, pinned):
+6,659,354,204 → 5,164,694,840 = **-22.5%**. Byte-exact: fr-store FULL lib suite
+662 tests green; `sinter s1 s4 | sort | md5` identical to redis 7.2.4. Applies to
+every lookup_slot caller (all set/hash `contains` + point lookups). RAM: +1 byte
+per slot (slots ≈ 1.33-2.67× entries) — real RSS only (used_memory is modelled);
+acceptable for the membership speedup and small vs the arena payload.
+
 ## 2026-07-02 CrimsonHawk: KEEP — CompactFieldMap::lookup_slot field-only decode (skip the discarded value-length varint per probe); -6.0% instructions on the set-membership hot path, byte-exact
 
 Follow-up to the 2-key SINTER fresh-build. `perf record` of SINTER
