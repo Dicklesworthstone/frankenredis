@@ -723,8 +723,13 @@ impl HashFieldMap {
         }
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &[u8]> {
-        self.iter().map(|(k, _)| k)
+    pub fn keys(&self) -> HashFieldMapKeyIter<'_> {
+        match self {
+            // Packed hashes are tiny (<= PACKED_MAX_ENTRIES); the value decode is
+            // negligible. The hashtable-range variant skips the value entirely.
+            HashFieldMap::Packed(p) => HashFieldMapKeyIter::Packed(p.iter()),
+            HashFieldMap::Hash(h) => HashFieldMapKeyIter::Hash(h.field_iter()),
+        }
     }
 
     pub fn values(&self) -> impl Iterator<Item = &[u8]> {
@@ -749,6 +754,23 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
             m.insert(k, v);
         }
         m
+    }
+}
+
+/// (CrimsonHawk) Field-only iterator over a `HashFieldMap` (HKEYS / HSCAN
+/// NOVALUES). The hashtable-range arm skips the per-entry value decode.
+pub enum HashFieldMapKeyIter<'a> {
+    Packed(PackedStrMapIter<'a>),
+    Hash(CompactFieldMapFieldIter<'a>),
+}
+
+impl<'a> Iterator for HashFieldMapKeyIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            HashFieldMapKeyIter::Packed(it) => it.next().map(|(k, _)| k),
+            HashFieldMapKeyIter::Hash(it) => it.next(),
+        }
     }
 }
 
@@ -1111,6 +1133,13 @@ impl CompactFieldMap {
         CompactFieldMapIter { map: self, pos: 0 }
     }
 
+    /// (CrimsonHawk) Field-only iterator (skips the value decode per entry) for
+    /// keys-only consumers like HKEYS / HSCAN NOVALUES on a hashtable-range hash.
+    #[must_use]
+    pub(crate) fn field_iter(&self) -> CompactFieldMapFieldIter<'_> {
+        CompactFieldMapFieldIter { map: self, pos: 0 }
+    }
+
     /// (frankenredis-ym6ih) Swap-remove the live entry at order position `pos`,
     /// whose index slot is `slot`. O(1) and probe-free: tombstone `slot`, move
     /// the last entry into the gap, and repoint *its* slot via the `slot_of`
@@ -1227,6 +1256,22 @@ impl<'a> Iterator for CompactFieldMapIter<'a> {
         let pair = self.map.get_index(self.pos)?;
         self.pos += 1;
         Some(pair)
+    }
+}
+
+/// (CrimsonHawk) Field-only insertion-order iterator over a [`CompactFieldMap`],
+/// decoding just the field (no value varint/slice) per entry.
+pub struct CompactFieldMapFieldIter<'a> {
+    map: &'a CompactFieldMap,
+    pos: usize,
+}
+
+impl<'a> Iterator for CompactFieldMapFieldIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        let f = self.map.field_at(self.pos)?;
+        self.pos += 1;
+        Some(f)
     }
 }
 

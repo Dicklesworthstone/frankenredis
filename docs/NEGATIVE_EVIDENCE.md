@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — HKEYS/HSCAN-NOVALUES iterate fields only (field_iter), skipping the per-entry value decode; -24.4% instructions on HKEYS, byte-exact
+
+Extends the field-only iteration to hashes. `HashFieldMap::keys()` was
+`self.iter().map(|(k,_)| k)` — decoding BOTH varints + building the value slice
+per entry, then discarding the value. Added `CompactFieldMap::field_iter` (a
+field-only iterator) and a `HashFieldMapKeyIter` enum; the hashtable-range (Hash)
+arm now decodes only the field. Packed (small, <=128-entry) hashes keep the pair
+iter (value decode negligible there).
+
+MEASURED (perf stat -e instructions:u, fixed 1500×`HKEYS h`, 5000-field hashtable
+hash, before=set-field_at binary / after, pinned): 2,033,555,591 → 1,538,497,457
+= **-24.4%** (reproduced exactly twice). Byte-exact: fr-store full 662-test lib
+suite green; `hkeys h | sort | md5` identical to redis 7.2.4. Also benefits HSCAN
+NOVALUES (same keys() path). HVALS gets NO win — the value's arena position
+requires decoding the field-length varint first, so the field decode is
+unavoidable there.
+
 ## 2026-07-02 CrimsonHawk: KEEP — set iteration decodes only the field (field_at), skipping the empty-value varint per element; -21.5% instructions on SMEMBERS, byte-exact
 
 Completes the field-only-decode work: lookup_slot was fixed earlier, but the set
