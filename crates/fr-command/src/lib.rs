@@ -7394,9 +7394,35 @@ fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
     ms_str.parse::<u64>().ok()
 }
 
+/// Append the decimal ASCII of `n` to `out` without the general `fmt` machinery.
+/// (CrimsonHawk) `format!` is ~21% of XRANGE full-scan self-time (the per-entry
+/// `<ms>-<seq>` id); this manual path is byte-identical and avoids the formatter
+/// plus its intermediate `String` allocation.
+#[inline]
+fn push_u64_ascii(out: &mut Vec<u8>, mut n: u64) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    // u64::MAX is 20 digits.
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
 #[inline]
 pub fn format_stream_id(id: StreamId) -> Vec<u8> {
-    format!("{}-{}", id.0, id.1).into_bytes()
+    // 20 (ms) + 1 ('-') + 20 (seq) worst case.
+    let mut out = Vec::with_capacity(41);
+    push_u64_ascii(&mut out, id.0);
+    out.push(b'-');
+    push_u64_ascii(&mut out, id.1);
+    out
 }
 
 #[inline]

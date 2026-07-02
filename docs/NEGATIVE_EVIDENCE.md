@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — format_stream_id manual u64→ASCII (drop format!); -19.3% instructions on XRANGE full-scan, byte-exact
+
+Family sweep (streams/geo/bitfield/HLL) found XRANGE full-scan the sole outlier
+at 0.82-0.90x vs redis 7.2.4 (everything else parity or fr-faster — geosearch
+1.23-1.34x, xlen 1.05-1.18x). `perf record`: ~21% of self-time in
+`alloc::fmt::format::format_inner` — `format_stream_id` built each entry's
+`<ms>-<seq>` id via `format!("{}-{}")` (formatter + intermediate String alloc)
+per entry. Replaced with a manual `push_u64_ascii` (fixed 20-byte stack buffer,
+one output Vec). Benefits all 26 `format_stream_id` callers (XRANGE/XREVRANGE/
+XREAD/XADD-reply/XINFO/XAUTOCLAIM/XPENDING…).
+
+MEASURED (perf stat -e instructions:u, fixed 800×`XRANGE st - +`, 5000-entry
+stream, before=format! binary / after, pinned): 14,298,768,605 → 11,544,007,699
+= **-19.3%** (reproduced exactly twice). Byte-exact: 17 stream tests green;
+`XRANGE` with explicit ids (incl u64::MAX-1 seq / max-ms) `md5` identical to
+redis 7.2.4; XADD reply id identical. (Wall-clock A/B was unreliable this run —
+3 fr instances + oracle contending on pinned cores — so instruction count is the
+signal, per method.)
+
 ## 2026-07-02 CrimsonHawk: CORRECT — the "keyspace RAM 4.49x" (uhthd/p8dd2) belief is WRONG; real fresh-process gap is 1.53x for SMALL values, 1.04x for 200-byte values, and fr's used_memory MODEL is LEANER than redis. The big number was mimalloc RSS retention + a Lua-populate artifact.
 
 Chased the biggest documented gap (keyspace RAM) and it largely evaporated under
