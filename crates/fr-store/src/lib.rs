@@ -13244,16 +13244,19 @@ impl Store {
             return Ok(None);
         };
         let result: Box<SetValue> = match smallest.as_generic() {
-            // Fresh-build only pays off with >=2 other sets: it walks the smallest
-            // set once, testing membership in every other set, and copies just the
-            // survivors — avoiding the intermediate result sets and the extra
-            // retain pass the clone+retain path materialises per other set. With a
-            // single other set (2-key SINTER) the clone is a bulk copy and the one
-            // in-place retain beats per-survivor inserts when the result is a large
-            // fraction of the smallest set, so keep clone+retain there. Output
-            // order is the smallest set's iteration order in both paths
-            // (byte-identical; verified fr-vs-fr 0-diff). (frankenredis-sinterfresh)
-            Some(base) if keys.len() >= 3 => {
+            // Fresh-build: walk the smallest set once, test membership in every
+            // other set, and copy just the survivors into a right-sized set —
+            // avoiding both the full clone of the smallest set and the retain
+            // rebuild the clone+retain path materialises per other set. Output
+            // order is the smallest set's iteration order (byte-identical; verified
+            // fr-vs-fr 0-diff). (frankenredis-sinterfresh)
+            // (CrimsonHawk) Extended from >=3 to >=2 keys: the 2-key clone+retain
+            // was MEASURED 0.61-0.65x vs redis 7.2.4 on two 5000-member string sets
+            // (perf: ~22% in CompactFieldMap insert/rehash/append_entry — clone
+            // rebuilds the whole map, then retain_intersect rebuilds it again). The
+            // fresh-build does neither. Only intset smallest sets (as_generic None)
+            // keep the galloping clone+retain path below.
+            Some(base) if keys.len() >= 2 => {
                 // (BlackThrush) Hoist the other-set references out of the per-member
                 // loop. The previous code re-probed the key-dict (self.entries.get)
                 // for EVERY member of the smallest set times EVERY other set —

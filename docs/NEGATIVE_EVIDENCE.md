@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — 2-key SINTER on large string sets fresh-build (drop clone+retain-rebuild); 0.61-0.65x → ~0.75-0.94x toward parity, byte-exact
+
+Found via correct redis-benchmark (options BEFORE the command — a prior sweep put
+`-q` AFTER, silently passing it as an extra key). Two 5000-member hashtable sets,
+2500-element intersection: 2-key SINTER measured 0.61/0.63/0.65x vs redis 7.2.4
+(tight, real — NOT the -q artifact). `perf record` of fr: ~22% in
+`CompactFieldMap::insert/rehash/append_entry` — the 2-key path did
+`smallest.clone()` (rebuild the whole 5000-entry map) then `retain_intersect`
+(rebuild it AGAIN dropping rejects). The 3+-key path already used a fresh-build
+(walk smallest once, test membership, insert only survivors); I extended that gate
+from `keys.len() >= 3` to `>= 2` so 2-key string SINTER skips both the full clone
+and the retain rebuild (intset smallest sets keep the galloping clone+retain).
+
+MEASURED (release, pinned taskset -c 2 fr / -c 3 oracle, client -c 6,7):
+- Correctness: `sinter s1 s2 | sort | md5` IDENTICAL to oracle (byte-exact result).
+- 2-key SINTER, 2500-elem result: 0.61-0.65x → 0.706/0.752/0.944x (noisy — the
+  big member reply dominates + host loadavg ~9-16, but the median clearly moved
+  up and the clone+retain rebuild is gone). fr-store set/intersect/retain tests
+  all green (14 tests).
+Net: removes the profiled clone+retain double-rebuild on the hottest 2-key SINTER
+path; directional win toward parity, byte-exact. Compute-isolated (small-result /
+SINTERCARD) re-measure was in progress at ship time — expect a cleaner ratio
+there since reply encoding no longer masks the saved build cost.
+
 ## 2026-07-02 CrimsonHawk: CORRECT — the "-P16 GET/SET/INCR 0.83-0.88x residual" was a SHORT-RUN/WARMUP ARTIFACT; steady-state = PARITY, and the path is 79% SYSCALL-BOUND (no CPU lever exists)
 
 The immediately-following entry recorded a 0.83-0.88x pipelined residual from a
