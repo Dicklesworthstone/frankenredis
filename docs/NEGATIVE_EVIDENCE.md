@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: REJECT — PUBLISH/SUBSCRIBE ~0.77x is SYSCALL-BOUND (delivery __send), NOT the channel-map SipHash; foldhash swap showed NO measurable win (reverted).
+
+Benchmarked pub/sub with a long (60-char) channel + 3 subscribers: PUBLISH
+0.74-0.93x, SUBSCRIBE 0.73-0.84x vs redis. Hypothesised the SipHash on the long
+`Vec<u8>` channel key of `pubsub_channel_subs` was the cost, so swapped the 3
+channel-keyed pubsub maps to foldhash::quality (the proven Lua recipe). MEASURED
+before(SipHash) vs after(foldhash) vs oracle: PUBLISH UNCHANGED (both ~0.75x),
+SUBSCRIBE too noisy to claim (0.79-1.42x). perf of PUBLISH = syscall-bound
+(__syscall_cancel + __send delivery to subscribers + process_buffered_frames), NO
+dominant SipHash — the channel is hashed ONCE per publish, dwarfed by the N
+subscriber sends. So this is the same I/O-bound plateau as replication/-P16
+[[project_p16_pipeline_parity_syscall_bound]], not a CPU lever. Reverted (22
+pubsub tests were green; change was byte-transparent but no ratio). Don't chase
+pub/sub via hashing. NOTE: the foldhash recipe only pays where a map is hashed on
+a HOT, NON-syscall-bound path (Lua per-access = yes; pub/sub per-publish = no).
+
 ## 2026-07-02 CrimsonHawk: KEEP — eval_call_args pre-sizes the arg Vec (with_capacity vs Vec::new); -1.6% EVAL instructions on multi-arg-call scripts, byte-transparent.
 
 Small contained follow-up: `eval_call_args` built the redis.call / function arg
