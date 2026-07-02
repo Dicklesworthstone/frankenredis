@@ -396,6 +396,15 @@ enum LuaCoroutineContinuation {
         remaining: Vec<(Expr, Block)>,
         else_body: Option<Block>,
     },
+    /// (CrimsonHawk 7lmle) A top-level `while <coroutine.yield(...)> do ... end`
+    /// whose loop condition is a bare yield. The condition is evaluated (and thus
+    /// suspends) once per iteration: on a truthy resume the body runs and the loop
+    /// re-yields at the condition; a falsy resume exits the loop. A body-level
+    /// yield still errors exactly as before, so this is purely additive.
+    While {
+        cond: Expr,
+        body: Block,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4105,6 +4114,23 @@ impl<'a> LuaState<'a> {
                     if self.iterations > MAX_ITERATIONS {
                         return Err("script exceeded maximum iteration count".to_string());
                     }
+                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
+                    // condition suspends here; on resume the yielded value is the
+                    // condition result (truthy → run body then re-check; falsy →
+                    // exit). Only valid at the coroutine's top statement level;
+                    // deeper it errors as before.
+                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                        return self.start_coroutine_yield(
+                            yield_args,
+                            LuaCoroutineContinuation::While {
+                                cond: cond.clone(),
+                                body: body.clone(),
+                            },
+                            false,
+                            env,
+                            varargs,
+                        );
+                    }
                     let cv = self.eval_expr(cond, env, varargs)?;
                     if !cv.is_truthy() {
                         break;
@@ -5465,6 +5491,50 @@ impl<'a> LuaState<'a> {
                         self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
                     }
                 }
+            }
+            LuaCoroutineContinuation::While { cond, body } => {
+                // The yielded value is this iteration's loop-condition result.
+                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
+                if cond_val.is_truthy() {
+                    match self.exec_block(&body, env, varargs)? {
+                        ControlFlow::Return(vals) => return Ok(CoroutineRun::Complete(vals)),
+                        // `break` inside the body exits the loop; fall through
+                        // to the outer statements after the while.
+                        ControlFlow::Break => {}
+                        ControlFlow::None => {
+                            // Loop back: re-execute the while, which suspends
+                            // again at its bare-yield condition. Propagate that
+                            // re-yield as a fresh CoroutineRun::Yield (the nested
+                            // While continuation is already stored); next_pc
+                            // stays at outer_pc so the post-loop statements run
+                            // once the condition finally reads falsy.
+                            match self.exec_stmt(
+                                &Stmt::While(cond, body),
+                                env,
+                                varargs,
+                            ) {
+                                Ok(ControlFlow::Return(vals)) => {
+                                    return Ok(CoroutineRun::Complete(vals));
+                                }
+                                Ok(ControlFlow::Break | ControlFlow::None) => {}
+                                Err(e)
+                                    if is_lua_yield_signal(&e)
+                                        && self.pending_yield.is_some() =>
+                                {
+                                    let values = self.pending_yield.take().unwrap_or_default();
+                                    return Ok(CoroutineRun::Yield {
+                                        values,
+                                        next_pc: outer_pc,
+                                    });
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                }
+                // Condition read falsy (or the loop broke): continue with the
+                // statements following the while.
+                self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
             }
         }
     }
@@ -18401,6 +18471,53 @@ end
         assert_eq!(
             eval_script(script_fall, &[], &[], &mut store, 0),
             Ok(RespFrame::BulkString(Some(b"true,fell".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_as_while_condition_resumes_each_iteration_7lmle() {
+        // Verified against redis 7.2.4: `while coroutine.yield(n) do n=n+1 end`
+        // yields n each iteration; a truthy resume continues the loop, a falsy
+        // resume exits and runs the trailing return. Result: "0,1,2,done:2".
+        let mut store = Store::new();
+        let script = b"
+            local co=coroutine.create(function()
+                local n=0
+                while coroutine.yield(n) do n=n+1 end
+                return 'done:'..n
+            end)
+            local _,a=coroutine.resume(co)
+            local _,b=coroutine.resume(co,true)
+            local _,c=coroutine.resume(co,true)
+            local _,d=coroutine.resume(co,false)
+            return tostring(a)..','..tostring(b)..','..tostring(c)..','..tostring(d)
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"0,1,2,done:2".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_as_while_condition_break_exits_loop_7lmle() {
+        // Verified against redis 7.2.4: a `break` in the body of a
+        // yield-conditioned while exits the loop and runs trailing code.
+        // Result: "0,1,after:2".
+        let mut store = Store::new();
+        let script = b"
+            local co=coroutine.create(function()
+                local n=0
+                while coroutine.yield(n) do n=n+1; if n==2 then break end end
+                return 'after:'..n
+            end)
+            local _,a=coroutine.resume(co)
+            local _,b=coroutine.resume(co,true)
+            local _,c=coroutine.resume(co,true)
+            return tostring(a)..','..tostring(b)..','..tostring(c)
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"0,1,after:2".to_vec())))
         );
     }
 
