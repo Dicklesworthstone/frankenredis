@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — extend the itoa swap to tostring/concat/string.format integer paths (11 more format! sites); -7.9% EVAL instructions on concat-heavy scripts, byte-identical.
+
+Followed the itoa thread past redis.call: `to_display_string` (line 1138, the
+`tostring`/`..` concat path) and 10 other Lua integer-formatting sites still used
+`format!("{}", n as i64).into_bytes()`. Replaced all 11 with the existing
+`i64_to_ascii_bytes` (byte-identical: same cast then same digits). MEASURED perf
+stat instructions:u (300 scripts building 2000 `'prefix:key:'..i..':suffix'`
+strings): 2.514B → 2.316B = **-7.9%** (bigger than the redis.call itoa -3.6% —
+concat scripts hammer to_display_string). BYTE-IDENTICAL: before(format!)==
+after(itoa) across tostring/concat/string.format(%d)/i64-extremes/negatives; the
+concat-script result == oracle; 235 lua/eval tests green. (Observed but PRE-
+EXISTING + untouched: `tostring(-0.0)` = fr "-0" vs redis "0" — the float path,
+`is_neg_zero` skips the integer fast path; separate conformance nit.) Lua vein
+tally: foldhash -10.2%, itoa-redis.call -3.6%, arg-move -5.9%, reply-move -2.7%,
+argvec-presize -1.6%, itoa-display -7.9%.
+
 ## 2026-07-02 CrimsonHawk: REJECT — PUBLISH/SUBSCRIBE ~0.77x is SYSCALL-BOUND (delivery __send), NOT the channel-map SipHash; foldhash swap showed NO measurable win (reverted).
 
 Benchmarked pub/sub with a long (60-char) channel + 3 subscribers: PUBLISH

@@ -996,7 +996,7 @@ fn lua_check_string(
         Some(LuaValue::Str(b)) => Ok(b.clone()),
         Some(LuaValue::Number(n)) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
-                Ok(format!("{}", *n as i64).into_bytes())
+                Ok(i64_to_ascii_bytes(*n as i64))
             } else {
                 Ok(lua_number_to_string(*n).into_bytes())
             }
@@ -1135,7 +1135,7 @@ impl LuaValue {
                 let abs = n.abs();
                 let needs_scientific = abs >= 1e14;
                 if !is_neg_zero && !needs_scientific && *n == (*n as i64) as f64 && n.is_finite() {
-                    format!("{}", *n as i64).into_bytes()
+                    i64_to_ascii_bytes(*n as i64)
                 } else {
                     lua_number_to_string(*n).into_bytes()
                 }
@@ -6668,7 +6668,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(b) => b.clone(),
                     LuaValue::Number(n) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64).into_bytes()
+                            i64_to_ascii_bytes(*n as i64)
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -6722,7 +6722,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(s) => s.clone(),
                     LuaValue::Number(n) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64).into_bytes()
+                            i64_to_ascii_bytes(*n as i64)
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -8496,7 +8496,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(b)) => b.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64).into_bytes()
+                            i64_to_ascii_bytes(*n as i64)
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -8922,7 +8922,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(s)) => s.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64).into_bytes()
+                            i64_to_ascii_bytes(*n as i64)
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -8968,7 +8968,7 @@ impl<'a> LuaState<'a> {
                             LuaValue::Str(b) => b,
                             LuaValue::Number(n) => {
                                 if n == (n as i64) as f64 && n.is_finite() {
-                                    format!("{}", n as i64).into_bytes()
+                                    i64_to_ascii_bytes(n as i64)
                                 } else {
                                     lua_number_to_string(n).into_bytes()
                                 }
@@ -9451,7 +9451,7 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Str(s)) => s.clone(),
                     Some(LuaValue::Number(n)) => {
                         if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64).into_bytes()
+                            i64_to_ascii_bytes(*n as i64)
                         } else {
                             lua_number_to_string(*n).into_bytes()
                         }
@@ -10698,7 +10698,7 @@ fn lua_gsub_normalise_repl(s: &[u8], m: &LuaPatMatch, val: &LuaValue) -> Result<
         LuaValue::Str(b) => Ok(b.clone()),
         LuaValue::Number(n) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
-                Ok(format!("{}", *n as i64).into_bytes())
+                Ok(i64_to_ascii_bytes(*n as i64))
             } else {
                 Ok(lua_number_to_string(*n).into_bytes())
             }
@@ -11458,7 +11458,7 @@ fn lua_string_format(
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
                                     if *n == (*n as i64) as f64 && n.is_finite() {
-                                        format!("{}", *n as i64).into_bytes()
+                                        i64_to_ascii_bytes(*n as i64)
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
                                     }
@@ -11504,7 +11504,7 @@ fn lua_string_format(
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
                                     if *n == (*n as i64) as f64 && n.is_finite() {
-                                        format!("{}", *n as i64).into_bytes()
+                                        i64_to_ascii_bytes(*n as i64)
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
                                     }
