@@ -7921,6 +7921,32 @@ impl Store {
         Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
     }
 
+    /// (CrimsonHawk) Resolve-once read-only BITFIELD: apply every GET op after a
+    /// SINGLE keyspace lookup instead of the per-op `drop_if_expired` + `entries.get`
+    /// that `bitfield_get_no_stat` repeats on every GET (~3 keyspace lookups/op;
+    /// redis looks the key up once for the whole command). Byte-identical to N×
+    /// `bitfield_get_no_stat` for the all-GET case: each result is `bitfield_read`
+    /// over the same bytes, and a missing/expired key reads as empty. The caller
+    /// (`bitfield_cmd`) has already type-checked the key, so a present key is a
+    /// string; a non-string would be handled the same (empty read) but cannot occur.
+    #[must_use]
+    pub fn bitfield_get_batch(&mut self, key: &[u8], ops: &[(u64, u8, bool)], now_ms: u64) -> Vec<i64> {
+        if !self.drop_if_expired(key, now_ms) {
+            return ops
+                .iter()
+                .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
+                .collect();
+        }
+        let bytes = match self.entries.get(key) {
+            Some(entry) => entry.value.string_bytes().unwrap_or(Cow::Borrowed(&[][..])),
+            None => Cow::Borrowed(&[][..]),
+        };
+        let b = bytes.as_ref();
+        ops.iter()
+            .map(|&(off, bits, signed)| bitfield_read(b, off, bits, signed))
+            .collect()
+    }
+
     /// Write an arbitrary-width integer field to the string at `key`.
     /// Create/zero-extend the string backing `key` so a write of `bits` at
     /// `bit_offset` would fit, WITHOUT writing a value. Mirrors upstream

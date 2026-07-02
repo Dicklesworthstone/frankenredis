@@ -26137,6 +26137,30 @@ fn bitfield_cmd(
     // no-stat so they never double-count.
     if !has_write {
         record_source_key_lookups(store, &[key.as_slice()], now_ms);
+        // (CrimsonHawk) Read-only fast path: an all-GET BITFIELD re-resolved the key
+        // per op via bitfield_get_no_stat (drop_if_expired + entries.get each time —
+        // ~3 keyspace lookups/op). Collect the GET ops (args already validated in the
+        // pass above) and apply them all after a single keyspace lookup. OVERFLOW
+        // clauses are no-ops for reads. Byte-identical to the per-op loop below.
+        let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
+        let mut i = 2;
+        while i < argv.len() {
+            if argv[i].eq_ignore_ascii_case(b"GET") {
+                if let Some((signed, bits)) = bitfield_parse_encoding(&argv[i + 1])
+                    && let Some(bit_offset) = bitfield_parse_offset(&argv[i + 2], bits)
+                {
+                    ops.push((bit_offset, bits, signed));
+                }
+                i += 3;
+            } else {
+                // OVERFLOW <mode>: no effect on a read-only command.
+                i += 2;
+            }
+        }
+        let vals = store.bitfield_get_batch(key, &ops, now_ms);
+        return Ok(RespFrame::Array(Some(
+            vals.into_iter().map(RespFrame::Integer).collect(),
+        )));
     }
 
     let mut results: Vec<RespFrame> = Vec::new();
