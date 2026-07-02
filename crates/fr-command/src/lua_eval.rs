@@ -5370,7 +5370,10 @@ impl<'a> LuaState<'a> {
         if args.is_empty() {
             return Ok(Vec::new());
         }
-        let mut vals = Vec::new();
+        // (CrimsonHawk) Pre-size to the arg count (the common no-trailing-expansion
+        // case is exact) so building a redis.call / function arg list doesn't
+        // re-grow the Vec from zero on every call.
+        let mut vals = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             if i == args.len() - 1 {
                 // Last arg: expand multi-value

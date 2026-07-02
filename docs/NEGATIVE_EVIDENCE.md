@@ -4,6 +4,20 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — eval_call_args pre-sizes the arg Vec (with_capacity vs Vec::new); -1.6% EVAL instructions on multi-arg-call scripts, byte-transparent.
+
+Small contained follow-up: `eval_call_args` built the redis.call / function arg
+list from `Vec::new()`, re-growing from zero on every call. `Vec::with_capacity(
+args.len())` (exact for the common no-trailing-expansion case). MEASURED perf stat
+instructions:u (200 scripts, 1000x `redis.call('hset',k,f1,i,f2,i,f3,i)`+del):
+4.287B → 4.219B = **-1.6%**. Semantically identical (capacity hint), 235 lua tests
+green. Lua vein tally now: foldhash -10.2%, itoa -3.6%, arg-move -5.9%, reply-move
+-2.7%, argvec-presize -1.6% (all instructions:u). NEXT: the big remaining lever is
+`LuaValue::Str(Vec<u8>)` → `Rc<[u8]>` (Lua strings are immutable, so variable/arg
+reads could Rc-bump instead of byte-copy — eliminates clones broadly) but it's a
+large structural change (Str in ~everything). Tree-walker eval_expr 19% + the 9x
+compute gap still need the bytecode VM.
+
 ## 2026-07-02 CrimsonHawk: KEEP — redis.call MOVES the top-level BulkString reply bytes into the Lua string instead of cloning; -2.7% EVAL instructions on read-heavy scripts, byte-exact.
 
 Reply-side counterpart to the arg-move: `resp_to_lua` did `data.clone()` for a
