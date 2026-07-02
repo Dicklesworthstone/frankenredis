@@ -8777,3 +8777,16 @@ that could strand peers' HEAD is irresponsible now): pick (a)/(b)/(c) to unlock 
 large writes). Recommended: (a) — safe, nightly is already pinned, ~15 lines at the two resize sites via a
 `read_into_spare(stream, &mut Vec, want)` helper; revertible in one commit. Impact is edge-case (>=1MB values are parity; only
 4MB+ shows it) so this is LOW priority vs correctness/structural work. Filed as evidence, not shipped.
+
+### 2026-07-02 REJECT (geo distance {:.4} i128 fixed-point): no measurable gain — low-precision uses fast grisu, not dragon (CrimsonHawk)
+Follow-on to the shipped GEO coord i128 win (0bb9945c5). Applied the same i128 fixed-point trick to the WITHDIST / GEODIST
+distance formatter (`format!("{:.4}")`, redis %.4f) via a `format_dist_4dp` helper (byte-exact: 2,000,009-value fuzz vs
+`{:.4}` + 80/80 live differential vs redis 7.2.4, 0 diffs). BUT the clean candidate-vs-control fr A/B (interleaved 25x, pinned)
+showed NO gain: GEODIST -0.5% (parity), GEOSEARCH WITHDIST-only -3.9% (noise, slightly negative). The apparent
+"0.236x->0.494x / 0.895x->1.285x vs redis" was CROSS-RUN DRIFT between separately-timed control-era and candidate-era probes,
+NOT a real delta — the simultaneous A/B refutes it. ROOT CAUSE: `{:.4}` (4 decimals) mostly takes Rust std's FAST grisu path
+(flt2dec::grisu::format_exact_opt), only rarely falling to dragon — unlike `{:.17}` coords which hit dragon bignum ~55%. So
+the i128 replacement competes with grisu (already fast) and wins nothing. REFINES the vein: the "i128-beats-dragon" lever only
+pays for HIGH-precision fixed-decimal `format!("{:.N}")` (large N, N>=~15 where grisu can't and dragon is forced); low-N sites
+are already fast. Reverted (byte-exact but zero-gain code + a 2M fuzz test = not worth the complexity). Do NOT re-apply i128 to
+low-precision {:.N} formatters without a profile showing dragon (not grisu) dominates.
