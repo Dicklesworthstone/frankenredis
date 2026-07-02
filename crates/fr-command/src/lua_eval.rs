@@ -9,6 +9,12 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
+
+/// (CrimsonHawk) Fast, DoS-resistant hasher for the Lua interpreter's HOT maps —
+/// table string-fields and the globals env, hashed on every field/global access.
+/// The std default `RandomState` (SipHash) was ~9.5% of a redis.call-heavy EVAL
+/// profile; this matches fr-store's keyspace hasher (`foldhash::quality`).
+type LuaMap<K, V> = std::collections::HashMap<K, V, foldhash::quality::RandomState>;
 use std::time::Instant;
 
 use fr_protocol::RespFrame;
@@ -231,7 +237,7 @@ pub struct LuaTable {
 #[derive(Clone, Debug)]
 pub struct LuaTableInner {
     pub array: Vec<LuaValue>,
-    pub string_hash: HashMap<Vec<u8>, LuaValue>,
+    pub string_hash: LuaMap<Vec<u8>, LuaValue>,
     pub other_hash: Vec<(LuaValue, LuaValue)>,
     /// Set of keys in `other_hash` for fast O(1) existence checks.
     pub other_keys: HashSet<LuaHashKey>,
@@ -466,7 +472,7 @@ impl LuaTable {
     fn new() -> Self {
         let inner = Rc::new(RefCell::new(LuaTableInner {
             array: Vec::new(),
-            string_hash: HashMap::new(),
+            string_hash: LuaMap::default(),
             other_hash: Vec::new(),
             other_keys: HashSet::new(),
             metatable: None,
@@ -484,7 +490,7 @@ impl LuaTable {
         Self {
             inner: Rc::new(RefCell::new(LuaTableInner {
                 array: Vec::new(),
-                string_hash: HashMap::new(),
+                string_hash: LuaMap::default(),
                 other_hash: Vec::new(),
                 other_keys: HashSet::new(),
                 metatable: None,
@@ -2991,7 +2997,7 @@ enum CoroutineRun {
 pub struct LuaState<'a> {
     pub store: &'a mut Store,
     pub now_ms: u64,
-    globals: HashMap<String, LuaValue>,
+    globals: LuaMap<String, LuaValue>,
     /// (frankenredis-j02x9) Set to true at the start of execute(); once
     /// locked, any write to a top-level global raises "Attempt to modify
     /// a readonly table" and any read of an undefined global raises
@@ -3425,11 +3431,11 @@ impl Env {
 }
 
 thread_local! {
-    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<HashMap<String, LuaValue>>> =
+    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<LuaMap<String, LuaValue>>> =
         const { RefCell::new(None) };
 }
 
-fn lua_base_globals_template() -> HashMap<String, LuaValue> {
+fn lua_base_globals_template() -> LuaMap<String, LuaValue> {
     LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
         template
@@ -3438,8 +3444,8 @@ fn lua_base_globals_template() -> HashMap<String, LuaValue> {
     })
 }
 
-fn build_lua_base_globals_template() -> HashMap<String, LuaValue> {
-    let mut globals = HashMap::new();
+fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
+    let mut globals = LuaMap::default();
     // Register built-in functions.
     for name in &[
         "tonumber",

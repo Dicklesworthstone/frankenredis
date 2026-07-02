@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — Lua interpreter hot maps (table string-fields + globals) SipHash→foldhash; -10.2% EVAL instructions on table-access-heavy scripts, byte-exact.
+
+Profiled a redis.call-heavy EVAL: the std default `RandomState` (SipHash) was
+~9.5% (Sip13 write 5.4% + hash_one 4.1%) — fr's Lua `HashMap<Vec<u8>,LuaValue>`
+(table string_hash, hashed on every field access) and `HashMap<String,LuaValue>`
+(globals env) used the slow DoS-resistant SipHash while fr-store's keyspace uses
+fast foldhash. Added `type LuaMap<K,V> = HashMap<K,V,foldhash::quality::RandomState>`
+and switched string_hash + globals + the globals template (5 type sites + 3
+ctor sites, lua_eval.rs only).
+MEASURED via `perf stat instructions:u` (wall-clock too noisy for EVAL — 300
+identical table-hash scripts): before(siphash) 9.334B → after(foldhash) 8.379B =
+**-10.2% instructions**. BYTE-EXACT: `pairs()` output before==after byte-identical
+(fr already sorts table keys for deterministic iteration, so the hasher is
+order-transparent), table-compute result == oracle, 235 lua/eval tests green.
+DoS: consistent with fr-store already using foldhash for the (also
+client-controlled) keyspace; quality mode retains collision resistance.
+NOTE: this trims the EVAL GLUE/compute constant factor; the ~9x compute-loop gap
+vs redis's Lua bytecode VM (tree-walker, 0.11x) is unchanged — that needs the VM.
+
 ## 2026-07-02 CrimsonHawk: SATURATED — large-value / large-collection / iterate surface all parity-or-faster vs redis 7.2.4 post-BITOP; no new gap (don't re-probe these).
 
 Swept the previously-under-benchmarked large-input paths chasing the BITOP
