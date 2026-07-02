@@ -4,7 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-02 CrimsonHawk: SURFACE — replication writes are ~0.53x vs redis 7.2.4 (SAME shared structural gap as AOF); keyspace notifications are at PARITY. The argv-clone propagation refactor now covers TWO ubiquitous configs (AOF + replication).
+## 2026-07-02 CrimsonHawk: CORRECT (supersedes prior repl entry) — the replication write gap is SYSCALL-BOUND (__send in the event-loop I/O), NOT the argv-clone; DO NOT do the aof_records refactor for it. Gap is real under a FAIR comparison.
+
+Re-verified with a STABLE oracle replica (prior 0.53x compared fr-with-replica vs
+oracle-WITHOUT a synced replica — the oracle replica flapped; I fixed it with
+--repl-diskless-sync yes --repl-diskless-sync-delay 0 + --repl-diskless-load
+on-empty-db). FAIR result: oracle SET WITH an active caught-up replica = 68-72k
+rps (redis replication is nearly FREE), fr with an active caught-up replica =
+17-40k (HIGH variance) = ~0.25-0.55x. So the gap is REAL, not an artifact.
+
+ROOT CAUSE (perf of fr primary under active replica): ~70% SYSCALL-BOUND —
+__syscall_cancel 38% + __send 32%. The argv-clone (memmove) is only ~3.5%; the
+100ms-sampler estimate ~5.9%. RULED OUT as the lever: (1) argv-clone refactor
+(only 3.5% — my prior "the lever for 2 configs" claim was WRONG; do NOT attempt
+the risky ~8-consumer aof_records rewrite for this), (2) resync pathology
+(sync_full=0, master/replica offsets match exactly = replica keeps up real-time,
+no flapping), (3) Nagle (fr already set_nodelay(true) on accepted client conns incl
+the primary→replica socket at main.rs:1765, and on replica handshake streams).
+REMAINING lever = replica-feed SYSCALL COUNT: propagate_writes_to_replicas
+(main.rs:21582) sends the missing tail EVERY event-loop iteration when the replica
+is behind; if fr's loop batches fewer commands per iteration than redis, it issues
+more/smaller __send. That's subtle event-loop I/O batching (like the -P16
+syscall-bound plateau [[project_p16_pipeline_parity_syscall_bound]]) — high
+measurement variance (17k vs 40k across runs) makes a fix hard to validate safely;
+NOT attempted. This is I/O-bound, analogous to the pipeline plateau, not a clean
+CPU lever. keyspace notifications remain PARITY (with active subscriber).
 
 Two more production configs benchmarked:
 - notify-keyspace-events KEA: no-subscriber SET 0.88-0.96x / INCR 0.84-0.90x
