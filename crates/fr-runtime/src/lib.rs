@@ -14176,6 +14176,96 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Direct-encode variant of [`Self::execute_plain_smismember_borrowed`]:
+    /// writes the RESP integer-array reply straight into `out` instead of
+    /// building a throwaway `Vec<RespFrame::Integer>` for the encoder to walk
+    /// and then drop. Every SMISMEMBER element is `:0`/`:1` (a 4-byte literal —
+    /// no integer formatting, and identical in RESP2/RESP3), so the reply loop
+    /// is a bounded memcpy per member. Byte-identical reply and identical
+    /// bookkeeping/metrics/error-stats to the frame path (mirrors the MGET /
+    /// ZMSCORE `_into` migration). Returns `None` (fall back) on any disabling
+    /// state.
+    pub fn execute_plain_smismember_borrowed_into(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_smismember_borrowed(key, members, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("smismember");
+        self.session.last_argv_len_sum =
+            b"SMISMEMBER".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.smismember(key, members, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        let mut error_msg = None;
+        match result {
+            Ok(flags) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(flags.len(), false, out);
+                    for flag in flags {
+                        out.extend_from_slice(if flag { b":1\r\n" } else { b":0\r\n" });
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    // SMISMEMBER's only error is WRONGTYPE, byte-identical in
+                    // RESP2/RESP3, so the RESP2 encoder covers both protocols.
+                    reply.encode_into(out);
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_smismember_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_plain_smismember_borrowed_metrics(
         &mut self,

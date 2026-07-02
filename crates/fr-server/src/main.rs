@@ -4080,14 +4080,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
-                        packet.key,
-                        &[packet.start, packet.end],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_smismember_borrowed_into(
+                            packet.key,
+                            &[packet.start, packet.end],
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -4102,14 +4105,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
-                        packet.key,
-                        &[packet.f1, packet.f2, packet.f3],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_smismember_borrowed_into(
+                            packet.key,
+                            &[packet.f1, packet.f2, packet.f3],
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -4124,14 +4130,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember_multi_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
-                        packet.key,
-                        &packet.members[..packet.len],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_smismember_borrowed_into(
+                            packet.key,
+                            &packet.members[..packet.len],
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -9972,14 +9981,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
-                        packet.key,
-                        &[packet.start, packet.end],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_smismember_borrowed_into(
+                            packet.key,
+                            &[packet.start, packet.end],
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -9994,14 +10006,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
-                        packet.key,
-                        &[packet.f1, packet.f2, packet.f3],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_smismember_borrowed_into(
+                            packet.key,
+                            &[packet.f1, packet.f2, packet.f3],
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11078,12 +11093,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_smismember_borrowed(key, members, ts)
+                            && runtime
+                                .execute_plain_smismember_borrowed_into(key, members, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args)
