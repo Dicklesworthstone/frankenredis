@@ -1096,6 +1096,16 @@ impl CompactFieldMap {
         Some((&self.buf[fr], &self.buf[vr]))
     }
 
+    /// (CrimsonHawk) Field bytes at order position `idx`, skipping the value
+    /// decode. For the set encoding (members carry an empty value) the value
+    /// range is always discarded by callers, so reading its varint per element
+    /// is pure overhead on set iteration (SMEMBERS/SPOP/SUNION/SINTER base-walk).
+    #[must_use]
+    pub(crate) fn field_at(&self, idx: usize) -> Option<&[u8]> {
+        let off = *self.order.get(idx)?;
+        Some(&self.buf[cfm_field_range(&self.buf, off)])
+    }
+
     #[must_use]
     pub(crate) fn iter(&self) -> CompactFieldMapIter<'_> {
         CompactFieldMapIter { map: self, pos: 0 }
@@ -1260,7 +1270,7 @@ impl CompactStrSet {
 
     #[must_use]
     pub(crate) fn get_index(&self, idx: usize) -> Option<&[u8]> {
-        self.inner.get_index(idx).map(|(m, _)| m)
+        self.inner.field_at(idx)
     }
 
     /// Insert `member`; returns `true` if it was newly added (matches `IndexSet::insert`).
@@ -1301,20 +1311,25 @@ impl CompactStrSet {
     #[must_use]
     pub(crate) fn iter(&self) -> CompactStrSetIter<'_> {
         CompactStrSetIter {
-            inner: self.inner.iter(),
+            map: &self.inner,
+            pos: 0,
         }
     }
 }
 
-/// Insertion-order iterator over a [`CompactStrSet`].
+/// Insertion-order iterator over a [`CompactStrSet`]. Yields member bytes via
+/// the value-skipping `field_at` (members carry an empty value). (CrimsonHawk)
 pub struct CompactStrSetIter<'a> {
-    inner: CompactFieldMapIter<'a>,
+    map: &'a CompactFieldMap,
+    pos: usize,
 }
 
 impl<'a> Iterator for CompactStrSetIter<'a> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|(m, _)| m)
+        let m = self.map.field_at(self.pos)?;
+        self.pos += 1;
+        Some(m)
     }
 }
 

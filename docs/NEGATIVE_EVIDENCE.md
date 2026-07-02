@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — set iteration decodes only the field (field_at), skipping the empty-value varint per element; -21.5% instructions on SMEMBERS, byte-exact
+
+Completes the field-only-decode work: lookup_slot was fixed earlier, but the set
+ITERATOR (CompactStrSetIter) + CompactStrSet::get_index still went through
+CompactFieldMap::get_index, which decodes BOTH the field and value varints and
+returns both slices — the set encoding stores members with an empty value, so the
+value varint + slice are pure overhead per element. Added
+`CompactFieldMap::field_at(idx)` (field varint only) and routed the set iterator +
+get_index through it. Also confirmed the h2 tag landed at WALL-CLOCK: SINTER
+compute-isolated 0.76-0.84x → 0.95-1.39x (parity/faster), SISMEMBER ~parity.
+
+MEASURED (perf stat -e instructions:u, fixed 1500×`SMEMBERS sb`, 5000-member
+hashtable set, before=h2-tag binary / after, pinned): 2,168,530,959 →
+1,703,478,910 = **-21.5%** (reproduced exactly twice). Byte-exact: fr-store full
+662-test lib suite green; `smembers sb | sort | md5` identical to redis 7.2.4.
+Benefits all set iteration — SMEMBERS/SPOP/SRANDMEMBER/SUNION/SINTER base-walk/
+SSCAN.
+
 ## 2026-07-02 CrimsonHawk: KEEP — CompactFieldMap h2 hash-tag per slot (SwissTable trick): skip arena decode+memcmp on tag mismatch; -22.5% instructions on SINTER, byte-exact
 
 Closes most of the SINTER ~0.8x residual (the deferred lever from the field-only
