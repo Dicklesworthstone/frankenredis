@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — per-type DEBUG RELOAD profiling: stream 1.77x / list 1.33x slower (rest parity-or-faster); root causes are cross-crate/structural (multi-day), precisely characterized
+
+Ran the proven per-type DEBUG RELOAD method (found the hash 2.51x / set 3x
+bulk-load wins historically) on 50k-elem single-type datasets, populated via
+redis-cli `--pipe` (NOT `eval` — eval-in-bash-function quoting keeps flaking to
+empty datasets; use --pipe):
+- zset 1.00x, hash 0.72x (fr faster, bulk-load win), set 0.70x (fr faster),
+  intset ~1.0x
+- **stream 1.77x SLOWER**, **list 1.33x SLOWER**.
+
+STREAM reload profiled (`perf record`, 60× DEBUG RELOAD of a 20k-entry stream):
+cost is spread across encode+decode with no single dominant hotspot —
+decode_upstream_stream_skeleton 11%, decode_listpack 9.5%,
+`FieldsRef::to_pairs` + its from_iter ~10.5% (encode side materializes an OWNED
+`Vec<(Vec<u8>,Vec<u8>)>` per entry at store_to_rdb_entries lib.rs:37989 —
+2 to_vec/field), PackedStreamLog::from_sorted_entries 6.6%,
+encode_upstream_stream_listpacks3 6.4%, lzf_compress 5.7%, encode_listpack_*
+~15%. The one clean-ish lever (avoid the to_pairs owned materialization) requires
+`fr_persist::StreamEntry` to BORROW fields — a cross-crate lifetime refactor
+threading through store_to_rdb_entries → Vec<RdbEntry> → the fr-persist encoder.
+Multi-day/risky; NOT a clean single-cycle land. LIST 1.33x = the known ChunkedList
+per-element architectural issue (VecDeque rewrite already measured 0.53x slower —
+see [[project_list_restore_gap_architectural]]).
+
+These are PERSISTENCE-path (BGSAVE/replication/RESTORE/DEBUG RELOAD), not client
+command hot paths. Command surface remains saturated at parity-or-faster.
+Surfaced, not attempted — the remaining speed gaps are all cross-crate/structural.
+
 ## 2026-07-02 CrimsonHawk: REJECT — redis score String→bytes round-trip elision measured 0% (from_utf8 on fresh ASCII is not a real cost); post-XRANGE-fix sweep finds NO new below-parity outlier; ZPOPMIN "gap" was a destructive-exhaustion artifact
 
 Continued the `format!`/reply-formatting vein after the XRANGE win. Two dead ends
