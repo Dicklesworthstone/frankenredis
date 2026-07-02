@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — table_lookup_with_index_meta fast path skips the per-lookup table.clone(); -0.9% EVAL instructions on compute (more on table-read-heavy), byte-exact.
+
+Profiled a compute-heavy EVAL (no redis.call): eval_expr 34% + LuaValue::clone
+13.8% + drop_glue 7% (the tree-walker value-copy model, structural) +
+table_lookup 4.9%. Contained win in table_lookup_with_index_meta: it did
+`table.clone()` (Rc bump+drop) on EVERY `t[i]` read before the __index chain loop.
+Added a fast path — raw get through a borrow, return early for a present key OR an
+absent key on a metatable-less table (the overwhelmingly common case); only
+clone+loop for an actual __index chain. MEASURED perf stat instructions:u (300
+table-heavy compute scripts): 16.457B → 16.305B = **-0.9%** (mixed; larger on
+read-dominated). BYTE-EXACT: __index chains (table/function/nested), present/absent
+keys == oracle; 251 lua/table tests green.
+STRUCTURAL FRONTIER: the compute path is now eval_expr (tree-walker per-node
+dispatch, 34%) + LuaValue clone/drop (~21%, driven by the 32-byte enum — both
+Str(Vec<u8>) and RustFunction(String) are 24B). The big remaining Lua lever =
+shrink LuaValue via Str→Rc<[u8]> + RustFunction→Rc<str>/id (halves the enum → all
+clones cheaper + Str clones become Rc-bumps), then the bytecode VM. Both large.
+
 ## 2026-07-02 CrimsonHawk: KEEP — extend the itoa swap to tostring/concat/string.format integer paths (11 more format! sites); -7.9% EVAL instructions on concat-heavy scripts, byte-identical.
 
 Followed the itoa thread past redis.call: `to_display_string` (line 1138, the

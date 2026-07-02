@@ -6059,6 +6059,21 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<LuaValue, String> {
+        // (CrimsonHawk) Fast path for the overwhelmingly common lookup: a present
+        // key, or an absent key on a metatable-less table. Do the raw get through
+        // a borrow WITHOUT the per-lookup `table.clone()` (Rc bump + drop) or
+        // entering the __index chain loop below. table_lookup was ~4.9% of a
+        // compute-heavy EVAL profile; every `t[i]` read hits this.
+        {
+            let inner = table.inner.borrow();
+            let raw = inner.get(key);
+            if !matches!(raw, LuaValue::Nil) {
+                return Ok(raw);
+            }
+            if inner.metatable.is_none() {
+                return Ok(LuaValue::Nil);
+            }
+        }
         let mut current = table.clone();
         for _ in 0..16 {
             let raw = current.inner.borrow().get(key);
