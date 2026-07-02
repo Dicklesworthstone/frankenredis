@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: SURFACE — GET pipelined hot path (ohsk5 ~2x) profiled: clock is NOT a gap, per-command bookkeeping levers are sub-noise or UNSAFE
+
+Profiled the headline ohsk5 GET P16 gap fresh (3 parallel pre-encoded blasters
+saturating the single-thread server, `perf record`). Route-closing findings so the
+next agent does not chase these:
+
+- **12.95% in vdso `clock_gettime` is NOT a vs-Redis gap.** fr's `chained_command_start`
+  reuses the previous command's `end` instant when `prev_seq+1==seq` (per-batch reset),
+  so a pipelined GET reads the monotonic clock exactly ONCE/command (the latency `end`),
+  which becomes the next command's start. Redis's `call()` reads the monotonic clock
+  TWICE/command (elapsedStart + elapsedUs, no chaining). fr already reads HALF; the
+  12.95% is just the inherent cost of timing a ~300ns command and fr is more efficient
+  than Redis here. The wall-clock `ts` is read once per readable batch (main.rs:1298),
+  not per frame. Do NOT try to "optimize the GET clock."
+- **`next_packet_id()` (a global `PACKET_COUNTER.fetch_add`) per command is ~2% (lock-xadd
+  barrier) and used ONLY in the cold threat branch (`elapsed_us > command_time_budget`) —
+  BUT making it lazy is UNSAFE: `packet_id` is observable in the log-contract conformance
+  goldens (`crates/fr-conformance/fixtures/log_contract_v1/FR-P2C-*.golden.jsonl`), so
+  changing when the counter increments breaks the log contract. Do NOT make packet_id lazy.**
+- The residual `execute_plain_get_borrowed_into` ~10% self is spread across per-command
+  bookkeeping each in the sub-ns / low-% range and mostly parity-required
+  (`last_command_name` for CLIENT LIST, session interaction timestamps, reply-suppression
+  probe). No single clean lever.
+
+Conclusion: the ohsk5 per-command GET/SET frontier is saturated for CLEAN safe levers;
+the real remaining gains are structural (ChunkedList 99fwc, keyspace/hashtable RAM) or a
+whole-dispatch-chain restructure (command-hash vs the current linear matcher chain), both
+larger than a single-session lever. No source shipped.
+
 ## 2026-07-01 CrimsonHawk: SURFACE — >8 borrowed-parser dispatch-cliff vein EXHAUSTED; remaining sub-ms losses are dispatch-chain / structural / measurement-artifact
 
 After shipping the cliff fix across 6 commands (SMISMEMBER/HMGET/ZMSCORE/MGET/EXISTS
