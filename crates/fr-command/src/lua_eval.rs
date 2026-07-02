@@ -414,6 +414,18 @@ enum LuaCoroutineContinuation {
         body: Block,
         cond: Expr,
     },
+    /// (CrimsonHawk 7lmle) A top-level `for <names> in <iter exprs> do ... end`
+    /// whose iterator expression list contains a bare `coroutine.yield(...)`.
+    /// On resume the yielded value(s) complete the iterator triple (fn, state,
+    /// control) — exactly as for a local/assign RHS — and the loop then runs to
+    /// completion. A body-level yield still errors as before (additive).
+    GenericFor {
+        names: Vec<String>,
+        prefix: Vec<LuaValue>,
+        remaining: Vec<Expr>,
+        yield_was_last: bool,
+        body: Block,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3924,6 +3936,51 @@ impl<'a> LuaState<'a> {
         Ok(prefix)
     }
 
+    /// Run a generic-for loop given its already-resolved iterator values
+    /// (fn, state, control). Shared by the direct `Stmt::GenericFor` path and
+    /// the coroutine resume path where the iterator expression list yielded.
+    fn run_generic_for_from_iter_vals(
+        &mut self,
+        names: &[String],
+        iter_vals: Vec<LuaValue>,
+        body: &[(u32, Stmt)],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+        let iter_fn = iter_vals.first().cloned().unwrap_or(LuaValue::Nil);
+        let mut state = iter_vals.get(1).cloned().unwrap_or(LuaValue::Nil);
+        let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
+
+        loop {
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                return Err("script exceeded maximum iteration count".to_string());
+            }
+            let mut iter_args = vec![state.clone(), control.clone()];
+            let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
+            // Update state from mutated args (needed for stateful iterators like gmatch)
+            state = iter_args[0].clone();
+            let first = results.first().cloned().unwrap_or(LuaValue::Nil);
+            if matches!(first, LuaValue::Nil) {
+                break;
+            }
+            control = first.clone();
+            env.push_scope();
+            for (i, name) in names.iter().enumerate() {
+                let val = results.get(i).cloned().unwrap_or(LuaValue::Nil);
+                env.set_local(name, val);
+            }
+            let cf = self.exec_stmts(body, env, varargs)?;
+            env.pop_scope();
+            match cf {
+                ControlFlow::Break => break,
+                ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                ControlFlow::None => {}
+            }
+        }
+        Ok(ControlFlow::None)
+    }
+
     fn start_coroutine_yield(
         &mut self,
         yield_args: &[Expr],
@@ -4246,39 +4303,29 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::GenericFor(names, iter_exprs, body) => {
-                let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
-                let iter_fn = iter_vals.first().cloned().unwrap_or(LuaValue::Nil);
-                let mut state = iter_vals.get(1).cloned().unwrap_or(LuaValue::Nil);
-                let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
-
-                loop {
-                    self.iterations += 1;
-                    if self.iterations > MAX_ITERATIONS {
-                        return Err("script exceeded maximum iteration count".to_string());
-                    }
-                    let mut iter_args = vec![state.clone(), control.clone()];
-                    let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
-                    // Update state from mutated args (needed for stateful iterators like gmatch)
-                    state = iter_args[0].clone();
-                    let first = results.first().cloned().unwrap_or(LuaValue::Nil);
-                    if matches!(first, LuaValue::Nil) {
-                        break;
-                    }
-                    control = first.clone();
-                    env.push_scope();
-                    for (i, name) in names.iter().enumerate() {
-                        let val = results.get(i).cloned().unwrap_or(LuaValue::Nil);
-                        env.set_local(name, val);
-                    }
-                    let cf = self.exec_stmts(body, env, varargs)?;
-                    env.pop_scope();
-                    match cf {
-                        ControlFlow::Break => break,
-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
-                        ControlFlow::None => {}
-                    }
+                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
+                // the iterator expression list suspends here; on resume the
+                // yielded value(s) complete the iterator triple and the loop
+                // runs. Top-level only; deeper it errors as before.
+                if let Some((prefix, yield_args, remaining, yield_was_last)) =
+                    self.split_direct_yield_exprs(iter_exprs, env, varargs)?
+                {
+                    return self.start_coroutine_yield(
+                        &yield_args,
+                        LuaCoroutineContinuation::GenericFor {
+                            names: names.clone(),
+                            prefix,
+                            remaining,
+                            yield_was_last,
+                            body: body.clone(),
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
                 }
-                Ok(ControlFlow::None)
+                let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
+                self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
             }
             Stmt::DoBlock(body) => self.exec_block(body, env, varargs),
             Stmt::FunctionDecl(names, params, is_variadic, body) => {
@@ -5596,6 +5643,32 @@ impl<'a> LuaState<'a> {
                         })
                     }
                     Err(e) => Err(e),
+                }
+            }
+            LuaCoroutineContinuation::GenericFor {
+                names,
+                prefix,
+                remaining,
+                yield_was_last,
+                body,
+            } => {
+                // The yielded value(s) complete the iterator triple; then run
+                // the loop to completion and continue past it.
+                let iter_vals = self.complete_exprs_after_yield(
+                    prefix,
+                    &remaining,
+                    yield_was_last,
+                    resume_args,
+                    env,
+                    varargs,
+                )?;
+                match self
+                    .run_generic_for_from_iter_vals(&names, iter_vals, &body, env, varargs)?
+                {
+                    ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
+                    ControlFlow::Break | ControlFlow::None => {
+                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+                    }
                 }
             }
         }
@@ -18625,6 +18698,32 @@ end
         assert_eq!(
             eval_script(script, &[], &[], &mut store, 0),
             Ok(RespFrame::BulkString(Some(b"1,true,ret:2".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_as_generic_for_iterator_resumes_with_triple_7lmle() {
+        // Verified against redis 7.2.4: `for x in coroutine.yield("need") do ...`
+        // suspends at the iterator expression; the resume value(s) become the
+        // iterator triple (fn, state, control) and the loop runs. With the
+        // resumed iterator below (control gets set to the returned value, not an
+        // index) only the first element is produced. Result: "need,true,sum:10".
+        let mut store = Store::new();
+        let script = b"
+            local co=coroutine.create(function()
+                local sum=0
+                for x in coroutine.yield('need') do sum=sum+x end
+                return 'sum:'..sum
+            end)
+            local _,req=coroutine.resume(co)
+            local data={10,20,30}
+            local function it2(_, prev) prev=prev+1; if prev>3 then return nil end; return data[prev] end
+            local o2,res=coroutine.resume(co, it2, nil, 0)
+            return tostring(req)..','..tostring(o2)..','..tostring(res)
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"need,true,sum:10".to_vec())))
         );
     }
 
