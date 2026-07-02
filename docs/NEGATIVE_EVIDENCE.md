@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: MEASURED/REJECT — RDB SAVE is only ~1.4x vs redis 7.2.4 (NOT 3x — first read was cold/stale-process confounded), byte-size parity; expiry-map fast-exit = byte-identical but NO measurable win (reverted).
+
+Now that SAVE writes (79018d064), benchmarked RDB SAVE on 310k mixed keys
+(150k str + 40k each hash/list/set/zset). CAUTION: the first read (fr 551-676ms
+vs ora 184-219ms = "3x") was CONFOUNDED — cold first-SAVE allocations + a stale fr
+process (wrong cwd/data) answering the port. CLEAN A/B on distinct ports/cwds:
+fr 320-447ms vs ora 221-280ms = **~1.4x** slower, RDB byte-size parity (fr
+9403429 == fr-variant 9403429 vs ora 9403463; digest round-trips). METHOD: verify
+process cwd (readlink /proc/PID/cwd) + interleave; a cold first SAVE over-reads.
+Profile (fr SAVE): mimalloc ~21% (owned RdbEntry/RdbValue clone of every
+key+value) + all_keys().sort() 11% (keyspace sorted for fr-internal RDB
+determinism; redis uses hashtable order) + get_value_and_expiry re-lookup 13.5% +
+lzf/listpack encode. store_to_rdb_entries (fr-runtime) materializes the whole
+keyspace owned+sorted; the string-only borrowed fast path bails on any non-string.
+REJECTED this cycle: expires_count==0 fast-exit in expiry_ms/key_has_expiry
+(fr-store) — byte-identical (RDB parity + 33 expiry tests green) but GET 0.97-1.01x
+= PARITY and SAVE within noise (hashbrown get on an empty map barely costs more
+than the added branch; GET's hot path already guarded). Reverted (no ratio).
+The ~1.4x SAVE gap = owned-materialization; clean fix = borrowed streaming for
+mixed types (big refactor) or drop the keyspace sort (no md5-RDB test found, but
+all_keys has other callers + determinism risk) — LOW EV (BGSAVE forks/backgrounds
+the write via COW, so SAVE latency rarely blocks). Not worth a dedicated refactor.
+
 ## 2026-07-02 CrimsonHawk: SHIPPED + VERIFIED (correctness fix) — SAVE/BGSAVE silent-no-op on bare-launched fr FIXED; default rdb_path to cwd/dump.rdb like redis 7.2.4. E2E: SAVE writes file, restart reloads all data.
 
 Landed the fix diagnosed last entry. main.rs after config/CLI parsing (before
