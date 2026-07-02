@@ -1180,6 +1180,18 @@ fn main() -> ExitCode {
         }
     }
 
+    // (CrimsonHawk) redis ALWAYS has an RDB path: `dir` defaults to the cwd and
+    // `dbfilename` to "dump.rdb", so `SAVE`/`BGSAVE` always persist a snapshot and
+    // an existing dump.rdb loads at startup — even when launched with no config
+    // file and no --rdb, and even under `save ""`. Without this default, fr left
+    // `rdb_path` None on a bare launch, which made SAVE/BGSAVE a SILENT NO-OP
+    // (reply OK, rdb_last_bgsave_status:ok, but nothing written to disk) — a
+    // data-loss surprise and a divergence from redis 7.2.4. A config file's
+    // dir/dbfilename (via configured_rdb_path) or --rdb still wins when present.
+    if rdb_path.is_none() {
+        rdb_path = Some("dump.rdb".to_string());
+    }
+
     // Configure and load RDB snapshot persistence if requested.
     // When both AOF and RDB are configured, AOF takes precedence for data loading
     // (matches Redis behavior). RDB path is still set so SAVE/BGSAVE can write snapshots.

@@ -4,6 +4,20 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SHIPPED + VERIFIED (correctness fix) — SAVE/BGSAVE silent-no-op on bare-launched fr FIXED; default rdb_path to cwd/dump.rdb like redis 7.2.4. E2E: SAVE writes file, restart reloads all data.
+
+Landed the fix diagnosed last entry. main.rs after config/CLI parsing (before
+set_rdb_path): `if rdb_path.is_none() { rdb_path = Some("dump.rdb".into()); }` —
+purely additive, only affects the previously-None (bare-launch) case; a config
+file's dir/dbfilename or --rdb still wins. E2E VERIFIED on a fresh no-config
+launch: startup logs "will create on SAVE/BGSAVE", `SAVE`→dump.rdb written (125B),
+after `SHUTDOWN NOSAVE` + restart all data survived ("RDB: loaded 3 entries from
+dump.rdb": string+list+hash intact). fr-server lib suite 12/12 green. Now matches
+redis (always has an RDB path; writes on SAVE/shutdown-save, loads at startup)
+even under no config / `save ""`. Blast radius is redis-matching (startup
+auto-loads a present dump.rdb; SHUTDOWN-with-save writes it) — integration
+harnesses must use per-test dirs, same as redis's own test suite.
+
 ## 2026-07-02 CrimsonHawk: BUG FOUND (correctness, not a ratio) — SAVE/BGSAVE are a SILENT NO-OP on a bare-launched fr; fix diagnosed, code unbuilt (turn cut off), NOT pushed.
 
 Digging RDB SAVE throughput (a fresh CPU-bound area) surfaced a real data-loss
