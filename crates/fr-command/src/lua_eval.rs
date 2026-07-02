@@ -15,6 +15,29 @@ use std::rc::{Rc, Weak};
 /// The std default `RandomState` (SipHash) was ~9.5% of a redis.call-heavy EVAL
 /// profile; this matches fr-store's keyspace hasher (`foldhash::quality`).
 type LuaMap<K, V> = std::collections::HashMap<K, V, foldhash::quality::RandomState>;
+
+/// (CrimsonHawk) Fast decimal i64 → owned ASCII bytes, byte-identical to
+/// `format!("{}", v).into_bytes()` but without the core::fmt machinery. Used on
+/// the redis.call integer-argument hot path. `unsigned_abs()` makes i64::MIN safe.
+fn i64_to_ascii_bytes(v: i64) -> Vec<u8> {
+    let mut buf = [0u8; 20]; // i64::MIN = "-9223372036854775808" = 20 chars
+    let mut i = buf.len();
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    buf[i..].to_vec()
+}
 use std::time::Instant;
 
 use fr_protocol::RespFrame;
@@ -1070,7 +1093,11 @@ impl LuaValue {
         match self {
             LuaValue::Number(n) => {
                 if *n == (*n as i64) as f64 && n.is_finite() {
-                    Ok(format!("{}", *n as i64).into_bytes())
+                    // (CrimsonHawk) Manual itoa on the redis.call integer-arg hot
+                    // path — avoids the `format!`/core::fmt machinery (~2.6% of a
+                    // redis.call-heavy EVAL profile). Byte-identical to
+                    // `format!("{}", v)`.
+                    Ok(i64_to_ascii_bytes(*n as i64))
                 } else {
                     Ok(format!("{n}").into_bytes())
                 }

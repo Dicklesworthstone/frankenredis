@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — manual itoa on the redis.call integer-arg path (was format!); -3.6% EVAL instructions on redis.call-int-heavy scripts, byte-identical.
+
+Same Lua-profile vein as the foldhash win: `redis_call` showed
+`alloc::fmt::format::format_inner` ~2.6% — `LuaValue::to_redis_arg` formatted
+every integer argument via `format!("{}", n as i64).into_bytes()`. Replaced with a
+manual `i64_to_ascii_bytes` (unsigned_abs makes i64::MIN safe), byte-identical to
+format!'s digits, no core::fmt machinery. MEASURED perf stat instructions:u (200
+identical `redis.call('set',k,i)` x1000 scripts): 1.859B → 1.792B = **-3.6%**.
+BYTE-IDENTICAL to fr's prior output: before(format!)==after(itoa) for
+0/-5/i64::MAX/i64::MIN/negatives (k3/k4/list all equal); 235 lua/eval tests green.
+NOTE (pre-existing, NOT from this change, before==after==fr): fr treats a Lua
+number that round-trips through i64 as an EXACT integer, so `redis.call('set',k,
+9223372036854775807)` stores "9223372036854775807" while redis stores the
+double-rounded "9223372036854776000" — a separate i64-vs-double divergence in
+to_redis_arg's integer-detection, untouched here. Lua vein now: foldhash (-10.2%)
++ itoa (-3.6%); float-arg format! (`{n}` != redis %.17g) is the next thread but is
+correctness-entangled (deferred).
+
 ## 2026-07-02 CrimsonHawk: KEEP — Lua interpreter hot maps (table string-fields + globals) SipHash→foldhash; -10.2% EVAL instructions on table-access-heavy scripts, byte-exact.
 
 Profiled a redis.call-heavy EVAL: the std default `RandomState` (SipHash) was
