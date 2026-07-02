@@ -10008,14 +10008,12 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("XRANGE"));
     }
-    // Upstream t_stream.c::xrangeGenericCommand emits 'syntax error'
-    // (not wrong-arity) when the optional COUNT segment is malformed
-    // or the trailing args don't fit the expected pattern.
-    // (br-frankenredis-xrangearity)
-    if argv.len() != 4 && argv.len() != 6 {
-        return Err(CommandError::SyntaxError);
-    }
-
+    // Upstream t_stream.c::xrangeGenericCommand parses the start/end interval IDs
+    // (streamParseIntervalIDOrReply) BEFORE validating the optional COUNT trailer,
+    // so a malformed start/end ID surfaces "Invalid stream ID..." even when the
+    // trailing args are also wrong (e.g. `XRANGE k <bad-id> + extra`). The trailer
+    // syntax-error ("not COUNT" / wrong count of trailing args) is only reached
+    // once both IDs parse. (br-frankenredis-xrangearity; ID-before-arity order)
     let start = match parse_stream_range_bound(&argv[2], true) {
         Ok(v) => v,
         Err(reply) => return Ok(reply),
@@ -10025,8 +10023,8 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         Err(reply) => return Ok(reply),
     };
 
-    let count = if argv.len() == 6 {
-        if !eq_ascii_command(&argv[4], b"COUNT") {
+    let count = if argv.len() != 4 {
+        if argv.len() != 6 || !eq_ascii_command(&argv[4], b"COUNT") {
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
@@ -10069,12 +10067,9 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("XREVRANGE"));
     }
-    // (br-frankenredis-xrangearity) — match upstream syntax-error
-    // wording for malformed COUNT trailer.
-    if argv.len() != 4 && argv.len() != 6 {
-        return Err(CommandError::SyntaxError);
-    }
-
+    // (br-frankenredis-xrangearity; ID-before-arity order) Upstream parses the
+    // end/start interval IDs before validating the COUNT trailer, so a malformed
+    // ID beats the trailing-arg syntax error even when both are wrong.
     let end = match parse_stream_range_bound(&argv[2], false) {
         Ok(v) => v,
         Err(reply) => return Ok(reply),
@@ -10084,8 +10079,8 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Err(reply) => return Ok(reply),
     };
 
-    let count = if argv.len() == 6 {
-        if !eq_ascii_command(&argv[4], b"COUNT") {
+    let count = if argv.len() != 4 {
+        if argv.len() != 6 || !eq_ascii_command(&argv[4], b"COUNT") {
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
