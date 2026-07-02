@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP (parity!) — headroom-adaptive staleness for the maxmemory used_memory scan; SET under maxmemory(128mb, cache-not-full) 0.37x→~1.0x vs redis 7.2.4, eviction accuracy provably preserved
+
+Follow-up that closes the residual from the partial fix below. With maxmemory>0
+the eviction pressure check rescans used_memory O(N) every 64 mutations on EVERY
+write. When used_memory is comfortably below the limit (the common "cache not yet
+full" state) the pressure verdict cannot change for thousands of writes, so
+estimate_memory_usage_bytes now scales its staleness threshold with headroom:
+budget = clamp((maxmemory - used)/2 / 256, 64, 4096) mutations, tightening back to
+64 as usage nears the limit. maxmemory==0 keeps the tight 64 (INFO used_memory
+unchanged when no cache limit is set).
+
+SAFETY (provable, no missed eviction): the budget caps assumed drift at
+headroom/2 BYTES (budget mutations * 256B upper bound), so true used_memory stays
+< maxmemory until a recompute catches it — it can never cross the limit
+undetected. VERIFIED empirically: forced heavy eviction at 24mb, after(adaptive)
+262155 keys / used exactly 25165824 == before(64) 262152 keys / 25165824 — near-
+limit behavior IDENTICAL, no overshoot. Headroom write test: after used_memory
+15160896 vs before 15155328 (~5KB drift over 250k writes = negligible).
+
+MEASURED: SET+maxmemory(128mb, headroom) 0.37x→**0.95-1.0x** (parity; t3 1.6x =
+noise-high). keyspace matches oracle (~155k). 48 fr-store memory/eviction/int
+tests green. Cumulative maxmemory SET: 0.145x (orig) → 0.37x (is_int) → ~1.0x.
+The [[used_memory MODELED]] under-eviction/OOM at tight maxmemory (fr holds 262k
+at 24mb, evicts few) is UNCHANGED by this (before/after identical) — separate
+modeled-memory-fidelity bead.
+
 ## 2026-07-02 CrimsonHawk: NEW GAP + PARTIAL FIX — writes under `maxmemory` are 3-7x slower vs redis 7.2.4 (redis-as-cache config, untested before); byte-level is_int_encoded_string removed a from_utf8+parse+alloc from the O(N) memory-estimate hot path → SET+maxmemory(headroom) 0.28x→0.37x. Residual = the O(N) used_memory scan per write (needs incremental accounting).
 
 Benchmarked `maxmemory 128mb` + `allkeys-lru` (extremely common redis-as-cache

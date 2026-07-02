@@ -20927,7 +20927,30 @@ impl Store {
 
         // Return cached value if we haven't mutated much since last calculation.
         // We recompute roughly every 64 mutations to amortize O(N) cost while staying accurate.
-        if cached_bytes > 0 && mutations.saturating_sub(cached_dirty) < 64 {
+        //
+        // (CrimsonHawk) Headroom-adaptive staleness: with maxmemory set, this O(N)
+        // scan runs on EVERY write (the eviction pressure check). When used_memory
+        // is comfortably below the limit — the common "cache not yet full" state —
+        // the pressure verdict cannot change for thousands of writes, so we can
+        // tolerate far more mutations before rescanning. As usage approaches the
+        // limit we clamp back to 64 so eviction stays accurate. Bounded so the
+        // stale drift (mutations * a generous per-entry upper bound) can never
+        // silently cross the limit. maxmemory==0 (unlimited) keeps the tight 64,
+        // so INFO used_memory accuracy is unchanged when no cache limit is set.
+        let threshold = {
+            let mm = self.maxmemory_bytes_live;
+            if mm != 0 && cached_bytes != 0 && cached_bytes < mm {
+                // Never let the assumed drift consume more than half the remaining
+                // headroom; ~256 bytes/mutation is a safe upper bound on one write's
+                // modeled growth for typical cache values.
+                let headroom = mm - cached_bytes;
+                let budget = (headroom / 2) / 256;
+                budget.clamp(64, 4096) as u64
+            } else {
+                64
+            }
+        };
+        if cached_bytes > 0 && mutations.saturating_sub(cached_dirty) < threshold {
             return cached_bytes;
         }
 
