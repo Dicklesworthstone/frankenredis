@@ -8756,3 +8756,24 @@ dispatch-chain-structural (ohsk5, hot-path, risky) and (b) peer-owned structural
 RAM (uhthd), zset/hash dict RAM (uybhq). BLOCKER: agent-mail reservations DOWN all session (sqlite "database disk image is
 malformed", recovery mode wants `am doctor repair`) — coordinated via wedged-daemon playbook (single-author diffs, sentinel
 re-verified pre-commit).
+
+### 2026-07-02 BLOCKER (large-value SET zero-fill): 4MB SET 0.79x root-caused to a value-size memset, locked by #![forbid(unsafe_code)] + no-feature-gate policy (CrimsonHawk)
+Re-measured the qesp3 large-value gap vs redis 7.2.4 (single-cmd latency, connected_slaves:0 verified on both). The OLD
+0.4x/0.6x @>=256KB note is STALE — CoralOx's b6215ebf7 closed it: 4K/64K/256K/1M SET+GET are now PARITY (0.92-1.06x). The ONLY
+residual is at 4MB+: SET 0.794x (fr 1029us vs redis 817us), GET 0.892x (fr 5533us vs redis 4936us).
+ROOT CAUSE (perf record -g, 4000x 4MB SET): __memset_avx2 = 20% (16% self), __memmove_avx = 24% (the unavoidable value copy),
+recv syscall ~45%. The memset is `state.value.resize(old_len + want, 0)` (fr-server/main.rs:2031, direct-owned-set path;
+mirror at :2301 LARGE_CHUNK path) — a value-size ZERO-FILL that read() then fully overwrites. A 4MB memset at ~20GB/s ~= 200us
+= EXACTLY the fr-redis SET diff (1029-817=212us). Redis grows its query buffer with sdsMakeRoomFor (realloc, NO zero-fill), so
+it pays 0 for this. The zero-fill is 100% wasted work on EVERY large value (SET/APPEND/large bulk args).
+WHY IT'S LOCKED: eliminating the zero-fill means read()ing into UNINITIALIZED spare capacity. Under fr-server's
+`#![forbid(unsafe_code)]` (main.rs:7) the only routes are: (a) `#![feature(read_buf, core_io_borrowed_buf)]` + BorrowedBuf
+(SAFE, but would be the codebase's FIRST unstable-feature gate — the tree currently has ZERO `#![feature]` and is nightly-pinned
+by deliberate stable-compatible discipline); (b) a scoped `unsafe` set_len (forbidden crate-wide); (c) add the `bytes` crate
+(new hot-path dependency). Reused-scratch-buffer is a DEAD END (trades the memset for a memcpy = strictly worse, memcpy moves 2x
+the bytes). read_to_end/Take don't fit the non-blocking mio event loop (partial reads → WouldBlock).
+DECISION NEEDED FROM OWNER (not taken unilaterally — agent-mail reservations are DOWN this session so a build-fragility change
+that could strand peers' HEAD is irresponsible now): pick (a)/(b)/(c) to unlock ~200us/4MB (scales with value size, helps all
+large writes). Recommended: (a) — safe, nightly is already pinned, ~15 lines at the two resize sites via a
+`read_into_spare(stream, &mut Vec, want)` helper; revertible in one commit. Impact is edge-case (>=1MB values are parity; only
+4MB+ shows it) so this is LOW priority vs correctness/structural work. Filed as evidence, not shipped.
