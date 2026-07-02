@@ -8810,3 +8810,20 @@ deep in the chain. The ONLY fix is the structural first-byte / (argcount,cmdlen)
 up just shuffles cost). NOT taken unilaterally: agent-mail reservations DOWN this session (sqlite malformed) so a hot-dispatch
 restructure that could strand peers' HEAD is irresponsible now. This is the single highest-value remaining perf item and wants a
 dedicated coordinated cycle. The genuine-missing-fast-path COUNT sub-vein IS exhausted (lmpop/zmpop/zpopmin/zpopmax COUNT shipped).
+
+### 2026-07-02 SHIP (BITFIELD read-only resolve-once GET batch, 7bfee15a6) + confirm residual = ohsk5 dispatch-chain — CrimsonHawk
+Shipped resolve-once for the all-GET (read-only) BITFIELD: was re-resolving the key per op via bitfield_get_no_stat
+(drop_if_expired + entries.get on EVERY GET, ~3 keyspace lookups/op) vs redis's single per-command lookup. New
+Store::bitfield_get_batch applies all validated GET ops after ONE keyspace resolution. Measured (8-GET BITFIELD, 1M cmds,
+server pinned, perf stat instructions:u, best-of-3, vs fresh vendored redis 7.2.4): server instructions 35.14B->32.21B =
+**-8.32% cand/ctl (3/3 stable)**; throughput 0.618x->0.649x vs redis (+5%). Byte-exact vs control (full-key multi-GET,
+empty/expired key, OVERFLOW clause, WRONGTYPE — the peek_value_type type-check still fires before the fast path). Guarded by
+scripts/bitfield_get_blast.py. Extends the per-op-keyspace-lookup-fusion vein.
+**Residual 0.649x is now DISPATCH-CHAIN-BOUND (confirms ohsk5 above):** perf record on the candidate during the blast shows
+process_buffered_frames 24.9% self (the linear command-matcher chain — "BITFIELD\n" = 0x4c4549465449420a memcmp'd through ~100
+parse_borrowed_plain_*_packet rejects) + parse_command_args_borrowed_into 4.2% + copy_borrowed_argv_into_scratch (BITFIELD falls
+to GENERIC dispatch, 26-arg argv->scratch copy), while bitfield_cmd itself is only ~0.54%. My win moved ALL the cost out of the
+handler into the RESP-parse+dispatch chain. A BITFIELD-specific borrowed fast path would only avoid the ~2-3% scratch-copy while
+ADDING another arm to the already-crowded chain (net-marginal, possibly negative for other cmds) — not an all-safe lever. The
+real remaining lever is the structural command-hash/first-byte dispatch (ohsk5), unchanged from the entry above; still wants a
+dedicated coordinated cycle (agent-mail reservations down this session).
