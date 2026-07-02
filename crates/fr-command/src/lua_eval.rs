@@ -5435,17 +5435,23 @@ impl<'a> LuaState<'a> {
                     self.exec_block(&then_body, env, varargs)?
                 } else if !remaining.is_empty() || else_body.is_some() {
                     // Fall through to the remaining branches / else, evaluated
-                    // normally. A further bare-yield condition there cannot be
-                    // resumed from here (resume must not re-yield), so surface the
-                    // same boundary error it would raise unresumed — never leak the
-                    // internal yield sentinel.
+                    // normally via the Stmt::If arm — which itself detects a
+                    // bare-yield `elseif` condition and suspends again. Real
+                    // redis 7.2.4 supports such chained yields (each `elseif
+                    // coroutine.yield(...)` is a fresh suspension point), so
+                    // propagate the re-yield as another CoroutineRun::Yield
+                    // rather than erroring: start_coroutine_yield has already
+                    // stored the nested If continuation, and next_pc stays at
+                    // outer_pc so that once the chain resolves, execution
+                    // resumes right after the original `if`.
                     match self.exec_stmt(&Stmt::If(remaining, else_body), env, varargs) {
                         Ok(cf) => cf,
-                        Err(e) if is_lua_yield_signal(&e) => {
-                            self.pending_yield = None;
-                            return Err(
-                                "attempt to yield across metamethod/C-call boundary".to_string()
-                            );
+                        Err(e) if is_lua_yield_signal(&e) && self.pending_yield.is_some() => {
+                            let values = self.pending_yield.take().unwrap_or_default();
+                            return Ok(CoroutineRun::Yield {
+                                values,
+                                next_pc: outer_pc,
+                            });
                         }
                         Err(e) => return Err(e),
                     }
@@ -18336,6 +18342,66 @@ end
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:falsy".to_vec()))));
+    }
+
+    #[test]
+    fn coroutine_yield_in_chained_elseif_conditions_resume_each_7lmle() {
+        // Verified against redis 7.2.4: `if coroutine.yield(1) ... elseif
+        // coroutine.yield(2) ...` yields 1, then on a falsy resume yields 2,
+        // then on a truthy resume runs that elseif branch. Result:
+        // "1,true,2,true,b".
+        let mut store = Store::new();
+        let script = b"
+            local co = coroutine.create(function()
+                if coroutine.yield(1) then return 'a'
+                elseif coroutine.yield(2) then return 'b' end
+            end)
+            local o1,y1 = coroutine.resume(co)
+            local o2,y2 = coroutine.resume(co, false)
+            local o3,y3 = coroutine.resume(co, true)
+            return tostring(y1)..','..tostring(o2)..','..tostring(y2)..','..tostring(o3)..','..tostring(y3)
+        ";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(b"1,true,2,true,b".to_vec())))
+        );
+    }
+
+    #[test]
+    fn coroutine_yield_chain_falls_through_to_else_and_past_if_7lmle() {
+        // Verified against redis 7.2.4.
+        let mut store = Store::new();
+        // 3-level chain, both yields falsy -> else branch runs: "1,2,true,c".
+        let script_else = b"
+            local co=coroutine.create(function()
+                if coroutine.yield(1) then return 'a'
+                elseif coroutine.yield(2) then return 'b'
+                else return 'c' end
+            end)
+            local _,y1=coroutine.resume(co)
+            local _,y2=coroutine.resume(co,false)
+            local o3,y3=coroutine.resume(co,false)
+            return tostring(y1)..','..tostring(y2)..','..tostring(o3)..','..tostring(y3)
+        ";
+        assert_eq!(
+            eval_script(script_else, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"1,2,true,c".to_vec())))
+        );
+        // Chain with no else and no match -> execution continues past the if.
+        let script_fall = b"
+            local co=coroutine.create(function()
+                if coroutine.yield(1) then return 'a' elseif coroutine.yield(2) then return 'b' end
+                return 'fell'
+            end)
+            coroutine.resume(co); coroutine.resume(co,false)
+            local o,v=coroutine.resume(co,false)
+            return tostring(o)..','..tostring(v)
+        ";
+        assert_eq!(
+            eval_script(script_fall, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"true,fell".to_vec())))
+        );
     }
 
     #[test]
