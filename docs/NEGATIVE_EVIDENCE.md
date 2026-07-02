@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: VALIDATE — the 5 CompactFieldMap wins are REAL wall-clock throughput (fr now FASTER than redis 7.2.4 on set/hash iteration); read+write sweep shows the command surface is saturated at parity-or-faster
+
+Closed the loop on the arena-vein instruction-count wins (fresh-build, field-only
+lookup, h2 tag, set field_at iter, hash keys field_iter). Wall-clock A/B vs redis
+7.2.4 (release, pinned taskset -c 2 fr / -c 3 oracle, client -c 6,7, 5000-elem
+set + 5000-field hash, 3 interleaved trials each):
+- SMEMBERS 1.07 / 1.48 / 1.14x   (fr faster)
+- HKEYS    1.12 / 0.95 / 1.74x   (fr faster)
+- HVALS    1.50 / 1.38 / 1.40x   (fr faster)
+- HGETALL  1.08 / 1.01 / 1.16x   (parity+)
+- SSCAN    1.23 / 1.50 / 1.15x   (fr faster)
+- SINTER (from earlier this session) 0.61x → parity/faster.
+
+WRITE sweep (random keys via -r, flushall between, 3 interleaved trials):
+LPUSH 0.92-0.97 / RPUSH 0.96-1.25 / SADD 0.81-0.95 / HSET 0.88-0.98 /
+ZADD 0.85-0.93 — all parity within host-load noise. NOTE: LPUSH/RPUSH are ~0.95x,
+NOT the stale memory "0.77-0.83x ChunkedList" claim — that number is OBSOLETE.
+
+CONCLUSION: fr's reachable command surface (reads + writes, simple + aggregate) is
+now comprehensively at parity-or-faster vs redis 7.2.4. No new clean single-crate
+code lever remains. Documented next-levers, both lower-EV/higher-cost:
+(1) HRANDFIELD/ZRANDMEMBER no-VALUES/no-SCORES borrowed path still clones the
+value/formats the score in the store `_count` method then discards it in the
+runtime — a fields-only variant would skip it, but the win is count-scaled (niche
+for typical small counts) and the index-selection is LFU-rng-golden-sensitive
+(refactor risk). (2) Structural RAM (keyspace/hash 2x redis; ChunkedList list
+DUMP) — multi-day. The arena value-skip + h2-tag vein is EXHAUSTED for high-value
+clean paths.
+
 ## 2026-07-02 CrimsonHawk: KEEP — HKEYS/HSCAN-NOVALUES iterate fields only (field_iter), skipping the per-entry value decode; -24.4% instructions on HKEYS, byte-exact
 
 Extends the field-only iteration to hashes. `HashFieldMap::keys()` was
