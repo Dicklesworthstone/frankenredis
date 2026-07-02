@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: REJECT — ChunkedList arena tail REGRESSES 0.63-0.87x end-to-end (CORRECTS the fe62b26ed micro-bench; move-vs-copy, not clone-vs-copy)
+
+FULLY IMPLEMENTED the `OwnedArena{arena,spans}` ChunkedList variant (convert-on-
+mutation via make_mut, seal→listpack, arena iterators, back-append routing) and it
+is BYTE-EXACT: full `fr-store` test suite green; a 12-case LIST differential vs
+Redis 7.2.4 (sizes 1-300, with LSET/LINSERT/LREM/RPOP/LPUSH mutations) matched
+LRANGE + DUMP bytes + OBJECT ENCODING exactly. But the clean control-vs-candidate
+end-to-end A/B (both `taskset`-pinned, P200, interleaved x15) shows a REGRESSION,
+not the win the micro-bench predicted:
+  RPUSH_8_fresh 0.770x, RPUSH_64_fresh 0.867x, RPUSH_then_LRANGE 0.959x,
+  RPUSH_then_LPOP 0.774x, RPUSH_then_LREM 0.634x (all cand/ctl, <1 = SLOWER).
+
+ROOT CAUSE (corrects the prior fe62b26ed EVIDENCE row): the micro-bench compared
+`Vec<Vec<u8>>` built by CLONING (`e.clone()`) vs arena copy — but the real RPUSH
+path receives each element as an already-owned `Vec<u8>` (the command handler
+`to_vec`s the borrowed parser slice ONCE), and `Owned::push_back_owned` MOVES it
+into the `Vec<Vec<u8>>` (reuses that allocation, ~free). The arena instead COPIES
+the bytes into its buffer AND frees the caller's Vec — strictly MORE work. So the
+"per-element alloc" is the caller's, paid once and moved, NOT a push cost the arena
+removes. LPOP/LREM regress worse because convert-on-mutation materializes
+arena→Owned (re-alloc all elements) before mutating. The RPUSH 0.77x-vs-Redis gap
+is therefore NOT the owned-tail representation (fr already moves; Redis copies into
+a listpack node). DO NOT re-attempt the arena tail. Reverted (stash
+`...arena-tail-REVERTED-regression...`). Lesson: model the REAL ownership flow
+(move vs copy), not a clone-vs-copy micro-bench, before trusting a representation A/B.
+
 ## 2026-07-01 CrimsonHawk: EVIDENCE — ChunkedList raw-arena tail is 1.76-2.37x faster than Vec<Vec<u8>> (CORRECTS the stale "packing slower" 99fwc note); rewrite JUSTIFIED
 
 The RPUSH/LPUSH 0.77x vs Redis 7.2.4 gap is the owned tail chunk storing each
