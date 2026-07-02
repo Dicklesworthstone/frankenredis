@@ -4097,6 +4097,20 @@ impl<'a> LuaState<'a> {
                 result
             }
             Stmt::LocalAssign(names, exprs) => {
+                // (CrimsonHawk) Fast path for the ubiquitous `local x = expr`
+                // (one name, one value, non-yield RHS): skip the whole-list
+                // yield scan and the eval_expr_list Vec allocation + per-slot
+                // clone. eval_expr adjusts a multi-return call to its first value
+                // (see Expr::Call arm), matching the general path's vals.get(0),
+                // so this is byte-identical.
+                if names.len() == 1
+                    && exprs.len() == 1
+                    && Self::direct_coroutine_yield_args(&exprs[0]).is_none()
+                {
+                    let val = self.eval_expr(&exprs[0], env, varargs)?;
+                    env.set_local(&names[0], val);
+                    return Ok(ControlFlow::None);
+                }
                 if let Some((prefix, yield_args, remaining, yield_was_last)) =
                     self.split_direct_yield_exprs(exprs, env, varargs)?
                 {
@@ -4121,6 +4135,20 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::Assign(lhs_list, rhs_list) => {
+                // (CrimsonHawk) Fast path for the ubiquitous `x = expr` (one
+                // target, one value, non-yield RHS): skip the whole-list yield
+                // scan and the eval_expr_list Vec allocation + per-slot clone.
+                // eval_expr adjusts a multi-return call to its first value (see
+                // Expr::Call arm), matching the general path's vals.get(0), so
+                // this is byte-identical.
+                if lhs_list.len() == 1
+                    && rhs_list.len() == 1
+                    && Self::direct_coroutine_yield_args(&rhs_list[0]).is_none()
+                {
+                    let val = self.eval_expr(&rhs_list[0], env, varargs)?;
+                    self.assign_to(&lhs_list[0], val, env, varargs)?;
+                    return Ok(ControlFlow::None);
+                }
                 if let Some((prefix, yield_args, remaining, yield_was_last)) =
                     self.split_direct_yield_exprs(rhs_list, env, varargs)?
                 {

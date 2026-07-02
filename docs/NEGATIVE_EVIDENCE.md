@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — single-target/single-value assign fast-path in the Lua interpreter; -23.6% instructions on compute-heavy EVAL, byte-exact
+
+FOUND A LANDABLE EVAL WIN inside the tree-walker (short of the bytecode VM).
+`perf record` of `for i=1,2000 do s=s+i end`: the hot cost wasn't just node
+dispatch — `Stmt::Assign`/`Stmt::LocalAssign` ran `split_direct_yield_exprs`
+(whole-RHS-list yield scan) + `eval_expr_list` (a `Vec<LuaValue>` allocation via
+`eval_call_args`, hence `RawVec::grow_one` 4.5% + `eval_call_args` 7.8% in a
+CALL-FREE loop) + a per-slot `vals.get(i).cloned()` — EVERY assignment, even the
+ubiquitous `x = expr` / `local x = expr`. Added a fast path: when there's one
+target, one value, and the RHS isn't a bare `coroutine.yield`, eval the single
+expr and assign directly — no list scan, no Vec, no clone. `eval_expr` already
+adjusts a multi-return call to its first value (Expr::Call arm), matching the
+general path's `vals.get(0)`, so it's byte-identical.
+
+MEASURED (perf stat -e instructions:u, fixed 400×`eval "local s=0 for i=1,2000
+do s=s+i end return s"`, before=prior binary / after, pinned): 1,756,259,249 →
+1,343,313,592 = **-23.6%** (reproduced exactly twice). Byte-exact vs redis 7.2.4:
+compute-loop, swap `a,b=b,a` (multi-assign → general path), table-build loop, and
+`redis.call` glue all match the oracle; full 214-test lua suite green. Benefits
+ALL single-assignment Lua (the vast majority of script code + loop bodies) — a
+real dent in the EVAL compute gap without the multi-week VM.
+
 ## 2026-07-02 CrimsonHawk: SURFACE (EVAL lever scoping, definitive) — the contained per-EVAL-clone fix has NO single-cycle slice; the right project is RustFunction String→interned-ID (helps clone AND per-call dispatch) + overlay globals, then the bytecode VM.
 
 Followed up the EVAL gap to prove out the "contained" globals-clone fix. It is
