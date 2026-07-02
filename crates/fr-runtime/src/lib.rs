@@ -14825,6 +14825,54 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` sibling of
+    /// [`execute_plain_object_encoding_borrowed`]: encodes the encoding-name bulk
+    /// string straight into `out` (`FastEncodedReply`) from the borrowed `'static`
+    /// name, instead of `RespFrame::BulkString(Some(enc.as_bytes().to_vec()))` — a
+    /// heap `Vec` alloc per command — for the caller to re-match and encode
+    /// (`FastReply`). Byte-identical: `encode_bulk_string_slice` writes the same
+    /// `$<len>\r\n<enc>\r\n` (or `$-1\r\n` for a missing key) in both RESP2/3. Same
+    /// gate/stats/metrics/expiry semantics. OBJECT ENCODING never errors.
+    pub fn execute_plain_object_encoding_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("object|encoding");
+        self.session.last_argv_len_sum = b"OBJECT".len() + b"ENCODING".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let encoding = self.server.store.object_encoding(key, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        if !suppress_reply {
+            encode_bulk_string_slice(encoding.map(str::as_bytes), resp3, out);
+        }
+
+        self.record_plain_object_encoding_borrowed_metrics(key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
+    }
+
     fn record_plain_object_encoding_borrowed_metrics(
         &mut self,
         key: &[u8],

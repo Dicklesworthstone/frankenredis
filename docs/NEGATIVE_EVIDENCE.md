@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: KEEP OBJECT ENCODING borrowed zero-copy `_into` — 1.06x cand/ctl present-key, removes per-command Vec alloc, byte-exact
+
+Same `FastReply`→`FastEncodedReply` alloc-removal lever as the TYPE row below. OBJECT
+ENCODING's fast path returned `RespFrame::BulkString(Some(enc.as_bytes().to_vec()))`
+— a heap `Vec` alloc per command for the `'static` encoding name — for the caller to
+re-match/encode. Added `execute_plain_object_encoding_borrowed_into` (writes the bulk
+string straight into the output buffer from the borrowed name via
+`encode_bulk_string_slice`, no Vec) and routed both dispatch sites to it.
+
+Evidence: clean control-vs-candidate end-to-end binary A/B (hunk stashed, both
+`taskset`-pinned, P500, interleaved x25 median): OE_int cand/ctl **1.061x** (0.779x ->
+0.827x vs Redis 7.2.4), OE_list 1.011x, OE_miss 0.985x (missing key -> BulkString(None),
+no Vec to remove -> noise). The win lands on PRESENT keys (the common case); no
+regression anywhere. fr-vs-Redis-7.2.4 differential byte-exact across int/raw/listpack-
+list/listpack-hash/listpack-zset/intset/missing encodings. Residual ~0.8x-vs-Redis is
+systematic single-connection overhead (already fast-pathed), not further _into-addressable.
+
+REVERTED same turn (near-zero, kept for the record): GETEX `_into` — value-clone-avoidance
+hypothesis refuted, cand/ctl 1.03x@8B -> **1.000x@4KB** (mimalloc absorbs the value clone,
+the socket encode dominates at size), so no size-scaling win like GET; reverted.
+
 ## 2026-07-01 CrimsonHawk: KEEP TYPE borrowed zero-copy `_into` — 1.05x cand/ctl, removes per-command String alloc, byte-exact
 
 Probing simple O(1) single-key reads found TYPE/TTL/XLEN/LLEN/SCARD all measure
