@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE — pub/sub + GETEX + EXPIRE-family + TTL/TYPE/EXISTS/PERSIST all parity; client command surface now EXHAUSTIVELY confirmed saturated; sole concrete remaining lever = stream RDB reload (cross-crate, multi-day)
+
+Swept the last distinct un-benchmarked command paths (PUBLISH, GETEX
+PERSIST/EX, TTL, EXPIRE XX, PEXPIRETIME, SET EX GET, TYPE, EXISTS, PERSIST):
+all 0.85-1.03x = parity within host-load noise. No outlier.
+
+Cumulative saturation picture (this + prior entries): fr is at parity-or-faster
+vs redis 7.2.4 across strings, lists, sets, hashes, zsets, stream-reads, geo,
+bitfield, HLL, sort, pub/sub, getex, expire/ttl, and the *STORE set-algebra ops
+(SUNIONSTORE 2.7-3.2x / SINTERSTORE 1.5-1.9x / SDIFFSTORE 1.8-3.1x faster).
+Correctness byte-exact (150+ differential probes). Modeled RAM leaner than redis.
+
+The ONLY concrete remaining speed gaps are PERSISTENCE-path reload (stream 1.77x,
+list 1.33x — prior entry) whose clean lever (borrowed `fr_persist::StreamEntry`
+to kill the `to_pairs` owned materialization) is a cross-crate lifetime refactor
+through store_to_rdb_entries → Vec<RdbEntry> → encoder. NOTE: EncodableStreamEntry
+is already generic `<F,V>` so the ENCODER accepts borrowed types — the blocker is
+solely that `RdbValue::Stream` forces owned `Vec<(Vec,Vec)>`. Real, scoped,
+multi-day; deliberately NOT rushed into a short cycle. Small-value RSS (embstr)
+is the other, both deferred with full characterization for a dedicated effort.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — per-type DEBUG RELOAD profiling: stream 1.77x / list 1.33x slower (rest parity-or-faster); root causes are cross-crate/structural (multi-day), precisely characterized
 
 Ran the proven per-type DEBUG RELOAD method (found the hash 2.51x / set 3x
