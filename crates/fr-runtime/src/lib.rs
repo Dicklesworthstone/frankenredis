@@ -20949,6 +20949,130 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Borrowed WRITE fast path for the 2-key COUNT form
+    /// `LMPOP 2 k1 k2 LEFT|RIGHT COUNT n` (arity `*7`). The no-COUNT `*5` form is
+    /// [`Self::execute_plain_lmpop2_borrowed`]; the COUNT form previously fell all
+    /// the way through to the fully-generic owned-argv dispatch — measured 0.297x
+    /// vs Redis 7.2.4, i.e. ~2.3x slower than the no-COUNT fast path (0.681x) for
+    /// nothing but dispatch overhead (bead frankenredis-0ui1o). Byte-identical to
+    /// `fr_command::lmpop` for this shape: pop up to `count` from the first
+    /// non-empty key via `lpop_count`/`rpop_count`, reply `[key, [elem..]]`. Fires
+    /// only for a valid positive count with the literal COUNT keyword; any other
+    /// shape (bad/zero count, wrong keyword, numkeys != 2, bad direction) returns
+    /// `None` so the generic path renders the exact error wording.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop2_count_borrowed(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 7
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        // Only handle a valid positive count; defer any invalid count to the
+        // generic path so its exact error ("ERR count should be greater than 0")
+        // is preserved byte-for-byte.
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len()
+                + numkeys_arg.len()
+                + k1.len()
+                + k2.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        // Same single-lookup-per-key pop as the generic fr_command::lmpop: a list
+        // is never stored empty, so lpop_count/rpop_count returns None/empty on a
+        // missing key (scan the next) and the popped items on the first hit.
+        let mut reply = RespFrame::Array(None);
+        for k in [k1, k2] {
+            let popped = if left {
+                self.server.store.lpop_count(k, count, now_ms)
+            } else {
+                self.server.store.rpop_count(k, count, now_ms)
+            };
+            match popped {
+                Ok(Some(items)) if !items.is_empty() => {
+                    let arr = items
+                        .into_iter()
+                        .map(|v| RespFrame::BulkString(Some(v)))
+                        .collect();
+                    reply = RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(k.to_vec())),
+                        RespFrame::Array(Some(arr)),
+                    ]));
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    reply = CommandError::Store(err).to_resp();
+                    break;
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// (frankenredis-zmpop1fast) Borrowed WRITE fast path for the common 1-key,
     /// no-COUNT form `ZMPOP 1 key MIN|MAX` (count defaults to 1). Mirrors
     /// fr-command::zmpop for that shape: zcard_no_stat probe (no keyspace bump),
