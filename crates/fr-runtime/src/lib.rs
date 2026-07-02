@@ -20858,6 +20858,109 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Borrowed WRITE fast path for the 1-key COUNT form
+    /// `LMPOP 1 key LEFT|RIGHT COUNT n` (arity `*6`). Sibling of
+    /// [`Self::execute_plain_lmpop2_count_borrowed`]: the no-COUNT `*4` form is
+    /// [`Self::execute_plain_lmpop1_borrowed`]; the COUNT form measured 0.245x vs
+    /// Redis 7.2.4 on the generic dispatch vs 0.644x for no-COUNT (bead
+    /// frankenredis-0ui1o). Byte-identical to `fr_command::lmpop`; any non-conforming
+    /// shape returns `None` so the generic path renders the exact error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop1_count_borrowed(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len()
+                + numkeys_arg.len()
+                + key.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let popped = if left {
+            self.server.store.lpop_count(key, count, now_ms)
+        } else {
+            self.server.store.rpop_count(key, count, now_ms)
+        };
+        let reply = match popped {
+            Ok(Some(items)) if !items.is_empty() => {
+                let arr = items
+                    .into_iter()
+                    .map(|v| RespFrame::BulkString(Some(v)))
+                    .collect();
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.to_vec())),
+                    RespFrame::Array(Some(arr)),
+                ]))
+            }
+            Ok(_) => RespFrame::Array(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// Borrowed WRITE fast path for `LMPOP 2 k1 k2 LEFT|RIGHT` (no COUNT, count=1).
     /// Mirrors fr-command::lmpop: probe k1 then k2 (llen_no_stat, no keyspace bump),
     /// pop one from the first non-empty list -> [key, [elem]]; both empty/missing -> nil;
