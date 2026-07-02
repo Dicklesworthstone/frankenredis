@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: SURFACE (EVAL lever scoping, definitive) — the contained per-EVAL-clone fix has NO single-cycle slice; the right project is RustFunction String→interned-ID (helps clone AND per-call dispatch) + overlay globals, then the bytecode VM.
+
+Followed up the EVAL gap to prove out the "contained" globals-clone fix. It is
+not single-cycle-safe:
+- The per-EVAL globals clone costs ~160 String allocs, not 80: each builtin is
+  stored as `LuaValue::RustFunction(String)` (the fn NAME), so cloning the
+  template clones every key String AND every RustFunction name String.
+- `RustFunction(String)` has 53 construction sites + is dispatched by matching the
+  NAME STRING on every builtin call (lua_eval.rs:1112) — so the String rep is BOTH
+  a per-EVAL clone cost AND a per-call dispatch cost. Converting it to an interned
+  ID / enum would fix both, but that's a 53-site + dispatch refactor.
+- Overlay globals (shared base + per-script overlay) is separately blocked: the
+  primary global-write path goes through the `_G` LuaTable
+  (table_assign_with_newindex), not `self.globals` — a DUAL globals/_G
+  representation with lazy sync (ensure_g_table). Threading an overlay through
+  both is risky.
+
+So the EVAL work is a real, scoped MULTI-DAY project (RustFunction interning +
+overlay globals ≈ the ~40% per-op-CPU setup gap; then a bytecode VM ≈ the 10x
+compute gap), NOT a single-cycle land. Rushing any of it risks breaking all
+scripting. Deferred with the plan above; this is the codebase's #1 remaining
+perf lever. Everything else stays parity-or-faster.
+
 ## 2026-07-02 CrimsonHawk: SURFACE (MAJOR NEW GAP) — EVAL is the biggest remaining gap vs redis 7.2.4: trivial 0.6x, redis.call-glue 0.53x, COMPUTE-HEAVY LOOP 0.07x (~10x slower). Root: fr's tree-walking Lua interpreter vs redis's Lua 5.1 bytecode VM + per-EVAL env clone.
 
 First benchmark of the EVAL/scripting path (previously only correctness-tested).
