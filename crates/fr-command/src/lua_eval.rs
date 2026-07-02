@@ -386,6 +386,16 @@ enum LuaCoroutineContinuation {
         current: f64,
         body_pc: usize,
     },
+    /// (CrimsonHawk 7lmle) A top-level `if <coroutine.yield(...)> then ...` whose
+    /// branch condition was a bare yield. On resume the yielded value becomes that
+    /// condition's result: truthy → run `then_body`; falsy → fall through to the
+    /// `remaining` branches / `else_body` (evaluated normally — a second bare-yield
+    /// condition there errors exactly as before, so this is purely additive).
+    If {
+        then_body: Block,
+        remaining: Vec<(Expr, Block)>,
+        else_body: Option<Block>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4060,7 +4070,25 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::If(branches, else_body) => {
-                for (cond, body) in branches {
+                for (idx, (cond, body)) in branches.iter().enumerate() {
+                    // (CrimsonHawk 7lmle) A branch condition that is a bare
+                    // `coroutine.yield(...)` suspends here; on resume the yielded
+                    // value is the condition result. Only the FIRST such condition
+                    // is handled per suspension (resume must not re-yield); a later
+                    // branch's bare-yield condition still errors as before.
+                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                        return self.start_coroutine_yield(
+                            yield_args,
+                            LuaCoroutineContinuation::If {
+                                then_body: body.clone(),
+                                remaining: branches[idx + 1..].to_vec(),
+                                else_body: else_body.clone(),
+                            },
+                            false,
+                            env,
+                            varargs,
+                        );
+                    }
                     let cv = self.eval_expr(cond, env, varargs)?;
                     if cv.is_truthy() {
                         return self.exec_block(body, env, varargs);
@@ -5396,6 +5424,42 @@ impl<'a> LuaState<'a> {
                 env,
                 varargs,
             ),
+            LuaCoroutineContinuation::If {
+                then_body,
+                remaining,
+                else_body,
+            } => {
+                // The yielded value is the branch condition's result.
+                let cond_val = resume_args.first().cloned().unwrap_or(LuaValue::Nil);
+                let cf = if cond_val.is_truthy() {
+                    self.exec_block(&then_body, env, varargs)?
+                } else if !remaining.is_empty() || else_body.is_some() {
+                    // Fall through to the remaining branches / else, evaluated
+                    // normally. A further bare-yield condition there cannot be
+                    // resumed from here (resume must not re-yield), so surface the
+                    // same boundary error it would raise unresumed — never leak the
+                    // internal yield sentinel.
+                    match self.exec_stmt(&Stmt::If(remaining, else_body), env, varargs) {
+                        Ok(cf) => cf,
+                        Err(e) if is_lua_yield_signal(&e) => {
+                            self.pending_yield = None;
+                            return Err(
+                                "attempt to yield across metamethod/C-call boundary".to_string()
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    ControlFlow::None
+                };
+                match cf {
+                    ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
+                    ControlFlow::Break => Ok(CoroutineRun::Complete(vec![LuaValue::Nil])),
+                    ControlFlow::None => {
+                        self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
+                    }
+                }
+            }
         }
     }
 
@@ -18233,6 +18297,45 @@ end
                 RespFrame::BulkString(Some(b"done".to_vec())),
             ])))
         );
+    }
+
+    #[test]
+    fn coroutine_yield_in_if_condition_truthy_runs_then_branch_7lmle() {
+        let mut store = Store::new();
+        let script = b"
+            local co = coroutine.create(function(a)
+                if coroutine.yield(a + 1) then
+                    return 'truthy'
+                else
+                    return 'falsy'
+                end
+            end)
+            local ok1, v1 = coroutine.resume(co, 10)
+            local ok2, v2 = coroutine.resume(co, true)
+            return v1 .. ':' .. v2
+        ";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:truthy".to_vec()))));
+    }
+
+    #[test]
+    fn coroutine_yield_in_if_condition_falsy_falls_through_to_else_7lmle() {
+        let mut store = Store::new();
+        // Resume value nil is falsy, so the else branch must run.
+        let script = b"
+            local co = coroutine.create(function(a)
+                if coroutine.yield(a + 1) then
+                    return 'truthy'
+                else
+                    return 'falsy'
+                end
+            end)
+            local ok1, v1 = coroutine.resume(co, 10)
+            local ok2, v2 = coroutine.resume(co)
+            return v1 .. ':' .. v2
+        ";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:falsy".to_vec()))));
     }
 
     #[test]
