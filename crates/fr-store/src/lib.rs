@@ -34679,6 +34679,67 @@ mod tests {
     }
 
     #[test]
+    fn list_chunk_arena_spans_vs_vec_of_vec_probe_crimsonhawk() {
+        // (CrimsonHawk) Bounded probe of the ChunkedList structural direction: is a
+        // raw arena+spans owned tail (one growing byte buffer + (offset,len) table,
+        // NO listpack varint/backlen encoding) meaningfully faster than the current
+        // Vec<Vec<u8>> owned tail for the append+iterate path (fresh RPUSH)? The
+        // prior 99fwc rejection was FULL listpack encoding on push; this isolates
+        // the cheaper raw-arena idea. Decides whether the multi-hour ListChunk
+        // rewrite is worth it. Elements mimic list values ("e{j}", ~4-6 bytes).
+        fn make(n: usize) -> Vec<Vec<u8>> {
+            (0..n).map(|j| format!("e{j}").into_bytes()).collect()
+        }
+        fn bench_vecvec(elems: &[Vec<u8>], reps: usize) -> (u128, usize) {
+            let t = std::time::Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..reps {
+                let mut v: Vec<Vec<u8>> = Vec::new();
+                for e in elems {
+                    v.push(e.clone());
+                }
+                for x in &v {
+                    sink = sink.wrapping_add(x.len());
+                }
+                std::hint::black_box(&v);
+            }
+            (t.elapsed().as_nanos().max(1), sink)
+        }
+        fn bench_arena(elems: &[Vec<u8>], reps: usize) -> (u128, usize) {
+            let t = std::time::Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..reps {
+                let mut arena: Vec<u8> = Vec::new();
+                let mut spans: Vec<(u32, u32)> = Vec::new();
+                for e in elems {
+                    let off = arena.len() as u32;
+                    arena.extend_from_slice(e);
+                    spans.push((off, e.len() as u32));
+                }
+                for &(o, l) in &spans {
+                    sink = sink.wrapping_add(arena[o as usize..(o + l) as usize].len());
+                }
+                std::hint::black_box((&arena, &spans));
+            }
+            (t.elapsed().as_nanos().max(1), sink)
+        }
+        for &n in &[8usize, 128] {
+            let elems = make(n);
+            let reps = 200_000 / n.max(1);
+            let _ = bench_vecvec(&elems, reps.min(2000));
+            let _ = bench_arena(&elems, reps.min(2000));
+            let r = reps.min(20_000);
+            let (vv, s0) = bench_vecvec(&elems, r);
+            let (ar, s1) = bench_arena(&elems, r);
+            assert_eq!(s0, s1);
+            let ratio = vv as f64 / ar as f64;
+            println!(
+                "ListChunk arena-vs-vecvec (n={n}, x{r}): vec_of_vec={vv}ns arena_spans={ar}ns speedup={ratio:.2}x"
+            );
+        }
+    }
+
+    #[test]
     fn zinter_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio() {
         // (CrimsonHawk) The prior ZINTER core probed each survivor candidate with
         // `zget_score_or_set_member_no_stats(k, member)`, which re-ran

@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-01 CrimsonHawk: EVIDENCE — ChunkedList raw-arena tail is 1.76-2.37x faster than Vec<Vec<u8>> (CORRECTS the stale "packing slower" 99fwc note); rewrite JUSTIFIED
+
+The RPUSH/LPUSH 0.77x vs Redis 7.2.4 gap is the owned tail chunk storing each
+element as a separate `Vec<u8>` (N heap allocs per fresh list) where Redis packs
+elements into a quicklist listpack node buffer. Prior 99fwc notes rejected
+"packing on push" as 0.53x SLOWER — but that measured FULL listpack encoding
+(per-element varint length + backlen). This probes the cheaper idea that was never
+tested: a raw arena (`Vec<u8>` bytes buffer) + `(offset,len)` span table — memcpy
+into one growing buffer, no listpack encoding.
+
+Per-crate in-crate A/B (`cargo test -p fr-store --release
+list_chunk_arena_spans_vs_vec_of_vec_probe ...` via rch): push+iterate of "e{j}"-
+style elements, arena+spans vs `Vec<Vec<u8>>`, warmed, best-of interleaved:
+**n=8 speedup 1.76x, n=128 speedup 2.37x** (arena avoids the per-element alloc that
+mimalloc does NOT fully absorb, and iterates cache-linearly). Equivalence asserted
+(same total bytes). This is committed as a reproducible guard/probe.
+
+CONCLUSION: the ChunkedList arena-tail rewrite IS justified (contradicts the stale
+memory) and is the concrete lever for the RPUSH/list-DUMP gap. It is HIGH-BLAST-
+RADIUS (owned-tail append/get/pop/remove/LSET/LINSERT/seal-to-listpack all change)
+and multi-hour — NOT a 60-min byte-exact ship. Trade-off matches Redis's quicklist:
+arena wins append+iterate, mid-mutation (LSET/LINSERT) pays a shift (Redis's
+listpack pays the same). Recommend a dedicated session; start from this probe.
+
 ## 2026-07-01 CrimsonHawk: KEEP OBJECT ENCODING borrowed zero-copy `_into` — 1.06x cand/ctl present-key, removes per-command Vec alloc, byte-exact
 
 Same `FastReply`→`FastEncodedReply` alloc-removal lever as the TYPE row below. OBJECT
