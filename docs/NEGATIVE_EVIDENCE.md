@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: REJECT — LocalBinding.name String→Rc<str> loop-var name reuse measured 0.2% (noise); tree-walker CONTAINED-win vein is EXHAUSTED — remaining EVAL lever is the bytecode VM
+
+After the 4 landed EVAL wins, `Scope::set_local_cell` showed 6.5% self in the
+compute-loop profile (it does `name.to_string()` when appending to the fresh
+per-iteration scope). Hypothesised the loop-var NAME alloc was the cost; changed
+`LocalBinding.name` to `Rc<str>` + added `set_local_cell_rc` so both for-loops
+reuse ONE shared name Rc across iterations (no per-iteration String alloc).
+MEASURED (perf stat, fixed 400×compute-loop, before=4-wins binary / after):
+943,035,865 → 941,441,014 = **0.2% = NOISE**. Reverted (no-zero-win discipline).
+Lesson: short local names ("i","s") are mimalloc-fast to alloc; `set_local_cell`'s
+6.5% is the Vec push + LocalBinding move + find, NOT the name String. Byte-exact
+throughout (closures 1,2,3; shadow; nested) — correctness was fine, just no gain.
+
+The compute-loop profile after the 4 wins is now dominated by eval_expr (self
+~13%) + exec_stmt (~11%) DISPATCH, drop_glue (~10%, LuaValue drops + Rc cell
+decrements — fundamental value churn), set_existing_local_slot (~5%), and
+LuaValue::clone (~2.4%). These are the irreducible tree-walker per-node costs; no
+contained single-cycle win remains. The remaining EVAL lever is a Lua bytecode
+compiler + register VM (multi-week). Tree-walker contained-win vein EXHAUSTED
+(4 wins shipped: assign fast-path, boxed Function, numeric-for + generic-for
+loop-var reuse — cumulative ~46% off compute-loop).
+
 ## 2026-07-02 CrimsonHawk: KEEP — generic-for (pairs/ipairs) loop-var cell reuse, same Rc strong_count trick; -6.3% instructions on ipairs-loop EVAL, byte-exact
 
 Applied the numeric-for loop-var-reuse pattern to `run_generic_for_from_iter_vals`
