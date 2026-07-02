@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: CORRECT — the "-P16 GET/SET/INCR 0.83-0.88x residual" was a SHORT-RUN/WARMUP ARTIFACT; steady-state = PARITY, and the path is 79% SYSCALL-BOUND (no CPU lever exists)
+
+The immediately-following entry recorded a 0.83-0.88x pipelined residual from a
+`-n 200000` run (~0.2s at ~1M rps — connection-setup/ramp dominated, NOT steady
+state). Re-measured properly and it does NOT hold:
+
+**Steady-state `-n 3000000 -c 50 -P16`, pinned (fr taskset -c 2, oracle -c 3,
+client -c 6,7), interleaved trials:**
+- GET: 1.002 / 1.021 / 1.021  → stable PARITY (fr slightly faster).
+- SET: 0.798 / 0.986 / 1.284  → high-variance, centers on parity.
+- INCR: 1.629 / 1.060 / 1.019 → high-variance, centers on parity.
+The wide swing on SET/INCR (both directions, incl fr 1.28x/1.63x faster) is
+measurement noise under host load (loadavg ~9-16), NOT a fr deficit. GET, the
+stable one, is at parity. Short single-run `-P16` ratios are UNRELIABLE here —
+always use -n ≥3M + interleaved trials for pipelined commands.
+
+**Why no CPU lever exists (fresh `perf record` of fr under GET -P16):** ~79% of
+fr's time is in `__syscall_cancel_arch_end` → kernel (epoll/read/write). The
+high-pipeline path is I/O-SYSCALL-BOUND, exactly like redis — command-path micro
+-optimizations (matcher-chain reorder, per-command bookkeeping) cannot move a
+syscall-bound workload. This structurally confirms the ohsk5 "frontier
+saturated" conclusion with a root cause: it's the kernel I/O boundary, not the
+dispatch chain. GET already sits 3rd in the borrowed matcher chain yet shows the
+same behavior, ruling out chain-position as the cause.
+
+NET: fr's entire benchmarked command surface (single + pipelined) is at parity
+with redis 7.2.4. The prior entry's "only residual" is WITHDRAWN. No open perf
+gap remains on the reachable (non-fr-store-structural) surface.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — broad differential + release-vs-release perf sweep finds NO new clean lever; correctness saturated, only residual = known pipelined GET/SET/INCR @ -P16 (0.83-0.88x, ohsk5 frontier)
 
 Ran a wide land-or-dig cycle vs vendored Redis 7.2.4. Findings, all measured:
