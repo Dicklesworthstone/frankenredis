@@ -23018,6 +23018,13 @@ fn parse_linux_proc_self_stat_cpu_times(stat_line: &str) -> Option<(f64, f64)> {
 /// from /proc/sys/kernel; on other platforms we fall back to the
 /// static OS name. (frankenredis-6xj9o)
 fn format_info_os_string() -> String {
+    // (CrimsonHawk) The uname sysname/release come from immutable /proc files;
+    // cache them so INFO does not read /proc every call (redis reads uname once
+    // at startup). This was ~3x on INFO server / ~5x on INFO all.
+    use std::sync::OnceLock;
+    static OS_CACHE: OnceLock<String> = OnceLock::new();
+    OS_CACHE
+        .get_or_init(|| {
     fn fallback_os_name() -> &'static str {
         match std::env::consts::OS {
             "linux" => "Linux",
@@ -23063,6 +23070,8 @@ fn format_info_os_string() -> String {
     {
         format!("{} {}", fallback_os_name(), arch_machine())
     }
+        })
+        .clone()
 }
 
 fn read_cpu_times() -> (f64, f64) {

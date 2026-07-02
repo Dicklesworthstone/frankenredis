@@ -5228,22 +5228,28 @@ pub fn read_rss_bytes() -> Option<usize> {
 /// Returns None on non-Linux or when /proc/meminfo cannot be parsed.
 #[must_use]
 pub fn read_total_system_memory_bytes() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-        for line in meminfo.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kb_str = rest.trim().strip_suffix("kB")?.trim();
-                let kb: usize = kb_str.parse().ok()?;
-                return Some(kb * 1024);
+    // (CrimsonHawk) MemTotal is immutable for the process lifetime; cache it so
+    // INFO (memory section) does not read + parse /proc/meminfo on every call.
+    use std::sync::OnceLock;
+    static TOTAL_MEM_CACHE: OnceLock<Option<usize>> = OnceLock::new();
+    *TOTAL_MEM_CACHE.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+            for line in meminfo.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    let kb_str = rest.trim().strip_suffix("kB")?.trim();
+                    let kb: usize = kb_str.parse().ok()?;
+                    return Some(kb * 1024);
+                }
             }
+            None
         }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    })
 }
 
 impl Default for Store {

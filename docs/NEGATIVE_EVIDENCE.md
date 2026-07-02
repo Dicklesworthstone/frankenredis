@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — cache the immutable /proc reads in INFO (uname OS string + /proc/meminfo MemTotal); INFO all 0.227x→0.387x, INFO server 0.315x→0.566x vs redis 7.2.4, byte-exact
+
+NEW gap found by benchmarking introspection commands (previously unmeasured):
+INFO was 0.19-0.27x (~4-5x slower) — a command monitoring/Sentinel/exporters
+call constantly. `perf record` showed `std::fs::read_to_string` in the INFO path:
+`format_info_os_string` read /proc/sys/kernel/ostype + osrelease (the uname
+sysname/release) on EVERY call, and `read_total_system_memory_bytes` read+parsed
+/proc/meminfo (MemTotal) on every call. Both are IMMUTABLE for the process
+lifetime (redis reads uname once at startup). Wrapped each in a `OnceLock` cache.
+
+MEASURED (redis-benchmark, pinned, 3 trials, before=prior binary / after):
+- INFO all:    0.227x → 0.387x  (~1.7x)
+- INFO server: 0.315x → 0.566x  (~1.8x)
+- INFO memory: 0.264x → 0.323x  (MemTotal cached; residual = read_rss_bytes
+  /proc/self/statm + estimate_memory, which change per call — legitimate)
+Byte-exact: os + total_system_memory values identical before/after; INFO server
+field names diff-clean vs oracle; 60 info tests green.
+RESIDUAL: INFO still ~0.4x — read_cpu_times (/proc/self/stat) + read_rss_bytes
+(/proc/self/statm) are read fresh each call (values change; redis does too) and
+the big genRedisInfoString fmt. Those are inherent; the immutable-/proc caching
+was the clean win. CLIENT INFO 0.77x also noted (per-connection format!, not yet
+dug).
+
 ## 2026-07-02 CrimsonHawk: VALIDATE — the 4 EVAL wins moved compute-loop wall-clock 0.07x→0.11x vs redis 7.2.4 (real, ~1.5x ratio gain); glue 0.545x; parity needs the bytecode VM. Globals-overlay for glue assessed = feasible-for-common-case but _G-risky, deferred.
 
 Wall-clock A/B vs redis (pinned, interleaved) confirms the session's 4 EVAL
