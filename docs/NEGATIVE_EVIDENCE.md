@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: CORRECT — the "keyspace RAM 4.49x" (uhthd/p8dd2) belief is WRONG; real fresh-process gap is 1.53x for SMALL values, 1.04x for 200-byte values, and fr's used_memory MODEL is LEANER than redis. The big number was mimalloc RSS retention + a Lua-populate artifact.
+
+Chased the biggest documented gap (keyspace RAM) and it largely evaporated under
+rigorous measurement:
+
+1. FIRST measure (populate via `eval` Lua loop, single long-lived process): fr RSS
+   138MB vs redis 25MB = 5.41x — LOOKED catastrophic. But FLUSHALL then showed fr
+   RSS stuck at ~104MB while redis fell to ~12MB → the bulk was mimalloc holding
+   freed transient LUA garbage (RSS lags frees; mimalloc retains pages). ARTIFACT.
+2. RIGOROUS measure (FRESH process each side, native pipelined SET, no Lua):
+   - 200k keys, ~10-byte values: RSS fr=38.6MB ora=25.2MB = **1.53x**; delta/key
+     fr ~155B vs ora ~88B.
+   - 200k keys, 200-byte values: RSS fr=77MB ora=74MB = **1.04x** (parity).
+   - used_memory (fr's MODEL) is consistently LEANER: 14.4MB vs 17.5MB (small),
+     56MB vs 65MB (big) = ~0.82-0.85x. MEMORY USAGE per key = 64 (matches redis).
+
+CONCLUSION: there is NO 2-5x keyspace representation bloat. The real gap is FIXED
+per-key overhead that only bites SMALL values (amortizes to parity by 200 bytes),
+i.e. fr stores a small string value as a SEPARATE heap Vec<u8> (24B header + heap
+block, mimalloc size-class rounded) where redis uses embstr (value inline in the
+robj = one allocation). The ONLY real RAM lever left = small-string-inline
+Value::String (embstr equivalent), payoff ~1.53x→~1.0x for small-value workloads
+ONLY — a big, risky change to the hottest value type (touches every string cmd),
+multi-day. NOT a clean single-cycle land; surfaced, not attempted.
+
+METHOD LOCK-IN for RAM: NEVER measure fr RAM via RSS on a reused/flushed process
+(mimalloc retention lies) NOR after Lua-populate (garbage retained). Use a FRESH
+process + native SET + read RSS once. fr's used_memory is a good model and is
+leaner than redis. The uhthd/p8dd2 "4.49x" beads are based on the flawed method —
+downgrade them.
+
 ## 2026-07-02 CrimsonHawk: VALIDATE — the 5 CompactFieldMap wins are REAL wall-clock throughput (fr now FASTER than redis 7.2.4 on set/hash iteration); read+write sweep shows the command surface is saturated at parity-or-faster
 
 Closed the loop on the arena-vein instruction-count wins (fresh-build, field-only
