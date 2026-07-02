@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-02 CrimsonHawk: KEEP — numeric-for loop-var cell reuse via Rc strong_count; -11.4% instructions on compute-heavy EVAL, byte-exact
+
+The numeric-for loop `env.set_local(name, i)` per iteration allocated a fresh
+`Rc<RefCell<LuaValue>>` + GC-registered it + dropped it at pop_scope EVERY
+iteration (Env::set_local was 10.9% self, plus its share of drop_glue 8.5%). Lua
+gives each iteration a FRESH loop variable ONLY so a closure created in the body
+captures that iteration's value — otherwise the fresh cell is unobservable. Now
+the loop holds one `loop_cell` and, before each iteration, checks
+`Rc::strong_count`: ==1 (nothing captured it — the GC registry holds only a
+Weak, so it doesn't inflate the count) → reuse in place (no alloc, no register);
+>1 (a closure captured it) → allocate a fresh cell so the capture keeps the old
+value. NO AST walker needed — the refcount decides. Per-iteration scope push/pop
+is unchanged, so body-local freshness and the coroutine-yield-resume path are
+untouched.
+
+MEASURED (perf stat -e instructions:u, fixed 400×compute-loop EVAL,
+before=box binary / after, pinned): 1,070,696,355 → 949,628,074 = **-11.4%**
+(reproduced twice). Cumulative across the 3 EVAL tree-walker wins (assign
+fast-path + box + this): ~1.756B → ~0.950B ≈ **-46%** off the original
+compute-loop cost. Byte-exact vs redis 7.2.4 — verified the CRITICAL closure
+cases: simple capture (1,2,3), conditional-closure (2,4), body-local capture
+(30), NESTED loops with closures (11,22,32), break (6), plain compute; full
+214-test lua suite green.
+
 ## 2026-07-02 CrimsonHawk: KEEP — box the Function variant: LuaValue 144→32 bytes; -20.2% instructions on compute-heavy EVAL (on top of the assign fast-path), byte-exact
 
 `size_of::<LuaValue>()` was 144 bytes — ENTIRELY because `Function(LuaFunc)` was

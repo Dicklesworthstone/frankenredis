@@ -3309,11 +3309,26 @@ impl Env {
     fn set_local(&mut self, name: &str, value: LuaValue) {
         if let Some(scope) = self.scopes.last_mut() {
             let cell = Rc::new(RefCell::new(value));
-            // (frankenredis-qqq17) Track upvalue cells: a recursive closure's
+            // (frankenredis-qqq17) Track upvalue cells: a recursive closure.s
             // captured_env can hold an Rc back to this cell, forming a leak.
             lua_gc_register_cell(&cell);
             scope.set_local_cell(name, cell);
         }
+    }
+
+    // (CrimsonHawk) Insert an ALREADY-allocated (and already GC-registered) cell
+    // into the top scope. Lets the numeric-for loop reuse one loop-variable cell
+    // across iterations instead of allocating + GC-registering a fresh one each
+    // time (safe only while nothing captured the previous cell).
+    fn set_local_cell_top(&mut self, name: &str, cell: LuaCell) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.set_local_cell(name, cell);
+        }
+    }
+
+    // (CrimsonHawk) Clone the cell for `name` out of the top scope, if present.
+    fn top_local_cell(&self, name: &str) -> Option<LuaCell> {
+        self.scopes.last()?.get_local_cell(name).cloned()
     }
 
     fn get_local(&self, name: &str) -> Option<LuaValue> {
@@ -4319,6 +4334,10 @@ impl<'a> LuaState<'a> {
                 // responsibility, same as `while true do end`). Vendored
                 // does not reject step=0 at the runtime layer.
                 let mut i = s;
+                // (CrimsonHawk) Reuse one loop-var cell across iterations unless a
+                // closure captured it (Rc strong_count > 1; GC registry holds only a
+                // Weak). Byte-identical to fresh-every-iteration.
+                let mut loop_cell: Option<LuaCell> = None;
                 loop {
                     self.iterations += 1;
                     if self.iterations > MAX_ITERATIONS {
@@ -4328,7 +4347,17 @@ impl<'a> LuaState<'a> {
                         break;
                     }
                     env.push_scope();
-                    env.set_local(name, LuaValue::Number(i));
+                    match loop_cell.take() {
+                        Some(cell) if Rc::strong_count(&cell) == 1 => {
+                            *cell.borrow_mut() = LuaValue::Number(i);
+                            env.set_local_cell_top(name, cell.clone());
+                            loop_cell = Some(cell);
+                        }
+                        _ => {
+                            env.set_local(name, LuaValue::Number(i));
+                            loop_cell = env.top_local_cell(name);
+                        }
+                    }
                     let cf =
                         self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
                     env.pop_scope();
