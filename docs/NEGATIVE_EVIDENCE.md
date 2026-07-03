@@ -9112,3 +9112,17 @@ my changes — zscore=dict.get, zrank=treap, neither uses range). **SAFE EXECUTO
 session (zset-trim + set/hash random-access + hash-once + RESTORE family all shipped). Remaining perf frontier = (a) ohsk5
 dispatch chain (main.rs, unsafe), (b) incremental-ZADD-into-Compact O(n^2) (deliberate read/write tradeoff), (c) ChunkedList
 (CoralOx). Correctness surface is robust (adversarial-fuzz-clean).**
+
+### 2026-07-03 SURFACE (deep adversarial fuzz of stream/geo/bitfield/expiry/scan = CLEAN; incremental-ZADD O(n^2) is structural) — CrimsonHawk
+Extended the adversarial fuzz to the less-tested families (50 probes): XADD/XSETID/XRANGE/XCLAIM/XAUTOCLAIM/XINFO with
+inverted/huge/zero stream IDs + negative COUNT/MAXLEN; GEOADD out-of-range coords, GEOSEARCH huge/negative radius/box;
+BITFIELD u64/i64/u100/#huge offsets+types; EXPIRE/PEXPIRE/SETEX/GETEX huge/negative TTLs + XX+NX; SCAN/HSCAN/SSCAN/ZSCAN
+huge cursors + negative COUNT; SETRANGE at 512MB/huge offset; LMPOP/ZMPOP/LPOS/SINTERCARD negative counts+numkeys. fr HEAD
+vs redis 7.2.4 = **0 crashes, 0 error-ness divergences**, fr stays alive. Combined with the prior 40-probe batch = **90
+adversarial probes, 0 crashes** (after the f0c200da1 inverted-range fix). Correctness surface is adversarially robust across
+string/list/hash/set/zset/bitmap/stream/geo. **Re incremental-ZADD-into-Compact O(n^2): NOT a clean command-level fix — the
+cost is the per-insert Vec::insert shift; multi-member ZADD bulk-merge only helps rare large-N-per-command forms, while the
+real O(n^2) is many SINGLE-member ZADDs growing the zset (each O(n) per command = O(n^2) total). Only a structural change
+(FullZSetOrder Compact-Vec -> skiplist/order-stat-tree) fixes it, and that's the deliberate read/write tradeoff (Vec kept
+for O(1) ZRANGE index). Deferred/structural, not a safe clean lever.** Safe executor lever vein remains exhausted; frontier =
+ohsk5 dispatch (main.rs, unsafe) / this ZADD structural tradeoff / ChunkedList (CoralOx).
