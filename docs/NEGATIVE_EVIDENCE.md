@@ -9012,3 +9012,14 @@ SRANDMEMBER x1M on a 10000-member hashtable set 242.1B->7.2B = **-97.04%** (34x)
 across listpack/hashtable n=5/200/3000 (get_index==iter().nth is test-asserted). **REMAINING iter().nth(idx) sites:
 SortedSet::dict_member_at Packed-zset path (line ~1555, ZRANDMEMBER on a listpack zset) is O(idx) but BOUNDED (<=128
 listpack cap) = small; line 35311 is a test. The set random-access path is now O(1) end-to-end (SPOP/SRANDMEMBER/counts).**
+
+### 2026-07-03 SHIP (O(1) get_index for single HRANDFIELD, 45e8e9dfd) — CrimsonHawk
+The HRANDFIELD twin of the SRANDMEMBER fix (7ad55fdb3): single `hrandfield` used `m.keys().nth(idx)` (O(n/2)/call);
+swapped to O(1) `m.get_index(idx)`. Measured (instructions:u, 3/3): HRANDFIELD x1M on a 10000-field hashtable hash
+227.4B->7.4B = **-96.73%** (31x); **0.091x->0.802x vs redis 7.2.4** (base 11x SLOWER than redis). Byte-identical
+(0/500 base-vs-cand mismatch, all valid, listpack+hashtable). HRANDFIELD-count already O(1). **Set+hash single random
+access now O(1) end-to-end. REMAINING iter().nth/keys().nth O(n) random-access sites: (1) maxmemory eviction
+AllkeysRandom/VolatileRandom candidate pick (lib.rs ~21299/21316, self.entries.keys().nth) — O(n) per eviction under
+memory pressure, CONFIG-GATED (maxmemory + *-random policy), next lever if there's an O(1) keyspace index (RANDOMKEY the
+command already uses a sample vector, not this); (2) SortedSet::dict_member_at Packed-zset ZRANDMEMBER (~1555) bounded
+<=128. The unbounded set/hash random-read O(n) bugs are FIXED.**
