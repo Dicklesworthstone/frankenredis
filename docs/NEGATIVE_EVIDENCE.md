@@ -9140,3 +9140,19 @@ dispatch chain + zrank_ws borrowed fast path + large-value vectored-write = main
 session, can't reserve the hottest/most-contended file; a single additive fast-path is net-marginal per ohsk5); (b)
 incremental-ZADD-into-Compact O(n^2) = structural read/write tradeoff; (c) hashtable/zset RAM 2x + ChunkedList = CoralOx
 fr-store structural domain. No safe clean lever remains to ship without coordination.**
+
+### 2026-07-03 SURFACE (ruled out the last lever classes: per-tick tasks amortized, dispatch reorder = ohsk5) — CrimsonHawk
+Final dig this session confirmed I'm the SOLE committer all session (no peer commits on origin; shared tree clean each turn),
+so main.rs's shared-tree-race risk is low — BUT the remaining main.rs levers are still not clean/safe to ship solo:
+- PER-TICK BACKGROUND TASKS ruled out: deliver_pubsub_messages / flush_aof_to_disk / deliver_monitor_output /
+  propagate_writes_to_replicas run ONCE PER EVENT-LOOP TICK (main.rs:~1480-1505), amortized across the whole command batch
+  (~200 cmds/tick pipelined) => negligible per-command. The pubsub_clients_with_pending "build then is_empty" is a per-tick
+  empty-HashSet (lazy, no alloc) — guarding it saves ~nothing per command. NOT a lever.
+- DISPATCH MATCHER CHAIN is the only real per-command lever (process_buffered_frames 20-34% self = ~100 linear
+  parse_borrowed_plain_*_packet name-compares; e.g. plain SET tries ~14 arms before set_packet@3045). But reordering hot
+  cmds first is the ohsk5 "just shuffles cost / not safe piecemeal" lever prior CrimsonHawk analysis already rejected; the
+  real fix = structural command-hash/first-byte jump table = big change to THE hottest fn, wants a dedicated coordinated
+  session + representative multi-cmd workload to measure, NOT a tail-of-long-session solo edit. **DEFINITIVE SESSION CEILING:
+  every safe executor/algorithmic/correctness lever shipped or exhausted (15 perf wins + 1 DoS fix, byte-exact 4761-check
+  + 90-probe-crash-clean surface); the sole remaining per-command lever is the ohsk5 command-hash dispatch (main.rs,
+  dedicated cycle), plus structural CoralOx items (ZADD-Compact O(n^2) tradeoff, hashtable/zset RAM, ChunkedList).**
