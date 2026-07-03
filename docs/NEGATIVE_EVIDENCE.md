@@ -9174,3 +9174,19 @@ verify no-slots key ops return CLUSTERDOWN like redis and audit every cluster_en
 "disabled" error for silent new divergences. This is a scope/architecture decision (does fr claim single-node cluster mode?)
 for the maintainer/CoralOx. The 4+ CLUSTER SETSLOT beads are BLOCKED on it. Meanwhile the non-cluster CLIENT beads appear
 already-fixed (stale-open) — beads.db drift, per feedback_br_sync_drift.**
+
+### 2026-07-03 SURFACE (SHARPENED: wiring cluster-enabled is UNSAFE — fr lacks the slot-serving/CLUSTERDOWN layer entirely) — CrimsonHawk
+Assessed whether the cluster-enabled config-wiring (da2fe14da root cause) could be a safe ship. IT CANNOT: `grep CLUSTERDOWN`
++ `grep "Hash slot not served"` across fr-runtime + fr-store = **ZERO occurrences**. fr has NO slot-serving / cluster_state
+(server-side) / key-op rejection layer — the `cluster_state` field is the CLIENT's READONLY/ASKING mode, not the server's
+slot ownership. So in cluster mode with no slots assigned, redis returns `CLUSTERDOWN Hash slot not served` for `SET k v`
+while fr would just STORE it => an immediate fundamental divergence the moment cluster-enabled is turned on. Therefore
+wiring the config directive alone is UNSAFE (trades a clear "disabled" error for a broken cluster that silently accepts
+keys redis rejects). Enabling fr's cluster mode = real FEATURE-COMPLETION (implement slot ownership + CLUSTERDOWN +
+CLUSTER-mode MOVED/CROSSSLOT for live keys + likely the cluster bus/gossip), a substantial task, NOT a config-plumbing bug
+fix. The 4+ CLUSTER SETSLOT beads (23q3c/xenr3/xvnsr/m56qu) are blocked on THIS feature layer, not just the startup wiring.
+Also confirmed via code review: the "Direct CLIENT KILL/LIST dispatcher" beads (61iis/q3rts/3kr0t/rd96p/b1urj) — fr's live
+CLIENT KILL/LIST path (fr-runtime:34760) is the generic one and matches redis on all probed forms; no separate live
+direct-dispatcher bug found. Those beads are stale-open (beads.db drift). **CONCLUSION: no safe clean bead-based correctness
+lever available; the cluster surface needs feature-completion (maintainer scope decision), and the CLIENT beads are already
+fixed.**
