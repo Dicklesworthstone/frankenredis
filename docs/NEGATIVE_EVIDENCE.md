@@ -9698,3 +9698,12 @@ applies (42424242), truly-unknown command (NOTACMD) STILL EXECABORTs correctly (
 regular MULTI/EXEC byte-exact (OK,QUEUED,QUEUED,OK,2). **EXEC-BYPASS BUG CLASS now CLOSED: REPLICAOF/SLAVEOF (b22c2c110,
 sentinel failover) + CONFIG SET (6856ae988) + ACL SETUSER (this) all work correctly inside MULTI/EXEC. Three real functional
 bugs found+fixed this session via the Sentinel-failover investigation, atop the byte-exact/interop/perf/robustness campaign.**
+
+### 2026-07-03 SURFACE (EXEC-bypass bug class AUDIT COMPLETE — no more members) — CrimsonHawk
+Swept the remaining side-effecting special/admin commands inside MULTI/EXEC (post-fix binary) vs redis 7.2.4 to confirm the
+EXEC-bypass class is fully closed: SCRIPT LOAD (-> EVALSHA returns 99, script cached), FUNCTION LOAD (-> FCALL returns 5),
+DEBUG SLEEP (OK), WAIT 0 100 (-> 0), XADD+XLEN (1-1/1). **ALL byte-identical to redis — no more no-op/EXECABORT bugs.** The
+three fixed (REPLICAOF/SLAVEOF b22c2c110, CONFIG 6856ae988, ACL 172a46cb8) were the real members; SCRIPT/FUNCTION/DEBUG/WAIT
+already persist correctly in the EXEC context. EXEC-bypass bug class = FOUND (3), FIXED (3), AUDITED-CLOSED. Net session HA/
+transaction outcome: redis-Sentinel failover works end-to-end + CONFIG SET + ACL SETUSER + all audited special cmds correct
+inside MULTI/EXEC, byte-exact vs redis 7.2.4.
