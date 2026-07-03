@@ -9058,3 +9058,15 @@ zrank/strlen/copy_list >1x). LOSSES classified:
   pass, not a rushed change. ONE primitive fixes ZPOPMIN/ZPOPMAX-count + ZMPOP + ZREMRANGEBYRANK. **The clean one-liner
   executor levers are exhausted this session; the real remaining perf frontier is (a) main.rs dispatch (ohsk5, blocked)
   and (b) this bounded zset-pop/trim bulk-removal primitive.**
+
+### 2026-07-03 SHIP (bulk front/back drain for ZPOPMIN/ZPOPMAX COUNT, 256519a46) — CrimsonHawk
+Implemented the zset-pop bulk-drain surfaced in 0d8d38bdc. zpopmin_count/zpopmax_count looped pop_min/pop_max (each
+ordered.remove -> Vec::remove(0), O(len) shift) = O(count*len) on Compact(Vec) zsets (129..2048). Added
+FullZSetOrder::drain_first_n/drain_last_n (Compact: single drain; Tree: pop_first/last loop) + FullSortedSet::pop_min_n/
+pop_max_n + SortedSet wrappers (Packed keeps the bounded loop). Also speeds ZMPOP. Measured (instructions:u, 3/3;
+RESTORE-rebuild each round so the O(n log n) build cancels): RESTORE(2000)+ZPOPMIN 1900 cycle 31.9B->11.5B = **-64.05%**,
+**0.828x->1.056x vs redis 7.2.4** (now beats redis). Byte-exact: 30 integer-score trials base==cand==redis reply+DIGEST
+across packed/compact/tree + partial/full/over-count + rank_tree; float trials base==cand (fr-vs-redis float DIGEST delta
+is the pre-existing -0.0/float quirk ac7a9ca80, replies match). **REMAINING zset-pop/trim: ZREMRANGEBYRANK still loops
+zs.remove(m) = O(count*len) Compact — the follow-up (needs a rank-RANGE drain, not just front/back; the drain_first_n/
+drain_last_n primitives + collect_drained pattern are the template). ZPOPMIN/ZPOPMAX-count + ZMPOP now O(len)+O(count log n).**
