@@ -7193,7 +7193,13 @@ impl Store {
     }
 
     pub fn append(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (with_mutated_entry below re-probes the key). Byte-identical: with
+        // expires_count==0 no key can carry an expiry, so drop_if_expired never evicts
+        // and its (ignored) return value is unused here.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -10477,7 +10483,11 @@ impl Store {
             }
             return Ok(());
         }
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (internal_entry below re-probes). Byte-identical; return value unused. See append.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let count = fields.len() as u64;
@@ -10552,7 +10562,13 @@ impl Store {
             }
             return Ok(added);
         }
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
+        // (internal_entry below re-probes). Byte-identical; return value unused. See append.
+        // This is the LIVE HSET/HMSET path (fr-runtime hset_borrowed_many fast path); the
+        // earlier expiry-fusion pass guarded store.hset, which HSET does NOT route through.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let count = (pairs.len() / 2) as u64;
