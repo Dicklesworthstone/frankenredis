@@ -30567,6 +30567,21 @@ impl Runtime {
         if eq_ascii_token(command, b"REPLICAOF") || eq_ascii_token(command, b"SLAVEOF") {
             return Ok(self.handle_replicaof_command(argv));
         }
+        // (frankenredis-execslaveof, same class) CONFIG and ACL carry server-side
+        // side effects (CONFIG SET mutates the config; ACL SETUSER/DELUSER mutate
+        // the user registry) applied only by their special handlers on the normal
+        // path. A queued CONFIG SET / ACL SETUSER inside a transaction reached this
+        // function directly and returned a plausible reply via the generic
+        // dispatcher WITHOUT applying the mutation (maxmemory unchanged, user never
+        // created) — verified divergent from redis 7.2.4. Route them to their real
+        // handlers (server-level, never db-namespaced), mirroring upstream
+        // execCommand -> call() -> {config,acl}Command.
+        if eq_ascii_token(command, b"CONFIG") {
+            return Ok(self.handle_config_command(argv));
+        }
+        if eq_ascii_token(command, b"ACL") {
+            return Ok(self.handle_acl_command(argv, now_ms));
+        }
         // (frankenredis-execpubsub) The (P)SUBSCRIBE / (P)UNSUBSCRIBE family are
         // runtime-special: the normal path intercepts them in execute_frame and
         // routes to these handlers, which mutate the server pubsub registry. A

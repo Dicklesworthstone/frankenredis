@@ -9670,3 +9670,18 @@ side-effecting case). VALIDATED (fr-fix binary, built clean 9m20s):
 **fr now completes redis-Sentinel-orchestrated failover — closes the highest-value functional bug of the session and the
 last HA-interop gap. fr's Redis-7.2.4 drop-in fidelity now includes Sentinel failover, atop monitoring+replication(bidir+
 partial-resync)+MIGRATE(bidir)+persistence(RDB+AOF)+all correctness surfaces + perf(parity-or-faster)+robustness(188).**
+
+### 2026-07-03 SHIPPED (FIX: CONFIG SET now applies inside MULTI/EXEC) + SURFACE (ACL SETUSER residual) — CrimsonHawk
+Audited the EXEC-bypass bug class (same as the shipped REPLICAOF/SLAVEOF failover fix b22c2c110): side-effecting
+RuntimeSpecialCommands that lose their effect when queued in MULTI/EXEC. Found TWO more divergent from redis 7.2.4:
+CONFIG SET (fr left maxmemory unchanged) and ACL SETUSER (fr never created the user). Added routing for both to
+execute_db_scoped_command (:30576 CONFIG->handle_config_command, :30582 ACL->handle_acl_command), same pattern.
+**SHIPPED + VALIDATED: CONFIG SET inside MULTI/EXEC now APPLIES** — `MULTI; CONFIG SET maxmemory 123456789; EXEC` ->
+maxmemory=123456789 (matches redis; was: unchanged/0). Regression clean: regular MULTI/EXEC reply byte-identical
+(OK,QUEUED,QUEUED,OK,2), standalone CONFIG SET works, CONFIG GET-in-MULTI reads correctly.
+**RESIDUAL (surfaced, NOT fixed by routing): ACL SETUSER inside MULTI/EXEC is STILL a no-op** even routed to
+handle_acl_command — so handle_acl_command's SETUSER persistence is itself EXEC-context-dependent (the user-registry
+mutation doesn't stick when dispatched from the exec loop; likely a post-dispatch propagation/apply step that EXEC's
+execute_db_scoped_command path skips). This is a SEPARATE deeper bug from the dispatch routing (CONFIG's handler persists
+fine; ACL's does not). Needs handle_acl_command EXEC-context investigation. Lower-severity than CONFIG (ACL provisioning
+in a txn is rarer). fr Sentinel-failover + CONFIG-in-MULTI now correct; ACL-in-MULTI residual open.
