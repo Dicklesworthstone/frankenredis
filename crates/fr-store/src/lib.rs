@@ -922,6 +922,54 @@ impl FullZSetOrder {
         }
     }
 
+    /// (CrimsonHawk) Remove and return the `n` lowest entries in ASCENDING order.
+    /// For the Compact(Vec) encoding this is a SINGLE `drain(0..n)` (one O(len)
+    /// tail-shift) instead of `n`× `remove(0)` — the O(count·n) that made
+    /// ZPOPMIN/ZPOPMAX COUNT + ZMPOP + ZREMRANGEBYRANK on a 129..2048-member zset
+    /// quadratic. Order + membership are byte-identical to `n`× `first()`+`remove`.
+    fn drain_first_n(&mut self, n: usize) -> Vec<ScoreMember> {
+        match self {
+            Self::Compact(keys) => {
+                let n = n.min(keys.len());
+                keys.drain(0..n).collect()
+            }
+            Self::Tree(keys) => {
+                let mut out = Vec::with_capacity(n.min(keys.len()));
+                for _ in 0..n {
+                    match keys.pop_first() {
+                        Some((sm, ())) => out.push(sm),
+                        None => break,
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// (CrimsonHawk) Remove and return the `n` highest entries in DESCENDING order
+    /// (matching `n`× `last()`+`remove`, i.e. the ZPOPMAX/`pop_max` order).
+    fn drain_last_n(&mut self, n: usize) -> Vec<ScoreMember> {
+        match self {
+            Self::Compact(keys) => {
+                let len = keys.len();
+                let n = n.min(len);
+                let mut out: Vec<ScoreMember> = keys.drain(len - n..).collect();
+                out.reverse();
+                out
+            }
+            Self::Tree(keys) => {
+                let mut out = Vec::with_capacity(n.min(keys.len()));
+                for _ in 0..n {
+                    match keys.pop_last() {
+                        Some((sm, ())) => out.push(sm),
+                        None => break,
+                    }
+                }
+                out
+            }
+        }
+    }
+
     fn first(&self) -> Option<&ScoreMember> {
         match self {
             Self::Compact(keys) => keys.first(),
@@ -1229,6 +1277,40 @@ impl FullSortedSet {
             }
         }
         None
+    }
+
+    /// (CrimsonHawk) Bulk `pop_min` × count: drain the `count` lowest from `ordered`
+    /// in ONE pass (O(len) tail-shift for Compact vs the old O(count·len) of `count`×
+    /// `remove(0)`), then remove each from the rank tree + dict. Byte-identical to a
+    /// `count`× `pop_min()` loop: same members in the same ascending order, same
+    /// residual `ordered`/`dict`/`rank_tree` (the dict `swap_remove`s happen in the
+    /// same ascending order, so the dict ends in the same state). `ordered` only ever
+    /// holds `Actual` members (Min/Max are transient range-query sentinels), so
+    /// `into_actual()` always yields `Some`; a defensive `None` is skipped as before.
+    fn pop_min_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let drained = self.ordered.drain_first_n(count);
+        self.collect_drained(drained)
+    }
+
+    /// (CrimsonHawk) Bulk `pop_max` × count (highest first). See `pop_min_n`.
+    fn pop_max_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let drained = self.ordered.drain_last_n(count);
+        self.collect_drained(drained)
+    }
+
+    fn collect_drained(&mut self, drained: Vec<ScoreMember>) -> Vec<(Vec<u8>, f64)> {
+        let mut out = Vec::with_capacity(drained.len());
+        for sm in drained {
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
+            if let Some(member) = sm.member.into_actual() {
+                let score = sm.score;
+                self.dict.swap_remove(member.as_slice());
+                out.push((member, score));
+            }
+        }
+        out
     }
 
     /// Ensure the order-statistic index exists, building it from `ordered`
@@ -1882,6 +1964,43 @@ impl SortedSet {
         match &mut self.inner {
             SortedSetInner::Packed(p) => p.pop_max(),
             SortedSetInner::Full(f) => f.pop_max(),
+        }
+    }
+
+    /// (CrimsonHawk) Bulk pop of the `count` lowest members (ascending). The Full
+    /// encoding drains in one pass (O(len) not O(count·len)); the Packed encoding
+    /// (bounded by zset-max-listpack-entries) keeps the simple per-pop loop. Byte-
+    /// identical to `count`× `pop_min()`.
+    fn pop_min_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => {
+                let mut out = Vec::new();
+                for _ in 0..count {
+                    match p.pop_min() {
+                        Some(pair) => out.push(pair),
+                        None => break,
+                    }
+                }
+                out
+            }
+            SortedSetInner::Full(f) => f.pop_min_n(count),
+        }
+    }
+
+    /// (CrimsonHawk) Bulk pop of the `count` highest members (descending).
+    fn pop_max_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => {
+                let mut out = Vec::new();
+                for _ in 0..count {
+                    match p.pop_max() {
+                        Some(pair) => out.push(pair),
+                        None => break,
+                    }
+                }
+                out
+            }
+            SortedSetInner::Full(f) => f.pop_max_n(count),
         }
     }
 
@@ -15828,13 +15947,9 @@ impl Store {
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        let mut result = Vec::new();
-        for _ in 0..count {
-            match zs.pop_min() {
-                Some(pair) => result.push(pair),
-                None => break,
-            }
-        }
+        // (CrimsonHawk) Bulk drain the `count` lowest in one pass — byte-identical to
+        // the old `count`× `pop_min()` loop but O(len) not O(count·len) on Compact zsets.
+        let result = zs.pop_min_n(count);
         let is_empty = zs.is_empty();
         if !result.is_empty() {
             // (frankenredis-zpopcountdirty) Each popped member is a keyspace
@@ -15880,13 +15995,8 @@ impl Store {
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        let mut result = Vec::new();
-        for _ in 0..count {
-            match zs.pop_max() {
-                Some(pair) => result.push(pair),
-                None => break,
-            }
-        }
+        // (CrimsonHawk) Bulk drain the `count` highest in one pass — see zpopmin_count.
+        let result = zs.pop_max_n(count);
         let is_empty = zs.is_empty();
         if !result.is_empty() {
             // (frankenredis-zpopcountdirty) See zpopmin_count: bump dirty by the
