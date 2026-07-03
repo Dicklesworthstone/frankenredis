@@ -29,9 +29,11 @@
 //! Step 1 = this self-contained, exhaustively-tested primitive (NOT yet wired
 //! into `Store`). Step 2 = swap it in for `entries`, route SCAN through
 //! [`KeyDict::scan`] and RANDOMKEY through [`KeyDict::random_sample`], and delete
-//! the side indices. Grow-only for now (Redis also shrinks; a later step can add
-//! it — the reverse-binary cursor handles size *changes*, and grow-only is the
-//! conservative subset that never drops a present-throughout key).
+//! the side indices. Grows at load factor 1 and shrinks under ~10% fill
+//! ([`maybe_shrink`](KeyDict::maybe_shrink), Redis's HASHTABLE_MIN_FILL policy) so a
+//! keyspace that spikes large then sheds its keys returns the bucket memory — the
+//! reverse-binary cursor keeps its no-missed-key guarantee across both grow and
+//! shrink (verified by the scan-across-growth and scan-across-shrink tests).
 //!
 //! `#![forbid(unsafe_code)]` holds: chaining uses arena indices, not raw links.
 
@@ -267,12 +269,39 @@ impl<V> KeyDict<V> {
                 }
                 self.free.push(idx);
                 self.count -= 1;
+                self.maybe_shrink();
                 return Some(removed.value);
             }
             prev = cur;
             cur = next;
         }
         None
+    }
+
+    /// Halve the bucket table (repeatedly, to the smallest power-of-two that keeps
+    /// the load factor >= ~0.1) once removals leave it under ~10% full — the mirror
+    /// of the load-factor-1 doubling in [`insert`], and the same HASHTABLE_MIN_FILL
+    /// policy Redis's `dictShrinkIfNeeded` uses. Without this a keyspace that spiked
+    /// large and then shed most of its keys would keep the whole grown bucket array
+    /// forever (the "grow-only" gap called out in the module header). The 10%-shrink
+    /// / 100%-grow watermarks leave a wide stable band [0.1, 1.0], so alternating
+    /// insert/remove at a boundary cannot thrash. Shrinking is a plain rehash into a
+    /// smaller power-of-two table, so the reverse-binary [`scan`](Self::scan) cursor
+    /// keeps its no-missed-key guarantee across the size change exactly as it does
+    /// across growth (a stale larger cursor masked by the new smaller mask re-visits
+    /// the merged bucket — a permitted duplicate — and never skips).
+    fn maybe_shrink(&mut self) {
+        if self.buckets.len() <= Self::INITIAL_BUCKETS {
+            return;
+        }
+        // fill < 10% (count*10 < buckets); target = smallest pow2 that fits `count`.
+        if self.count.saturating_mul(10) >= self.buckets.len() {
+            return;
+        }
+        let target = Self::bucket_count_for_capacity(self.count);
+        if target < self.buckets.len() {
+            self.resize_buckets(target);
+        }
     }
 
     /// Double the bucket array and rehash every node into its new home. Power-of-
@@ -291,7 +320,10 @@ impl<V> KeyDict<V> {
 
     fn resize_buckets(&mut self, new_len: usize) {
         debug_assert!(new_len.is_power_of_two());
-        if new_len <= self.buckets.len() {
+        // Rehashes every live node into a fresh power-of-two table; works for both
+        // growth (grow / reserve) and shrink (maybe_shrink) — `hash & new_mask` is
+        // correct for a larger or smaller mask alike. Only a true no-op is skipped.
+        if new_len == self.buckets.len() {
             return;
         }
         let new_mask = (new_len as u64) - 1;
@@ -727,6 +759,112 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
         }
+    }
+
+    #[test]
+    fn scan_never_misses_a_present_throughout_key_across_shrink() {
+        // The dictScan guarantee must also hold when the table SHRINKS mid-scan:
+        // start large, delete most keys during the scan (forcing repeated halvings
+        // via maybe_shrink), and assert every key present for the WHOLE scan is
+        // still returned at least once. A "keep" set is never deleted; everything
+        // else is shed as the scan proceeds.
+        let mut d: KeyDict<u32> = KeyDict::new();
+        for i in 0..4000u32 {
+            d.insert(format!("base{i}").into_bytes().into_boxed_slice(), i);
+        }
+        let start_buckets = d.bucket_count();
+        // keep = present-throughout; never deleted.
+        let keep: std::collections::HashSet<Vec<u8>> = (0..200u32)
+            .map(|i| format!("base{i}").into_bytes())
+            .collect();
+        // deletable pool (base200..base3999), removed a chunk per step.
+        let mut deletable: Vec<u32> = (200..4000u32).collect();
+        let mut rng = Lcg(0x51ed_2718_dead_c0de);
+        // shuffle the deletable order (Fisher-Yates via the Lcg).
+        for i in (1..deletable.len()).rev() {
+            let j = (rng.next() % (i as u64 + 1)) as usize;
+            deletable.swap(i, j);
+        }
+        let mut di = 0usize;
+        let mut returned: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        let mut step = 0u32;
+        loop {
+            cursor = d.scan(cursor, 7, |key, _| {
+                returned.insert(key.to_vec());
+            });
+            // Shed ~120 deletable keys per step so the table drops from 4000 to 200
+            // over the scan, tripping several shrinks.
+            for _ in 0..120 {
+                if di < deletable.len() {
+                    let victim = format!("base{}", deletable[di]).into_bytes();
+                    d.remove(&victim);
+                    di += 1;
+                }
+            }
+            step += 1;
+            if cursor == 0 {
+                break;
+            }
+            assert!(step < 1_000_000, "scan did not terminate");
+        }
+        assert!(
+            d.bucket_count() < start_buckets,
+            "test must actually trigger a shrink (buckets {} -> {})",
+            start_buckets,
+            d.bucket_count()
+        );
+        for key in &keep {
+            assert!(
+                returned.contains(key),
+                "present-throughout key {:?} was MISSED by scan across shrink",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
+    fn remove_shrinks_table_and_preserves_entries_and_scan() {
+        // maybe_shrink: filling then emptying returns bucket memory (buckets shrink
+        // back toward INITIAL), all survivors stay reachable, and a full static scan
+        // still returns exactly the survivor set.
+        let mut d: KeyDict<u32> = KeyDict::new();
+        for i in 0..2000u32 {
+            d.insert(format!("k{i}").into_bytes().into_boxed_slice(), i);
+        }
+        let grown = d.bucket_count();
+        assert!(grown >= 2000, "should have grown to hold 2000");
+        // Delete all but 5 -> fill collapses well under 10% -> shrinks fire.
+        for i in 5..2000u32 {
+            assert_eq!(d.remove(format!("k{i}").into_bytes().as_slice()), Some(i));
+        }
+        assert_eq!(d.len(), 5);
+        assert!(
+            d.bucket_count() < grown,
+            "table should have shrunk ({grown} -> {})",
+            d.bucket_count()
+        );
+        // Survivors intact + reachable.
+        for i in 0..5u32 {
+            assert_eq!(d.get(format!("k{i}").into_bytes().as_slice()), Some(&i));
+        }
+        // Full scan returns exactly the 5 survivors.
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        loop {
+            cursor = d.scan(cursor, 4, |key, _| {
+                seen.insert(key.to_vec());
+            });
+            if cursor == 0 {
+                break;
+            }
+        }
+        let want: std::collections::HashSet<Vec<u8>> =
+            (0..5u32).map(|i| format!("k{i}").into_bytes()).collect();
+        assert_eq!(
+            seen, want,
+            "post-shrink scan must return exactly the survivors"
+        );
     }
 
     #[test]
