@@ -9962,3 +9962,12 @@ pattern (script_read_only) — the script-OOM fix can MIRROR it (add store.scrip
 site, checked next to the ACL/read-only checks at fr-command:~2320 for denyoom inner calls). Remaining subtlety = computing
 "over maxmemory (post-eviction)" at script entry (eviction-policy + not-counted-bytes handling from the maxmemory subsystem);
 de-risked but still a focused effort. Read-only-script restricted context = verified drop-in.
+
+### 2026-07-03 SURFACE (SINTERCARD/ZINTERCARD + LIMIT — 15 checks, 0 DIFF) — CrimsonHawk
+Differentiated SINTERCARD/ZINTERCARD (redis-7.0, numkeys + LIMIT capping, edge-prone) fr-v8 vs redis 7.2.4: SINTERCARD 2/3-set
+intersection cardinality (4/2), LIMIT n caps the count (LIMIT 2 -> 2, LIMIT 1 -> 1), LIMIT 0 = unlimited (4), single set
+= full card (6), missing key -> 0; ZINTERCARD 2 z1 z2 -> 2, LIMIT 1 -> 1, LIMIT 0 -> 2, with nokey -> 0. Error surface:
+LIMIT -1 -> "ERR LIMIT can't be negative", numkeys 0 -> "ERR numkeys should be greater than 0", numkeys>args -> "ERR Number
+of keys can't be greater than number of args", bad option -> "ERR syntax error". **RESULT: 15/15 byte-exact, 0 DIFF.** fr's
+intersection-cardinality + LIMIT early-stop + numkeys validation match redis 7.2.4. (METHOD NOTE: fr loads /tmp/dump.rdb by
+default — an initial run hit stale WRONGTYPE keys; FLUSHALL + rm dump.rdb before differentials with common key names.)
