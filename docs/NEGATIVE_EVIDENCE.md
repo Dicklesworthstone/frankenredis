@@ -9040,3 +9040,21 @@ lookup (drop_if_expired 2 lookups + contains_key + get_mut) of the SAME key — 
 RISKY: must replicate spop's exact next_rand() sequence (idx per pop + conditional lfu_rand), digest/touch/empty-key-DEL
 + notification, across a held-entry borrow (next_rand borrows self => needs pre-generated rands); memory 934ax flags SPOP
 COUNT per-call structure as load-bearing. Needs a careful byte-exact RNG-sequence validation before shipping.
+
+### 2026-07-03 SURFACE (post-10-wins broad sweep: remaining losses = dispatch (unsafe) or zset pop/trim family O(count*n) bounded+multi-layer) — CrimsonHawk
+Data-driven extended2 sweep on current HEAD (after SRANDMEMBER/HRANDFIELD/hash-once/RESTORE-family ships). fr WINS
+broadly (zrangestore 3.19x, linsert 3.24x, lrem 2.15x, lpos 2.24x, spop_n 1.33x [my pop_index work], zincrby/zscore/
+zrank/strlen/copy_list >1x). LOSSES classified:
+- DISPATCH-BOUND (unsafe main.rs, agent-mail down): zrank_ws 0.613 (profiled: process_buffered_frames 24%, needs a
+  borrowed fast path), setbit 0.81, getex 0.846, incrbyfloat 0.818, hincrbyfloat 0.857, bitop_and 0.687 (executor is
+  ALREADY SWAR+no-clone — the loss is small-string dispatch, not the AND loop).
+- ZSET POP/TRIM FAMILY O(count*n) for Compact(Vec) zsets (BOUNDED <=2048): zremrangebyrank 0.642, zpopmin_n 0.746,
+  zmpop 0.826. zpopmin_count/zpopmax_count loop pop_min() (each ordered.remove -> Vec::remove(0), O(n) shift) = O(count*n);
+  zremrangebyrank loops zs.remove(m). CLEAN-FIX = a bulk front/rank-range drain on FullZSetOrder (Compact: drain(0..count)
+  O(n) once; Tree: pop_first loop, already O(count log n)) + dict swap_remove + rank_tree remove, returning the pairs.
+  NOT a one-liner: touches FullZSetOrder/FullSortedSet/PackedZSet/SortedSet, must replicate pop_min's non-actual-
+  ScoreMember skip (the `while let ... if let Some=into_actual() else continue`) and the digest_mutations/dirty counts,
+  byte-exact. Bounded reward (Compact cap 2048; Tree zsets already O(count log n)) + multi-layer risk = deserves a focused
+  pass, not a rushed change. ONE primitive fixes ZPOPMIN/ZPOPMAX-count + ZMPOP + ZREMRANGEBYRANK. **The clean one-liner
+  executor levers are exhausted this session; the real remaining perf frontier is (a) main.rs dispatch (ohsk5, blocked)
+  and (b) this bounded zset-pop/trim bulk-removal primitive.**
