@@ -10002,3 +10002,13 @@ LISTPACK at both peak and final (effective hash-max-listpack-entries > 200 here,
 LISTPACK (list-max-listpack-size is size-based -2, not a 128 count) -- fr MATCHES redis's actual thresholds exactly (that's
 the point: whatever redis's configured conversion threshold, fr converts identically). Encoding conversion thresholds +
 no-shrink invariant (zset/set/hash stay in the big encoding after shrinking; lists adapt) all byte-exact vs redis 7.2.4.
+
+### 2026-07-03 SURFACE (HyperLogLog PFADD/PFCOUNT/PFMERGE — byte-identical implementation, 13 checks 0 DIFF) — CrimsonHawk
+Differentiated HLL (complex probabilistic: 16384 registers, sparse/dense encoding, LogLog-Beta cardinality estimation) fr-v8
+vs redis 7.2.4, 13 checks. **RESULT: 0 DIFF, byte-identical.** Cardinality estimates match TO THE EXACT DIGIT: PFCOUNT of
+20000 distinct = 19603 on BOTH (not just ~approx — identical estimate), 5-distinct = 5, union-of-two = 8, PFMERGE result = 8,
+small+big union = 19612. Internal representation byte-identical: STRLEN sparse = 33 bytes (5-elem HLL), dense = 12304 bytes
+(20000-elem), DEBUG DIGEST-VALUE matches; OBJECT ENCODING=raw, TYPE=string. PFADD-existing -> 0 (no register change),
+PFCOUNT missing -> 0. **fr's HLL registers, sparse<->dense encoding, PFADD hashing, LogLog-Beta estimate, and PFMERGE union
+are all byte-identical to redis 7.2.4 -> HLL is fully cross-compatible (DUMP/RESTORE + PFCOUNT interop, an HLL built on redis
+gives the same PFCOUNT on fr).** HyperLogLog family verified as a drop-in.
