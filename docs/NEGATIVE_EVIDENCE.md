@@ -10315,3 +10315,38 @@ enum-shrink, ~195 sites in the EVAL interpreter, ~5-8% compute-heavy — needs a
 cycle + full Lua differential harness) or structural (HSCAN/SSCAN chaining dictScan
 [e3y73, guarded by scan_deletion_guarantee_gate.py], list ChunkedList 99fwc, stream
 serialize reconstruct-vs-copy, keyspace/collection RAM 2x). Rollback: n/a (reverted).
+
+### 2026-07-03 SURFACE (BITCOUNT/BITPOS kernels optimal; FRONTIER HANDOFF — remaining levers are EV-gated structural/risky) — CrimsonHawk
+
+Checked BITCOUNT/BITPOS as a fresh alien-graveyard "optimal-kernel" candidate:
+`Store::popcount_bytes` and `bitpos_full_bytes` already process 8 bytes/iter via
+`u64::from_ne_bytes(..).count_ones()` (lowers to POPCNT) with a byte remainder —
+equivalent to redis's word-at-a-time `redisPopcount`. No win. Consistent with every
+other compute kernel this arc (LCS prefix-popcount, HLL SIMD, set-algebra
+smallest-base, zset resolve-once) all already optimal.
+
+**FLEET HANDOFF — the clean+safe+measurable per-crate frontier is CLOSED (measured, this
+arc). Remaining levers, ranked, with their blocking preconditions (all fail the
+alien-graveyard EV>=2.0 gate for a SAFE single-session ship *today* due to Effort +
+Friction, NOT because they lack value):**
+
+1. **KeyDict wiring (keyspace RAM ~2-4.5x + fixes SCAN family properly)** — HIGHEST value.
+   `keyspace_dict::KeyDict` (chaining dict, reverse-binary cursor, owns each key once as
+   Box<[u8]>) is WRITTEN + exhaustively tested but Step-2-UNWIRED. Wiring it replaces
+   entries HashMap + ordered_keys BTreeSet + random_key_slots → cuts the dominant RAM gap
+   AND gives O(1)-mem deletion-safe SCAN. Precondition: fr-store hot-path structural change,
+   multi-day, CoralOx-domain, needs reservations UP. (beads uhthd/p8dd2)
+2. **HSCAN/SSCAN deletion guarantee (e3y73)** — apply the same chaining-dictScan idea to
+   Hash/Set (they reorder on swap-remove). Guarded by scan_deletion_guarantee_gate.py
+   (flips green when done). Structural; naturally bundles with #1.
+3. **Lua LuaValue enum-shrink (~5-8% compute-heavy EVAL)** — Str(Vec<u8>)->Rc<[u8]>, enum
+   32->24B, ~195 fr-command sites. Per-crate, has a 214-test Lua suite + oracle harness.
+   Precondition: reservations UP (risky 195-site interpreter change; agent-mail DB is
+   currently corrupt so fr-command can't be safely reserved) + dedicated cycle. NOT rushed.
+4. **list ChunkedList packed-node rewrite (99fwc)** and **stream serialize
+   reconstruct-vs-copy** — structural storage-format changes; ChunkedList already had a
+   naive fix measure SLOWER (lojpt). Low priority.
+
+Micro-opt veins are measured-exhausted (guard/expiry-fusion 0.00%, cold paths bypass
+drop_if_expired, kernels optimal). Further wins REQUIRE #1-#3 above with reservations up.
+Rollback: n/a (no code change).
