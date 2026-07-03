@@ -8970,3 +8970,16 @@ the decode's strictly-increasing check, so sort/dedup were provable no-ops). Mea
 dhash 1.93x, dzset 1.95x, intset(<=512) big-win; REMAINING LOSSES: dlist 0.358x (architectural ChunkedList, off-limits),
 dset/>512-all-int 0.808-0.87x (RDB_TYPE_SET GenericSet::insert arm — next lever, same collect+dedup+bulk pattern but needs
 intset-vs-string encoding derivation). RESTORE decode vein: string LZF/hash/zset/intset all shipped this session.**
+
+### 2026-07-03 SHIP (hash-once in CompactFieldMap insert, 2d7af1247) — CrimsonHawk
+Profiling RDB_TYPE_SET RESTORE (the last RESTORE loss) showed CompactFieldMap lookup_slot 13% + insert 12.6% + hash 9.6%
+— and the DOUBLE-HASH: insert/insert_borrowed hashed the field once in the existence probe (lookup_slot) then AGAIN to
+place the new slot. Compute once + lookup_slot_prehashed(field,h) reuse. Broadens well beyond RESTORE: CompactFieldMap
+backs every >128-entry hash AND set (via CompactStrSet), so this cuts a member-hash from every new-field SADD/HSET,
+set-algebra *STORE dests, and RESTORE-set. Measured (instructions:u, 3/3): SADD build -2.35%, HSET build -1.02%; SADD
+build 0.844x vs redis (residual = structural compact-arena-set vs redis pointer-dict build, separate item). Byte-exact:
+DIGEST-VALUE+ENCODING match redis across 6 randomized SADD/HSET/SREM/HDEL trials n=5/400/1500. **NOTE: the RDB_TYPE_SET
+bulk-build lever I evaluated is NOT worth it — from_index_set already MOVES the set in for >512 (BlackThrush), and the
+build cost is inherent hash+slot-placement per member (both fr and redis pay); a bulk build only swaps CompactStrSet probe
+for HashSet probe = marginal. The real broad lever was the double-hash, now fixed.** DUMP int-string encode (line ~22268
+value.to_string) is single-int-per-DUMP = negligible.
