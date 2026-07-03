@@ -10250,3 +10250,26 @@ VERDICT — largely STRUCTURAL, not a clean per-crate lever:
 Non-stream types are all parity-or-faster (string/set/hash/zset). No clean lever;
 DUMP-perf vein now covered for all 6 types (list+hash shipped earlier; stream =
 structural). Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (blocking commands BLPOP/BRPOP/BLMOVE/BLMPOP/BZPOPMIN/BZMPOP/WAIT — 21 checks incl FIFO wakeup + MULTI-nonblock, 0 DIFF) — CrimsonHawk
+
+Fresh stateful surface (analogous to the SCAN cursor-semantics vein). All byte-exact
+vs fresh redis 7.2.4:
+- Immediate pop when data present (BLPOP/BRPOPLPUSH/BLMOVE/BZPOPMIN/BZPOPMAX/BLMPOP/
+  BZMPOP), multi-key priority (first key with data), fractional timeout.
+- Timeout errors: negative timeout, non-numeric timeout, BLMPOP numkeys=0 — exact wording.
+- Timeout->nil (BLPOP nonexistent 0.2s returns *-1 after waiting; confirmed dt>=0.15s).
+- **FIFO wakeup ordering**: two clients block on the same key (A first, B second); an
+  RPUSH of "first" then "second" wakes A with "first" and B with "second" — verified
+  the actual two-thread blocked/woken path, byte-identical on fr and redis.
+- **MULTI/EXEC non-blocking**: BLPOP/BZPOPMIN queued in MULTI return nil immediately at
+  EXEC (never block) — exact.
+- WAIT 0 100 -> :0 immediate; wrong-type on BLPOP/BZPOPMIN -> exact WRONGTYPE.
+
+CONCLUSION: the reachable BEHAVIORAL surface is comprehensively saturated across cycles
+— SCAN family (keyspace+ZSCAN fixed; HSCAN/SSCAN structural, e3y73), keyspace
+notifications, wrong-type, expiration, BITFIELD, streams, blocking cmds, MULTI/EXEC —
+all byte-exact vs fresh 7.2.4. Remaining gaps are ALL structural: HSCAN/SSCAN cursor
+(reorder-on-delete → needs chaining dictScan/KeyDict, uhthd), list ChunkedList (99fwc),
+stream serialize (reconstruct-vs-copy). Fleet focus for further wins = those structural
+levers. Rollback: n/a (no code change).
