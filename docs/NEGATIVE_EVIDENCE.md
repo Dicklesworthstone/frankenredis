@@ -10566,3 +10566,21 @@ Confirms RESP3 clients (which dispatch on the type byte) get the correct contain
 across the command surface. Combined with the earlier RESP2/RESP3 push-framing (pub/sub)
 + map/set/double checks, the RESP3 protocol surface is comprehensively verified. No
 lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (string-size-limit + numeric-overflow error handling byte-exact vs redis 7.2.4 — 27 edges) — CrimsonHawk
+
+Overflow/limit error-path differential (27 edges): 0 diffs. Byte-exact error handling:
+- proto-max-bulk-len: SETRANGE offset >512MB -> "ERR string exceeds maximum allowed size
+  (proto-max-bulk-len)" REJECTED BEFORE ALLOCATING (verified STRLEN=0, no OOM), huge/
+  negative offset errors match.
+- SETBIT bit offset 2^32 / negative / bit!=0/1 -> exact errors.
+- i64 overflow: INCR at i64::MAX, DECR at i64::MIN, INCRBY/DECRBY overflow, INCR on
+  float/non-int -> "ERR ... not an integer or out of range" / overflow exact.
+- float: INCRBYFLOAT 3e400/nan, HINCRBYFLOAT 3e400 -> "ERR ... NaN or Infinity" exact.
+- HINCRBY overflow, ZINCRBY inf then +(-inf) -> "ERR ... NaN" exact.
+- SETEX 0/-1, EXPIRE/PEXPIRE/SET EX huge (ms-overflow), GETEX EXAT overflow -> exact
+  "invalid expire" errors.
+Confirms fr's overflow/size-limit rejection matches redis 7.2.4 (incl. the important
+reject-before-allocate for proto-max-bulk-len, which prevents an OOM DoS). METHOD NOTE:
+probe only the ERROR paths (offset > limit); at-limit values genuinely allocate 512MB
+and wedge a loaded box. No lever. Rollback: n/a.
