@@ -9341,3 +9341,17 @@ definitively closes the last in-domain fixable perf lever as unsafe-for-low-EV. 
 (~3-5% aggregate, low-ROI/high-risk) and the executor-competitive-everywhere sweep, the perf campaign is COMPLETE: fr is at
 parity-or-faster vs Redis 7.2.4 across the surface; no safe high-value lever remains. Remaining work is strictly the
 coordinated/structural items (ohsk5 dedicated cycle if prioritized; set/zset member-dup RAM = CoralOx).**
+
+### 2026-07-03 SURFACE (mapped the actual dispatch order — a REORDER is negligible ~1%; only the full O(1) command-hash delivers ohsk5's ~3-5%) — CrimsonHawk
+Extracted the actual borrowed-dispatch arm ORDER in process_buffered_frames (main.rs:2468+) to settle "would a safe reorder
+help?". First 48 arms: PING(1-2), GET(3), WATCH/UNWATCH(4-5), keyed_pop=LPOP/RPOP(6), SET+6variants(7-14), HSET(15-17),
+MSET(18), MGET-2..8(19-25), KEYS(26), BITCOUNT-3var(27-29), BITPOS-4var(30-33), INCR/INCRBY/DECRBY(34-36), GETRANGE(37),
+ZADD(38), ... strlen(44) scard(46) ... LRANGE(66). Common-but-DEEP: INCR@34, LRANGE@66. BUT quantified the only UNAMBIGUOUS
+reorder (move INCR past the RARE bitcount/bitpos block 27-33): saves ~7 arm-checks ≈ ~7×3ns ≈ 21ns/INCR ≈ **~1% on INCR**
+(INCR executor ~1-2µs) = NEGLIGIBLE. Moving INCR/LRANGE FURTHER up displaces the equally-common SET-variants/HSET/MGET
+(14-25) = a WASH ("shuffles cost", now quantified). Each arm-check is a cheap failed strip_prefix (~3ns memcmp); the chain
+walk is only ~5-10% of a sub-ms command's cost, and a reorder recovers at most a fraction of that. **CONCLUSION: a byte-exact
+REORDER is not worth the delicate hot-path surgery (~1% on one command). Only the FULL O(1) command-hash / first-byte
+jump-table (skip ALL ~34 arms for INCR at once) delivers ohsk5's ~3-5% — confirming ohsk5 is genuinely the big all-or-nothing
+restructure, not a safe partial ship. No safe high-value perf lever remains; the perf campaign is COMPLETE (fr parity-or-
+faster across the surface; remaining = ohsk5 full restructure [dedicated cycle] + set/zset RAM [CoralOx]).**
