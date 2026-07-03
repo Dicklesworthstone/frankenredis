@@ -9812,3 +9812,12 @@ TRACKINGINFO -> correct map (flags on, redirect 0, prefixes). **RESULT: 7/7 byte
 invalidation protocol (default + BCAST + prefix-filter + push framing + trackinginfo) matches redis 7.2.4 — clients using
 RESP3 tracking (redis-py client-side cache, lettuce) get correct invalidations. Another complex stateful feature verified
 alongside consumer-groups; no divergence.
+
+### 2026-07-03 SURFACE (CLIENT TRACKING OPTIN + REDIRECT modes — 3 checks, 0 DIFF; rd96p confirmed working) — CrimsonHawk
+Completed the CLIENT TRACKING surface with the two most complex sub-modes fr HEAD vs redis 7.2.4: **OPTIN** (only keys read
+after CLIENT CACHING YES are tracked) -> non-cached-key change = NO push (correct), cached-key change = push
+`>2 invalidate [ok2]`; **REDIRECT** (invalidations sent to ANOTHER client subscribed to __redis__:invalidate) -> the
+redirected subscriber receives `>2 invalidate [rk]`. **RESULT: 3/3 byte-exact, 0 DIFF.** Confirms stale bead
+frankenredis-rd96p (TRACKING REDIRECT) is WORKING. CLIENT TRACKING now FULLY verified: default + BCAST+prefix + OPTIN +
+REDIRECT + prefix-filtering + push framing + TRACKINGINFO all byte-exact vs redis 7.2.4. Client-side caching (all modes) is
+a verified drop-in.
