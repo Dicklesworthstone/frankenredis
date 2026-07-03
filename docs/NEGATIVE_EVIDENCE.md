@@ -9276,3 +9276,22 @@ working cache).** The sole remaining per-command perf lever is the ohsk5 structu
 dispatch (main.rs, dedicated cycle + representative read-heavy workload to measure the reorder net; piecemeal reorder
 "shuffles cost" between equally-common reads/writes). Non-perf frontier = set/zset member-dup RAM ~1.38x (CoralOx). This
 session's measurement campaign is COMPLETE: every command family swept, every hypothesized safe lever falsified or shipped.
+
+### 2026-07-03 MEASURED-CORRECTION (list DUMP 0.38x is NOT "architectural" — the DUMP payload cache is ZSET-ONLY; fixable but correctness-multi-part) — CrimsonHawk
+Measure-before-assuming on the "list DUMP 0.65x is architectural (ChunkedList re-encode, unfixable)" conclusion
+(project_dump_perf_differential). Measured repeated DUMP of an UNMODIFIED 1000-elem list x200k (cache-hit test) fr vs redis
+7.2.4: fr 6031ms vs redis 2290ms = **0.380x** — fr RE-ENCODES EVERY TIME despite the dump_payload_cache. ROOT CAUSE: the
+cache is populated ONLY when `cache_compact_zset_dump` (fr-store lib.rs ~22641) — i.e. ZSETS ONLY. Lists/hashes/sets/strings
+are cache-checked at the top but NEVER populated, so lists pay the full encode_dump_quicklist2 + LZF re-encode on every
+DUMP. **So list DUMP is NOT purely architectural — it's a CACHE-COVERAGE gap, FIXABLE.** BUT the fix is correctness-multi-
+part, NOT a clean quick win: the cache is invalidated by modification_count (in-place mutations don't hit the
+insert/remove proactive-removal path — only key create/delete do), and list writes DON'T reliably bump modification_count
+(touch_write doesn't; ltrim/lrem bodies don't) because lists were never cached. Extending the cache to lists requires (1)
+add modification_count bumps to ALL ~10 list-write methods (rpush/lpush/lpop/rpop/lset/ltrim/lrem/linsert/rpoplpush/lmove)
+— else stale-DUMP -> RESTORE data corruption in MIGRATE, (2) add list_max_listpack_size to the cache validity (list DUMP
+encoding depends on it), (3) populate for lists, (4) differential-validate DUMP-after-every-mutation-type vs redis. MODERATE
+EV: helps repeated DUMP (replication/tooling/benchmarks) but the PRIMARY DUMP use (MIGRATE) is once-per-key = always a
+cache MISS = still pays the re-encode (that part IS architectural: ChunkedList not listpack-backed). Deferred as a careful
+focused task (correctness-critical list-write audit). NOTE hash/set/string DUMP already BEAT redis (2.4-2.8x) so they don't
+need caching. This is the 3rd measured-correction this session (ZADD-Compact optimal, hashtable-RAM parity, list-DUMP-
+cacheable) — measuring reclassifies "architectural/unfixable" items as fixable-with-care.
