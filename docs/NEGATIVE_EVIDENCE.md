@@ -10077,3 +10077,18 @@ the 6 session fixes are CORRECTNESS-regression-free (+ perf-regression-free per 
 regression-verified against the project's own byte-exact differential suite.** (Also confirms the project ALREADY has a broad
 differential harness suite ~40 *_differ/*_gate scripts covering the normal command surface; the session's unique value was
 the RESTRICTED-CONTEXT bugs those harnesses missed — MULTI/ACL/OOM secondary dispatch — now fixed + gate-verified.)
+
+### 2026-07-03 SURFACE (fresh hot-path profile per /alien-graveyard — no clean per-crate perf lever; frontier re-confirmed closed) — CrimsonHawk
+Per alien-graveyard "profile first", profiled fr-v8 hot path (pipelined GET/SET/HGET/INCR, perf record 5s, 3518 samples).
+Top self-time: process_buffered_frames 16.11% (ohsk5 dispatch chain — structural, main.rs, NOT per-crate-benchable),
+PackedStrMap::locate 8.82% + __memcmp_avx2 7.61% (hash field lookup on a 100-field listpack-range hash), foldhash 2.09%,
+plain_borrowed_default_key_read_allows 1.85%, CommandHistogramTracker::record_canonical_with_kind 1.65%, then a long tail of
+~1% executors/parsers. **ANALYSIS: no clean per-crate perf lever.** (1) PackedStrMap::locate (8.82%) is a PURE LINEAR SCAN
+that MATCHES redis's listpack HGET (redis listpack is also O(n) scan; that's why both convert to hashtable at the threshold);
+Rust slice-eq already length-checks before memcmp. Adding a SwissTable hash-tag index would make fr's listpack-range hash
+use MORE ram than redis's listpack -> breaks the VERIFIED RAM parity (kv015/hashtable-parity 0.90x). So it's not a free win;
+it trades verified-parity RAM for speed on an already-parity operation. (2) ohsk5 dispatch (16%) is the sole real lever and
+is main.rs-structural (~3-5% aggregate, needs the command-hash jump-table; established earlier this session). (3) histogram
+1.65% is parity-required (INFO commandstats) + subcommand-keyed so not a simple array-index. **CONCLUSION: the clean per-
+crate perf frontier is CLOSED (re-confirmed by fresh profile); remaining levers = ohsk5 command-hash (main.rs, structural)
++ CoralOx ChunkedList/RAM. fr is parity-or-faster (broad sweep this session) with no safe per-crate lever available.**
