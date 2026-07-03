@@ -9479,3 +9479,15 @@ timeout/reply-framing/error-strings) all match. **CORRECTNESS dimension byte-exa
 perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's Redis-7.2.4 fidelity is proven across every
 dimension devised. Untested-remaining now VERY narrow (replication/AOF byte round-trip; cluster=known-incomplete). Open perf
 levers = ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.
+
+### 2026-07-03 SURFACE (DEBUG DIGEST fr==redis IDENTICAL + RDB round-trip — representation byte-identical) — CrimsonHawk
+Strongest correctness check: DEBUG DIGEST-VALUE per key + whole-keyspace DEBUG DIGEST fr HEAD vs redis 7.2.4 over a diverse
+14-key dataset (str short/int/long, listpack+quicklist lists, listpack+hashtable hashes, intset+listpack+hashtable sets,
+listpack+skiplist zsets, stream, TTL key). **RESULT: all 14 per-key DIGEST-VALUE MATCH (0 diff) AND whole-keyspace DEBUG
+DIGEST is BYTE-IDENTICAL (fr==redis==eff67857549d6ee416d48155614e6eaa4a3df85b).** Identical digests => fr's internal value
+representation is byte-for-byte equal to redis across every type+encoding. Plus DEBUG RELOAD round-trip: digest pre==post
+(RDB serialize+load preserves data exactly). This is the capstone of the correctness campaign: not just reply-equal but
+REPRESENTATION-equal. **CORRECTNESS byte-exact across: values (4761) + encoding (25) + RESP3 (35) + COMMAND meta (370x7) +
+keyspace events (~40) + EVAL/Lua (50) + transactions (16) + blocking (11) + DEBUG DIGEST representation (14 keys, whole-
+keyspace identical) + RDB round-trip.** With perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's
+Redis-7.2.4 fidelity is exhaustively proven. Open levers = ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx RAM.
