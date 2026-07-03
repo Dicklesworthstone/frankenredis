@@ -10030,3 +10030,13 @@ reply = "+RESET"; MULTI cleared (EXEC after -> "ERR EXEC without MULTI"); SELECT
 SETNAME cleared (name empty); CLIENT TRACKING cleared (flags=off); RESP3 reverted to RESP2 (HELLO returns the *array form
 not the %map). fr's RESET clears transaction/watch/subscriber/tracking/name/db/protocol state exactly like redis 7.2.4.
 Connection-lifecycle command (RESET) verified as a drop-in.
+
+### 2026-07-03 SURFACE (LPOS RANK/COUNT/MAXLEN — 18 checks, 0 DIFF) — CrimsonHawk
+Differentiated LPOS (list position search; RANK direction + COUNT + MAXLEN interactions, edge-prone) fr-v8 vs redis 7.2.4,
+18 checks on RPUSH mylist a b c a b c a b c d: LPOS a -> 0; RANK 1/2 -> 0/3 (nth forward); RANK -1/-2 -> 6/3 (nth from tail);
+COUNT 0 -> [0,3,6] (all); COUNT 2 -> [0,3]; RANK -1 COUNT 0 -> [6,3,0] (tail-first ordering); RANK 2 COUNT 0 -> [3,6];
+COUNT 0 MAXLEN 3 -> [0] (limited scan); RANK -1 COUNT 2 MAXLEN 4 -> [6]; no-match -> nil; RANK 0 -> exact "ERR RANK can't be
+zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list";
+MAXLEN -1 -> "ERR MAXLEN can't be negative"; COUNT -1 -> "ERR COUNT can't be negative"; no-list -> nil. **RESULT: 18/18
+byte-exact, 0 DIFF.** fr's LPOS rank-direction search, count-limiting, maxlen scan-bounding, and error surface all match redis
+7.2.4. List command surface fully verified (LPUSH/RPUSH/LPOP/RPOP/LRANGE/LINSERT/LSET/LREM/LTRIM/LMOVE/LMPOP/LPOS + blocking).
