@@ -10273,3 +10273,24 @@ all byte-exact vs fresh 7.2.4. Remaining gaps are ALL structural: HSCAN/SSCAN cu
 (reorder-on-delete → needs chaining dictScan/KeyDict, uhthd), list ChunkedList (99fwc),
 stream serialize (reconstruct-vs-copy). Fleet focus for further wins = those structural
 levers. Rollback: n/a (no code change).
+
+### 2026-07-03 SHIPPED (scan_deletion_guarantee_gate.py) + SURFACE (full fuzz sweep ~159k ops clean, regression-verifies SCAN/ZSCAN fixes) — CrimsonHawk
+
+**Regression verification:** ran `scripts/run_fuzz_sweep.sh` (6 randomized differential
+fuzzers) vs fresh redis 7.2.4 AFTER the keyspace-SCAN (55cfc0966) + ZSCAN (db57b2734)
+fr-store fixes: random_command_differ 7×8000, random_differential_fuzz 8000,
+fuzz_untrodden_differ 5×4000, option_fuzz 9000, random_state_differ 6×3000 (state-digest),
+random_reply_differ 8×6000 = **~159k ops, 0 divergences** (command stream + keyspace
+state digest + replies all byte-exact). My two hot-path SCAN fixes introduced no
+regression; behavioral surface saturation reconfirmed.
+
+**SHIPPED durable gate `scripts/scan_deletion_guarantee_gate.py`:** guards the
+SCAN-family mid-scan-deletion guarantee (the bug class I fixed). Drives the canonical
+scan-batch-then-delete-what-you-saw loop on a multi-batch collection and asserts no
+present-throughout element is missed, with the redis 7.2.4 oracle as a live control.
+Current run: SCAN PASS + ZSCAN PASS (guarded — a regression exits 1); HSCAN/SSCAN XFAIL
+(known-structural e3y73: Hash/Set removal reorders, needs chaining dictScan/KeyDict,
+uhthd — reported but does not fail the gate). Exit 0 on main today; flip HSCAN/SSCAN to
+guarded when the structural fix lands and this gate proves it. Fills the one coverage
+hole the per-command fuzzers miss (they check per-op parity, not full-iteration
+completeness under mutation).
