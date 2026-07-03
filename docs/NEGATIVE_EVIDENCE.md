@@ -9453,3 +9453,16 @@ interpreter divergence points. **CORRECTNESS dimension verified byte-exact acros
 RESP3 shapes (35) + COMMAND metadata (370x7) + keyspace events (~40) + EVAL/Lua (50). Every static AND dynamic facet
 matches Redis 7.2.4.** Combined w/ perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's fidelity is
 comprehensively proven. Open = ohsk5 restructure (~3-5%) + CoralOx RAM.
+
+### 2026-07-03 SURFACE (MULTI/EXEC/WATCH transactions — 16 sequences, 0 DIFF incl error paths) — CrimsonHawk
+Differentiated transaction semantics fr HEAD vs redis 7.2.4 — 16 MULTI/EXEC/WATCH/DISCARD/RESET sequences on single conns,
+reply-list compared. **RESULT: 0 DIFF.** Byte-exact on the subtle cases: bad-command-during-queue -> EXEC returns EXECABORT
+(and the queue-time error string), arity error during queue -> abort, WRONGTYPE surfacing DURING exec (EXEC returns partial
+array with the error element inline, other commands still run), nested MULTI (MULTI-inside-MULTI error, transaction
+continues), EXEC/DISCARD without MULTI (their exact errors), WATCH-inside-MULTI error, SUBSCRIBE-in-MULTI (not allowed
+error), empty EXEC -> empty array, RESET clearing transaction state, UNWATCH, +QUEUED framing for every queued command. All
+identical. **CORRECTNESS dimension now byte-exact across EVERY facet tested: RESP2 values (4761) + encoding (25) + RESP3 (35)
++ COMMAND metadata (370x7) + keyspace events (~40) + EVAL/Lua (50) + transactions (16). Static, dynamic, protocol,
+introspection, scripting, and transactional semantics all match Redis 7.2.4.** With perf (parity-or-faster every subsystem)
++ robustness (188 crash probes), fr's fidelity is proven exhaustively. Untested-remaining surfaces are narrow (blocking-cmd
+wake timing, replication/AOF round-trip, cluster=known-incomplete). Open levers = ohsk5 restructure (~3-5%) + CoralOx RAM.
