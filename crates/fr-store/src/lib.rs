@@ -1462,6 +1462,28 @@ impl FullSortedSet {
         let asc = self.ensure_rank_tree().rank_of(&target);
         Some((len - 1 - asc, score))
     }
+
+    /// (frankenredis e3y73) Ascending index of the first member strictly greater
+    /// than `(score, member)`, computed BY VALUE so it is correct whether or not
+    /// `member` still exists. This is the deletion-safe ZSCAN resume point: after a
+    /// batch that last returned `(member, score)`, the next batch resumes here — a
+    /// mid-scan ZREM of an already-returned member shifts positions, but recomputing
+    /// by value lands on the true next member, so no present-throughout member is
+    /// skipped. Compact ordering answers in O(log n) via binary search (no rank-tree
+    /// build); the Tree ordering uses the order-statistic rank tree.
+    fn resume_index_after(&mut self, member: &[u8], score: f64) -> usize {
+        let target = ScoreMember::actual(score, member.to_vec());
+        if let FullZSetOrder::Compact(keys) = &self.ordered {
+            // Ok(i): target present at i -> resume past it (i+1).
+            // Err(i): target absent -> i is the insertion point = first key > target.
+            return match keys.binary_search(&target) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            };
+        }
+        let present = self.get_score(member).is_some();
+        self.ensure_rank_tree().rank_of(&target) + usize::from(present)
+    }
 }
 
 impl SortedSet {
@@ -2000,6 +2022,18 @@ impl SortedSet {
         match &mut self.inner {
             SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
             SortedSetInner::Full(f) => f.index_slice_asc_adaptive(start_idx, count),
+        }
+    }
+
+    /// (frankenredis e3y73) Deletion-safe ZSCAN resume index for the Full encoding
+    /// (the multi-batch hashtable/skiplist path). `None` for the Packed encoding,
+    /// whose ZSCAN one-shots at cursor 0 in practice; the rare case of a Packed but
+    /// oversized zset (a live `zset-max-listpack-entries` shrink below its size)
+    /// falls back to the positional cursor — same behaviour as before this fix.
+    fn zscan_resume_index_after(&mut self, member: &[u8], score: f64) -> Option<usize> {
+        match &mut self.inner {
+            SortedSetInner::Full(f) => Some(f.resume_index_after(member, score)),
+            SortedSetInner::Packed(_) => None,
         }
     }
 
@@ -4880,6 +4914,22 @@ struct DbScanResume {
     last_key: Vec<u8>,
 }
 
+/// (frankenredis e3y73) Resume point for ZSCAN. The cursor into a zset is a
+/// positional rank index, which is NOT deletion-safe: a mid-scan ZREM of an
+/// already-returned member shifts every later member down one rank, so the
+/// positional cursor steps over a member that was present for the whole scan —
+/// violating Redis's SCAN guarantee. Keyed by (zset key, cursor), this remembers
+/// the last returned (score, member); on resume the index is recomputed BY VALUE
+/// over the ordered zset (deletion-safe), exactly like `DbScanResume` does for the
+/// keyspace. Only the Full encoding uses it (Packed ZSCAN one-shots at cursor 0).
+#[derive(Debug, Clone)]
+struct ZScanResume {
+    key: Vec<u8>,
+    next_cursor: u64,
+    last_member: Vec<u8>,
+    last_score: f64,
+}
+
 #[derive(Debug, Clone)]
 struct HllRegisterCache {
     modification_count: u64,
@@ -4938,6 +4988,7 @@ pub struct Store {
     /// structural mutation) it falls back to the skip path.
     scan_cache: Vec<ScanResume>,
     db_scan_cache: Vec<DbScanResume>,
+    zscan_cache: Vec<ZScanResume>,
     /// Physical keys by DB for RANDOMKEY sampling. `ordered_keys` remains the
     /// deterministic SCAN/KEYS surface; RANDOMKEY has no ordering contract, so
     /// its per-db vector is rebuilt lazily only when a caller actually asks for
@@ -5478,6 +5529,7 @@ impl Default for Store {
             keyspace_generation: 0,
             scan_cache: Vec::new(),
             db_scan_cache: Vec::new(),
+            zscan_cache: Vec::new(),
             random_key_slots: vec![RandomKeySlotIndex::default(); DEFAULT_NUM_DATABASES],
             expiry_deadlines: HashMap::default(),
             volatile_keys: BTreeSet::new(),
@@ -10249,6 +10301,7 @@ impl Store {
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
         self.scan_cache.clear();
         self.db_scan_cache.clear();
+        self.zscan_cache.clear();
         self.volatile_keys.clear();
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
@@ -10291,6 +10344,8 @@ impl Store {
         self.scan_cache.shrink_to_fit();
         self.db_scan_cache.clear();
         self.db_scan_cache.shrink_to_fit();
+        self.zscan_cache.clear();
+        self.zscan_cache.shrink_to_fit();
         self.hll_register_cache.shrink_to_fit();
         self.clear_dump_payload_cache();
         self.dump_payload_cache.shrink_to_fit();
@@ -20813,7 +20868,24 @@ impl Store {
         };
         let zset_max_listpack_entries = self.zset_max_listpack_entries;
         let zset_max_listpack_value = self.zset_max_listpack_value;
-        match self.entries.get_mut(key) {
+        // (frankenredis e3y73) Take this ZSCAN stream's resume point (last returned
+        // member+score) so the batch below can resume BY VALUE — deletion-safe —
+        // instead of by positional rank. Matched by (key, cursor); a miss falls back
+        // to the positional cursor (prior behaviour). Extracted before borrowing
+        // `entries` so the two disjoint Store fields never alias.
+        let zscan_resume_hint: Option<(Vec<u8>, f64)> = if cursor != 0 {
+            self.zscan_cache
+                .iter()
+                .position(|c| c.next_cursor == cursor && c.key == key)
+                .map(|i| {
+                    let e = self.zscan_cache.remove(i);
+                    (e.last_member, e.last_score)
+                })
+        } else {
+            None
+        };
+        let mut zscan_pushback: Option<ZScanResume> = None;
+        let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -20844,20 +20916,36 @@ impl Store {
                         }
 
                         let batch_size = count.max(1);
+                        // (frankenredis e3y73) Resume BY VALUE when we have this
+                        // stream's last returned member: recompute the ascending
+                        // index of the first member strictly after it, which is
+                        // deletion-safe (a mid-scan ZREM shifts positions, but the
+                        // value-based index still lands on the true next member). On a
+                        // cache miss / Packed encoding, fall back to the positional
+                        // cursor. With no intervening deletion the recomputed index
+                        // equals `start`, so cursor values + result order are
+                        // byte-identical to the positional path.
+                        let resume_start = match &zscan_resume_hint {
+                            Some((m, s)) => zs.zscan_resume_index_after(m, *s).unwrap_or(start),
+                            None => start,
+                        };
                         // (frankenredis-zkkn4) Take the next `batch_size` members
-                        // via index_slice_asc, which jumps to `start` through the
-                        // order-statistic treap in O(log N + batch) when the tree
+                        // via index_slice_asc, which jumps to `resume_start` through
+                        // the order-statistic treap in O(log N + batch) when the tree
                         // is built (the common case for ranked zsets) — versus
                         // iter_asc().skip(start) = O(start), which makes a full
                         // ZSCAN O(N²/batch). The ADAPTIVE slice warms the treap
                         // once a deep enough cursor is reached on a large zset, so
-                        // a full ZSCAN of a cold zset stops being quadratic. Cursor
-                        // and result order are unchanged (treap select == skip). The
+                        // a full ZSCAN of a cold zset stops being quadratic. The
                         // examined window (== examined count) drives `pos` exactly
                         // as the old per-member loop did; only matching members are
                         // returned. (frankenredis-5l66d)
-                        let window = zs.index_slice_asc_adaptive(start, batch_size);
+                        let window = zs.index_slice_asc_adaptive(resume_start, batch_size);
                         let examined = window.len();
+                        // Last member physically examined this batch = this stream's
+                        // resume anchor for the next call (captured before the filter
+                        // consumes `window`).
+                        let last_examined = window.last().map(|(m, s)| (m.clone(), *s));
                         let result: Vec<(Vec<u8>, f64)> = match pattern {
                             Some(pat) if pat != b"*" => window
                                 .into_iter()
@@ -20867,9 +20955,19 @@ impl Store {
                             // including the empty member (redis use_pattern semantics).
                             _ => window,
                         };
-                        let pos = start + examined;
+                        let pos = resume_start + examined;
 
                         let next = if pos >= total { 0 } else { pos as u64 };
+                        if next != 0
+                            && let Some((last_member, last_score)) = last_examined
+                        {
+                            zscan_pushback = Some(ZScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                last_member,
+                                last_score,
+                            });
+                        }
                         // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
@@ -20877,7 +20975,14 @@ impl Store {
                 }
             }
             None => Ok((0, Vec::new())),
+        };
+        if let Some(pb) = zscan_pushback {
+            self.zscan_cache.push(pb);
+            if self.zscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.zscan_cache.remove(0);
+            }
         }
+        outcome
     }
 
     /// TOUCH: returns count of keys that exist and updates last access time.
@@ -35941,6 +36046,68 @@ mod tests {
 
     // (frankenredis-zkkn4) Frozen fingerprint of the full-ZSCAN sequence.
     const ZSCANRT_GOLDEN: u64 = 0xbc1a_8d4b_00ab_b681;
+
+    // (frankenredis e3y73) ZSCAN must honour Redis's SCAN guarantee: a member
+    // present for the WHOLE iteration is returned at least once, even if OTHER
+    // members are deleted mid-scan (the canonical ZSCAN + ZREM loop). Before the
+    // fix the cursor was a positional rank index, so deleting an already-returned
+    // member shifted later members down a rank and the next batch stepped over a
+    // present-throughout member. This drives that pattern and asserts nothing is
+    // missed. (Sibling of the keyspace-SCAN fix 55cfc0966.)
+    #[test]
+    fn zscan_returns_present_throughout_member_after_mid_scan_deletion() {
+        use super::Store;
+
+        let mut store = Store::new();
+        // >128 members => skiplist/hashtable (Full) encoding, so ZSCAN paginates
+        // (the listpack encoding one-shots at cursor 0 and is not affected).
+        let n = 500usize;
+        for i in 0..n {
+            store
+                .zadd(b"z", &[(i as f64, format!("m{i:04}").into_bytes())], 0)
+                .unwrap();
+        }
+
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut deleted: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        let mut batches = 0usize;
+        loop {
+            let (next, batch) = store.zscan(b"z", cursor, None, 10, 0).unwrap();
+            for (m, _) in &batch {
+                seen.insert(m.clone());
+            }
+            batches += 1;
+            // After the first batch, ZREM two members we already returned (the
+            // lowest ones) — the "scan then delete what you saw" loop.
+            if batches == 1 {
+                let mut lows: Vec<Vec<u8>> = batch.iter().map(|(m, _)| m.clone()).collect();
+                lows.sort();
+                for m in lows.into_iter().take(2) {
+                    let removed = store.zrem(b"z", &[m.as_slice()], 0).unwrap();
+                    assert_eq!(removed, 1, "victim member must exist");
+                    deleted.insert(m);
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+            assert!(batches < 1_000_000, "zscan did not terminate");
+        }
+
+        let mut missing = Vec::new();
+        for i in 0..n {
+            let m = format!("m{i:04}").into_bytes();
+            if !deleted.contains(&m) && !seen.contains(&m) {
+                missing.push(String::from_utf8_lossy(&m).into_owned());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "ZSCAN guarantee violated: present-throughout members never returned: {missing:?}"
+        );
+    }
 
     // (frankenredis-zkkn4) ZSCAN treap-resume: a full ZSCAN returns exactly the
     // zset's members in iter_asc order filtered by pattern (the old skip walk's
