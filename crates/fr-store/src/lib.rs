@@ -11349,7 +11349,12 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % m.len();
-                        Ok(m.keys().nth(idx).map(<[u8]>::to_vec))
+                        // (CrimsonHawk) O(1) get_index instead of the O(idx) keys().nth
+                        // scan — the HRANDFIELD twin of the single-SRANDMEMBER fix. On a
+                        // hashtable-range hash this is O(1) vs O(n/2) average per call.
+                        // Byte-identical: get_index(idx) yields the same insertion-order
+                        // field as keys().nth(idx).
+                        Ok(m.get_index(idx).map(|(f, _)| f.to_vec()))
                     }
                     _ => Err(StoreError::WrongType),
                 }
