@@ -9397,3 +9397,20 @@ see identical behavior. No divergence. **This extends the CORRECTNESS dimension 
 byte-exact alongside the 4761-check value differential). All quality dimensions remain comprehensively verified: perf
 (parity-or-faster every subsystem), correctness (byte-exact incl encoding transitions), robustness (crash-hardened 188
 probes). Perf frontier closed; only ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx RAM remain.**
+
+### 2026-07-03 SURFACE (RESP3 protocol differential — 35 checks, shapes byte-exact; 2 diffs both spec-compliant/env) — CrimsonHawk
+Dug RESP3 (HELLO 3) reply shapes — high-yield per feedback_differential_probe_pattern (type-specific RESP3 replies easy to
+get wrong). 35 RESP3-sensitive commands fr HEAD vs redis 7.2.4 byte-compared: HGETALL/CONFIG GET (map %), SMEMBERS/SPOP (set
+~), ZSCORE/ZADD INCR/INCRBYFLOAT (double ,), null replies (_), verbatim (=), booleans, ZPOPMIN, ZRANGE WITHSCORES, HELLO,
+etc. **RESULT: RESP3 protocol SHAPES are BYTE-EXACT (33/35 fully identical incl every map/set/double/null/verbatim marker).**
+The 2 diffs are NOT protocol bugs: (1) **HRANDFIELD/SRANDMEMBER/ZRANDMEMBER with count>=size** (return-all) — redis returns
+a DETERMINISTIC internal-iteration order (HRANDFIELD/SRANDMEMBER forward=HKEYS/SMEMBERS; ZRANDMEMBER reverse), fr SHUFFLES
+(Fisher-Yates, random each call, hrandfield_count lib.rs:11636). This is SPEC-COMPLIANT (HRANDFIELD docs: "random fields",
+order unguaranteed; redis's own tests lsort the result) AND UNFIXABLE-to-match for large collections: redis's return-all
+order is DICT/listpack-internal-order (hash-function-dependent), which fr's IndexMap insertion-order cannot reproduce — only
+small listpack collections would coincidentally align. fr returns the CORRECT SET (all distinct elements). Removing fr's
+return-all shuffle would be a tiny perf win + coincidental small-collection compat but leaves large collections divergent and
+ZRANDMEMBER's reverse quirk unmatched — NOT worth the fragility. (2) CLIENT INFO — env-specific (addr/laddr ports, fd, age)
++ cosmetic qbuf-free (fr 4070 vs redis 20448 = input-buffer sizing); not functional. **NO real RESP3 divergence. Correctness
+dimension now covers RESP2 values + encoding transitions + RESP3 shapes — all byte-exact. The random-command return-all order
+is a spec-compliant, hash-order-dependent non-bug; DON'T chase it.**
