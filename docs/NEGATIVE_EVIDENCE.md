@@ -9002,3 +9002,13 @@ remaining inefficiencies, none a clean quick win (documenting for a dedicated zs
    length (O(1) check: `len>max_entries || new_len>max_value`), but it's 10 call sites incl variadic/rebuild paths.
    Bounded 128^2 EV + invasive = deferred. **The set/hash write path IS clean (CompactFieldMap hash-once shipped); the
    zset write path's residuals are tradeoffs or need a dedicated pass. Reads (ZRANGE etc.) benefit from the current Vec.**
+
+### 2026-07-03 SHIP (O(1) get_index for single SRANDMEMBER, 7ad55fdb3) — CrimsonHawk
+Grepping for iter().nth(idx) O(idx) random-access scans (after the CompactFieldMap hash-once ship) found single
+`srandmember` still used `s.iter().nth(idx)` (O(n/2)/call) while SPOP (pop_index) and SRANDMEMBER-count (get_index
+sampling) already had O(1) — the missed spot. Swap to O(1) `s.get_index(idx)`. Measured (instructions:u, 3/3):
+SRANDMEMBER x1M on a 10000-member hashtable set 242.1B->7.2B = **-97.04%** (34x); **0.103x->0.800x vs redis 7.2.4**
+(base was 10x SLOWER than redis, pathological O(n)/call). Byte-identical: 0/500 base-vs-cand mismatch, every draw valid,
+across listpack/hashtable n=5/200/3000 (get_index==iter().nth is test-asserted). **REMAINING iter().nth(idx) sites:
+SortedSet::dict_member_at Packed-zset path (line ~1555, ZRANDMEMBER on a listpack zset) is O(idx) but BOUNDED (<=128
+listpack cap) = small; line 35311 is a test. The set random-access path is now O(1) end-to-end (SPOP/SRANDMEMBER/counts).**
