@@ -1578,7 +1578,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("databases", "16"),
     ("always-show-logo", "no"),
     ("set-proc-title", "yes"),
-    ("proc-title-template", "{title} {laddr} {server-mode}"),
+    ("proc-title-template", "{title} {listen-addr} {server-mode}"),
     // Memory
     ("maxmemory", "0"),
     ("maxmemory-policy", "noeviction"),

@@ -85,7 +85,10 @@ HOST_SPECIFIC = {
     "cluster-config-file", "cluster-announce-ip", "cluster-announce-port",
     "cluster-announce-bus-port", "cluster-announce-human-nodename",
     "cluster-announce-tls-port", "replicaof", "slaveof", "syslog-ident",
-    "proc-title-template", "locale-collate", "io-threads", "server-cpulist",
+    # proc-title-template is a FIXED default string (not host-specific) — un-excluded
+    # 2026-07-03 after fixing fr's default {laddr}->{listen-addr} to match redis 7.2.4,
+    # so the gate now guards it against regression.
+    "locale-collate", "io-threads", "server-cpulist",
     "bio-cpulist", "aof-rewrite-cpulist", "bgsave-cpulist", "socket-mark-id",
     "run-id", "maxmemory", "appendonly", "daemonize", "supervised",
     "crash-log-enabled", "crash-memcheck-enabled", "oom-score-adj",

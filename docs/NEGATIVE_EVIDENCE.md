@@ -10418,3 +10418,18 @@ commands (356) are fully byte-exact incl. key-specs/tips. CONCLUSION: the intros
 metadata surface — which cluster proxies + client libraries actually depend on (arity,
 key positions, flags, key-specs) — is CORRECT; the only divergence is a cosmetic
 order-of-subcommands with no client-observable effect. No lever. Rollback: n/a.
+
+### 2026-07-03 SHIPPED (config-default parity: proc-title-template {laddr}->{listen-addr}; config_defaults_gate now guards all 195 non-host params) — CrimsonHawk
+
+Small targeted differential (CONFIG GET * param-set + defaults vs redis 7.2.4): fr's
+195 config params exactly match redis's set (0 missing, 0 extra). One real default-VALUE
+divergence found: proc-title-template defaulted to `{title} {laddr} {server-mode}` vs
+redis's `{title} {listen-addr} {server-mode}` (`{laddr}` isn't even a redis template
+var). It slipped through because config_defaults_gate.py wrongly listed it as
+HOST_SPECIFIC (it is a FIXED string, not host-dependent). fr never renders the template
+(no setproctitle — it is stored/echoed by CONFIG GET only), so the fix is a one-constant
+byte-exact change with zero behavioral risk. FIXED (fr-runtime defaults table) + removed
+from the gate's exclude list so it is now guarded. Gate re-run: "195 CONFIG parameters
+match redis 7.2.4 compiled defaults" with proc-title-template now INCLUDED. Other
+CONFIG-GET-* value diffs (bind/port/save) are genuine host/startup artifacts (correctly
+excluded). Config-default surface now fully verified. Rollback: revert the 2 lines.
