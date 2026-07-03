@@ -10217,3 +10217,36 @@ already MEASURED SLOWER, lojpt). Ratios are noise-dominated under concurrent fle
 load — trust perf-stat-instructions over wall-clock here. No clean per-crate perf
 lever surfaced. CONCLUSION: reachable correctness surface saturated; remaining gaps
 (HSCAN/SSCAN cursor, list ChunkedList) are structural. Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (per-type DEBUG RELOAD + DUMP/RESTORE ratios vs Redis 7.2.4; stream serialize 2.5-4x = STRUCTURAL, rest parity-or-faster) — CrimsonHawk
+
+Per-type DEBUG RELOAD (save+load whole dataset, fresh 7.2.4 oracle, median of 3,
+400 keys × 2000 elems for aggregates / 1M strings):
+| type   | redis_ms | fr_ms | ratio(fr/redis) |
+|--------|---------:|------:|----------------:|
+| string |     1470 |  1400 | 0.95 (parity)   |
+| set    |      190 |   110 | 0.58 (fr faster)|
+| hash   |      360 |   230 | 0.64 (fr faster, qxfmr bulk-load)|
+| zset   |      300 |   220 | 0.73 (fr faster)|
+| stream |       80 |   330 | **4.12 (fr SLOWER)** |
+
+Isolated the stream gap to SERIALIZE (single 200k-entry stream): DUMP redis 9.1ms
+vs fr 22.7ms (~2.5x); RESTORE at parity (17.9 vs 18.6ms); DUMP payload BYTE-IDENTICAL
+(1561305B). perf of fr stream DUMP: 23% lzf_compress_with_scratch, 12.7% entry
+iterator (PackedStreamLog FlatMap→tuples), 8% memmove, ~5% per-entry Vec alloc.
+
+VERDICT — largely STRUCTURAL, not a clean per-crate lever:
+- LZF (23%) is already SWAR-optimized (g9h0v/wmh2p) and byte-exact; redis pays the
+  same LZF cost on identical output, so it is not fr's gap.
+- The real delta is that fr RECONSTRUCTS the listpack-radix-node format from
+  PackedStreamLog on every DUMP (traverse + pack_stream_nodes re-encode), whereas
+  redis stores streams AS those rax listpacks and DUMP is ~a memcpy. This is the
+  same class as list ChunkedList (99fwc): fr's in-memory format ≠ redis's on-disk
+  format. A real fix = store streams as rax-listpack nodes (architectural, big).
+- The only contained sliver is eliminating dump_stream_entries' per-entry
+  `fields.iter().collect()` Vec (200k small allocs) via a streaming/scratch-reuse
+  encoder — but that is ~1.1x on a non-hot persistence path against the byte-exact
+  RDB encoder + 7 call sites; EV too low to justify the byte-exactness risk now.
+Non-stream types are all parity-or-faster (string/set/hash/zset). No clean lever;
+DUMP-perf vein now covered for all 6 types (list+hash shipped earlier; stream =
+structural). Rollback: n/a (no code change).
