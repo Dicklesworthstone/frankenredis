@@ -8906,3 +8906,16 @@ raised cap 8K->1M. Measured (instructions:u, 3/3, vs redis 7.2.4): RESTORE strin
 list -15.51%, hash/set/zset +0.04-0.08% (noise floor). Byte-exact 8/8 DIGEST-VALUE. **Same "optimized one path, missed
 its twin" pattern as HSET (hset_borrowed_many) — when a helper exists in BOTH fr-persist and fr-store, check both.
 Residual RESTORE loss = ChunkedList/store-build for collections (architectural, 99fwc), NOT decode.**
+
+### 2026-07-03 SURFACE (next RESTORE lever: collection build uses per-element insert, not the existing bulk builder) — CrimsonHawk
+After shipping the RESTORE-string LZF fix (0772c5e28), the residual RESTORE collection losses (dzset 0.569x, diset 0.668x,
+dhash 0.763x, dset 0.815x) are in the store-BUILD, not decode. IDENTIFIED: the RDB_TYPE_ZSET/ZSET_2 RESTORE path
+(fr-store lib.rs ~22590) builds the zset via `zs.insert_with_limits(member, score, ...)` ONE MEMBER AT A TIME in a loop,
+while `SortedSet::from_unique_pairs_with_limits` (the O(n) bulk builder) already exists and IS used by the RDB-load / ZADD
+paths (lib.rs 14418/14487/14603/15520) — the same "optimized one path, missed the RESTORE twin" pattern as HSET
+(hset_borrowed_many) and lzf_decompress (5boi9). Likely same for hash/set/intset RESTORE decode arms. **NOT taken now
+(time-boxed): switching to the bulk builder is CORRECTNESS-SENSITIVE — the per-element insert_with_limits rejects
+duplicate/limit-violating members with InvalidDumpPayload (malformed-DUMP guard); from_unique_pairs ASSUMES uniqueness, so
+the bulk path must either dedup-check first or the error semantics diverge from redis's rdbLoadObject.** This is the next
+RESTORE lever: collect (member,score) into a Vec with an inline uniqueness/limit check, then one from_unique_pairs_with_limits
+build; verify byte-exact incl the duplicate-member and encoding-transition error cases before shipping.
