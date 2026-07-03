@@ -8827,3 +8827,16 @@ handler into the RESP-parse+dispatch chain. A BITFIELD-specific borrowed fast pa
 ADDING another arm to the already-crowded chain (net-marginal, possibly negative for other cmds) — not an all-safe lever. The
 real remaining lever is the structural command-hash/first-byte dispatch (ohsk5), unchanged from the entry above; still wants a
 dedicated coordinated cycle (agent-mail reservations down this session).
+
+### 2026-07-03 SHIP (expires_count guard on LIVE HSET + APPEND drop_if_expired, 319233a2a) — CrimsonHawk
+Extended the expiry-lookup-fusion vein to two HOT write paths that were still on the bare unconditional
+drop_if_expired (always 2 keyspace lookups: entries.get + expiry_ms) before an internal_entry/with_mutated_entry
+re-probe: **hset_borrowed_many** (the LIVE HSET/HMSET path — fr-runtime:9877/10045 route here) + hset_many (generic)
++ append. Guarded each with `if self.expires_count != 0`. Measured (perf stat instructions:u, pinned, best-of-3):
+HSET 4-field 15.536B->15.224B = **-2.01% cand/ctl (3/3)**, APPEND 7.626B->7.314B = **-4.09% cand/ctl (3/3)**;
+vs redis 7.2.4 HSET 0.726x, APPEND 1.080x. Byte-identical incl the expired-TTL-key case (SET PX 50; expire; HSET ->
+fresh hash) because a TTL makes expires_count!=0 so the guard runs the drop. **KEY LESSON: the HSET win was MISSED by
+the earlier expiry-fusion pass because it guarded the COLD store.hset (measured 0.00%, reverted) — HSET does NOT route
+through store.hset, it takes the borrowed fast path hset_borrowed_many. ALWAYS trace the command's LIVE store method
+(grep fr-runtime for the *_borrowed_* variant) before guarding, not the same-named plain method.** Guarded by
+scripts/hset_blast.py.
