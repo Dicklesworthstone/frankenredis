@@ -10700,3 +10700,17 @@ up real master+replica pairs for redis (control) + fr (subject):
 Gate exit 0 on main (bug xfail + trap guarded). This locks in the bug repro + the fix's
 acceptance criteria + the AOF-corruption regression guard, so the eventual coordinated
 fix can be executed and verified directly. No prod code change. Rollback: rm the script.
+
+### 2026-07-03 SURFACE (FUNCTION/FCALL byte-exact vs redis 7.2.4; documented compile-error gap RESOLVED) — CrimsonHawk
+
+FUNCTION/FCALL differential: 0 diffs. Byte-exact: FUNCTION LOAD (valid -> +libname, dup ->
+error, REPLACE, missing-shebang/no-name -> error, no-registered-function -> error),
+FCALL/FCALL_RO (read, write, RO-write-rejection, no-such-function, numkeys>args / negative
+-> exact errors), FUNCTION LIST / LIST LIBRARYNAME / LIST WITHCODE, FUNCTION STATS,
+FUNCTION DUMP, FUNCTION DELETE (+ no-such-lib error), FUNCTION HELP.
+NOTABLE — the previously-documented gap (function_acl_edge_fixes memory: "FUNCTION LOAD
+text-scans, no Lua compile-error") is RESOLVED: fr now COMPILE-CHECKS the Lua on LOAD and
+returns the byte-identical error "ERR Error compiling function: user_function:2:
+unexpected symbol near 'end'" (exact line + symbol) for invalid syntax. So fr does not
+text-scan; it compiles via its Lua interpreter like redis. Scripting engine surface
+(EVAL library + FUNCTION) is fully verified. No lever. Rollback: n/a.
