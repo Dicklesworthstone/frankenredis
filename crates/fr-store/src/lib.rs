@@ -1011,7 +1011,27 @@ impl FullZSetOrder {
                 let window = keys.get(start..end).unwrap_or(&[]);
                 FullZSetOrderRange::Compact(window.iter())
             }
-            Self::Tree(keys) => FullZSetOrderRange::Tree(keys.range(range)),
+            Self::Tree(keys) => {
+                // (CrimsonHawk) BTreeMap::range PANICS when the start bound exceeds the
+                // end bound (start > end, or start == end with both Excluded) — which a
+                // ZRANGEBYSCORE/ZREMRANGEBYSCORE/ZCOUNT with min > max produces on a
+                // Tree-encoded (>2048-member) zset. The Compact arm already clamps such
+                // an inverted range to an empty window (start.min(end)); mirror it here so
+                // fr returns NO elements (matching redis) instead of crashing (a pre-fix
+                // client-triggerable panic/DoS). Byte-identical to the empty result the
+                // Compact path yields.
+                let inverted = match (range.start_bound(), range.end_bound()) {
+                    (Included(s), Included(e))
+                    | (Included(s), Excluded(e))
+                    | (Excluded(s), Included(e)) => s > e,
+                    (Excluded(s), Excluded(e)) => s >= e,
+                    _ => false,
+                };
+                if inverted {
+                    return FullZSetOrderRange::Compact(<&[ScoreMember]>::default().iter());
+                }
+                FullZSetOrderRange::Tree(keys.range(range))
+            }
         }
     }
 }
