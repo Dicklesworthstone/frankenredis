@@ -9249,3 +9249,16 @@ RSS (min of 3 idle reads) fr HEAD vs redis 7.2.4:
 sets/zsets (~1.38x, structural member-dup, CoralOx/uybhq), and even that is ~1.4x not 2x. Overall mixed RAM = 1.20x.** Two
 measured corrections this session (this + the ZADD-Compact one) removed OVER-STATED items from the "remaining frontier":
 measure structural claims before treating them as levers.
+
+### 2026-07-03 SURFACE (stream/geo/hll/bitfield sweep — never-benchmarked family, no new executor lever; PFCOUNT profiled = dispatch not cache) — CrimsonHawk
+Measured a family I'd never perf-benchmarked (measure-before-assuming) fr HEAD vs redis 7.2.4 (pipelined best-of-7):
+XADD **1.279x (fr WINS)**, GEOADD 1.049x, PFADD 1.048x (all ~parity/win); losses XLEN 0.887, BITFIELD_GET(single) 0.754,
+SETBIT 0.766, GEODIST 0.793, PFCOUNT 0.585 — all sub-ms. PROFILED PFCOUNT (the worst) to check for a cache-miss executor
+lever: cache WORKS (pfcount_cache_hittable + execute_plain_cardinality_borrowed both <2.5% self) — process_buffered_frames
+is **27.76% self** = its borrowed-fast-path arm is DEEP in the ~100-arm chain (same as strlen). So PFCOUNT 0.585x is
+DISPATCH-DEPTH (ohsk5), NOT a cache bug — no PFCOUNT/GEODIST/BITFIELD lever. **CONFIRMED from the stream/geo/hll/bitfield
+angle: no new executor-bound gap exists; the sub-ms losses are uniformly ohsk5 chain-depth (fast path + cache both work,
+the arm is just deep). XADD/GEOADD/PFADD are fr wins. The ONLY per-command perf lever remains the ohsk5 structural
+command-hash dispatch.** This session's measurement campaign (perf sweeps x3, crash fuzz 90, value-exact 4761, RSS, ZADD
+threshold, this family) has now falsified every hypothesized safe lever — the frontier is exactly ohsk5 (main.rs, dedicated
+cycle) + set/zset member-dup RAM ~1.38x (CoralOx). Nothing else safe/clean remains.
