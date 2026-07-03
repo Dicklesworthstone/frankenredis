@@ -10398,3 +10398,23 @@ op count. Do NOT chase sweep "<0.9x" readings; re-measure pinned or by instructi
 first. Perf frontier reconfirmed CLOSED (no stable, reliably-measurable loss exists;
 remaining real gaps are structural: large-value framing qesp3, list ChunkedList 99fwc,
 keyspace RAM uhthd). Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (COMMAND INFO metadata byte-exact per-command vs redis 7.2.4; only subcommand LIST ORDER differs = WONTFIX dict-order) — CrimsonHawk
+
+Small targeted differential on the command-introspection metadata surface the
+data-command fuzzers skip: COMMAND INFO <cmd> for all 370 commands, deep-compared
+(arity, flags, first/last/step key, ACL categories, command tips, key-specs, and every
+subcommand's full field record). Result: **byte-exact except subcommand list ORDER on
+the 14 container commands** (acl/client/cluster/command/function/latency/memory/module/
+object/pubsub/script/slowlog/xgroup/xinfo). For each, the parent fields match, the
+subcommand SET matches, and EVERY subcommand's arity/flags/key-specs/acl-cats/tips match
+byte-exact — only the iteration order of the subcommand array differs (e.g. object:
+redis encoding,idletime,freq,help,refcount vs fr help,idletime,refcount,freq,encoding).
+This is the dict-iteration-order cosmetic class already WONTFIX for FUNCTION LIST/ACL
+CAT: clients index COMMAND INFO by subcommand name (order-independent), redis doesn't
+specify the order, and matching redis's exact subcommand-dict hash-bucket order is
+impractical (not alphabetical, not source-order — pure hash layout). Non-container
+commands (356) are fully byte-exact incl. key-specs/tips. CONCLUSION: the introspection
+metadata surface — which cluster proxies + client libraries actually depend on (arity,
+key positions, flags, key-specs) — is CORRECT; the only divergence is a cosmetic
+order-of-subcommands with no client-observable effect. No lever. Rollback: n/a.
