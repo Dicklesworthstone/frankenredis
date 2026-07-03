@@ -9726,3 +9726,12 @@ context). `MULTI; BLPOP nolist 5; BRPOP nolist 5; BLMOVE ... 5; BZPOPMIN nozset 
 vs redis 7.2.4. **RESULT: both return in 0.14s (NOT the 5-20s timeout), replies byte-identical (nil results).** fr correctly
 applies the no-block-in-MULTI semantics. No divergence. Transaction semantics remain byte-exact across the blocking-command
 surface too.
+
+### 2026-07-03 SURFACE (manual FAILOVER command — coordinated handoff works) — CrimsonHawk
+Tested the manual FAILOVER command (distinct HA feature from Sentinel: master coordinates a graceful handoff to a replica).
+fr master 7481 + fr replica 7482, `FAILOVER` on 7481. **RESULT: works correctly.** Reply OK; by t1 the roles SWAPPED
+(7481 master->slave, 7482 slave->master), old master (7481) is now READONLY, new master (7482) writable (SET OK), data
+preserved (k=v), master_failover_state:no-failover (clean completion). fr's coordinated FAILOVER = correct. NOTE: manual
+FAILOVER promotes via a direct (non-MULTI) path so it was NEVER hit by the EXEC-bypass REPLICAOF bug; both HA failover paths
+now work — manual FAILOVER (this, always worked) + Sentinel-orchestrated failover (fixed b22c2c110). fr's HA surface
+(monitoring + Sentinel failover + manual FAILOVER + bidirectional replication + partial resync) verified end-to-end.
