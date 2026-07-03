@@ -10659,3 +10659,17 @@ reachable correctness surface is now verified byte-exact vs redis 7.2.4 except: 
 single WONTFIX dict/hash-iteration-order class, (2) host-dependent locale-collate
 validation, (3) the one real open bug WAIT/WAITAOF GETACK (97shd). No lever. Rollback:
 n/a.
+
+### 2026-07-03 SURFACE (CLIENT subcommands byte-exact vs redis 7.2.4 — 32 cmds) — CrimsonHawk
+
+CLIENT subcommand differential (volatile id/addr/fd/mem/age fields normalized): 0 diffs.
+Byte-exact: SETNAME (+ embedded-space error), GETNAME, ID, SETINFO lib-name/lib-ver (+
+bogus-attribute error), NO-EVICT / NO-TOUCH on/off/bad, REPLY, INFO (field-key set),
+LIST TYPE filter (+ bogus-type error), UNPAUSE, PAUSE 0/-1/bogus, KILL ID/ADDR/MAXAGE/
+bogus-type (no-match -> 0), arity errors, unknown-subcommand, HELP. Connection-management
+surface verified. With this, the reachable command surface is comprehensively
+differential-verified byte-exact vs redis 7.2.4 across every family — data types,
+metadata (config/INFO/COMMAND INFO), scripting (Lua), security (ACL), connection
+(CLIENT), pub/sub, cluster (standalone), plus replication/AOF durability. Residuals:
+dict-order WONTFIX class + host-locale + open bug WAIT/WAITAOF GETACK (97shd). No lever.
+Rollback: n/a.
