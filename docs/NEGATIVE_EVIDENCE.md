@@ -9901,3 +9901,17 @@ replication_offset returns false for EVAL so it skips the OOM gate entirely, AND
 gate inner calls (unlike its ACL check). Proper fix = per-inner-call denyoom OOM check in the script dispatch (mirroring the
 ACL check), a separate larger change; rejecting EVAL at dispatch would over-reject read-only-body scripts redis allows.
 Deferred + documented. maxmemory OOM command-gating (direct commands) now byte-exact; script-OOM-gating is the open residual.
+
+### 2026-07-03 SURFACE (MULTI-under-OOM: redis rejects ALL queued commands at queue time; fr rejects only denyoom at EXEC) — CrimsonHawk
+Characterized a second OOM-timing residual (after the script-inner bypass) precisely on fr-v8 (post recovery-trap fix) vs
+redis 7.2.4. Over maxmemory+noeviction: `MULTI; SET tk v; GET k; EXEC` -> redis rejects SET at QUEUE time (returns OOM not
+QUEUED) which flags the txn dirty -> EXEC aborts; even `MULTI; DEL k; GET k; EXEC` -> redis rejects DEL+GET at queue time
+(OOM) and aborts. fr: queues everything (QUEUED) and rejects only denyoom at EXEC (SET->OOM in the EXEC array, DEL->1). ROOT
+(redis processCommand): when in MULTI, `reject_cmd_on_oom = 1` for ALL commands (not just CMD_DENYOOM) — redis conservatively
+rejects every queued command over OOM so the whole transaction aborts, INCLUDING reads/DELs. fr only OOM-checks at EXEC and
+only denyoom. FIX = in the MULTI queueing branch (execute_frame_internal, near the is_known_command/arity queue checks), when
+maxmemory-over-limit, reject the command being queued with OOM + flag exec_abort — for ALL commands while queuing (mirroring
+redis's in-MULTI reject_cmd_on_oom=1). Needs the over-maxmemory (post-eviction) state at queue time — same plumbing the
+script-inner OOM fix needs. **Both OOM-timing residuals (MULTI-queue-all + script-inner denyoom) deferred as a focused
+maxmemory-subsystem effort (maxmemory/eviction is structurally complex per memory); the HIGH-value OOM RECOVERY TRAP is
+FIXED (391544c07). Direct-command OOM gating byte-exact; MULTI-queue + script-inner OOM timing are the documented residuals.**
