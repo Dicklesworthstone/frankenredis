@@ -9846,3 +9846,15 @@ PUBLISH/SPUBLISH to forbidden channel -> NOPERM (was :0); allowed channel -> :0;
 (all_channels=true, no perf regression for the common case); key-ACL fast paths unaffected (SET foo:1 ok / bar:1 NOPERM).
 **4th real functional bug found+fixed this session; a security-relevant ACL channel-bypass. The borrowed-fast-path-skips-a-
 generic-check pattern struck again (after EXEC-bypass x3) — audit other fast paths for skipped ACL/gate checks.**
+
+### 2026-07-03 SURFACE (fast-path ACL bypass AUDIT — command/key/category all covered; channel was the only gap, now fixed) — CrimsonHawk
+Audited the borrowed-fast-path ACL-bypass vein (after the PUBLISH channel-bypass fix 0f453462f) across command/category/key
+ACL dimensions on fr-v4 (post-fix) vs redis 7.2.4, 22 restricted-user checks: @write-denied user -> ALL write fast paths
+NOPERM (SET/INCR/DECR/APPEND/SETNX/GETDEL/GETSET/SETEX/HSET/LPUSH/EXPIRE) + reads OK (GET/STRLEN); -incr/-del user -> INCR/DEL
+NOPERM, DECR/SET OK; key-restricted ~ok:* -> GET/APPEND ok:1 OK, GET/INCR/SETNX no:* NOPERM-key. **RESULT: 22/22 byte-exact,
+0 DIFF.** The fast-path gate current_acl_allows_default_key_command correctly bails restricted users to the generic path for
+command (all_commands+denied_commands+denied_categories), key (all_keys), AND channel (all_channels, added by the fix). The
+CHANNEL dimension (PUBLISH/SPUBLISH) was the ONLY ACL bypass; command/key/category were already covered. Fast-path ACL-bypass
+vein now AUDITED-CLOSED for ACL. (Other fast-path checks — maxmemory/aof/replication/keyspace-notify — are gated by
+plain_borrowed_default_key_{read,write}_allows, verified thorough.) 4 real bugs total from the fast-path-skips-generic-check
+vein this session (EXEC-bypass x3 + PUBLISH ACL); the vein is now swept for ACL.
