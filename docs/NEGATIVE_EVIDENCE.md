@@ -10473,3 +10473,25 @@ installed on the host); fr stores the string unvalidated. WONTFIX-class:
     green) with locale-collate="" (the default), so fr never uses the collation locale.
 CONCLUSION: the CONFIG SET validation surface is byte-exact except one obscure,
 host-dependent, safe-Rust-unfixable param. No lever. Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (Lua scripting library/API byte-exact vs redis 7.2.4, 53/54; sole diff = cjson object KEY-ORDER, WONTFIX) — CrimsonHawk
+
+EVAL differential over the Lua library/API surface (54 scripts): 53 byte-exact vs redis
+7.2.4. Verified matching: cjson (encode/decode round-trip, floats, empty/sparse tables,
+string escaping, malformed-input pcall), cmsgpack (pack/unpack ints/strings/arrays),
+redis.sha1hex (""/"abc"), struct.pack/unpack, bit.band/bxor/lshift/tohex,
+redis.status_reply/error_reply (incl no-arg + non-string), redis.call/pcall error-table
+propagation ({err=}/{ok=}), Lua->RESP type conversions (float truncation 3.99->3,
+true->1, false->nil, nil-array-truncation), inf/-inf/nan tostring, tonumber("0x1A"),
+string.format %d 2^53, redis.replicate_commands/setrepl/log/LOG_WARNING/breakpoint
+presence, KEYS/ARGV, syntax/nil-global errors.
+SOLE divergence: cjson.encode of a MULTI-key object emits keys in a different ORDER
+(redis {"z":1,"n":42,"foo":"bar"} = Lua 5.1 table-hash order; fr {"foo":"bar","n":42,
+"z":1} = insertion order). Both are DETERMINISTIC (stable across runs); single-key
+objects + all arrays are byte-exact. WONTFIX-class: JSON object key order is
+semantically unspecified (clients parse by key), matching redis requires replicating Lua
+5.1's exact table-hash iteration in fr's own Lua impl (impractical), and fr's
+insertion-order is deterministic (arguably more predictable). Same class as
+FUNCTION-LIST/ACL-CAT/COMMAND-INFO-subcmd dict-order. CONCLUSION: the Lua scripting
+library/API is functionally byte-exact; only a semantically-irrelevant, deterministic
+JSON key-order differs. No lever. Rollback: n/a (no code change).
