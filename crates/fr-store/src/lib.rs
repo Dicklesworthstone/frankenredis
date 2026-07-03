@@ -22811,25 +22811,17 @@ impl Store {
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                // The members are canonical i64 decimal strings, so parse + sort +
-                // dedup straight into SetValue::Int instead of hash-inserting each
-                // into a GenericSet and re-deriving via from_index_set (the
-                // GenericSet build + conversion dominated RESTORE of an integer set
-                // -- O(n) hash inserts + a re-parse/sort pass). De-dup matches the
-                // GenericSet path (it silently drops duplicate ints), and the sort
-                // matches Int's canonical order; from_index_set on an all-int set
-                // produces this exact sorted-unique Int. A loaded intset stays
+                // (CrimsonHawk) decode_intset_ints returns the i64s directly and validates
+                // STRICTLY-INCREASING order, so the result is already sorted + unique —
+                // build SetValue::Int straight from it. Byte-identical to the prior
+                // parse-strings + sort_unstable + dedup (a strictly-increasing sequence is
+                // its own sort, and dedup drops nothing), minus the i64->string->i64
+                // round-trip and the redundant O(n log n) sort. A loaded intset stays
                 // intset-encoded regardless of set-max-intset-entries.
-                let members = decode_intset_members(&intset)?;
-                if members.is_empty() {
+                let ints = decode_intset_ints(&intset)?;
+                if ints.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut ints: Vec<i64> = Vec::with_capacity(members.len());
-                for member in &members {
-                    ints.push(parse_i64(member).map_err(|_| StoreError::InvalidDumpPayload)?);
-                }
-                ints.sort_unstable();
-                ints.dedup();
                 Value::Set(Box::new(SetValue::Int(ints)))
             }
             RDB_TYPE_SET_LISTPACK => {
@@ -24722,7 +24714,7 @@ fn decode_ziplist_i64(data: &[u8], cursor: &mut usize, end: usize) -> Result<i64
     Ok(i64::from_le_bytes(bytes))
 }
 
-fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+fn decode_intset_ints(data: &[u8]) -> Result<Vec<i64>, StoreError> {
     if data.len() < 8 {
         return Err(StoreError::InvalidDumpPayload);
     }
@@ -24752,7 +24744,10 @@ fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
         return Err(StoreError::InvalidDumpPayload);
     }
 
-    let mut members = Vec::with_capacity(len);
+    // (CrimsonHawk) Return the i64s directly instead of formatting each to a decimal
+    // string that the sole caller (RESTORE intset arm) immediately parses back to i64 —
+    // that round-trip (to_string + parse_i64 per element) dominated intset RESTORE.
+    let mut ints = Vec::with_capacity(len);
     let mut cursor = 8;
     let mut previous = None;
     for _ in 0..len {
@@ -24792,9 +24787,9 @@ fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
             return Err(StoreError::InvalidDumpPayload);
         }
         previous = Some(value);
-        members.push(value.to_string().into_bytes());
+        ints.push(value);
     }
-    Ok(members)
+    Ok(ints)
 }
 
 /// Minimal SHA-1 implementation (pure Rust, no unsafe).
