@@ -6664,7 +6664,18 @@ impl Store {
     }
 
     pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
-        if !self.drop_if_expired(key, now_ms) {
+        // (CrimsonHawk) With no volatile keys (expires_count==0) drop_if_expired can never
+        // evict, so its return value == entries.contains_key(key). Use the single
+        // contains_key probe and skip drop_if_expired's SECOND lookup (the expiry_ms map
+        // probe) + the expired-key eviction/notification/propagation machinery. Byte-
+        // identical: an expired key requires a TTL, which keeps expires_count>0 and takes
+        // the full drop path. This is the LIVE SET/GETSET/MSET write path (fr-runtime).
+        let key_present = if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms)
+        } else {
+            self.entries.contains_key(key)
+        };
+        if !key_present {
             let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
             let lfu_tracking_enabled = self.lfu_tracking_enabled();
             entry.lfu_freq = if lfu_tracking_enabled {
@@ -6684,7 +6695,13 @@ impl Store {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let old_expiry = self.expiry_ms(key);
+        // (CrimsonHawk) With no volatile keys the overwritten key cannot carry a TTL, so
+        // expiry_ms is always None here — skip the second expiry-map probe. Byte-identical.
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         let (old_expiry, old_was_stream) = {
             let Some(entry) = self.entries.get_mut(key) else {
                 self.set(key.to_vec(), value.to_vec(), None, now_ms);
