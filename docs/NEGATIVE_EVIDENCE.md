@@ -9533,3 +9533,16 @@ dimension complete: RDB round-trip (DEBUG RELOAD, prev) + AOF round-trip (kill/r
 loads fr's RDB in redis, prev) all digest-identical. fr's Redis-7.2.4 fidelity now proven across wire/values/encoding/COMMAND/
 notifications/Lua/txn/blocking/representation/RDB/AOF/bidirectional-replication + perf (parity-or-faster) + robustness (188
 probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.**
+
+### 2026-07-03 SURFACE (MIGRATE interop fr<->redis BOTH directions, all types, 0 diff) — CrimsonHawk
+Tested MIGRATE (cross-instance DUMP+RESTORE+DEL) fr<->redis 7.2.4 both directions — directly verifies fr's per-key serialized
+payload is wire-compatible with redis's RESTORE. 9 type/encoding variants each way (string, list, hash-listpack,
+intset, set-listpack, zset-listpack, stream, hashtable-hash 150f, skiplist-zset 150m). **RESULT: 18/18 OK, 0 diff.**
+fr->redis: every key migrated, destination DEBUG DIGEST-VALUE == source's pre-migrate digest, source EXISTS=0 (deleted).
+redis->fr: same, all 9 digest-preserved + source-deleted. So fr's DUMP payload (RDB-per-key serialization incl the version
+footer + CRC64) is byte-accepted by redis's RESTORE AND fr's RESTORE byte-accepts redis's DUMP payload, across all types.
+(Corollary: confirms the earlier list-DUMP-cache finding was purely a CACHE-COVERAGE/perf issue — the list DUMP payload
+itself is CORRECT & redis-interoperable, just recomputed each call.) **INTEROP dimension now complete: bidirectional
+replication (digest-identical) + bidirectional MIGRATE (digest-preserved) + RDB redis-loadable + AOF/RDB round-trips. fr is a
+verified drop-in for Redis 7.2.4 across wire/values/encoding/COMMAND/notifications/Lua/txn/blocking/representation/persistence/
+replication/migration + perf (parity-or-faster) + robustness (188 probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.**
