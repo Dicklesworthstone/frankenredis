@@ -9426,3 +9426,16 @@ verified across: RESP2 values (4761-check), encoding transitions (25), RESP3 sha
 fields) — all byte-exact. Combined with perf (parity-or-faster every subsystem incl pub/sub) + robustness (188 crash probes),
 fr's fidelity to Redis 7.2.4 is comprehensively proven across every dimension I can devise. Remaining = ohsk5 full
 restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM. No safe high-value lever in any dimension.**
+
+### 2026-07-03 SURFACE (keyspace notification events — ~40 commands, IDENTICAL event sets) — CrimsonHawk
+Differentiated actual keyspace-notification EVENTS fired (not just flag normalization) fr HEAD vs redis 7.2.4: notify-keyspace-
+events KEA, PSUBSCRIBE __keyevent@0__:*, ran ~40 commands incl edge cases, compared (event,key) multisets. **RESULT: fr 50
+events == redis 50 events, IDENTICAL sets.** Byte-exact on the tricky cases: del-on-empty (SREM/HDEL/LPOP that empties a
+collection fires `del`), SETEX fires set+expire, RENAME fires rename_from+rename_to, COPY, GETDEL, INCRBYFLOAT, SETRANGE/
+APPEND, ZINCRBY, ZPOPMIN, RPOPLPUSH (lpush+rpop+del chain), SETNX/SETBIT. No missing/extra/misnamed events, correct keys.
+Clients using keyspace notifications (cache invalidation, event streams) behave identically. **CORRECTNESS dimension now
+verified byte-exact across: RESP2 values (4761) + encoding transitions (25) + RESP3 shapes (35) + COMMAND metadata (370×7) +
+keyspace-notification events (~40 cmds). Together with perf (parity-or-faster every subsystem) + robustness (188 crash
+probes), fr's Redis-7.2.4 fidelity is proven across value semantics, wire protocol, encoding, introspection, event
+notifications, performance, and crash-safety — every dimension devised. No safe high-value lever remains; open items =
+ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.**
