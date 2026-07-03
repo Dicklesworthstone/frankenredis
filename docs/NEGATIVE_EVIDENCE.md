@@ -10622,3 +10622,20 @@ almost certainly shares 97shd's root cause (no master-side REPLCONF GETACK), so
 WAITAOF with numreplicas>0 on a short timeout will likewise undercount — fold into the
 97shd fix. Replication is now swept: propagation/READONLY/roles/offsets/slave0/REPLICAOF/
 replica-expiry byte-exact; sole real bug = WAIT/WAITAOF GETACK (97shd). Rollback: n/a.
+
+### 2026-07-03 SURFACE (AOF durability round-trip byte-exact vs redis 7.2.4 — DEBUG DIGEST match across restart AND == redis) — CrimsonHawk
+
+AOF is the data-durability path (a gap = data loss; cf. the SAVE silent-no-op bug
+79018d064). Direct round-trip test (fr --aof, all value types + a TTL, BGREWRITEAOF,
+SHUTDOWN NOSAVE, restart from the same AOF):
+- pre-restart DBSIZE=5, DEBUG DIGEST=4719c674...
+- fr writes a redis-7.x-style MULTI-PART AOF (manifest + base + incr; 170B/0B/74B).
+- after restart-from-AOF: DBSIZE=5, DEBUG DIGEST=4719c674... -> **DIGEST MATCH** (whole
+  dataset serialized+deserialized identically), TTL preserved (5000->4997), spot checks
+  (GET/LRANGE/ZSCORE) correct.
+- CROSS-CHECK: redis 7.2.4 loaded with the identical data yields the SAME digest
+  4719c674... -> fr's AOF-reloaded content is byte-identical to redis AND fr's DEBUG
+  DIGEST algorithm matches redis.
+So AOF durability is correct: data (all types) + TTLs survive restart, content matches
+redis, multi-part AOF format is redis-7.x-compatible. (Complements aof_cross_compat_gate
+/ aof_roundtrip_digest_fuzz.) No lever. Rollback: n/a.
