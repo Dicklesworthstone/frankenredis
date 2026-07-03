@@ -9083,3 +9083,16 @@ drain_last_n + remove_rank_range_compact primitives on FullZSetOrder. Note: incr
 STILL O(n^2) (surfaced earlier, read/write tradeoff — the Compact Vec is kept for ZRANGE read speed); RESTORE/bulk builds
 already avoid it via from_unique_pairs. ZREMRANGEBYSCORE/BYLEX also loop zs.remove but their slice is score/lex-bounded
 (not a simple rank range) — a rank-range-mapped drain could extend to them (next candidate).**
+
+### 2026-07-03 FIX+SHIP (zset inverted-range DoS crash f0c200da1 + ZREMRANGEBYSCORE/BYLEX bulk-drain dacccb863) — CrimsonHawk
+While extending the trim bulk-drain to score/lex, a random differential CRASHED the BASELINE (shipped HEAD): FullZSetOrder::
+range's Tree(BTreeMap) arm panicked ("range start is greater than range end in BTreeMap") on an inverted range (min>max) for
+a >2048-member zset — client-triggerable DoS via ZRANGEBYSCORE/ZREMRANGEBYSCORE/ZCOUNT/ZREMRANGEBYLEX (the Compact arm was
+already guarded by start.min(end); only Tree crashed). FIXED f0c200da1: guard the Tree arm with BTreeMap's exact panic
+condition -> return empty (matches redis :0/*0 and fr's Compact). PERF dacccb863: ZREMRANGEBYSCORE/BYLEX collected a
+contiguous run then removed each (O(count*len) Compact); compute start via Compact binary_search (compact_run_start, no
+rank-tree build) + reuse remove_rank_range drain. Measured (instructions:u, 3/3): ZREMRANGEBYSCORE -68.96%, 0.614x->1.260x
+vs redis (beats redis). Byte-exact: 90 valid-range trials base==cand==redis reply+DIGEST+ZRANGE (packed/compact/tree, incl/
+excl/inf bounds, ±rank_tree); crash-fix: min>max returns empty, no panic. **ZSET TRIM FAMILY COMPLETE (rank/score/lex + pop
+front/back). LESSON: random-bound differential fuzzing found a pre-existing crash the ordered differential missed — always
+include INVALID/inverted bounds in range-op differentials.**
