@@ -9611,3 +9611,25 @@ replica on master-down; fr accepts REPLICAOF NO ONE so likely works.) **HA/topol
 partial-resync)+MIGRATE(bidir)+persistence. fr's Redis-7.2.4 fidelity spans every level tested: correctness (all byte-exact)
 + interop (repl/migrate/sentinel) + persistence + perf (parity-or-faster) + robustness (188 probes). Open perf levers =
 ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.**
+
+### 2026-07-03 REAL BUG (Sentinel-orchestrated FAILOVER does not complete with fr — replica never promotes) — CrimsonHawk
+**FOUND A REAL HA BUG** (first functional bug in many turns). Setup: fr master (7481) + fr replica (7482, REPLICAOF) + REAL
+redis 7.2.4 sentinel (quorum 1, down-after 2s, failover-timeout 10-12s). Sentinel MONITORING works perfectly (prior entry:
+discovers master+replica, CKQUORUM OK). But FAILOVER FAILS: kill the fr master ->
+  sentinel: +sdown, +odown, +try-failover, +failover-state-select-slave, **+selected-slave 127.0.0.1:7482**,
+  **+failover-state-send-slaveof-noone slave 127.0.0.1:7482**, +failover-state-wait-promotion, ... (12s) ...
+  **-failover-abort-slave-timeout**.
+The fr replica (7482) STAYS role:slave for the ENTIRE promotion window (polled every 1s, t1..t16 all role:slave) and is
+never promoted -> failover aborts, no new master. **fr CANNOT be failed over by redis Sentinel.**
+DIAGNOSIS (narrowed): (1) fr's REPLICAOF/SLAVEOF NO ONE promotion WORKS in isolation via redis-cli — even with a DEAD master,
+fr promotes to role:master + writable within ~1s. So the promotion primitive is fine. (2) But MONITOR on the fr replica
+during the sentinel failover shows the replica receives sentinel's PING x3 / INFO / PUBLISH __sentinel__:hello / MULTI..EXEC
+but **NO SLAVEOF|REPLICAOF NO ONE command is ever seen**, plus "Error: Server closed the connection" on the link. So
+sentinel's promotion command is NOT reaching / not being processed by fr on sentinel's command-connection (while the same
+command via a fresh redis-cli conn works). Likely fr-repl/fr-sentinel command-connection handling: sentinel's async
+command link to fr (used for the SLAVEOF NO ONE) is not delivering/executing it, or fr closes it. (3) NOTE offset is fine —
+master_repl_offset advances correctly on post-replica writes (34 after a 34-byte write); the earlier offset:0 was correct
+rl0qz pre-replica behavior, not the cause. **IMPACT: HA via redis Sentinel is BROKEN — a real gap in the drop-in claim.
+Needs dedicated fr-repl/fr-sentinel investigation (why sentinel's command-link SLAVEOF NO ONE doesn't promote fr); NOT a
+quick fix. Reproduction fully scripted above. This is the highest-value open item found this session — a functional HA bug,
+distinct from the (low-ROI) ohsk5 perf lever + CoralOx RAM.**
