@@ -8919,3 +8919,15 @@ duplicate/limit-violating members with InvalidDumpPayload (malformed-DUMP guard)
 the bulk path must either dedup-check first or the error semantics diverge from redis's rdbLoadObject.** This is the next
 RESTORE lever: collect (member,score) into a Vec with an inline uniqueness/limit check, then one from_unique_pairs_with_limits
 build; verify byte-exact incl the duplicate-member and encoding-transition error cases before shipping.
+
+### 2026-07-03 SHIP (O(n^2)->O(n) hashtable-hash RESTORE bulk-build, 6ba66c966) — CrimsonHawk
+The zset-build lever surfaced last turn generalized: RDB_TYPE_HASH RESTORE built via N HashFieldMap::insert (each O(n)
+arena locate) = O(n^2) for a hashtable-encoded hash. Collect fields + HashSet dedup-check (preserves the per-element
+duplicate-field reject) then HashFieldMap::from_unique_pairs (O(n)) — the RESTORE twin of the qxfmr RDB-load bulk build
+(2.51x, shipped) that was missed on the RESTORE arm. Measured (instructions:u, 3/3): 3000-field hashtable hash 16.19B->
+12.46B = -23.0% cand/ctl, 1.602x vs redis 7.2.4 (was O(n^2)-slow, now BEATS redis). Listpack hashes (<=128 / even
+300-field which redis keeps listpack here) = EXACT parity (different unchanged arm). Byte-exact: DIGEST-VALUE + OBJECT
+ENCODING + HGETALL order match redis at n=1/5/128/129/300/1000, corrupt-payload error path matches. **STILL OPEN (same
+pattern, deferred for the canonicalize/dup semantics): RDB_TYPE_ZSET/ZSET_2 per-element insert_with_limits (line ~22590)
+— needs canonicalize_zero_score + dup-reject in a bulk path. RDB_TYPE_SET uses GenericSet::insert (O(1) IndexSet, less
+of a win) + from_index_set. Hash was the clear O(n^2) win; zset is O(n log n) build so smaller EV.**
