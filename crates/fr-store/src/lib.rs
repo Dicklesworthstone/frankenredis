@@ -4878,7 +4878,6 @@ struct DbScanResume {
     db: usize,
     sig: u64,
     last_key: Vec<u8>,
-    generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -20414,7 +20413,6 @@ impl Store {
 
         let batch = count.max(1);
         let start = cursor as usize;
-        let keyspace_gen = self.keyspace_generation;
 
         // Stream signature: same (db, pattern, type) => same key sequence, so the
         // resume cache never crosses streams.
@@ -20457,15 +20455,25 @@ impl Store {
 
         // Resume past the previous batch's last key (cache hit), else skip the
         // first `start` matched keys from the range start (cache miss / first).
+        //
+        // (frankenredis SCAN-guarantee fix) The resume is matched by
+        // (cursor, db, sig) ONLY — deliberately NOT by keyspace generation.
+        // Resuming from `Bound::Excluded(last_key)` over the ordered keyspace is
+        // deletion-SAFE: it always returns the keys strictly greater than the
+        // last key already returned, regardless of what was inserted or deleted
+        // before that point. Gating on generation forced a mutation (e.g. the
+        // canonical SCAN + DEL loop, which bumps `keyspace_generation` every
+        // batch) onto the positional `skip(start)` fallback below, which is NOT
+        // deletion-safe: deleting an already-returned key shifts every later key
+        // down one position, so `skip(start)` steps over a key that was present
+        // for the whole iteration — violating Redis's SCAN guarantee that a key
+        // present from start to end is returned at least once. Resume-by-key has
+        // no such hole. (The `db`/`sig` checks still keep interleaved SCAN
+        // streams over different DB/MATCH/TYPE from crossing.)
         let resume_key: Option<Vec<u8>> = if start > 0 {
             self.db_scan_cache
                 .iter()
-                .position(|c| {
-                    c.next_cursor == cursor
-                        && c.db == db
-                        && c.sig == sig
-                        && c.generation == keyspace_gen
-                })
+                .position(|c| c.next_cursor == cursor && c.db == db && c.sig == sig)
                 .map(|i| self.db_scan_cache.remove(i).last_key)
         } else {
             None
@@ -20539,7 +20547,6 @@ impl Store {
                 db,
                 sig,
                 last_key: last,
-                generation: keyspace_gen,
             });
             if self.db_scan_cache.len() > SCAN_CACHE_LRU_CAP {
                 self.db_scan_cache.remove(0);
@@ -36415,6 +36422,68 @@ mod tests {
         assert!(
             old_ns as f64 / new_ns as f64 > 2.0 || cfg!(debug_assertions),
             "expected >2x"
+        );
+    }
+
+    // (frankenredis SCAN-guarantee) Redis guarantees a full SCAN iteration returns
+    // every key present from start to end AT LEAST once, even if OTHER keys are
+    // deleted mid-scan. The canonical use — SCAN a batch, DEL keys in it, repeat —
+    // deletes already-returned keys between calls. Before the fix `scan_in_db`
+    // gated its resume-by-last-key cache on `keyspace_generation`, so any DEL
+    // (which bumps the generation) forced the positional `skip(start)` fallback;
+    // deleting an already-returned key then shifted every later key down one slot,
+    // and `skip(start)` stepped over a present-throughout key. This drives exactly
+    // that pattern and asserts nothing is missed.
+    #[test]
+    fn scan_in_db_returns_present_throughout_key_after_mid_scan_deletion() {
+        use super::Store;
+
+        let mut store = Store::new();
+        // Zero-padded so sorted byte order == numeric order (deterministic).
+        for i in 0..500u32 {
+            store.set(format!("k{i:04}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut deleted: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        let mut batches = 0usize;
+        loop {
+            let (next, batch) = store.scan_in_db(0, cursor, None, None, 10, 0);
+            for k in &batch {
+                seen.insert(k.clone());
+            }
+            batches += 1;
+            // After the first batch, DEL two keys we already returned (the lowest
+            // ones) — the exact "SCAN then delete what you saw" loop. Each DEL bumps
+            // keyspace_generation, which previously broke the resume.
+            if batches == 1 {
+                let mut lows: Vec<Vec<u8>> = batch.clone();
+                lows.sort();
+                for k in lows.into_iter().take(2) {
+                    assert_eq!(store.del(&[k.clone()], 0), 1, "victim key must exist");
+                    deleted.insert(k);
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+            assert!(batches < 1_000_000, "scan did not terminate");
+        }
+
+        // Every key that existed for the WHOLE iteration (all 500 minus the 2 we
+        // deleted) must have been returned at least once.
+        let mut missing = Vec::new();
+        for i in 0..500u32 {
+            let k = format!("k{i:04}").into_bytes();
+            if !deleted.contains(&k) && !seen.contains(&k) {
+                missing.push(String::from_utf8_lossy(&k).into_owned());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "SCAN guarantee violated: present-throughout keys never returned: {missing:?}"
         );
     }
 
