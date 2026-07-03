@@ -10294,3 +10294,24 @@ uhthd — reported but does not fail the gate). Exit 0 on main today; flip HSCAN
 guarded when the structural fix lands and this gate proves it. Fills the one coverage
 hole the per-command fuzzers miss (they check per-op parity, not full-iteration
 completeness under mutation).
+
+### 2026-07-03 SURFACE (drop_if_expired internal expires_count fast-exit = MEASURED 0.00%, reverted; safe per-crate perf frontier definitively closed) — CrimsonHawk
+
+Tested the last plausible safe/byte-identical per-crate micro-opt: fold the call-site
+`if expires_count != 0` guard vein into `drop_if_expired` itself (skip the
+expiry_deadlines probe + evaluate_expiry when no key has a TTL). Byte-identical (664
+fr-store tests pass). Measured via `perf stat -e instructions:u` over a fixed 2M-TTL
+blast on a no-TTL keyspace, baseline vs candidate binaries, correct distinct PIDs, 3
+runs: ratio **1.0000 / 0.9993 / 1.0001 = 0.00% instruction change**. An empty-HashMap
+probe is already near-free, and critically the HOT borrowed fast paths in fr-runtime do
+NOT call `drop_if_expired` at all (grep: 0 uses) — it is only on the generic/cold
+dispatch path, and store.hset (bare-drop) is itself cold (hot HSET uses
+hset_borrowed_many). REVERTED per the measure-before-claiming rule (mirrors the earlier
+store.hset 0.00% revert). CONCLUSION: the redundant-lookup / expiry-fusion guard vein is
+now DEFINITIVELY exhausted (measured, not assumed); combined with GET/INCR parity and
+the DUMP/RELOAD + behavioral saturation this arc, the clean+safe+measurable per-crate
+lever frontier is CLOSED. The only remaining real levers are high-risk (Lua LuaValue
+enum-shrink, ~195 sites in the EVAL interpreter, ~5-8% compute-heavy — needs a dedicated
+cycle + full Lua differential harness) or structural (HSCAN/SSCAN chaining dictScan
+[e3y73, guarded by scan_deletion_guarantee_gate.py], list ChunkedList 99fwc, stream
+serialize reconstruct-vs-copy, keyspace/collection RAM 2x). Rollback: n/a (reverted).
