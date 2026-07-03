@@ -30551,6 +30551,22 @@ impl Runtime {
         if eq_ascii_token(command, b"CLIENT") {
             return Ok(self.handle_client_command(argv, now_ms));
         }
+        // (frankenredis-execslaveof) REPLICAOF/SLAVEOF are runtime-special: the
+        // normal path (execute_frame_internal) intercepts them and routes to
+        // handle_replicaof_command, which mutates server replication state
+        // (role -> Master + replica_reconfigure_requested on NO ONE). A queued
+        // command inside a transaction reaches THIS function directly from
+        // handle_exec_command's loop, bypassing that interception — so a queued
+        // REPLICAOF used to return +OK via the generic dispatcher WITHOUT ever
+        // applying the promotion/reconfigure side effect (role stayed slave).
+        // This broke redis-Sentinel failover, which promotes via a MULTI txn:
+        // MULTI; SLAVEOF NO ONE; CONFIG REWRITE; CLIENT KILL...; EXEC. Upstream
+        // execCommand call()s each queued command through its normal proc
+        // (replicaofCommand), so route them here too. Server-level, never
+        // db-namespaced, so this stays above the namespacing (like CLIENT above).
+        if eq_ascii_token(command, b"REPLICAOF") || eq_ascii_token(command, b"SLAVEOF") {
+            return Ok(self.handle_replicaof_command(argv));
+        }
         // (frankenredis-execpubsub) The (P)SUBSCRIBE / (P)UNSUBSCRIBE family are
         // runtime-special: the normal path intercepts them in execute_frame and
         // routes to these handlers, which mutate the server pubsub registry. A

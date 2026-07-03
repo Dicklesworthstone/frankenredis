@@ -9653,3 +9653,20 @@ side effects) through their handle_*_command in the EXEC queued-execution path (
 command), mirroring redis's EXEC->call()->cmd->proc. Replication-critical + fr-runtime shared crate -> implement carefully +
 re-test full sentinel failover AND regular MULTI/EXEC byte-exactness.** This is the highest-value functional bug of the
 session, now root-caused to a one-mechanism defect. Recorded in [[project_sentinel_failover_promotion_bug]].
+
+### 2026-07-03 SHIPPED (FIX: Sentinel failover now works — REPLICAOF/SLAVEOF in MULTI/EXEC applies promotion) — CrimsonHawk
+FIXED the root-caused Sentinel-failover HA bug (prev entries). One-line-class fix in fr-runtime execute_db_scoped_command
+(:30553): added `if REPLICAOF|SLAVEOF -> handle_replicaof_command(argv)` routing, following the EXACT established
+frankenredis-execpubsub precedent (queued cmds in EXEC reach execute_db_scoped_command directly, bypassing execute_frame_
+internal's special dispatch; pubsub+CLIENT were already routed here for the same reason — REPLICAOF/SLAVEOF were the missing
+side-effecting case). VALIDATED (fr-fix binary, built clean 9m20s):
+- TEST1 (direct): send `MULTI; SLAVEOF NO ONE; CONFIG REWRITE; CLIENT KILL TYPE normal; EXEC` to a fr replica w/ dead master
+  -> role=**MASTER** + writable (was: stayed slave). FIXED.
+- TEST2 (end-to-end): REAL redis-Sentinel failover — kill fr master -> **FAILOVER COMPLETE at t5**: fr replica promoted to
+  role:master, sentinel switched GET-MASTER-ADDR to it, replica writable, data preserved. (was: abort-slave-timeout, never
+  promoted.) redis-Sentinel HA now WORKS with fr.
+- TEST3 (regression): regular MULTI/EXEC reply BYTE-IDENTICAL to redis 7.2.4 (OK,QUEUED,QUEUED,QUEUED,OK,2,6); standalone
+  REPLICAOF NO ONE still promotes. No regression.
+**fr now completes redis-Sentinel-orchestrated failover — closes the highest-value functional bug of the session and the
+last HA-interop gap. fr's Redis-7.2.4 drop-in fidelity now includes Sentinel failover, atop monitoring+replication(bidir+
+partial-resync)+MIGRATE(bidir)+persistence(RDB+AOF)+all correctness surfaces + perf(parity-or-faster)+robustness(188).**
