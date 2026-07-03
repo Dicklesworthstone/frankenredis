@@ -10684,3 +10684,19 @@ line, UNBALANCED quote -> exact "unbalanced quotes in request" error, oversized 
 "invalid bulk length", non-$ element -> "expected '$'", $3 vs PING len-mismatch), valid
 multibulk. Parser error wording + connection handling match redis 7.2.4 (consistent with
 the earlier protocol_abuse_parity fixes; no new blind spot). No lever. Rollback: n/a.
+
+### 2026-07-03 SHIPPED (scripts/wait_getack_gate.py — acceptance gate + AOF-pollution guard for WAIT bug 97shd) — CrimsonHawk
+
+Turned the fully-specced WAIT/GETACK bug (97shd) into a durable executable gate. Stands
+up real master+replica pairs for redis (control) + fr (subject):
+- CONTROL redis: SET; WAIT 1 300 -> :1 in 0ms (confirms expected behavior).
+- fr (XFAIL, 97shd): SET; WAIT 1 300 -> :0 in 301ms (blocks the full timeout, never acks
+  in time — WAIT sends no REPLCONF GETACK, resolves only on 1Hz periodic ack). Reported,
+  not failing the gate until the fix lands (flip WAIT_LATENCY_GUARDED=True).
+- AOF-pollution guard (GUARDED, fails the gate): the fr master runs --aof; after a WAIT
+  the on-disk AOF must contain NO 'GETACK' token — catches the key 97shd fix trap (fr
+  unifies AOF buffer + repl backlog, so a naive GETACK injection would corrupt the AOF on
+  reload). Passes today; MUST keep passing after the fix.
+Gate exit 0 on main (bug xfail + trap guarded). This locks in the bug repro + the fix's
+acceptance criteria + the AOF-corruption regression guard, so the eventual coordinated
+fix can be executed and verified directly. No prod code change. Rollback: rm the script.
