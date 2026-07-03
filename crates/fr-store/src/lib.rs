@@ -22565,17 +22565,35 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut hash = HashFieldMap::default();
+                // (CrimsonHawk) Collect the fields then BULK-build via from_unique_pairs
+                // (O(n)) instead of N HashFieldMap::insert calls that each do an O(n)
+                // arena locate — the per-element loop was O(n^2), dominating HASH RESTORE.
+                // This is the RESTORE twin of the qxfmr RDB-load bulk build; mirrors the
+                // dedup-check + bulk pattern the RDB_TYPE_SET_LISTPACK arm already uses.
+                // RESTORE still rejects a duplicate field (from_unique_pairs assumes
+                // uniqueness, so the dedup-check preserves the per-element reject). Byte-
+                // identical: from_unique_pairs preserves insertion order and derives the
+                // same encoding (used for the byte-exact hset bulk-load path).
+                let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
                 for _ in 0..count {
                     let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += fc;
                     let (value, vc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += vc;
-                    if hash.insert(field, value).is_some() {
-                        return Err(StoreError::InvalidDumpPayload);
+                    pairs.push((field, value));
+                }
+                {
+                    let mut seen = HashSet::with_capacity_and_hasher(
+                        pairs.len(),
+                        foldhash::quality::RandomState::default(),
+                    );
+                    for (field, _) in &pairs {
+                        if !seen.insert(field.as_slice()) {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
                     }
                 }
-                Value::Hash(Box::new(hash))
+                Value::Hash(Box::new(HashFieldMap::from_unique_pairs(pairs)))
             }
             RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
