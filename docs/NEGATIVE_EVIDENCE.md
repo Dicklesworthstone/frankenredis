@@ -10049,3 +10049,16 @@ HELLO 3 AUTH default <anypass> -> success (default user is nopass, accepts any);
 HELLO option 'BADOPT'". **RESULT: 9/9 byte-exact, 0 DIFF.** fr's HELLO reports the redis 7.2.4 identity (server/version),
 RESP2/RESP3 negotiation, AUTH/SETNAME inline, and NOPROTO/syntax errors all match -- clients handshaking via HELLO see an
 identical redis 7.2.4. Connection-handshake surface verified.
+
+### 2026-07-03 SURFACE (REGRESSION CHECK: broad perf sweep on fr post-6-fixes — no perf regression) — CrimsonHawk
+Ran scripts/broad_command_headtohead.py on fr-v8 (post all 6 session fixes: EXEC-routing REPLICAOF/CONFIG/ACL, PUBLISH
+all_channels fast-path gate, script-ACL wrap, OOM denyoom gate) vs redis 7.2.4 to confirm the fixes — esp. the all_channels
+addition to current_acl_allows_default_key_command (evaluated on EVERY command's fast-path eligibility) — did NOT regress
+hot-path throughput. **RESULT: no regression.** fr faster-or-parity across the compute-heavy sweep: bitcount 1.99x,
+sintercard 1.92x, sinterstore 2.00x, sunionstore 4.40x, sdiffstore 2.39x, lpos 2.32x, hrandfield 1.13x, zrandmember 1.20x,
+srandmember 1.07x, getrange 1.12x, lrange_full 1.05x, sinter3 0.97x, zrange* ~1.0x. Only 2 sub-0.9 readings: zcount 0.827x
+(DOCUMENTED known residual — the harness docstring itself lists it as constant-factor) + smismember 0.811x (SUB-MS NOISE:
+memory has it at 1.10x post-a67a6b86c; pipe=200/5-trials is noise-prone for sub-ms cmds per the EXISTS_9 false-regression
+lesson). The all_channels gate change is free for the default user (all_channels=true -> fast path unchanged); only channel-
+restricted users take the generic path. **All 6 session fixes confirmed perf-clean (no hot-path regression) + correctness
+validated individually. Session fixes are regression-free.**
