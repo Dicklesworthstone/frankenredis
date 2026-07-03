@@ -9980,3 +9980,14 @@ shape, DESC+COUNT, COUNT n ANY (early-stop), tiny 1m radius (precise filtering),
 **RESULT: 15/15 byte-exact, 0 DIFF.** fr's haversine distance, coordinate encode (i128 fixed-point formatter per memory),
 geohash, and radius/box search filtering + sort all match redis 7.2.4. GEO family (GEOADD/GEODIST/GEOPOS/GEOHASH/GEOSEARCH/
 GEOSEARCHSTORE) is a verified drop-in — both formatting (prior memory) AND search LOGIC confirmed.
+
+### 2026-07-03 SURFACE (COMMAND GETKEYS key extraction — 35 checks, 0 DIFF; cluster-proxy critical) — CrimsonHawk
+Differentiated COMMAND GETKEYS (per-command key-spec extraction; used by cluster-aware clients/proxies for routing;
+movablekeys/numkeys logic edge-prone) fr-v8 vs redis 7.2.4, 35 checks. Byte-exact on: simple (GET/SET/MSET/MGET/DEL/GETRANGE/
+GETEX/OBJECT/MEMORY USAGE), numkeys-based (EVAL/FCALL k1,k2 for numkeys=2 + empty for 0; XREAD STREAMS s1,s2; LMPOP/ZMPOP/
+SINTERCARD; ZUNIONSTORE dest+numkeys-sources; ZDIFF), movablekeys (SORT STORE dest, SORT BY/GET -> only the sort key NOT the
+patterns, GEORADIUS/GEORADIUSBYMEMBER STORE/STOREDIST, GEOSEARCHSTORE dst+src, COPY src+dst), variadic (BITOP dest+srcs,
+PFCOUNT, PFMERGE dest+srcs), MIGRATE ... KEYS k1 k2, LCS key1 key2, ZADD-with-flags. **RESULT: 35/35 byte-exact, 0 DIFF.**
+fr's COMMAND_TABLE key-specs (first/last/step + movablekeys + numkeys handlers) match redis 7.2.4 exactly -- cluster proxies
+/ smart clients that route by GETKEYS behave identically against fr. (Complements the COMMAND INFO metadata differential 370x
+earlier: both metadata AND runtime key-extraction verified.)
