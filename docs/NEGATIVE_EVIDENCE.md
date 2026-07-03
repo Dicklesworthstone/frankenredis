@@ -8876,3 +8876,23 @@ single highest-value SAFE-once-reservations-return lever) and the sub-ms gaps ar
 main.rs and blocked on agent-mail being down. DON'T re-chase HGETALL/LRANGE/SMEMBERS per-element compute — it's already
 optimal (direct-encode _into + O(1) compact scan).** The safe fr-store/fr-command per-command veins (resolve-once,
 expiry-fusion, zero-copy _into, reply-set-elimination) are EXHAUSTED for this session's reservation constraints.
+
+### 2026-07-03 SURFACE (DUMP per-type frontier: 5/6 types fr WINS; sole list loss 0.65x is architectural cached-listpack, not a safe lever) — CrimsonHawk
+With main.rs (dispatch/write-path) blocked (agent-mail degraded_read_only) I probed the DUMP/RESTORE vein (fr-persist,
+uncontended — memory says high-yield "when hot crates locked"). Per-type DUMP throughput vs fresh redis 7.2.4 (best-of-5,
+pinned, 1000-elem collections): dstr 1.65x, dhash **2.80x**, dset 2.43x, dzset **2.89x**, intset 1.08x — all fr WINS —
+and **dlist 0.650x = the SOLE loss.** ROOT CAUSE is architectural, NOT a fixable fr bug: profiled fr DUMP dlist =
+lzf_compress_with_scratch 57.9% self + encode_listpack_entry 17.5% + crc64 6.7%. fr is CONSISTENT ~575ms across
+hash/list; REDIS is fast on list (383ms) but slow on hash (1602ms). Why: redis stores a list as a quicklist of
+ALREADY-COMPRESSED listpack nodes, so DUMP just memcpys the cached compressed bytes (no re-encode/re-compress); redis
+has no cached form for a hashtable-encoded hash so it re-encodes+LZFs there (slow) — exactly where fr WINS. fr's
+ChunkedList is NOT listpack-backed, so fr rebuilds+LZFs every node for ALL types (consistent, wins 5/6, loses only where
+redis has the memcpy shortcut). Verified fr DUMP dlist output is BYTE-IDENTICAL to redis (both 7324 B, cross-RESTORE
+fr->redis OK LLEN 1000) — so there is NO compression divergence / wasted work to exploit; the gap is pure re-encode+LZF
+CPU. LZF is already SWAR-optimized (frankenredis-g9h0v, byte-exact-sensitive — DON'T micro-tweak, high golden-regression
+risk) and the literal path is 1 hash+get+set/byte = algorithmically required. **CONCLUSION: the list DUMP gap = the
+ChunkedList->compressed-listpack-node rewrite (99fwc, CoralOx structural domain), same root as list RESTORE 4.5x /
+p128 0.42x. NOT a safe fr-persist compute lever. DON'T re-chase DUMP — 5/6 types already beat redis and the list loss is
+structural.** This completes the session's frontier map: safe per-cmd (resolve-once/expiry-fusion/zero-copy _into),
+large-reads (write-path IO), sub-ms (ohsk5 dispatch), and DUMP (cached-listpack) all either shipped or confirmed
+main.rs/structural — no safe shippable lever remains while agent-mail is down.
