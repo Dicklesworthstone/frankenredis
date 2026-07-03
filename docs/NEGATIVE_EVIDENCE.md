@@ -9070,3 +9070,16 @@ across packed/compact/tree + partial/full/over-count + rank_tree; float trials b
 is the pre-existing -0.0/float quirk ac7a9ca80, replies match). **REMAINING zset-pop/trim: ZREMRANGEBYRANK still loops
 zs.remove(m) = O(count*len) Compact — the follow-up (needs a rank-RANGE drain, not just front/back; the drain_first_n/
 drain_last_n primitives + collect_drained pattern are the template). ZPOPMIN/ZPOPMAX-count + ZMPOP now O(len)+O(count log n).**
+
+### 2026-07-03 SHIP (bulk rank-range drain for ZREMRANGEBYRANK, 9a332059e) — CrimsonHawk
+Completed the zset-trim family follow-up. ZREMRANGEBYRANK removed the rank slice via count× zs.remove(m) (each O(len)
+Vec::remove on Compact) = O(count*len). SortedSet::remove_rank_range: Full+Compact drains [s_idx,s_idx+count) in ONE
+shift; Tree/Packed fall back to the EXACT prior collect+remove path (no regression). Measured (instructions:u, 3/3;
+RESTORE-rebuild cancels): RESTORE(2000)+ZREMRANGEBYRANK 0 1898 cycle 28.2B->7.8B = **-72.30%**, **0.493x->1.176x vs redis
+7.2.4** (was 2x slower, now beats redis). Byte-exact: 50 integer-score trials base==cand==redis reply+DIGEST+ZRANGE
+across packed/compact/tree, random ranges (neg/oob/full/single), ±rank_tree. **ZSET TRIM FAMILY COMPLETE: ZPOPMIN/
+ZPOPMAX-count + ZMPOP (256519a46) + ZREMRANGEBYRANK (9a332059e) now O(len)+O(count log n) via the drain_first_n/
+drain_last_n + remove_rank_range_compact primitives on FullZSetOrder. Note: incremental ZADD build into a Compact zset is
+STILL O(n^2) (surfaced earlier, read/write tradeoff — the Compact Vec is kept for ZRANGE read speed); RESTORE/bulk builds
+already avoid it via from_unique_pairs. ZREMRANGEBYSCORE/BYLEX also loop zs.remove but their slice is score/lex-bounded
+(not a simple rank range) — a rank-range-mapped drain could extend to them (next candidate).**
