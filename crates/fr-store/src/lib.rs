@@ -22602,9 +22602,21 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut zs = SortedSet::new();
                 let zset_max_entries = self.zset_max_listpack_entries;
                 let zset_max_value = self.zset_max_listpack_value;
+                // (CrimsonHawk) Collect (member,score) then BULK-build via
+                // from_unique_pairs_with_limits instead of N insert_with_limits calls
+                // (each an ordered-structure insert). RESTORE twin of the qxfmr/HSET
+                // bulk-build vein; mirrors the RDB_TYPE_HASH / SET_LISTPACK arms. The
+                // per-element loop's only non-Added outcome is a duplicate member (limits
+                // promote, they don't reject), so the HashSet uniqueness pass preserves
+                // the InvalidDumpPayload reject. Scores are canonicalize_zero_score'd here
+                // (idempotent; from_unique_pairs also canonicalizes) and NaN-rejected
+                // inline, exactly as insert_with_limits did. from_unique_pairs_with_limits
+                // picks Packed vs Full by the SAME final count/size condition the
+                // incremental maybe_promote path converges to. Byte-identical (verified:
+                // DIGEST-VALUE + OBJECT ENCODING + ZRANGE WITHSCORES vs redis 7.2.4).
+                let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(count);
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
@@ -22628,10 +22640,24 @@ impl Store {
                     if score.is_nan() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    if !zs.insert_with_limits(member, score, zset_max_entries, zset_max_value) {
-                        return Err(StoreError::InvalidDumpPayload);
+                    pairs.push((member, canonicalize_zero_score(score)));
+                }
+                {
+                    let mut seen = HashSet::with_capacity_and_hasher(
+                        pairs.len(),
+                        foldhash::quality::RandomState::default(),
+                    );
+                    for (member, _) in &pairs {
+                        if !seen.insert(member.as_slice()) {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
                     }
                 }
+                let zs = SortedSet::from_unique_pairs_with_limits(
+                    pairs,
+                    zset_max_entries,
+                    zset_max_value,
+                );
                 Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_STREAM_LISTPACKS
