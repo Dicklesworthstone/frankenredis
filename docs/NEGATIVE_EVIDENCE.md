@@ -9219,3 +9219,17 @@ the ONLY fix is the structural first-byte / (arity,cmdlen)-grouped / command-has
 to THE hottest fn wanting a dedicated cycle + representative multi-cmd workload. Reordering hot arms up "just shuffles cost"
 (SET/HSET/MGET are also common). CEILING RE-CONFIRMED from the perf-bead angle: no safe clean lever; ohsk5 is the sole
 per-command lever and it is structural.**
+
+### 2026-07-03 MEASURED-CORRECTION (incremental-ZADD "O(n^2) lever" was WRONG — Compact-Vec is faster for BOTH build AND read) — CrimsonHawk
+I repeatedly SURFACED "incremental-ZADD-into-Compact O(n^2) is a structural read/write tradeoff / deferred lever" (b5f2eb97b,
+9368e0582, etc.) WITHOUT measuring it. Measured it now: lowered SORTED_SET_COMPACT_FULL_MAX_ENTRIES 2048->128 (makes 129..2048
+zsets use Tree/BTreeMap instead of Compact/Vec; byte-exact — OBJECT ENCODING="skiplist" for both, ZRANGE/ZRANGEBYSCORE
+identical, driven by the separate zset_max_listpack_entries=128 flag). A/B on a 2000-member zset (perf instructions:u, 3/3
++ 2/2 stable): ZADD incremental build Tree is **+7.4% SLOWER** than Compact; ZRANGE 0 -1 Tree is **+9.1% SLOWER**. So
+Compact(Vec) is FASTER for BOTH build and read at n<=2048 — the O(n^2)-looking Vec::insert is a cache-friendly HARDWARE
+MEMMOVE (~15 GB/s) that beats BTreeMap's O(n log n) pointer-chasing + node allocs + cache misses until large n; and Vec
+iteration is cache-friendly vs BTreeMap node-hopping. **The threshold 2048 is a GENUINE optimization, NOT a tradeoff. The
+"incremental ZADD O(n^2)" is NOT a lever — do NOT lower the threshold or switch medium zsets to a tree/skiplist; it
+regresses both dimensions.** REVERTED the experiment (working tree back to 2048). LESSON: measure a hypothesized structural
+"tradeoff" before surfacing it as a lever — asymptotic complexity (O(n^2) vs O(n log n)) LOSES to constant factors (memmove
+vs pointer-chasing) at these sizes. Removes one item from the "remaining frontier"; the incremental-ZADD path is optimal.
