@@ -10453,3 +10453,23 @@ CONCLUSION: the INFO surface (every monitoring agent reads it) is byte-exact in 
 coverage + structure. Combined with the now-fully-gated config-defaults (195/195) and
 COMMAND INFO metadata, the server-introspection/metadata surface is comprehensively
 verified. No lever. Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (CONFIG SET accept/reject validation 194/195 byte-exact; sole diff = locale-collate, WONTFIX host-dependent+unsafe) — CrimsonHawk
+
+Differential: for each of 195 config params (minus side-effecting/host/secret ones),
+CONFIG SET <param> <invalid value: __garbage__ / -1 / notanumber> and compare fr vs
+redis 7.2.4 accept(OK)/reject(ERR). Result: **194/195 identical** — fr validates numeric
+ranges, enums, booleans, and byte-units exactly as redis (accepts/rejects the same).
+SOLE divergence: `CONFIG SET locale-collate __garbage__` -> redis ERR ("CONFIG SET
+failed"), fr OK. Redis validates via setlocale(LC_COLLATE, value) (rejects locales not
+installed on the host); fr stores the string unvalidated. WONTFIX-class:
+  - redis's accept-set is HOST-DEPENDENT (which locales are installed) — this is exactly
+    why locale-collate is already in config_defaults_gate's HOST_SPECIFIC exclude list.
+  - a byte-exact fix requires setlocale FFI, but fr-runtime is `#![deny(unsafe_code)]`
+    (and fr-command `#![forbid]`); there is no SAFE cross-platform way to enumerate
+    installed locales, and any pattern heuristic would create NEW divergences (accept an
+    uninstalled xx_XX that redis rejects).
+  - the value is functionally INERT in fr: SORT ALPHA is byte-exact vs redis (sort gates
+    green) with locale-collate="" (the default), so fr never uses the collation locale.
+CONCLUSION: the CONFIG SET validation surface is byte-exact except one obscure,
+host-dependent, safe-Rust-unfixable param. No lever. Rollback: n/a (no code change).
