@@ -10040,3 +10040,12 @@ zero: use 1 to start from the first match, 2 from the second ... or use negative
 MAXLEN -1 -> "ERR MAXLEN can't be negative"; COUNT -1 -> "ERR COUNT can't be negative"; no-list -> nil. **RESULT: 18/18
 byte-exact, 0 DIFF.** fr's LPOS rank-direction search, count-limiting, maxlen scan-bounding, and error surface all match redis
 7.2.4. List command surface fully verified (LPUSH/RPUSH/LPOP/RPOP/LRANGE/LINSERT/LSET/LREM/LTRIM/LMOVE/LMPOP/LPOS + blocking).
+
+### 2026-07-03 SURFACE (HELLO handshake options — 9 checks, 0 DIFF; fr reports server=redis version=7.2.4) — CrimsonHawk
+Differentiated HELLO (protocol handshake: protover/AUTH/SETNAME + errors) fr-v8 vs redis 7.2.4, 9 checks: HELLO no-arg/2 ->
+RESP2 *14 array (server=redis, version=7.2.4, proto:2); HELLO 3 -> RESP3 %7 map (proto:3); HELLO 4 -> "-NOPROTO unsupported
+protocol version"; HELLO non-int -> "-ERR Protocol version is not an integer or out of range"; HELLO 3 SETNAME foo -> ok;
+HELLO 3 AUTH default <anypass> -> success (default user is nopass, accepts any); HELLO 3 BADOPT -> "-ERR Syntax error in
+HELLO option 'BADOPT'". **RESULT: 9/9 byte-exact, 0 DIFF.** fr's HELLO reports the redis 7.2.4 identity (server/version),
+RESP2/RESP3 negotiation, AUTH/SETNAME inline, and NOPROTO/syntax errors all match -- clients handshaking via HELLO see an
+identical redis 7.2.4. Connection-handshake surface verified.
