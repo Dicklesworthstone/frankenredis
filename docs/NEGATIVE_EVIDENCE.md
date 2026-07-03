@@ -9773,3 +9773,12 @@ SSCAN/ZSCAN full + reply byte-exact.** HSCAN NOVALUES -> BOTH return "ERR syntax
 fr correctly does NOT implement it, matching the 7.2.4 target — a feature-parity WIN, not a gap). fr's SCAN cursor
 (reverse-binary-iteration-equivalent completeness) + MATCH/COUNT/TYPE filters + per-type scan replies all match redis 7.2.4.
 No divergence. Tools that rely on SCAN full-iteration (redis-cli --scan, migration, --bigkeys) work correctly against fr.
+
+### 2026-07-03 SURFACE (EXPIRE NX/XX/GT/LT conditional options — 15 checks, 0 DIFF) — CrimsonHawk
+Differentiated the redis-7.0 EXPIRE conditional options (comparison-logic edge-prone) fr HEAD vs redis 7.2.4, 15 checks
+(reply + resulting TTL): NX on no-ttl=set / on has-ttl=reject; XX on no-ttl=reject / on has-ttl=set; GT higher=set / lower=
+reject / on-no-ttl(infinite)=reject; LT lower=set / higher=reject / on-no-ttl(infinite)=set; NX+GT combo=error; past
+EXPIREAT=delete; negative EXPIRE=delete; PEXPIRE GT ms. **RESULT: 15/15 byte-exact, 0 DIFF** — including the subtle
+infinite-TTL semantics (a key with no TTL is treated as +inf: GT rejects vs it, LT accepts). fr's conditional-expire
+comparison logic + option-combo validation + immediate-deletion-on-past-time all match redis 7.2.4. Expiry command surface
+(EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT + NX/XX/GT/LT + TTL/PTTL/EXPIRETIME earlier) byte-exact.
