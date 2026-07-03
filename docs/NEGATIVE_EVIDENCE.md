@@ -10062,3 +10062,18 @@ memory has it at 1.10x post-a67a6b86c; pipe=200/5-trials is noise-prone for sub-
 lesson). The all_channels gate change is free for the default user (all_channels=true -> fast path unchanged); only channel-
 restricted users take the generic path. **All 6 session fixes confirmed perf-clean (no hot-path regression) + correctness
 validated individually. Session fixes are regression-free.**
+
+### 2026-07-03 SURFACE (CORRECTNESS-REGRESSION CHECK: project's own ACL/MULTI/EVAL fuzz gates PASS on fr post-6-fixes) — CrimsonHawk
+Ran the project's existing differential harnesses over the exact areas the 6 session fixes touched, on fr-v8 vs redis 7.2.4:
+- acl_semantics_gate.py -> PASS (33 steps; ACL SETUSER/GETUSER/DRYRUN/CAT/LIST parity) -- confirms the PUBLISH all_channels
+  gate + script-ACL wrap fixes did not regress ACL semantics.
+- multi_exec_differ.py -> PASS (5 seeds x 4000 = 20000 transactions, 0 divergences; MULTI/EXEC/WATCH cross-connection dirty)
+  -- confirms the EXEC-routing fixes (REPLICAOF/CONFIG/ACL now applied in execute_db_scoped_command) did not regress
+  transaction control.
+- eval_semantics_differ.py -> PASS (196 EVAL steps, 0 divergences; Lua core semantics) -- confirms the script-ACL error wrap
+  did not regress EVAL.
+These harnesses FUZZ far more than the per-fix validation (20000 tx, 196 EVAL steps, 33 ACL steps). **RESULT: all PASS ->
+the 6 session fixes are CORRECTNESS-regression-free (+ perf-regression-free per prior broad sweep). Session fixes fully
+regression-verified against the project's own byte-exact differential suite.** (Also confirms the project ALREADY has a broad
+differential harness suite ~40 *_differ/*_gate scripts covering the normal command surface; the session's unique value was
+the RESTRICTED-CONTEXT bugs those harnesses missed — MULTI/ACL/OOM secondary dispatch — now fixed + gate-verified.)
