@@ -9934,3 +9934,11 @@ PXAT past=DELETE key (ttl -2); missing key=nil; PERSIST-on-no-ttl=noop; error su
 time in 'getex' command", EX+PX / PERSIST+EX -> "ERR syntax error", wrong-type -> WRONGTYPE). **RESULT: 13/13 byte-exact,
 0 DIFF.** GETEX's read-vs-write dual semantics, TTL set/remove/delete, and option-conflict validation all match redis 7.2.4.
 Expiry-adjacent command surface (EXPIRE options + GETEX + SETEX + TTL family) byte-exact.
+
+### 2026-07-03 SURFACE (LCS longest-common-subsequence — 14 checks, 0 DIFF) — CrimsonHawk
+Differentiated LCS (algorithmically complex: DP subsequence + match-range output) fr-v8 vs redis 7.2.4, 14 checks: bare LCS
+("mytext"), LEN (6), IDX (match-range array [[4,7],[5,8]]/[[2,3],[0,1]] + len), MINMATCHLEN 4 (filters short matches),
+WITHMATCHLEN (per-match lengths), all option combos, empty-string keys, identical keys, no-common (abcdefg vs xyzabc ->
+"abc"), missing keys, LEN+IDX conflict -> "ERR If you want both the length and indexes, please just use IDX.", MINMATCHLEN
+100 -> empty matches + len 6. **RESULT: 14/14 byte-exact, 0 DIFF.** fr's LCS DP result, match-range indices, min-match
+filtering, and with-match-length output all match redis 7.2.4 precisely.
