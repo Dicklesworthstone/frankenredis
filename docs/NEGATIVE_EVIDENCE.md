@@ -9190,3 +9190,17 @@ CLIENT KILL/LIST path (fr-runtime:34760) is the generic one and matches redis on
 direct-dispatcher bug found. Those beads are stale-open (beads.db drift). **CONCLUSION: no safe clean bead-based correctness
 lever available; the cluster surface needs feature-completion (maintainer scope decision), and the CLIENT beads are already
 fixed.**
+
+### 2026-07-03 SURFACE (bead 7qmmr primary claim FIXED; residual = architectural; bead DB confirmed stale) — CrimsonHawk
+Probed bead 7qmmr (FUNCTION LOAD non-UTF8 body returns WRONGTYPE) vs redis 7.2.4: **PRIMARY CLAIM ALREADY FIXED** — fr
+returns `-ERR Error compiling function: user_function:2: unexpected symbol near '...'` (a compile error, NOT WRONGTYPE),
+matching redis's error TYPE. RESIDUAL byte-divergence: for the offending symbol fr emits the byte re-encoded (0xff ->
+U+00FF -> UTF-8 0xc3 0xbf) while redis emits the raw 0xff — because function_load (fr-store:21766) does
+String::from_utf8_lossy(code) then lexes decoded chars via fr's custom Lua tree-walker, losing raw bytes. NOT a clean fix:
+the lossy String's byte offsets don't map back to the original body (0xff->U+FFFD/U+00FF changes byte length), so emitting
+the raw offending byte needs the lexer to track original-body byte offsets = architectural (fr Lua source is a Rust String,
+not bytes). Low-EV edge case (non-UTF8 Lua function body). **PATTERN CONFIRMED across ~14 probed ready-beads this session
+(CLIENT/CLUSTER/FUNCTION): the beads.db is STALE — primary claims already fixed; genuinely-open items are architectural
+(Lua raw-byte lexing, yield-as-arg 7lmle), main.rs borrowed-fast-path (ohsk5-crowded, marginal), or cluster feature-
+completion (no slot-serving layer). No clean safe bead-based lever remains; the safe executor/correctness vein is
+exhausted (per feedback_br_sync_drift, the open-bead count overstates real remaining work).**
