@@ -9295,3 +9295,17 @@ cache MISS = still pays the re-encode (that part IS architectural: ChunkedList n
 focused task (correctness-critical list-write audit). NOTE hash/set/string DUMP already BEAT redis (2.4-2.8x) so they don't
 need caching. This is the 3rd measured-correction this session (ZADD-Compact optimal, hashtable-RAM parity, list-DUMP-
 cacheable) — measuring reclassifies "architectural/unfixable" items as fixable-with-care.
+
+### 2026-07-03 SURFACE (verified: ltrim/lrem not calling touch_write is HARMLESS — no correctness bug) — CrimsonHawk
+Follow-up to the list-DUMP-cache dig: noticed ltrim/lrem (and touch_write-skipping list writes) don't bump modification_count
+(touch_write calls bump_mod_count; ltrim/lrem call only bump_lfu_freq). Hypothesized this could cause stale OBJECT IDLETIME
+(LRU not reset) or stale DEBUG DIGEST (mod_count-cached). MEASURED both vs redis 7.2.4 — REFUTED, fr matches redis: OBJECT
+IDLETIME after LTRIM/LREM/LSET/LPUSH = identical to redis (both preserve idle, neither resets on these); DEBUG DIGEST-VALUE
+after LTRIM/LREM/LSET/LINSERT = MATCH. HARMLESS because (1) lists are NOT in any modification_count-based cache
+(dump_payload_cache is zset-only, HLL cache is string-only), and (2) DEBUG DIGEST uses digest_stale/digest_mutations, not
+modification_count. So the missing touch_write on ltrim/lrem is a non-issue for current correctness (it ONLY matters IF the
+dump cache is extended to lists — see the list-DUMP correction above, where adding the bump is a prerequisite). No bug, no
+change. Measure-before-assuming ruled out a hypothesized bug. **SESSION CEILING remains comprehensively verified: 15 perf
+wins + 1 DoS fix + 3 measured-corrections; every command family swept (executors competitive-or-faster everywhere), surface
+byte-exact (4761-check) + crash-robust (90-probe); sole remaining levers = ohsk5 structural dispatch (main.rs) + set/zset
+member-dup RAM (CoralOx) + list-DUMP-cache (low real-world EV, correctness-multi-part). No clean safe quick lever remains.**
