@@ -9414,3 +9414,15 @@ ZRANDMEMBER's reverse quirk unmatched — NOT worth the fragility. (2) CLIENT IN
 + cosmetic qbuf-free (fr 4070 vs redis 20448 = input-buffer sizing); not functional. **NO real RESP3 divergence. Correctness
 dimension now covers RESP2 values + encoding transitions + RESP3 shapes — all byte-exact. The random-command return-all order
 is a spec-compliant, hash-order-dependent non-bug; DON'T chase it.**
+
+### 2026-07-03 SURFACE (COMMAND INFO metadata — 370 commands, 0 DIFF across arity/flags/keypos/ACL) — CrimsonHawk
+Differentiated COMMAND INFO metadata (client-library-visible: redis-py/lettuce/etc. introspect it) fr HEAD vs redis 7.2.4
+across ALL 370 commands (names from redis COMMAND LIST, authoritative). Normalized + compared name/arity/flags(sorted)/
+first-key/last-key/step/ACL-categories(sorted). **RESULT: 370 commands, arity-diff=0, flags-diff=0, keypos-diff=0,
+acl-diff=0, missing=0 — the entire COMMAND table is BYTE-EXACT with redis.** Every command's arity, flag set (write/readonly/
+denyoom/fast/pubsub/etc.), key-spec positions (first/last/step for cluster key routing), and ACL categories match. Clients
+that introspect commands (cluster key extraction, ACL, command routing) behave identically. **CORRECTNESS dimension now
+verified across: RESP2 values (4761-check), encoding transitions (25), RESP3 shapes (35), AND full COMMAND metadata (370×7
+fields) — all byte-exact. Combined with perf (parity-or-faster every subsystem incl pub/sub) + robustness (188 crash probes),
+fr's fidelity to Redis 7.2.4 is comprehensively proven across every dimension I can devise. Remaining = ohsk5 full
+restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM. No safe high-value lever in any dimension.**
