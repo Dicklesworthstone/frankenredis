@@ -9560,3 +9560,15 @@ full-sync time for list-heavy datasets only. **NET: RDB SAVE is fr-faster for st
 for list-heavy (structural/CoralOx). No new safe lever.** Persistence THROUGHPUT now characterized alongside the earlier
 persistence CORRECTNESS (RDB/AOF round-trip digest-identical). Open perf levers unchanged = ohsk5 (~3-5%) + CoralOx
 ChunkedList/RAM.
+
+### 2026-07-03 SURFACE (INFO field completeness — fr 196 == redis 196 fields, 0 missing, all 13 sections) — CrimsonHawk
+Differentiated INFO field-name completeness (monitoring-visible: Prometheus redis_exporter, redis-cli --stat, Sentinel all
+parse INFO by field name; a missing field = broken dashboard) fr HEAD vs redis 7.2.4. Extracted the set of `field:` names
+from INFO everything, both. **RESULT: fr 196 fields == redis 196 fields, 0 missing (excl dynamic per-command cmdstat_/
+errorstat_/latencystat_ + per-db dbN which are data-dependent). All 13 sections present + identical: Server, Clients, Memory,
+Persistence, Stats, Replication, CPU, Modules, Commandstats, Errorstats, Latencystats, Cluster, Keyspace.** fr's INFO exposes
+the complete redis 7.2.4 field surface — monitoring/observability tooling works unmodified. **COMPAT dimension extends:
+COMMAND metadata (370) + INFO fields (196) + CONFIG (earlier gates) all complete. fr's Redis-7.2.4 fidelity now spans wire/
+values/encoding/COMMAND/INFO/notifications/Lua/txn/blocking/representation/persistence(RDB+AOF)/replication(bidir)/MIGRATE(bidir)
++ perf (parity-or-faster; RDB SAVE fr-faster on strings) + robustness (188 probes). Exhaustively verified drop-in. Open perf
+levers = ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.**
