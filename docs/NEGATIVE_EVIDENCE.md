@@ -9942,3 +9942,12 @@ WITHMATCHLEN (per-match lengths), all option combos, empty-string keys, identica
 "abc"), missing keys, LEN+IDX conflict -> "ERR If you want both the length and indexes, please just use IDX.", MINMATCHLEN
 100 -> empty matches + len 6. **RESULT: 14/14 byte-exact, 0 DIFF.** fr's LCS DP result, match-range indices, min-match
 filtering, and with-match-length output all match redis 7.2.4 precisely.
+
+### 2026-07-03 SURFACE (BITOP AND/OR/XOR/NOT + zero-padding — 13 checks, 0 DIFF) — CrimsonHawk
+Differentiated BITOP (bit-parallel ops across keys; zero-pad/off-by-one-prone) fr-v8 vs redis 7.2.4, 13 checks comparing
+BOTH return-length AND resulting dest bytes (hex): AND/OR/XOR of different-length keys (shorter zero-padded to longest -> len
+6, correct bytes), NOT single, missing-key-treated-as-zeros (AND/OR with nokey), XOR-self (all-zero), 3-key AND, empty+key
+OR, all-missing -> len 0 (dest deleted), NOT-missing -> 0, NOT-multi-key -> "ERR BITOP NOT must be called with a single
+source key.", unknown-op -> "ERR syntax error". **RESULT: 13/13 byte-exact, 0 DIFF.** fr's BITOP bit arithmetic, zero-padding
+to the longest operand, missing-key-as-empty semantics, dest-deletion-on-empty-result, and error surface all match redis
+7.2.4. Bitmap family fully verified (SETBIT/GETBIT/BITCOUNT/BITPOS/BITFIELD + BITOP).
