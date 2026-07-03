@@ -9831,3 +9831,18 @@ client CREATES it -> aborts. **RESULT: 6/6 byte-exact, 0 DIFF.** fr's optimistic
 abort-on-any-touch incl restore/expire/flush/create) matches redis 7.2.4 precisely. Transaction surface now fully verified:
 queueing/EXECABORT/partial-results (earlier) + special-command routing (3 fixes) + blocking-in-MULTI + WATCH-CAS -- all
 byte-exact. Optimistic locking is a verified drop-in.
+
+### 2026-07-03 SHIPPED (SECURITY FIX: PUBLISH/SPUBLISH ACL channel-permission BYPASS via borrowed fast path) — CrimsonHawk
+**FOUND + FIXED A REAL ACL-BYPASS SECURITY BUG** (same fast-path-skips-a-check class as the EXEC-bypass thread). fr enforced
+ACL channel permissions on SUBSCRIBE but NOT on PUBLISH: a user restricted to `&ch:*` channels could `PUBLISH bad msg` to ANY
+channel -> fr returned `:0` (allowed) vs redis 7.2.4 `-NOPERM No permissions to access a channel`. ROOT CAUSE: the borrowed
+PUBLISH fast path `execute_plain_publish_borrowed` (fr-runtime:24623, dispatched at main.rs:7010) gates on
+`plain_borrowed_default_key_write_allows` -> `current_acl_allows_default_key_command` (27437), which checked
+all_commands+all_keys but NOT all_channels -> a channel-restricted (but command/key-unrestricted) user passed the gate, ran
+the fast path, and skipped the ACL channel check the generic path applies (acl_channel_permission_error_for_argv). FIX: add
+`&& user.all_channels` to current_acl_allows_default_key_command so channel-restricted users fall through to the generic
+dispatch (which enforces the &-pattern -> NOPERM). **SHIPPED + VALIDATED byte-exact vs redis:** channel-restricted user
+PUBLISH/SPUBLISH to forbidden channel -> NOPERM (was :0); allowed channel -> :0; DEFAULT user PUBLISH still fast+works
+(all_channels=true, no perf regression for the common case); key-ACL fast paths unaffected (SET foo:1 ok / bar:1 NOPERM).
+**4th real functional bug found+fixed this session; a security-relevant ACL channel-bypass. The borrowed-fast-path-skips-a-
+generic-check pattern struck again (after EXEC-bypass x3) — audit other fast paths for skipped ACL/gate checks.**

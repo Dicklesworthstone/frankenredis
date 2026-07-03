@@ -27447,6 +27447,16 @@ impl Runtime {
             && user.denied_commands.is_empty()
             && user.denied_categories.is_empty()
             && user.all_keys
+            // (frankenredis-pubaclchan) Also require all_channels: the borrowed
+            // write fast path (execute_plain_publish_borrowed) skips the ACL
+            // CHANNEL check that the generic path applies, so a channel-restricted
+            // user (e.g. `&ch:*`) could PUBLISH to ANY channel via the fast path
+            // (verified divergent from redis 7.2.4, which returns NOPERM). Bailing
+            // channel-restricted users to the generic dispatch enforces the
+            // per-channel &-pattern permission (NOPERM No permissions to access a
+            // channel). Channels are irrelevant to non-pubsub fast paths, so the
+            // only effect is a rare channel-restricted user taking the slow path.
+            && user.all_channels
     }
 
     #[allow(clippy::too_many_arguments)]
