@@ -9126,3 +9126,17 @@ real O(n^2) is many SINGLE-member ZADDs growing the zset (each O(n) per command 
 (FullZSetOrder Compact-Vec -> skiplist/order-stat-tree) fixes it, and that's the deliberate read/write tradeoff (Vec kept
 for O(1) ZRANGE index). Deferred/structural, not a safe clean lever.** Safe executor lever vein remains exhausted; frontier =
 ohsk5 dispatch (main.rs, unsafe) / this ZADD structural tradeoff / ChunkedList (CoralOx).
+
+### 2026-07-03 SURFACE (value-EXACT differential 4761 checks = 0 divergences; safe ceiling reached, main.rs still blocked) — CrimsonHawk
+Ran a value-EXACT differential (exact reply bytes, not just error-ness) across 13 subtle-semantics areas x 300 randomized
+trials = **4761 checks, 0 divergences** vs redis 7.2.4: ZADD NX/XX/GT/LT/CH/INCR flag combos, SETRANGE offsets, LPOS
+RANK/COUNT (incl negative rank), GETRANGE neg/oob, BITCOUNT/BITPOS BYTE|BIT, OBJECT ENCODING transitions (intset/listpack/
+hashtable), COPY [REPLACE], ZRANGEBYSCORE incl/excl/inf + LIMIT, INCRBYFLOAT (incl -0.0/1e100/3.0e3), LMPOP, SINTERCARD
+LIMIT, ZRANGE REV/BYSCORE/LIMIT, list encoding, APPEND. Combined with 90 adversarial crash probes (0 crashes) this session,
+the correctness surface is byte-exact AND adversarially robust. **SESSION SAFE-CEILING REACHED: 15 perf wins shipped
+(SRANDMEMBER/HRANDFIELD ~97%, zset-trim family -64..72% all beating redis, RESTORE family, hash-once, expiry-fusion) + 1 DoS
+crash fix; safe executor/algorithmic + correctness veins exhausted. ALL remaining levers are BLOCKED/deferred: (a) ohsk5
+dispatch chain + zrank_ws borrowed fast path + large-value vectored-write = main.rs (agent-mail degraded_read_only ALL
+session, can't reserve the hottest/most-contended file; a single additive fast-path is net-marginal per ohsk5); (b)
+incremental-ZADD-into-Compact O(n^2) = structural read/write tradeoff; (c) hashtable/zset RAM 2x + ChunkedList = CoralOx
+fr-store structural domain. No safe clean lever remains to ship without coordination.**
