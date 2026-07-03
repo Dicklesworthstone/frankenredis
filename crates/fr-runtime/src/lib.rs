@@ -29951,7 +29951,18 @@ impl Runtime {
             return None;
         }
 
-        if !Self::command_advances_replication_offset(argv) {
+        // Redis processCommand rejects on OOM ONLY commands flagged denyoom
+        // (`reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). Non-denyoom writes
+        // (DEL/UNLINK/EXPIRE/LPOP/HDEL/SREM/RENAME/...) do NOT allocate and must
+        // stay allowed over maxmemory so a user can FREE memory to recover. fr
+        // previously rejected any replication-advancing (write) command, blocking
+        // DEL/EXPIRE under OOM = divergent from redis 7.2.4 AND a recovery trap.
+        // EXEC/scripts: their queued/inner denyoom commands are OOM-checked
+        // individually. (frankenredis-oomdenyoom)
+        if !argv
+            .first()
+            .is_some_and(|cmd| fr_command::command_is_denyoom(cmd))
+        {
             return None;
         }
 

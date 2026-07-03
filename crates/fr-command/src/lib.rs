@@ -17261,6 +17261,16 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 
 /// Check if the argument count (including command name) satisfies the command's arity.
 /// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
+/// Whether a command carries the `denyoom` flag — i.e. it may increase memory
+/// and must be rejected under maxmemory pressure (redis processCommand's
+/// `reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). Writes that DON'T allocate
+/// (DEL/UNLINK/EXPIRE/LPOP/HDEL/SREM/...) are NOT denyoom and stay ALLOWED over
+/// maxmemory so a user can free memory to recover. (frankenredis-oomdenyoom)
+pub fn command_is_denyoom(name: &[u8]) -> bool {
+    command_table_index(name)
+        .is_some_and(|idx| COMMAND_TABLE[idx].2.split(' ').any(|f| f == "denyoom"))
+}
+
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
     if is_hget_command(name) {
         return if argc == HGET_ARITY {

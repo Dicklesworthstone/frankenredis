@@ -9883,3 +9883,21 @@ allows checks `role == Master` and bails to the generic path, which enforces REA
 verified drop-in (no fast-path bypass). Restricted-context vein coverage now: MULTI (3 fixes) + ACL command/key/channel
 (1 security fix + audit) + scripts (1 error-parity fix) + subscriber-mode + read-only-replica -- fast-path gate verified
 comprehensive across all restricted contexts tested.
+
+### 2026-07-03 SHIPPED (FIX: OOM recovery trap — non-denyoom commands wrongly rejected over maxmemory) + SURFACE (pre-existing script-OOM bypass) — CrimsonHawk
+**FOUND + FIXED A REAL, IMPACTFUL BUG (6th this session):** under maxmemory + noeviction (redis-as-cache), fr rejected ALL
+write commands with "OOM command not allowed..." — including DEL/UNLINK/EXPIRE/PERSIST/LPOP/RPOP/HDEL/SREM/ZPOPMIN/ZREM/
+RENAME which are NOT denyoom (don't allocate; DEL/UNLINK/pops FREE memory). This is a RECOVERY TRAP: a user hitting OOM
+couldn't delete keys to recover, divergent from redis 7.2.4 (which allows non-denyoom commands over maxmemory precisely so
+you can free memory). ROOT CAUSE: enforce_maxmemory_before_dispatch (fr-runtime:29954) rejected any replication-advancing
+(write) command instead of only CMD_DENYOOM-flagged ones (redis: `reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). FIX:
+added fr_command::command_is_denyoom (reads the "denyoom" flag from COMMAND_TABLE) and gate the OOM rejection on it.
+**SHIPPED + VALIDATED byte-exact vs redis (fr-v6, 22 checks):** DEL/UNLINK/EXPIRE/PERSIST/LPOP/RPOP/HDEL/SREM/ZPOPMIN/ZREM/
+RENAME over OOM -> ALLOWED + correct data (was OOM-rejected); SET/INCR/APPEND/HSET/COPY/LMOVE (denyoom) -> still OOM-rejected;
+reads + read-only scripts -> allowed; EXEC per-queued denyoom check preserved.
+**SURFACE (PRE-EXISTING, separate bug — NOT introduced by this fix, confirmed on pre-fix fr-v5):** writable SCRIPTS bypass
+OOM — EVAL "redis.call('set',...)" returns OK over maxmemory (redis rejects the inner denyoom call). Root: command_advances_
+replication_offset returns false for EVAL so it skips the OOM gate entirely, AND fr's script redis.call path does NOT OOM-
+gate inner calls (unlike its ACL check). Proper fix = per-inner-call denyoom OOM check in the script dispatch (mirroring the
+ACL check), a separate larger change; rejecting EVAL at dispatch would over-reject read-only-body scripts redis allows.
+Deferred + documented. maxmemory OOM command-gating (direct commands) now byte-exact; script-OOM-gating is the open residual.
