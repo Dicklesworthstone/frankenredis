@@ -9971,3 +9971,12 @@ LIMIT -1 -> "ERR LIMIT can't be negative", numkeys 0 -> "ERR numkeys should be g
 of keys can't be greater than number of args", bad option -> "ERR syntax error". **RESULT: 15/15 byte-exact, 0 DIFF.** fr's
 intersection-cardinality + LIMIT early-stop + numkeys validation match redis 7.2.4. (METHOD NOTE: fr loads /tmp/dump.rdb by
 default — an initial run hit stale WRONGTYPE keys; FLUSHALL + rm dump.rdb before differentials with common key names.)
+
+### 2026-07-03 SURFACE (GEO search/dist/pos/hash — 15 checks, 0 DIFF; search logic + precision byte-exact) — CrimsonHawk
+Differentiated the GEO command surface (coordinate precision + distance math + search-shape filtering, all edge-prone) fr-v8
+vs redis 7.2.4, 15 checks: GEODIST (m/km/mi units + missing key -> nil), GEOPOS (WITHCOORD precision + missing member nil),
+GEOHASH (11-char geohash), GEOSEARCH BYRADIUS (ASC + WITHCOORD/WITHDIST/WITHHASH full annotations), FROMMEMBER anchor, BYBOX
+shape, DESC+COUNT, COUNT n ANY (early-stop), tiny 1m radius (precise filtering), GEOSEARCHSTORE, GEODIST same-member (0).
+**RESULT: 15/15 byte-exact, 0 DIFF.** fr's haversine distance, coordinate encode (i128 fixed-point formatter per memory),
+geohash, and radius/box search filtering + sort all match redis 7.2.4. GEO family (GEOADD/GEODIST/GEOPOS/GEOHASH/GEOSEARCH/
+GEOSEARCHSTORE) is a verified drop-in — both formatting (prior memory) AND search LOGIC confirmed.
