@@ -10714,3 +10714,15 @@ returns the byte-identical error "ERR Error compiling function: user_function:2:
 unexpected symbol near 'end'" (exact line + symbol) for invalid syntax. So fr does not
 text-scan; it compiles via its Lua interpreter like redis. Scripting engine surface
 (EVAL library + FUNCTION) is fully verified. No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (keyspace-notification event names byte-exact vs redis 7.2.4 — 42 more commands, streams+expire-family+stores) — CrimsonHawk
+
+Extended the earlier 52-command keyspace-notification sweep to the commands it didn't
+cover: 0 diffs across 42 more. Byte-exact event names for: SETEX/PSETEX/SETNX/GETDEL/
+GETEX (set/del/persist), PERSIST, SORT ... STORE, SETBIT/BITFIELD (setbit), SETRANGE/
+APPEND, SMOVE (smove_from/smove_to), MOVE (move_from/move_to), XADD/XTRIM/XDEL/XSETID,
+XGROUP CREATE/CREATECONSUMER/DELCONSUMER/DESTROY, COPY (copy_to)/RENAME (rename_from/
+rename_to), INCRBYFLOAT/HINCRBYFLOAT, LPUSH/LSET/LINSERT, ZADD/ZINCRBY/ZRANGESTORE.
+Combined with the prior 52-command probe, keyspace notifications are comprehensively
+verified (~94 commands, incl the stream-consumer-group + expire-family + store-variant
+events apps subscribe to). No lever. Rollback: n/a.
