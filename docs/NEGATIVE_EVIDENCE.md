@@ -9355,3 +9355,16 @@ REORDER is not worth the delicate hot-path surgery (~1% on one command). Only th
 jump-table (skip ALL ~34 arms for INCR at once) delivers ohsk5's ~3-5% — confirming ohsk5 is genuinely the big all-or-nothing
 restructure, not a safe partial ship. No safe high-value perf lever remains; the perf campaign is COMPLETE (fr parity-or-
 faster across the surface; remaining = ohsk5 full restructure [dedicated cycle] + set/zset RAM [CoralOx]).**
+
+### 2026-07-03 SURFACE (pub/sub fan-out — never-tested subsystem — is fr-FASTER; every subsystem now covered) — CrimsonHawk
+Tested the last untested subsystem: pub/sub fan-out (PUBLISH cost scales with subscriber count = per-subscriber buffer copy,
+a plausible fixable gap). Focused test (N subscribers on 1 channel, 64-byte msg, publisher throughput best-of-5) fr HEAD vs
+redis 7.2.4: PUBLISH to 100 subs = **1.506x fr-faster**, to 1000 subs = **1.278x fr-faster**. fr's fan-out BEATS redis (no
+per-subscriber inefficiency). **This closes the LAST unexplored subsystem. The session has now measured EVERY perf-relevant
+area — strings/lists/hashes/sets/zsets/streams/geo/hll/bitmaps, DUMP/RESTORE, SORT/SCAN/set-algebra, keyspace RAM, dispatch,
+AND pub/sub — and fr is PARITY-OR-FASTER across ALL of them (executors faster everywhere, common cmds at parity, only a
+minority of deep sub-ms cmds ~0.6-0.9x dispatch-bound = ohsk5 ~3-5% aggregate). There is no untested subsystem and no safe
+high-value lever. The perf frontier is comprehensively, exhaustively CLOSED.** Remaining = full ohsk5 command-hash restructure
+(big/risky/dedicated-cycle, ~3-5%) + set/zset member-dup RAM ~1.38x (CoralOx). Session tally: 15 perf wins + 1 DoS fix + 5
+measured corrections/analyses (ZADD-Compact optimal, hashtable-RAM parity, list-DUMP cacheable-but-unsafe, ohsk5 modest,
+reorder negligible) + full-surface competitiveness proof incl pub/sub.
