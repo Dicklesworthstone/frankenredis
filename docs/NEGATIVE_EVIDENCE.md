@@ -8943,3 +8943,19 @@ of a zset with -inf/-0.0 scores yields a different DEBUG DIGEST-VALUE than the s
 RESTORE — a separate correctness item worth a differential probe.** RESTORE bulk-build vein now: hash+zset shipped; SET
 uses O(1) IndexSet insert (small EV); intset/listpack arms already bulk. Session RESTORE tally: string LZF -54.8%, hash
 -23%, zset -74%.
+
+### 2026-07-03 SURFACE (root-caused: zset -0.0 score parity gap is ENCODING-DEPENDENT) — CrimsonHawk
+Root-caused the -inf/-0.0 RESTORE DIGEST divergence I flagged in 70a6c9e69. It is the NEGATIVE-ZERO score, and it is
+ENCODING-DEPENDENT (confirmed via raw-socket ZSCORE, fr HEAD vs redis 7.2.4):
+  listpack zset:  ZADD -0 -> fr ZSCORE "0",  redis "0"   = MATCH (redis listpack stores -0.0 as integer 0)
+  skiplist zset:  ZADD -0 -> fr ZSCORE "0",  redis "-0"  = DIVERGE (redis skiplist keeps the raw -0.0 double)
+fr's `canonicalize_zero_score` (fr-store lib.rs ~26651, **23 call sites**) UNCONDITIONALLY maps -0.0->+0.0, so fr matches
+redis's listpack but not its skiplist. Observable on ZSCORE / ZRANGE WITHSCORES / DEBUG DIGEST-VALUE for any skiplist zset
+carrying a -0.0 score (via ZADD -0, ZINCRBY-to-neg-zero, or RESTORE). NOT introduced by my RESTORE work (base==cand; the
+old insert_with_limits canonicalized too) and NOT a listpack bug. **DEFERRED, needs a dedicated careful pass, NOT a fast
+safe change:** the fix = stop canonicalizing in the Full (skiplist) score storage (store raw -0.0; IEEE compare treats
+-0==+0 so ordering/dedup still hold) while KEEPING it for Packed (listpack, matches redis int-0). Risk: several of the 23
+call sites are comparison/tie-break/boundary contexts (ZRANGEBYSCORE, member dedup) — must prove none rely on
+canonicalization for correctness and that scripts/zset_tiebreak_differ.py stays green. EV is modest (extreme edge case:
+negative-zero scores) but it IS a real byte-level differential-parity gap for a byte-exact port. Guarded by a new probe
+opportunity: extend zset_tiebreak_differ.py with a -0.0-in-skiplist case.
