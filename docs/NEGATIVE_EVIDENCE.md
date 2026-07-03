@@ -10603,3 +10603,22 @@ misreported (saw lag=116). redis sends GETACK at WAIT time. IMPACT: WAIT is the
 durability primitive; undercount = false "not replicated". Filed bead 97shd (P2) with
 the cross-layer fix (WAIT enqueues GETACK to replica write bufs; needs reservations up
 for the replication-subsystem change). Rollback: n/a (surface + bead only).
+
+### 2026-07-03 SURFACE (replica-side expiry semantics byte-exact vs redis 7.2.4; WAITAOF likely shares 97shd) — CrimsonHawk
+
+Continuing the replication sweep (which yielded WAIT bug 97shd). Replica-side EXPIRY is a
+classic redis-clone bug spot — a replica must MASK a logically-expired key on read but
+NOT delete it independently; only the master propagates the DEL. Differential (fr
+master+replica vs redis 7.2.4, both links confirmed up): fr == redis at every step:
+- key with PX TTL, expired but master untouched: replica GET->nil, EXISTS->0, TTL->-2,
+  DBSIZE unchanged (key physically retained, not independently deleted) — matches redis.
+- after master lazily expires it (master read) + propagates DEL: replica DBSIZE drops to
+  match — matches redis.
+So fr's replica does NOT independently expire (correct), masks reads (correct), and
+honors master-driven DEL (correct). (CAVEAT that cost a re-run: the redis replica link
+takes >3s to PSYNC; a down-link replica is EMPTY and gives a false baseline — always
+poll master_link_status:up before comparing.) NOTE: WAITAOF's replica-ack component
+almost certainly shares 97shd's root cause (no master-side REPLCONF GETACK), so
+WAITAOF with numreplicas>0 on a short timeout will likewise undercount — fold into the
+97shd fix. Replication is now swept: propagation/READONLY/roles/offsets/slave0/REPLICAOF/
+replica-expiry byte-exact; sole real bug = WAIT/WAITAOF GETACK (97shd). Rollback: n/a.
