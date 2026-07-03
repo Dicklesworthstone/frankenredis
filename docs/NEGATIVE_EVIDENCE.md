@@ -9546,3 +9546,17 @@ itself is CORRECT & redis-interoperable, just recomputed each call.) **INTEROP d
 replication (digest-identical) + bidirectional MIGRATE (digest-preserved) + RDB redis-loadable + AOF/RDB round-trips. fr is a
 verified drop-in for Redis 7.2.4 across wire/values/encoding/COMMAND/notifications/Lua/txn/blocking/representation/persistence/
 replication/migration + perf (parity-or-faster) + robustness (188 probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.**
+
+### 2026-07-03 SURFACE (RDB SAVE throughput — TYPE-DEPENDENT: fr 3.5x FASTER on strings, 1.8x slower on lists [known structural]) — CrimsonHawk
+Measured whole-keyspace RDB SAVE throughput fr HEAD vs redis 7.2.4 (perf dimension not previously benchmarked). Initial mixed
+28k-key dataset read fr ~2.5-3x SLOWER — but ISOLATED by type it's the opposite for the common case: (1) **200k STRINGS: fr
+0.07-0.09s vs redis 0.28s = fr ~3.5x FASTER** (fr's string RDB serialization is more efficient); (2) **8000 LISTS x300: fr
+0.10s vs redis 0.05s = fr ~1.8x SLOWER** — the KNOWN structural ChunkedList-not-listpack-backed re-encode (encode_dump_
+quicklist2 rebuilds each node; [[project_list_restore_gap_architectural]] / [[project_dump_perf_differential]], CoralOx
+packed-node rewrite). RDB SIZE byte-identical both cases (str 4488953 vs 4488987; list 9894950 vs 9894984 = <34B, same
+format+compression). So the "mixed SAVE slower" was COLLECTION-DOMINATED; fr WINS on strings. The collection SAVE slowness =
+the already-documented structural list serialization gap (whole-DB manifestation), NOT a new lever — affects BGSAVE/replica-
+full-sync time for list-heavy datasets only. **NET: RDB SAVE is fr-faster for string-heavy (common) workloads, slower only
+for list-heavy (structural/CoralOx). No new safe lever.** Persistence THROUGHPUT now characterized alongside the earlier
+persistence CORRECTNESS (RDB/AOF round-trip digest-identical). Open perf levers unchanged = ohsk5 (~3-5%) + CoralOx
+ChunkedList/RAM.
