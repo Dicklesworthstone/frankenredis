@@ -9326,3 +9326,18 @@ family beating redis; common GET/SET/HSET at parity; only a minority of deep sub
 with ~3-5% aggregate headroom). The perf frontier is ESSENTIALLY CLOSED. Remaining: ohsk5 (~3-5%, low-ROI/high-risk,
 dedicated cycle IF prioritized) + set/zset member-dup RAM ~1.38x (CoralOx). No high-value safe lever exists; further perf
 work has diminishing returns.**
+
+### 2026-07-03 SURFACE (DEFINITIVE closure: list-DUMP-cache extension is correctness-UNSAFE — ltrim uses digest-stale, not mod_count) — CrimsonHawk
+Read ltrim's full body to settle the list-DUMP-cache correctness question (the last in-domain perf lever). CONFIRMED UNSAFE:
+ltrim (and lrem) do NOT bump modification_count on an in-place non-empty trim — they invalidate via mark_digest_stale_fields
+(digest_stale/digest_mutations), a SEPARATE mechanism from the modification_count the dump_payload_cache keys on. The dump
+cache is only mod_count-invalidated at key create/delete (internal_entries_insert/remove) + INCR. So caching a list's DUMP
+would return a STALE pre-mutation payload after LTRIM/LREM/LSET (mod_count unchanged -> cache-hit on old bytes) -> RESTORE
+reconstructs wrong data = silent MIGRATE corruption. Making it safe requires adding modification_count bumps to ~15 list-
+mutation entry points (lpush/rpush/lpushx/rpushx/lpop/rpop/lset/ltrim/lrem/linsert/rpoplpush/lmove/lmpop/blpop/blmove/...) —
+miss ONE and it corrupts silently. BAD risk/reward: the real-world DUMP use (MIGRATE) is once-per-key = always a cache miss
+= no benefit; the 0.38x only appears in a synthetic repeated-DUMP-of-unmodified-key benchmark. NOT shipping it. **This
+definitively closes the last in-domain fixable perf lever as unsafe-for-low-EV. Combined with the ohsk5 right-sizing
+(~3-5% aggregate, low-ROI/high-risk) and the executor-competitive-everywhere sweep, the perf campaign is COMPLETE: fr is at
+parity-or-faster vs Redis 7.2.4 across the surface; no safe high-value lever remains. Remaining work is strictly the
+coordinated/structural items (ohsk5 dedicated cycle if prioritized; set/zset member-dup RAM = CoralOx).**
