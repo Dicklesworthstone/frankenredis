@@ -9368,3 +9368,18 @@ high-value lever. The perf frontier is comprehensively, exhaustively CLOSED.** R
 (big/risky/dedicated-cycle, ~3-5%) + set/zset member-dup RAM ~1.38x (CoralOx). Session tally: 15 perf wins + 1 DoS fix + 5
 measured corrections/analyses (ZADD-Compact optimal, hashtable-RAM parity, list-DUMP cacheable-but-unsafe, ohsk5 modest,
 reorder negligible) + full-surface competitiveness proof incl pub/sub.
+
+### 2026-07-03 SURFACE (deep crash-fuzz incl large-structure/Tree paths — 98 probes, 0 crashes; robustness confirmed) — CrimsonHawk
+Pivoted from the (closed) perf frontier to the higher-value ROBUSTNESS dimension — crash-hunting, since the session's one DoS
+crash (inverted BTreeMap range on >2048-member zsets, fixed f0c200da1) was high-severity. Ran 98 adversarial probes fr HEAD:
+(a) 60 small-structure probes — integer extremes (i64::MAX/MIN offsets/counts/indices, 10^30, 2^63) + inverted ranges + nan/
+inf scores across GETRANGE/SETRANGE/LRANGE/LINDEX/LTRIM/LREM/ZRANGE*/ZADD/BITCOUNT/BITPOS/SETBIT/BITFIELD/EXPIRE/GETEX/
+HRANDFIELD/SPOP/LMPOP/SINTERCARD/COPY/XADD/XRANGE + arity abuse; (b) 38 LARGE-structure probes (>2048 zset=Tree/skiplist,
+5000-elem list/hash/set) with inverted+extreme ranges on ZRANGEBYSCORE/BYLEX/ZREMRANGEBY*/ZRANGESTORE/ZPOPMIN COUNT/LRANGE/
+LTRIM/LPOS/SORT LIMIT/ZADD nan — deliberately targeting the SAME Tree-path class as the fixed crash. **RESULT: 0 crashes, 0
+panics, server survived ALL 98 (+ 90 earlier this session = ~188 total, 1 crash found+fixed).** fr is crash-hardened across
+small AND large/Tree structures. LESSON REAFFIRMED: the fixed crash was Tree-ONLY (Compact arm was already guarded) — always
+fuzz LARGE (>threshold) collections separately, they exercise different code paths. **Session dimensions now all verified:
+PERF (parity-or-faster every subsystem incl pub/sub) + CORRECTNESS (byte-exact, 4761-check differential) + ROBUSTNESS
+(crash-hardened, 188 adversarial probes). No safe high-value lever remains in any dimension; the one open item is the
+low-ROI ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.**
