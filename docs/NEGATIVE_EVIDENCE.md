@@ -10185,3 +10185,35 @@ survivors, full 500-member iteration complete, no duplicates. HSCAN/SSCAN still
 open in e3y73 (IndexMap/IndexSet have no ordered resume + Set swap_remove reorders
 → need reverse-binary dictScan, structural/uhthd). SCAN-family series: keyspace
 SCAN done (55cfc0966), ZSCAN done (db57b2734); HSCAN+SSCAN remain.
+
+### 2026-07-03 SURFACE (keyspace notifications / wrong-type / expiration all byte-exact; HSCAN+SSCAN confirmed STRUCTURAL; GET/INCR parity, LPUSH = ChunkedList) — CrimsonHawk
+
+Post-ZSCAN-ship (db57b2734) dig for a NEW clean lever. All vs a FRESH default-config
+redis 7.2.4 (shared oracle stays config-polluted):
+- **Keyspace notifications**: 52-command __keyevent stream (SET/APPEND/SETRANGE/INCR*/
+  GETSET/GETDEL/EXPIRE/PERSIST/COPY/RENAME/DEL, list/set/hash/zset/stream mutators,
+  SPOP/SMOVE/ZPOPMIN/MAX/ZRANGESTORE/XADD/XDEL, EXPIRE-0-as-del, MOVE) — 0 diffs
+  (event names + order byte-exact).
+- **Wrong-type sweep**: every type-specific command against every foreign type
+  (~180 checks across string/list/set/hash/zset/stream) — 0 diffs (WRONGTYPE wording
+  exact).
+- **Expiration semantics**: lazy expiry on GET/EXISTS/TTL/TYPE/STRLEN/APPEND after PX
+  elapse, negative-EXPIRE-as-delete, SET EX/PX<=0 errors, EXPIRETIME/PEXPIRETIME,
+  EXPIRE NX/XX/GT/LT on volatile/non-volatile — 0 diffs.
+
+**HSCAN/SSCAN (e3y73 remainder) = genuinely STRUCTURAL, re-confirmed:** both reorder
+on delete, so no element-identity resume survives the delete-whole-batch pattern.
+Hash HDEL uses order-agnostic O(1) `m.delete` (sremfast/ym6ih); Set SREM uses O(1)
+`swap_remove` for the Generic encoding (sremfast) — both deliberate perf wins that
+make the positional cursor unfixable without a reverse-binary chaining dict
+(keyspace_dict::KeyDict, unwired, uhthd). No clean per-crate fix; stays in e3y73.
+(Keyspace SCAN + ZSCAN were fixable only because they iterate an ORDERED structure.)
+
+**Perf (pinned server c2/c3, client c6/c7, redis-benchmark -P8):** GET 0.953x, INCR
+1.008x = PARITY (the ~0.65x short-run readings were the documented short-run/unpinned
+artifact — [[project_p16_pipeline_parity_syscall_bound]]). LPUSH 0.35-0.62x is the
+known ChunkedList-vs-quicklist STRUCTURAL gap (99fwc, CoralOx-domain; a proposed fix
+already MEASURED SLOWER, lojpt). Ratios are noise-dominated under concurrent fleet
+load — trust perf-stat-instructions over wall-clock here. No clean per-crate perf
+lever surfaced. CONCLUSION: reachable correctness surface saturated; remaining gaps
+(HSCAN/SSCAN cursor, list ChunkedList) are structural. Rollback: n/a (no code change).
