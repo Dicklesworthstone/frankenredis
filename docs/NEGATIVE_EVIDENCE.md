@@ -10639,3 +10639,23 @@ SHUTDOWN NOSAVE, restart from the same AOF):
 So AOF durability is correct: data (all types) + TTLs survive restart, content matches
 redis, multi-part AOF format is redis-7.x-compatible. (Complements aof_cross_compat_gate
 / aof_roundtrip_digest_fuzz.) No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (CLUSTER standalone-mode commands byte-exact vs redis 7.2.4 — 27 cmds; completes unswept-area sweep) — CrimsonHawk
+
+Last unswept area: CLUSTER subcommands in standalone (cluster_enabled:0) mode. 27-cmd
+differential (node-id normalized): 0 diffs. Byte-exact:
+- CLUSTER SLOTS/SHARDS/LINKS -> empty arrays.
+- CLUSTER KEYSLOT -> CRC16 slot incl hash-tag rules ({user1000}.following, a{b}c{d},
+  {} empty-tag, "" ) matching redis.
+- CLUSTER COUNTKEYSINSLOT/GETKEYSINSLOT incl slot-out-of-range (16384) error.
+- CLUSTER NODES (single self line), CLUSTER INFO (same field set), CLUSTER MYID.
+- non-cluster-mode errors: ADDSLOTS/SETSLOT/FORGET/SET-CONFIG-EPOCH/BUMPEPOCH/FLUSHSLOTS/
+  RESET -> exact "This instance has cluster support disabled" class errors.
+- arity errors, unknown-subcommand, HELP.
+COMPLETES the unswept-area sweep this arc (replication / AOF / cluster): replication
+byte-exact except WAIT/WAITAOF GETACK (bead 97shd); AOF durability round-trip byte-exact
+(digest match across restart + == redis); cluster standalone byte-exact. The ENTIRE
+reachable correctness surface is now verified byte-exact vs redis 7.2.4 except: (1) the
+single WONTFIX dict/hash-iteration-order class, (2) host-dependent locale-collate
+validation, (3) the one real open bug WAIT/WAITAOF GETACK (97shd). No lever. Rollback:
+n/a.
