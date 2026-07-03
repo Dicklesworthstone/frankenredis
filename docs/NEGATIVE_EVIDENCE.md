@@ -9023,3 +9023,20 @@ AllkeysRandom/VolatileRandom candidate pick (lib.rs ~21299/21316, self.entries.k
 memory pressure, CONFIG-GATED (maxmemory + *-random policy), next lever if there's an O(1) keyspace index (RANDOMKEY the
 command already uses a sample vector, not this); (2) SortedSet::dict_member_at Packed-zset ZRANDMEMBER (~1555) bounded
 <=128. The unbounded set/hash random-read O(n) bugs are FIXED.**
+
+### 2026-07-03 SURFACE (random-access O(n) vein EXHAUSTED after SRANDMEMBER/HRANDFIELD; sweep complete) — CrimsonHawk
+Comprehensive sweep of .nth()/.skip()/.position() across fr-store + fr-runtime + fr-command after the two ~97% wins
+(SRANDMEMBER 7ad55fdb3, HRANDFIELD 45e8e9dfd). Per-site classification — NO remaining clean unbounded O(n) random-access:
+- .nth(idx): all remaining are BOUNDED listpack Packed paths (<=128: GenericSet::get_index/pop_index Packed arms,
+  PackedStrMap::get_index, SortedSet::dict_member_at Packed ZRANDMEMBER), CONFIG-GATED eviction (entries.keys().nth for
+  maxmemory AllkeysRandom/VolatileRandom — can't cleanly reuse RANDOMKEY's O(1) random_key_slots index because eviction
+  DELETES keys => dirties the index => O(n) rebuild each time), or tests.
+- .skip(n): on a slice iterator this is O(1) (slice nth is pointer-advance); BTreeMap skip is inherent.
+- .position(): LPOS/LINSERT/LREM element-find is inherently O(n) (redis too; fr already WINS LINSERT 2.73x/LREM 2.14x).
+- All *count* random siblings already O(1)/optimal: srandmember_count (rndcnt), hrandfield_count, zrandmember_count (4ywto,
+  O(n) ordered pass is REQUIRED for byte-exact output order — BTreeMap has no O(1) nth; changing it breaks the order).
+NEXT CANDIDATE (deferred, NOT clean): spop_count (lib.rs ~14058) loops self.spop(key) N times, each doing a full keyspace
+lookup (drop_if_expired 2 lookups + contains_key + get_mut) of the SAME key — a resolve-once would do 1 lookup + N pops.
+RISKY: must replicate spop's exact next_rand() sequence (idx per pop + conditional lfu_rand), digest/touch/empty-key-DEL
++ notification, across a held-entry borrow (next_rand borrows self => needs pre-generated rands); memory 934ax flags SPOP
+COUNT per-call structure as load-bearing. Needs a careful byte-exact RNG-sequence validation before shipping.
