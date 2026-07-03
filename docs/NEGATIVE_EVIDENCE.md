@@ -9519,3 +9519,17 @@ are wire-compatible with redis 7.2.4 in both directions.** This is the topology-
 now proven end-to-end: wire protocol (RESP2/3) + values (4761) + encoding (25) + COMMAND meta (370) + keyspace events + Lua
 (50) + transactions (16) + blocking (11) + representation (identical digest) + RDB round-trip + BIDIRECTIONAL replication +
 perf (parity-or-faster all subsystems) + robustness (188 crash probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.
+
+### 2026-07-03 SURFACE (AOF persistence round-trip — digest-identical after kill+restart+replay; redis-7.x format) — CrimsonHawk
+Tested the AOF persistence path (distinct from RDB) — real kill/restart round-trip. fr (config-file: appendonly yes, dir)
+loaded diverse data WITH compound mutations (SET+APPEND, ZADD+ZINCRBY, SADD+SREM, HSET+HDEL, INCRBYFLOAT, EX TTL, 150-field
+hashtable-hash) -> digest 18caa9f1..., then KILLED and RESTARTED from the AOF. **RESULT: fr replayed 14 records from
+appendonlydir/appendonly.aof and reached the BYTE-IDENTICAL digest (18caa9f1...) = AOF ROUND-TRIP OK.** All state survived:
+s1=hello!! (SET+APPEND folded), z.a=6 (ZADD 1 + ZINCRBY 5), si=3 (SADD 4 - SREM 1), fl=3.14, **expk TTL preserved
+(ttl=9996)**, bh=150 fields. fr uses the redis-7.x MULTI-PART AOF layout (appendonlydir/ manifest + base + incr, not the
+legacy single appendonly.aof) — matching redis 7.2.4's persistence format. Note: fr invoked via `--config <path>` (positional
+config-file arg + --appendonly CLI flag are NOT supported; persistence config comes from the file's directives). **Persistence
+dimension complete: RDB round-trip (DEBUG RELOAD, prev) + AOF round-trip (kill/restart, this) + RDB redis-interop (replication
+loads fr's RDB in redis, prev) all digest-identical. fr's Redis-7.2.4 fidelity now proven across wire/values/encoding/COMMAND/
+notifications/Lua/txn/blocking/representation/RDB/AOF/bidirectional-replication + perf (parity-or-faster) + robustness (188
+probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.**
