@@ -8852,3 +8852,27 @@ set_plain_borrowed was already partly optimized (old_expiry.is_some() guard) so 
 only -0.33%. Guarded by scripts/set_blast.py. **REMAINING bare-drop borrowed methods after this: hset_borrowed
 (LFU-only, cold), pfadd_borrowed->pfadd_impl (PFADD, less common). The hot-write expiry-fusion frontier is now
 ~saturated: SET/HSET/APPEND/LPUSH/RPUSH/SADD/SREM/HDEL/ZADD/ZREM/SETRANGE/SETBIT/... all guarded.**
+
+### 2026-07-03 SURFACE (large-output collection reads 0.56-0.63x = write-path-IO-bound, NOT a safe compute lever) — CrimsonHawk
+After the expiry-fusion vein saturated, swept for a fresh EXECUTOR-bound (non-dispatch) gap in a safe crate. Found the
+sub-ms losses (zrank_ws 0.544x, zremrangebyrank 0.688x, getdel/setbit/getex 0.70-0.75x) are ALL dispatch-chain-bound:
+perf-recorded ZRANK WITHSCORE (0.544x, the worst) = process_buffered_frames 24.4% self (matcher chain, "ZRANK\r\n"
+memcmp'd) vs executor ZRankTreap::rank_of only 3.3%. zrank_ws lacks a borrowed fast path (plain ZRANK has one at 0.86x;
+the WITHSCORE delta is the generic-dispatch argv-alloc + full matcher-chain walk) — same ohsk5 frontier as BITFIELD.
+Fix needs a main.rs borrowed parser+dispatch arm = UNSAFE this session (agent-mail health=red/degraded_read_only, can't
+reserve, main.rs is the contended hot fn).
+PIVOTED to LARGE-output reads where dispatch is negligible: LRANGE 0-1 (10k) 0.610x, HGETALL (10k) 0.562x, SMEMBERS
+0.603x, ZRANGE WITHSCORES 0.627x (best-of-5, pinned, vs fresh redis 7.2.4). These ARE executor/IO-bound — but profiling
+HGETALL (worst) shows the gap is NOT a fixable compute redundancy: (1) ~18% is KERNEL epoll_wait/write syscalls (the
+reply write path in main.rs — redis writes the big reply more efficiently; the vectored-write / scatter-gather framing
+lever lives in main.rs try_flush = UNSAFE this session, bead qesp3-adjacent); (2) HGETALL already uses the direct-encode
+_into path (execute_plain_hgetall_borrowed_into + hgetall_borrow_scan, no intermediate Vec<RespFrame>); (3) the
+CompactFieldMap scan is O(1)/element (get_index = order[idx]->arena varint decode, no re-walk, no O(n^2)) — the varint
+decode is a DELIBERATE RAM-compactness tradeoff (frankenredis-ideww: compact+O(1) vs redis listpack compact-but-O(n));
+(4) per-tick housekeeping (run_active_expire_cycle, pubsub_clients_with_pending, drain_writer_completions, check_child_
+processes, flush_aof_to_disk) sums ~5% but each <1.3% and the writer-pool bits are main.rs. **CONCLUSION: no clean,
+safe, shippable executor-COMPUTE lever remains — the large-read gap is write-path-IO-bound (main.rs vectored-write, the
+single highest-value SAFE-once-reservations-return lever) and the sub-ms gaps are the ohsk5 dispatch chain. Both are
+main.rs and blocked on agent-mail being down. DON'T re-chase HGETALL/LRANGE/SMEMBERS per-element compute — it's already
+optimal (direct-encode _into + O(1) compact scan).** The safe fr-store/fr-command per-command veins (resolve-once,
+expiry-fusion, zero-copy _into, reply-set-elimination) are EXHAUSTED for this session's reservation constraints.
