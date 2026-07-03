@@ -8840,3 +8840,15 @@ the earlier expiry-fusion pass because it guarded the COLD store.hset (measured 
 through store.hset, it takes the borrowed fast path hset_borrowed_many. ALWAYS trace the command's LIVE store method
 (grep fr-runtime for the *_borrowed_* variant) before guarding, not the same-named plain method.** Guarded by
 scripts/hset_blast.py.
+
+### 2026-07-03 SHIP (expires_count guards on LIVE SET set_plain_borrowed, fd5928392) — CrimsonHawk
+Extended expiry-lookup-fusion to the #1 command. set_plain_borrowed (live plain-SET/GETSET/MSET path) probed
+the expiry map TWICE per overwrite: inside drop_if_expired (return branches fresh-insert vs overwrite) + explicit
+`old_expiry = expiry_ms(key)`. Guarded both on expires_count!=0: drop_if_expired->entries.contains_key (return equals
+contains_key when it can't evict), old_expiry->None. Measured -0.33% instr cand/ctl (3M SET overwrite, 3/3 dead
+stable at 0.9967), vs redis SET 1.116x. Byte-exact: fresh/overwrite/SET-over-expired(clears TTL)/KEEPTTL(preserves)/
+overwrite-clears-TTL all match. SMALL but real+zero-risk (pure fast-exit, no dispatch cost) on the hottest command;
+set_plain_borrowed was already partly optimized (old_expiry.is_some() guard) so the empty-map probes are cheap — hence
+only -0.33%. Guarded by scripts/set_blast.py. **REMAINING bare-drop borrowed methods after this: hset_borrowed
+(LFU-only, cold), pfadd_borrowed->pfadd_impl (PFADD, less common). The hot-write expiry-fusion frontier is now
+~saturated: SET/HSET/APPEND/LPUSH/RPUSH/SADD/SREM/HDEL/ZADD/ZREM/SETRANGE/SETBIT/... all guarded.**
