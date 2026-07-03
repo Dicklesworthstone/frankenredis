@@ -9719,3 +9719,10 @@ admin commands (CONFIG/REPLICAOF/ACL) from ever reaching a dispatch path, wherea
 noscript gate), exposing the missing special-handler routing. Both secondary-dispatch paths now verified: EXEC = 3 bugs
 found+fixed+audited-closed; Lua redis.call() = clean (noscript-protected). Transaction+scripting command-dispatch surface
 byte-exact vs redis 7.2.4.
+
+### 2026-07-03 SURFACE (blocking commands inside MULTI return immediately — byte-exact) — CrimsonHawk
+Fast build-free check: blocking commands queued in MULTI must NOT block (return nil at EXEC immediately, redis DENY_BLOCKING
+context). `MULTI; BLPOP nolist 5; BRPOP nolist 5; BLMOVE ... 5; BZPOPMIN nozset 5; EXEC` + XREAD BLOCK 5000 in MULTI, fr-v3
+vs redis 7.2.4. **RESULT: both return in 0.14s (NOT the 5-20s timeout), replies byte-identical (nil results).** fr correctly
+applies the no-block-in-MULTI semantics. No divergence. Transaction semantics remain byte-exact across the blocking-command
+surface too.
