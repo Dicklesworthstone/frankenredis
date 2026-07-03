@@ -9156,3 +9156,21 @@ so main.rs's shared-tree-race risk is low — BUT the remaining main.rs levers a
   every safe executor/algorithmic/correctness lever shipped or exhausted (15 perf wins + 1 DoS fix, byte-exact 4761-check
   + 90-probe-crash-clean surface); the sole remaining per-command lever is the ohsk5 command-hash dispatch (main.rs,
   dedicated cycle), plus structural CoralOx items (ZADD-Compact O(n^2) tradeoff, hashtable/zset RAM, ChunkedList).**
+
+### 2026-07-03 SURFACE (ROOT CAUSE: fr can't enter cluster mode via config — blocks the CLUSTER SETSLOT bead cluster) — CrimsonHawk
+Dug the ready-beads for a safe correctness win. Probed 11 CLIENT/CLUSTER parity beads (b1urj slave-alias, q3rts CLIENT LIST
+ID nonpositive, 3kr0t CLIENT KILL USER unknown, rd96p TRACKING REDIRECT, 61iis KILL LADDR, CLIENT KILL ID abc) vs redis
+7.2.4 in NON-cluster mode — ALL MATCH redis (stale-open; e.g. slave-alias fixed by h4grb + test). The CLUSTER SETSLOT beads
+(23q3c invalid-action error, xenr3 NODE-self, xvnsr MIGRATING owner-state, m56qu ADDSLOTS dup) need cluster mode to repro.
+**ROOT CAUSE FOUND: fr's startup config SILENTLY IGNORES `cluster-enabled` — startup_config_from_directives (fr-server/
+main.rs:739) matches bind/port/... then a catch-all `_ => {}` (main.rs:816) drops unknown directives, so a redis.conf with
+`cluster-enabled yes` leaves store.cluster_enabled=false.** Confirmed live: with `cluster-enabled yes` in the config, redis
+returns `ERR Invalid CLUSTER SETSLOT action...Try CLUSTER HELP` but fr returns `ERR This instance has cluster support
+disabled`. store.cluster_enabled is set true ONLY in unit tests (fr-runtime ~46135) — so fr's whole implemented cluster-mode
+command surface (cross-slot rejection, MOVED, CLUSTER SETSLOT behaviors, SWAPDB/MOVE-in-cluster rejection) is UNREACHABLE in
+production, and redis forbids `CONFIG SET cluster-enabled` (startup-only) so there's no runtime path either. **NOT a clean
+unilateral fix: wiring the directive enables fr's PARTIAL cluster mode (no cluster bus/gossip/slot-serving) — must first
+verify no-slots key ops return CLUSTERDOWN like redis and audit every cluster_enabled gate, else enabling it trades a clear
+"disabled" error for silent new divergences. This is a scope/architecture decision (does fr claim single-node cluster mode?)
+for the maintainer/CoralOx. The 4+ CLUSTER SETSLOT beads are BLOCKED on it. Meanwhile the non-cluster CLIENT beads appear
+already-fixed (stale-open) — beads.db drift, per feedback_br_sync_drift.**
