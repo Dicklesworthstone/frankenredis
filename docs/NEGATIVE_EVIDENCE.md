@@ -10111,3 +10111,59 @@ reuse_levers]] records CoralOx ALREADY measured buffer-reuse levers here REGRESS
 to the two KNOWN structural blockers (ohsk5 dispatch small-value + main.rs large-read framing), neither a safe per-crate
 lever. **CONCLUSION: no safe shippable per-crate perf lever exists (EV<2.0 on the only candidate); the clean frontier is
 closed. fr is parity-or-faster on the vast majority of the size/op matrix.** Rollback: n/a (no change made).
+
+### 2026-07-03 SHIPPED (SCAN keyspace mid-scan-deletion guarantee) + SURFACE (collection HSCAN/SSCAN/ZSCAN same class; ZSCAN fix recipe; fresh-oracle parity on BITFIELD/streams/encoding) — CrimsonHawk
+
+**SHIPPED 55cfc0966** (fr-store `scan_in_db`): the keyspace SCAN violated Redis's
+documented guarantee that a key present start→end of a full iteration is returned
+at least once, even if OTHER keys are deleted mid-scan — i.e. the canonical
+SCAN+DEL "delete keys matching pattern" loop. Measured vs redis 7.2.4: SCAN a
+20-key db, DEL two already-returned keys → fr silently dropped k05,k06
+(present throughout); redis returns all survivors. Root cause: the resume cache
+(which resumes deletion-safely via `Bound::Excluded(last_key)` over the ordered
+keyspace) was gated on `keyspace_generation`; every DEL bumps that generation, so
+SCAN+DEL ALWAYS missed the cache and fell to a positional `skip(start)` walk that
+steps over keys shifted down by the deletion. Fix = match resume by (cursor,db,sig)
+only, drop the generation gate. Cursor values unchanged (no-mutation goldens
+byte-identical); 663 fr-store tests pass; regression test
+`scan_in_db_returns_present_throughout_key_after_mid_scan_deletion`; verified E2E
+(fr==redis survivors, 2000-key full iteration intact, no new RESP/order diffs).
+
+**SURFACE — collection scans (bead e3y73, OPEN):** HSCAN/SSCAN/ZSCAN share an
+analogous deletion-skip but via a DIFFERENT mechanism — a pure positional cursor
+`cursor==pos` resumed through `IndexMap/IndexSet::get_index(pos)` / treap
+rank-index (fr-store ~20647/20766/20859). Measured on hashtable/skiplist-encoded
+500-elem collections (mid-scan HDEL/SREM/ZREM of returned elems): HSCAN misses
+f0498/f0499, SSCAN m0498/m0499, ZSCAN m0010/m0011; redis loses none. Small
+listpack/intset collections one-shot at cursor 0 and are unaffected. The keyspace
+fix does NOT transfer directly:
+  - **ZSCAN is cleanly fixable** (recipe, for a coordinated moment): the Full
+    encoding is ordered by (score,member), so resume by VALUE is deletion-safe like
+    the keyspace BTreeSet. Add a resume cache (key,cursor)→(last_score,last_member);
+    on resume `resume_start = full.ensure_rank_tree().rank_of(&ScoreMember::actual(
+    last_score,last_member)) + (zs.rank(last_member).is_some() as usize)` then
+    `index_slice_asc_adaptive(resume_start,batch)`; no generation gate needed.
+    NOT shipped this cycle: the SortedSet hotspot is under active peer perf edits
+    (pop_min_n/remove_rank_range/compact_run_start bulk-drain commits sit beside
+    zscan/index_slice_asc_adaptive) and agent-mail reservations are DOWN (DB
+    corrupt) → collision risk; deferred to coordinated window.
+  - **HSCAN/SSCAN genuinely need structural work**: IndexMap insertion-order + the
+    common "delete the whole batch" pattern kills resume-by-name (deleted-last has
+    no ordered successor); Set uses O(1) `swap_remove` which reorders arbitrarily.
+    Correct fix = reverse-binary dictScan (cf. keyspace_dict::KeyDict, written but
+    unwired, uhthd) — CoralOx-domain structural.
+
+**Fresh-oracle parity (config-pollution CAVEAT):** the long-lived shared oracle
+(16782) had `hash-max-listpack-entries=8` set by a peer — a 200-field hash reads
+`listpack` on fr vs `hashtable` on the polluted oracle, a FALSE positive. Against a
+FRESH redis 7.2.4 (default config) all encoding thresholds match (fresh default is
+512, not 128) and the "bug" vanishes. Re-run against a fresh oracle, these are all
+byte-exact vs redis 7.2.4: BITFIELD (56 checks — OVERFLOW WRAP/SAT/FAIL, u63/i64,
+`#`-offsets, INCRBY overflow, BITFIELD_RO, width/type/offset errors) + SETBIT/GETBIT
+bounds + EXPIRETIME/PEXPIRETIME; streams (50 checks — XADD/XRANGE/XREVRANGE excl
+bounds, XGROUP/XREADGROUP/XPENDING summary+extended/XACK/XCLAIM/XAUTOCLAIM/XINFO
+STREAM|GROUPS|CONSUMERS|FULL/XSETID/XDEL/XTRIM; only diffs were `*` auto-id 1ms
+clock skew). CONCLUSION: one-shot reply surface remains saturated; the sole open
+correctness gap is the collection-scan cursor class (e3y73). ALWAYS use a fresh
+default-config oracle — the shared one is polluted. Rollback: n/a (ship already
+regression-verified; surface = doc + bead only).
