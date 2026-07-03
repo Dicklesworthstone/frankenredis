@@ -9383,3 +9383,17 @@ fuzz LARGE (>threshold) collections separately, they exercise different code pat
 PERF (parity-or-faster every subsystem incl pub/sub) + CORRECTNESS (byte-exact, 4761-check differential) + ROBUSTNESS
 (crash-hardened, 188 adversarial probes). No safe high-value lever remains in any dimension; the one open item is the
 low-ROI ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.**
+
+### 2026-07-03 SURFACE (OBJECT ENCODING transition boundaries — 25 exact-threshold checks, 0 DIFF) — CrimsonHawk
+Dug a precise, client-visible, off-by-one-prone correctness surface my earlier 4761-check differential didn't target at exact
+boundaries: OBJECT ENCODING TRANSITION thresholds vs redis 7.2.4 (fresh oracle, defaults). 25 checks at each type's exact
+boundary: set-of-ints 128/129/512/**513→hashtable**, set-of-strs 128/**129→hashtable**, set value len64/**65→hashtable**,
+intset+nonint→listpack, hash 128/129 + value len64/**65→hashtable**, zset 128/**129→skiplist** + member len64/**65→skiplist**,
+list 128/129 + value len64/65, string int/embstr/**len44→embstr/len45→raw**. **RESULT: 0 DIFF / 25 — fr's encoding
+transitions are byte-exact with redis at every boundary** (the exact-threshold conversions intset→hashtable@513,
+listpack→hashtable@129-strs/@65-val, listpack→skiplist@129-zset, embstr→raw@45 all fire identically). Confirms the
+listpack/intset/skiplist threshold logic + config defaults match redis precisely — clients/tools relying on OBJECT ENCODING
+see identical behavior. No divergence. **This extends the CORRECTNESS dimension coverage (encoding transitions now verified
+byte-exact alongside the 4761-check value differential). All quality dimensions remain comprehensively verified: perf
+(parity-or-faster every subsystem), correctness (byte-exact incl encoding transitions), robustness (crash-hardened 188
+probes). Perf frontier closed; only ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx RAM remain.**
