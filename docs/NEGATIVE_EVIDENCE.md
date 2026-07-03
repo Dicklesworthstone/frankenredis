@@ -10167,3 +10167,21 @@ clock skew). CONCLUSION: one-shot reply surface remains saturated; the sole open
 correctness gap is the collection-scan cursor class (e3y73). ALWAYS use a fresh
 default-config oracle — the shared one is polluted. Rollback: n/a (ship already
 regression-verified; surface = doc + bead only).
+
+### 2026-07-03 SHIPPED (ZSCAN mid-scan-deletion guarantee — e3y73, 2nd in SCAN-family series) — CrimsonHawk
+
+**SHIPPED db57b2734** (fr-store `zscan`): ZSCAN violated Redis's SCAN guarantee
+under the canonical ZSCAN+ZREM loop — the positional rank-index cursor let a
+mid-scan ZREM of an already-returned member shift later members down a rank, so
+the next batch stepped over present-throughout members. Measured vs redis 7.2.4
+(500-member skiplist zset): fr dropped members, redis dropped none. Fix mirrors
+the keyspace SCAN fix (55cfc0966): resume BY VALUE via a ZScanResume cache
+(key,cursor)→(last_score,last_member) + `SortedSet::zscan_resume_index_after`
+(Compact O(log n) binary_search / Tree order-statistic rank tree; Packed one-shots
+so it falls back to positional). No generation gate (resume-by-value is
+mutation-safe). No-deletion output byte-identical (isomorphism golden green);
+664 fr-store tests pass + new regression test; E2E vs fresh 7.2.4 returns all
+survivors, full 500-member iteration complete, no duplicates. HSCAN/SSCAN still
+open in e3y73 (IndexMap/IndexSet have no ordered resume + Set swap_remove reorders
+→ need reverse-binary dictScan, structural/uhthd). SCAN-family series: keyspace
+SCAN done (55cfc0966), ZSCAN done (db57b2734); HSCAN+SSCAN remain.
