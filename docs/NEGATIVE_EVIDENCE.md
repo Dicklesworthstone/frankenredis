@@ -8983,3 +8983,22 @@ bulk-build lever I evaluated is NOT worth it — from_index_set already MOVES th
 build cost is inherent hash+slot-placement per member (both fr and redis pay); a bulk build only swaps CompactStrSet probe
 for HashSet probe = marginal. The real broad lever was the double-hash, now fixed.** DUMP int-string encode (line ~22268
 value.to_string) is single-int-per-DUMP = negligible.
+
+### 2026-07-03 SURFACE (zset incremental-write path: 3 characterized levers, all tradeoff/invasive — deferred) — CrimsonHawk
+Profiled incremental ZADD build (2000 members) after the CompactFieldMap hash-once ship. The zset WRITE path has 3
+remaining inefficiencies, none a clean quick win (documenting for a dedicated zset pass):
+1. **FullZSetOrder::Compact(Vec) O(n) insert** (binary_search 5.44% + Vec::insert shift): zsets up to
+   SORTED_SET_COMPACT_FULL_MAX_ENTRIES=2048 use a sorted Vec, so incremental ZADD building a <=2048-member zset is O(n^2).
+   This is EXACTLY why the RESTORE-zset bulk fix (70a6c9e69) won -74% (bulk sort O(n log n) vs incremental O(n^2)).
+   DELIBERATE read/write TRADEOFF: Vec ranges beat BTreeMap for ZRANGE/ZRANGEBYSCORE on medium zsets. Lowering the
+   threshold speeds ZADD builds but slows range reads (same shape as the ZCOUNT warm-threshold). NOT a clean win.
+2. **dict double-hash on new member** (FullSortedSet::insert_result: get_full_mut probe then dict.insert both hash):
+   NOT cleanly fixable — the split deliberately avoids cloning the member on the UPDATE path (ug50u, ZADD-benchmark is
+   ~75% duplicates); IndexMap's entry API would force that clone. Tradeoff.
+3. **refresh_zset_encoding_flag O(n) member scan per ZADD** (~2.5%, small-sample so uncertain): for a still-listpack
+   zset, `zs.keys().any(|k| k.len() > max_value)` re-scans ALL members every insert though existing members already
+   passed — only the NEW member can newly exceed. Bounded (listpack cap 128, then the len>max short-circuit sets the
+   skiplist flag and subsequent ZADDs early-return). CLEAN-fix approach = add a fast variant taking the new member's
+   length (O(1) check: `len>max_entries || new_len>max_value`), but it's 10 call sites incl variadic/rebuild paths.
+   Bounded 128^2 EV + invasive = deferred. **The set/hash write path IS clean (CompactFieldMap hash-once shipped); the
+   zset write path's residuals are tradeoffs or need a dedicated pass. Reads (ZRANGE etc.) benefit from the current Vec.**
