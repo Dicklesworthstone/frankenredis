@@ -1337,6 +1337,20 @@ impl FullSortedSet {
         matches!(self.ordered, FullZSetOrder::Compact(_))
     }
 
+    /// (CrimsonHawk) Order-index of `(score, member)` in a Compact(Vec) zset via
+    /// binary_search — O(log n), NO rank-tree build (unlike `rank`, which calls
+    /// `ensure_rank_tree`). Returns `None` for the Tree encoding. Lets a contiguous
+    /// score/lex run (whose members are already collected) be bulk-drained by rank.
+    fn compact_position(&self, score: f64, member: &[u8]) -> Option<usize> {
+        match &self.ordered {
+            FullZSetOrder::Compact(keys) => {
+                let target = ScoreMember::actual(score, member.to_vec());
+                keys.binary_search(&target).ok()
+            }
+            FullZSetOrder::Tree(_) => None,
+        }
+    }
+
     /// (CrimsonHawk) Remove the contiguous rank range [s_idx, s_idx+count) from a
     /// Compact(Vec)-ordered zset via a SINGLE `drain` (one O(len) tail-shift) instead
     /// of `count`× `remove(member)` (each an O(len) `Vec::remove`) — the O(count·len)
@@ -2068,6 +2082,17 @@ impl SortedSet {
             self.remove(m);
         }
         removed
+    }
+
+    /// (CrimsonHawk) Order-index of a Compact(Vec) zset's `(score, member)` (O(log n),
+    /// no rank-tree build); `None` for Tree/Packed. A contiguous score/lex run starts at
+    /// this index, so ZREMRANGEBYSCORE/BYLEX can bulk-drain [start, start+count) instead
+    /// of count× O(len) `remove(member)`.
+    fn compact_run_start(&self, member: &[u8], score: f64) -> Option<usize> {
+        match &self.inner {
+            SortedSetInner::Full(f) => f.compact_position(score, member),
+            SortedSetInner::Packed(_) => None,
+        }
     }
 
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
@@ -16663,10 +16688,23 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
-                    let to_remove = zs.score_bound_members(min, max, false);
-                    let removed_count = to_remove.len();
-                    for m in &to_remove {
-                        zs.remove(m);
+                    // (CrimsonHawk) The score range is a CONTIGUOUS run in (score,member)
+                    // order, so on a Compact(Vec) zset bulk-drain [start, start+count) in
+                    // one shift instead of count× O(len) remove(member) — O(count·len)
+                    // -> O(len). start = the run's first member's order index (binary_search,
+                    // no rank-tree build). Tree/Packed keep the per-member path (unchanged).
+                    // Byte-identical: same members removed, same residual.
+                    let run = zs.score_bound_range(min, max, false);
+                    let removed_count = run.len();
+                    if let Some(start) = run
+                        .first()
+                        .and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    {
+                        zs.remove_rank_range(start, removed_count);
+                    } else {
+                        for (m, _) in &run {
+                            zs.remove(m);
+                        }
                     }
                     let is_empty = zs.is_empty();
                     if removed_count > 0 {
@@ -16711,14 +16749,20 @@ impl Store {
                     // range `O(log n + k)` rather than `O(n)`; multi-score sets
                     // fall back to the identical exact iter+filter, so the removed
                     // membership is byte-for-byte unchanged.
-                    let to_remove: Vec<Vec<u8>> = zs
-                        .lex_range_asc(min, max)
-                        .into_iter()
-                        .map(|(m, _)| m)
-                        .collect();
-                    let removed_count = to_remove.len();
-                    for m in &to_remove {
-                        zs.remove(m);
+                    // (CrimsonHawk) Same contiguous-run bulk-drain as ZREMRANGEBYSCORE:
+                    // a Compact(Vec) zset drains [start, start+count) in one shift; Tree/
+                    // Packed keep the per-member remove. Byte-identical membership.
+                    let run = zs.lex_range_asc(min, max);
+                    let removed_count = run.len();
+                    if let Some(start) = run
+                        .first()
+                        .and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    {
+                        zs.remove_rank_range(start, removed_count);
+                    } else {
+                        for (m, _) in &run {
+                            zs.remove(m);
+                        }
                     }
                     let is_empty = zs.is_empty();
                     if removed_count > 0 {
