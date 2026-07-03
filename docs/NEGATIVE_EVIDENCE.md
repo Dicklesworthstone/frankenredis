@@ -10531,3 +10531,18 @@ SET in a different order. Clients process all frames / index by channel regardle
 order; fr's insertion-order is deterministic. Same WONTFIX dict-order class as
 FUNCTION-LIST/ACL-CAT/COMMAND-INFO-subcmd/cjson-object-keys. RESP2/RESP3 push framing
 itself is byte-exact. No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (cross-DB semantics MOVE/COPY-DB/SWAPDB/SELECT byte-exact vs redis 7.2.4 — 39 ops) — CrimsonHawk
+
+Multi-DB isolation is a classic redis-clone bug source; differential over 39 cross-DB
+ops (single stateful connection, SELECT-tracked): 0 diffs. Byte-exact:
+- MOVE: key relocates db0->db1 with TTL PRESERVED; source EXISTS->0; dest collision->0;
+  missing key->0; out-of-range db-> exact error; source==dest db-> exact error.
+- COPY ... DB N: value + TTL copied to target db; same-key-same-db-> exact error;
+  within-db copy OK.
+- SWAPDB: db0<->db2 swaps contents (DBSIZE reflects); same-db swap-> OK; out-of-range->
+  exact error.
+- SELECT scoping throughout.
+Confirms multi-DB namespace isolation, cross-DB TTL handling, and all the collision/
+range/self-op error paths match redis 7.2.4. (Complements the existing
+multidb_namespace_leak_gate.) No lever. Rollback: n/a.
