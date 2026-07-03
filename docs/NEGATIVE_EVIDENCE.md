@@ -10022,3 +10022,11 @@ LIMIT without ~ -> "ERR syntax error, LIMIT cannot be used without the special ~
 XADD 0-0 -> "ERR The ID specified in XADD must be greater than 0-0". **RESULT: 10/10 byte-exact, 0 DIFF.** fr's stream
 trim-by-length/trim-by-minid + NOMKSTREAM + LIMIT-gating + ID validation all match redis 7.2.4. Stream family fully verified
 (XADD/XRANGE/XLEN/XREAD + consumer-groups earlier + trimming now).
+
+### 2026-07-03 SURFACE (RESET connection-state clearing — 6 checks, 0 DIFF) — CrimsonHawk
+Differentiated RESET (full connection-state reset; many side effects) fr-v8 vs redis 7.2.4: set RESP3 + SELECT 3 + CLIENT
+SETNAME + CLIENT TRACKING ON + WATCH + MULTI + queued cmd, then RESET, then verify each cleared. **RESULT: 0 DIFF.** RESET
+reply = "+RESET"; MULTI cleared (EXEC after -> "ERR EXEC without MULTI"); SELECT reverted (db=0 in CLIENT INFO); CLIENT
+SETNAME cleared (name empty); CLIENT TRACKING cleared (flags=off); RESP3 reverted to RESP2 (HELLO returns the *array form
+not the %map). fr's RESET clears transaction/watch/subscriber/tracking/name/db/protocol state exactly like redis 7.2.4.
+Connection-lifecycle command (RESET) verified as a drop-in.
