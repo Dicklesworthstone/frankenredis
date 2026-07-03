@@ -10350,3 +10350,27 @@ Friction, NOT because they lack value):**
 Micro-opt veins are measured-exhausted (guard/expiry-fusion 0.00%, cold paths bypass
 drop_if_expired, kernels optimal). Further wins REQUIRE #1-#3 above with reservations up.
 Rollback: n/a (no code change).
+
+### 2026-07-03 SHIPPED (KeyDict RAM benchmark — quantifies the keyspace-index RAM lever: 0.645x, -35%) — CrimsonHawk
+
+Benched per-crate the RAM payoff of the #1 structural lever (wiring `KeyDict` as the
+live keyspace, uhthd/p8dd2). `#[ignore]` RSS bench in the unwired module (build N=2M
+keys, resident-set delta, one process, no drops so deltas are clean/additive):
+- **3-side-index baseline** (hashbrown entries + BTreeSet ordered_keys + Vec random
+  slots, each holding an Arc<[u8]> per key — Arc::clone shared, the FAVORABLE case):
+  276.3 MB = **138.1 B/key**.
+- **KeyDict** (owns each key once as Box<[u8]>, serves SCAN + RANDOMKEY itself):
+  178.3 MB = **89.1 B/key**.
+- **ratio 0.645 — KeyDict uses 65% of the baseline, saves 49 B/key (-35%)** on the
+  keyspace INDEX overhead (value/Entry RAM is identical in both, excluded here).
+
+This is the concrete, previously-only-estimated justification for the KeyDict wiring:
+it materially closes the keyspace-index portion of the ~2-4.5x RAM-vs-redis gap and
+brings the dict toward redis's chaining-dict footprint. Combined with the shrink
+support shipped 9109ed888, KeyDict is now feature-complete for wiring (grow+shrink,
+SCAN, RANDOMKEY, bulk-build). REMAINING wiring work (needs reservations up, hot-path):
+swap Store.entries HashMap + ordered_keys + random_key_slots -> KeyDict; route
+SCAN/RANDOMKEY through it; note the one tradeoff — losing ordered_keys drops fr's
+KEYS/SCAN-MATCH literal-prefix range-prune (2wgom/9cg1c), reverting those to redis's
+own O(n) full-scan (a correctness-neutral loss of an fr-only speedup, acceptable for
+the RAM parity). Rollback: n/a (bench-only, KeyDict still unwired = 0 prod refs).

@@ -493,6 +493,76 @@ mod tests {
         s.as_bytes().to_vec().into_boxed_slice()
     }
 
+    /// (uhthd) Quantify the RAM payoff of wiring `KeyDict` as the live keyspace vs
+    /// today's three side indices (`hashbrown` entries + `BTreeSet` ordered_keys +
+    /// `Vec` random slots), each holding an `Arc<[u8]>` per key. Measured as the
+    /// resident-set delta while building N keys, in ONE process, without dropping
+    /// either structure (RSS only grows, so the two deltas are clean and additive —
+    /// no allocator-retention confound). Run:
+    ///   cargo test -p fr-store keydict_vs_side_index_ram_uhthd -- --ignored --nocapture
+    #[test]
+    #[ignore = "RSS benchmark; run explicitly with --ignored --nocapture"]
+    fn keydict_vs_side_index_ram_uhthd() {
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        fn rss_bytes() -> usize {
+            // /proc/self/statm field 2 = resident pages.
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: usize = s
+                .split_whitespace()
+                .nth(1)
+                .and_then(|f| f.parse().ok())
+                .unwrap_or(0);
+            pages * 4096
+        }
+
+        let n = 2_000_000usize;
+        let mkkey = |i: usize| format!("key:{i:010}").into_bytes().into_boxed_slice();
+
+        let r0 = rss_bytes();
+        // Baseline: the three Arc-keyed side indices the live Store keeps today.
+        let mut entries: std::collections::HashMap<Arc<[u8]>, ()> =
+            std::collections::HashMap::with_capacity(n);
+        let mut ordered: BTreeSet<Arc<[u8]>> = BTreeSet::new();
+        let mut slots: Vec<Arc<[u8]>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let key: Arc<[u8]> = Arc::from(mkkey(i));
+            entries.insert(Arc::clone(&key), ());
+            ordered.insert(Arc::clone(&key));
+            slots.push(key);
+        }
+        let r1 = rss_bytes();
+        let base = r1 - r0;
+
+        // Candidate: one KeyDict owning each key once as Box<[u8]> (no Arc header,
+        // no side indices — it serves SCAN + RANDOMKEY itself).
+        let mut kd: KeyDict<()> = KeyDict::with_capacity(n);
+        for i in 0..n {
+            kd.insert(mkkey(i), ());
+        }
+        let r2 = rss_bytes();
+        let cand = r2 - r1;
+
+        std::hint::black_box((&entries, &ordered, &slots, &kd));
+        let bpp_base = base as f64 / n as f64;
+        let bpp_cand = cand as f64 / n as f64;
+        println!(
+            "KeyDict RAM (N={n}): 3-side-index baseline={:.1}MB ({:.1} B/key) | KeyDict={:.1}MB ({:.1} B/key) | ratio={:.3} (KeyDict uses {:.0}% of baseline, saves {:.1} B/key)",
+            base as f64 / 1e6,
+            bpp_base,
+            cand as f64 / 1e6,
+            bpp_cand,
+            cand as f64 / base as f64,
+            100.0 * cand as f64 / base as f64,
+            bpp_base - bpp_cand,
+        );
+        assert!(
+            cand < base,
+            "KeyDict must use less RAM than the 3 side indices"
+        );
+    }
+
     // Small deterministic LCG so tests are reproducible without rand crates and
     // without the harness-forbidden Math.random equivalent.
     struct Lcg(u64);
