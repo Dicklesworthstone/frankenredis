@@ -9926,3 +9926,11 @@ fr's just-fixed OOM gate correctly distinguishes is-write (NOREPLICAS) from is-d
 command-flag gates. Write-safety restricted context is a verified drop-in. Restricted-context coverage: MULTI + ACL(cmd/key/
 channel) + scripts + subscriber-mode + read-only-replica + OOM(denyoom) + min-replicas-to-write -- fast-path gate verified
 across all, with the OOM-timing residuals (MULTI-queue/script-inner) the only documented open items.
+
+### 2026-07-03 SURFACE (GETEX dual read/write semantics + TTL edges — 13 checks, 0 DIFF) — CrimsonHawk
+Differentiated GETEX (dual-nature: read when no option / write when PERSIST|EX|EXAT|... ; TTL-edge-prone) fr-v8 vs redis
+7.2.4, 13 checks (reply + resulting TTL): no-opt=read (TTL 500 unchanged); PERSIST=remove TTL(-1); EX 100/PX/EXAT=set TTL;
+PXAT past=DELETE key (ttl -2); missing key=nil; PERSIST-on-no-ttl=noop; error surface (EX 0 / EX -1 -> "ERR invalid expire
+time in 'getex' command", EX+PX / PERSIST+EX -> "ERR syntax error", wrong-type -> WRONGTYPE). **RESULT: 13/13 byte-exact,
+0 DIFF.** GETEX's read-vs-write dual semantics, TTL set/remove/delete, and option-conflict validation all match redis 7.2.4.
+Expiry-adjacent command surface (EXPIRE options + GETEX + SETEX + TTL family) byte-exact.
