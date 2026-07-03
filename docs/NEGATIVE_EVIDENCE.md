@@ -9233,3 +9233,19 @@ iteration is cache-friendly vs BTreeMap node-hopping. **The threshold 2048 is a 
 regresses both dimensions.** REVERTED the experiment (working tree back to 2048). LESSON: measure a hypothesized structural
 "tradeoff" before surfacing it as a lever — asymptotic complexity (O(n^2) vs O(n log n)) LOSES to constant factors (memmove
 vs pointer-chasing) at these sizes. Removes one item from the "remaining frontier"; the incremental-ZADD path is optimal.
+
+### 2026-07-03 MEASURED-CORRECTION (fr "hashtable RAM 2x redis" p8dd2 is REFUTED — hashtable is PARITY; the RAM gap is sets/zsets) — CrimsonHawk
+Applied "measure before assuming" to the deferred "hashtable RAM 2x redis (p8dd2, CoralOx)" claim. Measured settled actual
+RSS (min of 3 idle reads) fr HEAD vs redis 7.2.4:
+- 500k-field HASH (both hashtable-encoded): fr 35892 kB vs redis 39972 kB = **0.90x — fr uses LESS**. The "2x hashtable RAM"
+  is STALE/WRONG; fr's CompactFieldMap arena (frankenredis-ideww: [flen][field][vlen][value] contiguous, open-addr index,
+  ~35-41 B/field) already closed it. used_memory fr 28MB vs redis 33MB = 0.84x too.
+- +500k SET +500k ZSET: total RSS fr 131656 kB vs redis 109580 kB = **1.20x** overall. Isolating: the set+zset delta is fr
+  95764 kB vs redis 69608 kB = **~1.38x** — so the RAM gap is in SETS and ZSETS, not hashtables. Consistent with the known
+  structural zset member-dup (dict IndexMap Arc<[u8]> + ordered BTreeMap/Vec each hold the member+f64 score;
+  project_zset_member_dup_rss_gap residual 1.54x, CoralOx uybhq). CompactStrSet gives sets an arena but the GenericSet still
+  duplicates.
+**CORRECTION: fr hashtable RAM = PARITY (0.90x), NOT 2x — p8dd2 is effectively done (CompactFieldMap). The real RAM gap is
+sets/zsets (~1.38x, structural member-dup, CoralOx/uybhq), and even that is ~1.4x not 2x. Overall mixed RAM = 1.20x.** Two
+measured corrections this session (this + the ZADD-Compact one) removed OVER-STATED items from the "remaining frontier":
+measure structural claims before treating them as levers.
