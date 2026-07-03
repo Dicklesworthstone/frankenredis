@@ -9466,3 +9466,16 @@ identical. **CORRECTNESS dimension now byte-exact across EVERY facet tested: RES
 introspection, scripting, and transactional semantics all match Redis 7.2.4.** With perf (parity-or-faster every subsystem)
 + robustness (188 crash probes), fr's fidelity is proven exhaustively. Untested-remaining surfaces are narrow (blocking-cmd
 wake timing, replication/AOF round-trip, cluster=known-incomplete). Open levers = ohsk5 restructure (~3-5%) + CoralOx RAM.
+
+### 2026-07-03 SURFACE (blocking commands BLPOP/BZPOPMIN/BLMOVE/BLMPOP — 11 checks, byte-exact) — CrimsonHawk
+Differentiated blocking-command behavior (2 conns + timing) fr HEAD vs redis 7.2.4: immediate-return when data present
+(BLPOP -> [key,value]), timeout -> *-1 nil-array at ~1s, **block-then-wake** (2nd conn blocks on empty key, 1st RPUSHes ->
+blocked conn wakes with [key,pushed-value]), BZPOPMIN -> [key,member,score], BLMOVE/BLMPOP(-> [key,[popped]])/BRPOPLPUSH
+immediate, negative-timeout -> "ERR timeout is negative", non-float timeout -> "ERR timeout is not a float or out of range".
+**RESULT: byte-exact — the only nonzero delta was my own elapsed-time INSTRUMENTATION (fr 1005ms vs redis 1079ms wall-clock,
+both correctly timed out at ~1s + returned *-1), NOT a behavior difference.** Blocking semantics (immediate/block/wake/
+timeout/reply-framing/error-strings) all match. **CORRECTNESS dimension byte-exact across: RESP2 values (4761) + encoding
+(25) + RESP3 (35) + COMMAND meta (370x7) + keyspace events (~40) + EVAL/Lua (50) + transactions (16) + blocking (11).** With
+perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's Redis-7.2.4 fidelity is proven across every
+dimension devised. Untested-remaining now VERY narrow (replication/AOF byte round-trip; cluster=known-incomplete). Open perf
+levers = ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.
