@@ -10515,3 +10515,19 @@ INFO fields+structure, COMMAND INFO metadata, Lua library/API 53/54, ACL seriali
 host-dependent locale). One real fix landed (proc-title-template). Reachable correctness
 frontier confirmed closed; sole high-value lever remains KeyDict wiring (uhthd,
 feature-complete + RAM-proven -35%, needs a dedicated reservations-up session).
+
+### 2026-07-03 SURFACE (Pub/Sub reply framing RESP2+RESP3 byte-exact; only multi-channel reply ORDER differs = WONTFIX) — CrimsonHawk
+
+Differential over pub/sub framing (both RESP2 and RESP3): SUBSCRIBE/PSUBSCRIBE
+confirmation arrays (`*3 subscribe <ch> <count>` / RESP3 `>3` push), multi-channel
+SUBSCRIBE (one frame per channel), PING + PING msg in subscribe mode, GET-in-sub-mode
+error wording, UNSUBSCRIBE-all, PUNSUBSCRIBE, RESET, and PUBSUB NUMSUB/NUMPAT/
+SHARDCHANNELS/SHARDNUMSUB + PUBLISH return count — ALL byte-exact vs redis 7.2.4. Two
+diffs, both the channel-iteration-ORDER cosmetic class: (1) UNSUBSCRIBE-all emits its
+per-channel frames in a different order (redis subscription-dict hash order vs fr
+insertion order; the per-frame remaining-count differs only because the order does —
+both walk 4->3->2->1 and end at 0), (2) PUBSUB CHANNELS <pat> returns the same channel
+SET in a different order. Clients process all frames / index by channel regardless of
+order; fr's insertion-order is deterministic. Same WONTFIX dict-order class as
+FUNCTION-LIST/ACL-CAT/COMMAND-INFO-subcmd/cjson-object-keys. RESP2/RESP3 push framing
+itself is byte-exact. No lever. Rollback: n/a.
