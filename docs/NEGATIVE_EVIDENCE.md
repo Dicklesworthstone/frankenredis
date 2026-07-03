@@ -9782,3 +9782,12 @@ EXPIREAT=delete; negative EXPIRE=delete; PEXPIRE GT ms. **RESULT: 15/15 byte-exa
 infinite-TTL semantics (a key with no TTL is treated as +inf: GT rejects vs it, LT accepts). fr's conditional-expire
 comparison logic + option-combo validation + immediate-deletion-on-past-time all match redis 7.2.4. Expiry command surface
 (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT + NX/XX/GT/LT + TTL/PTTL/EXPIRETIME earlier) byte-exact.
+
+### 2026-07-03 SURFACE (ZADD GT/LT/NX/XX/CH/INCR option matrix — 22 checks, 0 DIFF) — CrimsonHawk
+Differentiated the ZADD flag matrix (complex interactions, edge-prone) fr HEAD vs redis 7.2.4, 22 checks (reply + resulting
+score): NX new=add / existing=reject; XX new=reject / existing=update; GT higher=update / lower=reject / new=add; LT lower=
+update / higher=reject; GT CH (change-count reporting); INCR basic; GT/NX/XX INCR when BLOCKED -> nil (the subtle case);
+GT INCR ok; illegal combos NX+XX / GT+NX / GT+LT -> exact errors; INCR with multiple pairs -> error; nan score -> error;
++inf score. **RESULT: 22/22 byte-exact, 0 DIFF** — including the nil-return-on-blocked-INCR semantics and the full
+option-combo validation. fr's ZADD conditional-update logic matches redis 7.2.4 precisely. Sorted-set write surface
+(ZADD options + ZINCRBY + ZADD-in-MULTI + trim family earlier) byte-exact.
