@@ -14091,7 +14091,13 @@ impl Store {
                         None
                     } else {
                         let idx = (rand_val as usize) % s.len();
-                        s.iter().nth(idx).map(|m| m.into_owned())
+                        // (CrimsonHawk) O(1) get_index instead of the O(idx) iter().nth
+                        // scan — SPOP/SRANDMEMBER-count already use get_index/get_index-
+                        // based sampling; single SRANDMEMBER was the missed spot. On a
+                        // hashtable-range set this is O(1) vs O(n/2) average per call.
+                        // Byte-identical (get_index matches iter().nth(idx), asserted by
+                        // the intset/generic index-equivalence test).
+                        s.get_index(idx).map(|m| m.into_owned())
                     };
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
