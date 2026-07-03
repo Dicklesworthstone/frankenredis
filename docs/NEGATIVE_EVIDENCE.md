@@ -9744,3 +9744,15 @@ replica) -> 1 after 1.09s (correct: times out returning the ACTUAL acked count, 
 appendonly is disabled." **All byte/behavior-exact vs redis 7.2.4 — replica ACK counting + blocking + timeout + WAITAOF
 gating correct.** fr's full replication/HA/durability surface now verified: bidirectional replication + partial resync +
 MIGRATE + Sentinel monitoring&failover(fixed) + manual FAILOVER + WAIT/WAITAOF — all correct.
+
+### 2026-07-03 SURFACE (RESP2 subscriber-mode restrictions byte-exact except a niche EXEC-after-blocked-MULTI nuance) — CrimsonHawk
+Probed RESP2 subscriber-mode command restrictions fr HEAD vs redis 7.2.4. **Byte-exact on the allow/deny surface:** in sub
+mode GET/SET/INCR/HSET/MULTI/SELECT/COMMAND all rejected with the EXACT "-ERR Can't execute '<cmd>': only (P|S)SUBSCRIBE /
+(P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"; PING/PING-msg/SUBSCRIBE/UNSUBSCRIBE/SSUBSCRIBE/RESET
+allowed identically; MULTI-BEFORE-subscribe queues SUBSCRIBE + EXEC runs it (matches redis). **ONE niche divergence:** after
+a sub-mode-BLOCKED MULTI, `EXEC` returns fr "-ERR Can't execute 'exec'..." vs redis "-EXECABORT Transaction discarded because
+of: Can't execute...". Redis's sub-mode rejection path flag-transactions the client (CLIENT_DIRTY_EXEC) so a subsequent EXEC
+aborts; fr treats EXEC as just another sub-mode-disallowed command. VERY edge-case (MULTI attempted inside RESP2 subscriber
+mode, then EXEC) — low real-world value; SURFACED not fixed (would need transaction-dirty flagging on the sub-mode reject +
+a build, poor ROI for the frequency). Everything else in subscriber mode byte-exact. NOT part of the EXEC-bypass class (that
+was side-effect application; this is error-message shape on a doubly-invalid sequence).
