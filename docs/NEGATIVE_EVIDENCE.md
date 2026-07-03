@@ -10673,3 +10673,14 @@ metadata (config/INFO/COMMAND INFO), scripting (Lua), security (ACL), connection
 (CLIENT), pub/sub, cluster (standalone), plus replication/AOF durability. Residuals:
 dict-order WONTFIX class + host-locale + open bug WAIT/WAITAOF GETACK (97shd). No lever.
 Rollback: n/a.
+
+### 2026-07-03 SURFACE (RESP protocol parsing edges byte-exact vs redis 7.2.4 — 17 raw cases) — CrimsonHawk
+
+Raw-byte differential over the RESP parser's error surface (malformed input robustness):
+0 diffs. Byte-exact: inline commands (PING, ECHO with double/single-quoted args, empty
+line, UNBALANCED quote -> exact "unbalanced quotes in request" error, oversized inline
+-> "too big inline request"), malformed multibulk (*-1 null, *0 empty, *abc bad-count,
+*100000000 -> "invalid multibulk length", $abc bad-bulk-hdr, $-1, $999999999999 ->
+"invalid bulk length", non-$ element -> "expected '$'", $3 vs PING len-mismatch), valid
+multibulk. Parser error wording + connection handling match redis 7.2.4 (consistent with
+the earlier protocol_abuse_parity fixes; no new blind spot). No lever. Rollback: n/a.
