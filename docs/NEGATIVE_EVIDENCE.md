@@ -9821,3 +9821,13 @@ redirected subscriber receives `>2 invalidate [rk]`. **RESULT: 3/3 byte-exact, 0
 frankenredis-rd96p (TRACKING REDIRECT) is WORKING. CLIENT TRACKING now FULLY verified: default + BCAST+prefix + OPTIN +
 REDIRECT + prefix-filtering + push framing + TRACKINGINFO all byte-exact vs redis 7.2.4. Client-side caching (all modes) is
 a verified drop-in.
+
+### 2026-07-03 SURFACE (WATCH optimistic-lock CAS abort semantics — 6 scenarios, 0 DIFF) — CrimsonHawk
+Differentiated WATCH/MULTI/EXEC CAS abort semantics under CONCURRENT modification (2 connections) fr HEAD vs redis 7.2.4:
+(1) concurrent SET of watched key -> EXEC aborts (nil), other's value wins; (2) modify-THEN-RESTORE-same-value -> STILL
+aborts (WATCH tracks the modification EVENT, not value equality — subtle redis semantics); (3) watched key EXPIRES ->
+aborts; (4) FLUSHDB -> aborts; (5) no modification -> COMMITS (txn value applied); (6) WATCH nonexistent key then another
+client CREATES it -> aborts. **RESULT: 6/6 byte-exact, 0 DIFF.** fr's optimistic-concurrency CAS (dirty-key tracking +
+abort-on-any-touch incl restore/expire/flush/create) matches redis 7.2.4 precisely. Transaction surface now fully verified:
+queueing/EXECABORT/partial-results (earlier) + special-command routing (3 fixes) + blocking-in-MULTI + WATCH-CAS -- all
+byte-exact. Optimistic locking is a verified drop-in.
