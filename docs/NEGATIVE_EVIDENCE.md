@@ -9991,3 +9991,14 @@ PFCOUNT, PFMERGE dest+srcs), MIGRATE ... KEYS k1 k2, LCS key1 key2, ZADD-with-fl
 fr's COMMAND_TABLE key-specs (first/last/step + movablekeys + numkeys handlers) match redis 7.2.4 exactly -- cluster proxies
 / smart clients that route by GETKEYS behave identically against fr. (Complements the COMMAND INFO metadata differential 370x
 earlier: both metadata AND runtime key-extraction verified.)
+
+### 2026-07-03 SURFACE (OBJECT ENCODING conversion + no-shrink lifecycle — byte-exact) — CrimsonHawk
+Differentiated the encoding lifecycle (grow-to-big-encoding then shrink; redis does NOT shrink hash/set/zset back, only lists
+are size-adaptive) fr-v8 vs redis 7.2.4. **RESULT: byte-exact, 0 DIFF.** Clear no-shrink demonstration: ZSET grown to 200
+members -> skiplist, then ZREM to 5 -> STAYS skiplist (redis never converts skiplist->listpack); SET grown to 200 strs ->
+hashtable, SREM to 5 -> STAYS hashtable; intset+bigstr-then-remove -> stays hashtable; hash big-val-then-small-val -> stays
+hashtable. fr mirrors redis on all. NOTE (method/threshold): in this fresh redis 7.2.4 build a 200-field small hash stays
+LISTPACK at both peak and final (effective hash-max-listpack-entries > 200 here, not the 128 I assumed) and small lists stay
+LISTPACK (list-max-listpack-size is size-based -2, not a 128 count) -- fr MATCHES redis's actual thresholds exactly (that's
+the point: whatever redis's configured conversion threshold, fr converts identically). Encoding conversion thresholds +
+no-shrink invariant (zset/set/hash stay in the big encoding after shrinking; lists adapt) all byte-exact vs redis 7.2.4.
