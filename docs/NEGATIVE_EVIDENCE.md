@@ -10495,3 +10495,23 @@ insertion-order is deterministic (arguably more predictable). Same class as
 FUNCTION-LIST/ACL-CAT/COMMAND-INFO-subcmd dict-order. CONCLUSION: the Lua scripting
 library/API is functionally byte-exact; only a semantically-irrelevant, deterministic
 JSON key-order differs. No lever. Rollback: n/a (no code change).
+
+### 2026-07-03 SURFACE (ACL rule serialization byte-exact vs redis 7.2.4 — 15 combos, SETUSER/GETUSER/LIST) — CrimsonHawk
+
+Differential over 15 varied ACL SETUSER rule combos -> ACL GETUSER + ACL LIST
+serialization: 0 diffs. Byte-exact rule rendering for: on/off, >pass/nopass/multi-pass,
+allkeys/~pat/%R~%W~ separate read-write key patterns, allcommands/+@cat/-@cat/+cmd/-cmd/
++container|subcmd, allchannels/&chan/resetchannels, selectors ((+get ~sel:* )),
+resetkeys/clearselectors, sanitize-payload, nopass, reset. This is the security-critical
+surface (a wrong rule serialization = a permissions bug); it matches redis 7.2.4
+byte-for-byte incl. rule ORDER and the derived GETUSER "commands"/"keys"/"channels"/
+"selectors" fields. (ACL CAT membership dict-order remains the only documented ACL
+WONTFIX.) No lever. Rollback: n/a.
+
+Server-metadata + scripting + security introspection surface now comprehensively
+verified byte-exact this arc: config defaults 195/195, CONFIG SET validation 194/195,
+INFO fields+structure, COMMAND INFO metadata, Lua library/API 53/54, ACL serialization
+— all remaining divergences are documented WONTFIX (dict/hash iteration order,
+host-dependent locale). One real fix landed (proc-title-template). Reachable correctness
+frontier confirmed closed; sole high-value lever remains KeyDict wiring (uhthd,
+feature-complete + RAM-proven -35%, needs a dedicated reservations-up session).
