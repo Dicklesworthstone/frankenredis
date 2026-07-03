@@ -9858,3 +9858,17 @@ CHANNEL dimension (PUBLISH/SPUBLISH) was the ONLY ACL bypass; command/key/catego
 vein now AUDITED-CLOSED for ACL. (Other fast-path checks — maxmemory/aof/replication/keyspace-notify — are gated by
 plain_borrowed_default_key_{read,write}_allows, verified thorough.) 4 real bugs total from the fast-path-skips-generic-check
 vein this session (EXEC-bypass x3 + PUBLISH ACL); the vein is now swept for ACL.
+
+### 2026-07-03 SHIPPED (FIX: script command-ACL-denial error wrapping — "ERR ACL failure in script:") — CrimsonHawk
+Found+fixed an error-FORMAT divergence in script ACL enforcement (security was already correct — denial happens; only the
+error message differed). A COMMAND-level ACL denial fired INSIDE a Lua script returned fr `NOPERM User X has no permissions
+to run the 'set' command...` vs redis 7.2.4 `ERR ACL failure in script: User X has no permissions to run the 'set'
+command...`. ROOT CAUSE: the shared dispatch ACL-error formatter (fr-command:2335 Command arm) always used the bare "NOPERM"
+prefix; redis wraps in-script (script_nesting_level >= 1) COMMAND denials with "ERR ACL failure in script:" (but NOT key
+denials, which stay "NOPERM No permissions to access a key", and NOT direct client denials). fr never emitted "ACL failure
+in script" at all. FIX: in the Command arm, when script_nesting_level >= 1, format as "ERR ACL failure in script: <msg>".
+**SHIPPED + VALIDATED byte-exact (7 checks, 0 DIFF):** script SET/INCR denial -> "ERR ACL failure in script:..." (matches
+redis); DIRECT SET denial -> still "NOPERM..." (unchanged); script KEY-denial -> still "NOPERM No permissions to access a
+key" (unchanged); allowed script commands work; pcall-caught error matches. 5th real fix this session — a client-visible
+script-ACL error-parity gap (scripts inspecting redis.call errors now see redis-identical messages). Found via the ACL-
+restricted-context differential (extending the fast-path-ACL-bypass audit into scripts).

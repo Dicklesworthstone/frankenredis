@@ -2332,13 +2332,29 @@ pub fn dispatch_argv(
             .next()
             .unwrap_or_else(|| command_name.to_ascii_lowercase());
         let (reason, object, error) = match permission_error {
-            DispatchAclPermissionError::Command => (
-                DispatchAclPermissionReason::Command,
-                command_name.to_ascii_uppercase(),
-                CommandError::Custom(format!(
-                    "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
-                )),
-            ),
+            DispatchAclPermissionError::Command => {
+                // A COMMAND-level ACL denial that fires INSIDE a Lua script
+                // (script_nesting_level >= 1) is wrapped by redis 7.2.4 as
+                // "ERR ACL failure in script: <msg>" rather than the bare
+                // "NOPERM <msg>" a direct client denial uses (the Lua error
+                // context "script: <sha>, on @user_script:N." is appended
+                // after). Key-level denials inside scripts are NOT wrapped
+                // (they stay "NOPERM No permissions to access a key"), so this
+                // rewrites only the Command arm. (frankenredis-aclscriptwrap)
+                let msg = format!(
+                    "User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
+                );
+                let error = if store.script_nesting_level >= 1 {
+                    CommandError::Custom(format!("ERR ACL failure in script: {msg}"))
+                } else {
+                    CommandError::Custom(format!("NOPERM {msg}"))
+                };
+                (
+                    DispatchAclPermissionReason::Command,
+                    command_name.to_ascii_uppercase(),
+                    error,
+                )
+            }
             DispatchAclPermissionError::Key(key) => {
                 let key_name = String::from_utf8_lossy(&key).into_owned();
                 (
