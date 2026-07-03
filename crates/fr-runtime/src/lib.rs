@@ -28508,7 +28508,17 @@ impl Runtime {
                         return CommandError::InvalidCommandFrame.to_resp();
                     }
                 };
-                if !fr_command::is_known_command(cmd_bytes) {
+                // A command is "known" for MULTI queueing if fr_command classifies
+                // it OR it is a runtime-special command (ACL, CLUSTER, etc.) handled
+                // outside the fr_command CommandId table. fr_command::is_known_command
+                // only checks CommandId, which lacks an Acl variant — so a queued
+                // `ACL SETUSER` used to hit "unknown command 'ACL'" -> EXECABORT
+                // (divergent from redis 7.2.4, which queues+applies it). Runtime-
+                // special commands ARE real known commands; accept them here so they
+                // queue, then route through their handlers at EXEC (execslaveof).
+                if !fr_command::is_known_command(cmd_bytes)
+                    && classify_runtime_special_command(cmd_bytes).is_none()
+                {
                     self.session.transaction_state.exec_abort = true;
                     let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
                     self.apply_existing_client_reply_suppression_to_undispatched_reply();

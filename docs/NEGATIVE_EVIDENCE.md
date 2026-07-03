@@ -9685,3 +9685,16 @@ mutation doesn't stick when dispatched from the exec loop; likely a post-dispatc
 execute_db_scoped_command path skips). This is a SEPARATE deeper bug from the dispatch routing (CONFIG's handler persists
 fine; ACL's does not). Needs handle_acl_command EXEC-context investigation. Lower-severity than CONFIG (ACL provisioning
 in a txn is rarer). fr Sentinel-failover + CONFIG-in-MULTI now correct; ACL-in-MULTI residual open.
+
+### 2026-07-03 SHIPPED (FIX: ACL SETUSER now works inside MULTI/EXEC — queue-recognition fix) — CrimsonHawk
+Fixed the residual ACL-in-MULTI bug (prev entry). Root cause was DISTINCT from CONFIG's (dispatch routing): the MULTI QUEUE-
+time existence check (fr-runtime:28511) uses `fr_command::is_known_command` -> `classify_command` (CommandId table), which has
+NO Acl variant (has Config/Client/Wait/Replicaof but not Acl) — so a queued `ACL SETUSER` hit "ERR unknown command 'ACL'" ->
+EXECABORT (verified pre-existing: identical on fr-cand13, NOT caused by my CONFIG/ACL routing commit 6856ae988). FIX: at the
+queue existence check, also accept commands that classify_runtime_special_command recognizes (ACL/CLUSTER/etc. ARE known
+commands, just handled outside the CommandId table). **SHIPPED + VALIDATED byte-identical to redis 7.2.4:** `MULTI; ACL SETUSER
+auser on >pw ~* +@all; EXEC` -> OK,QUEUED,OK + user CREATED (was: EXECABORT). Regressions all clean: CONFIG SET-in-MULTI still
+applies (42424242), truly-unknown command (NOTACMD) STILL EXECABORTs correctly (fix only accepts real runtime-special cmds),
+regular MULTI/EXEC byte-exact (OK,QUEUED,QUEUED,OK,2). **EXEC-BYPASS BUG CLASS now CLOSED: REPLICAOF/SLAVEOF (b22c2c110,
+sentinel failover) + CONFIG SET (6856ae988) + ACL SETUSER (this) all work correctly inside MULTI/EXEC. Three real functional
+bugs found+fixed this session via the Sentinel-failover investigation, atop the byte-exact/interop/perf/robustness campaign.**
