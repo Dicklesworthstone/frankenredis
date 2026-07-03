@@ -9791,3 +9791,14 @@ GT INCR ok; illegal combos NX+XX / GT+NX / GT+LT -> exact errors; INCR with mult
 +inf score. **RESULT: 22/22 byte-exact, 0 DIFF** — including the nil-return-on-blocked-INCR semantics and the full
 option-combo validation. fr's ZADD conditional-update logic matches redis 7.2.4 precisely. Sorted-set write surface
 (ZADD options + ZINCRBY + ZADD-in-MULTI + trim family earlier) byte-exact.
+
+### 2026-07-03 SURFACE (stream consumer groups — PEL/delivery-count/state byte-exact modulo timing) — CrimsonHawk
+Differentiated the most complex stateful surface — stream consumer groups — fr HEAD vs redis 7.2.4: XADD + XGROUP CREATE/
+CREATECONSUMER/SETID/DELCONSUMER, XREADGROUP (2 consumers), XPENDING (summary + detailed), XACK, XCLAIM, XAUTOCLAIM, XINFO
+GROUPS/CONSUMERS. **RESULT: state machine byte-exact.** The ONLY diffs were idle-time MILLISECOND values (fr 47 vs redis 37,
+8 vs 10, etc. — wall-clock deltas between two independent runs, timing-dependent, not normalizable). Everything structural
+matches: PEL membership (same message-ID -> consumer mapping), DELIVERY COUNTS (2 for the XCLAIM-re-delivered 2-1, 1 for
+others), pending counts (c3 pending=3 post-XAUTOCLAIM), XPENDING summary min/max/consumer-breakdown, XINFO GROUPS
+(pending/last-delivered/entries-read/lag), XINFO CONSUMERS (names/pending), XACK decrement, XAUTOCLAIM cursor+claimed+
+deleted arrays. fr's consumer-group PEL/delivery/idle state semantics match redis 7.2.4 (only the unavoidable wall-clock
+idle-ms differ). Streams (XADD/XRANGE/XLEN + CG lifecycle) byte-exact.
