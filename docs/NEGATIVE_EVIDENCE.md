@@ -9756,3 +9756,11 @@ aborts; fr treats EXEC as just another sub-mode-disallowed command. VERY edge-ca
 mode, then EXEC) — low real-world value; SURFACED not fixed (would need transaction-dirty flagging on the sub-mode reject +
 a build, poor ROI for the frequency). Everything else in subscriber mode byte-exact. NOT part of the EXEC-bypass class (that
 was side-effect application; this is error-message shape on a doubly-invalid sequence).
+
+### 2026-07-03 SURFACE (BITFIELD full mode/overflow/width matrix — 18 checks, 0 DIFF) — CrimsonHawk
+Differentiated BITFIELD (arithmetic-edge-prone) fr HEAD vs redis 7.2.4, 18 checks: OVERFLOW WRAP/SAT/FAIL (i8 127+10, u8
++300, u4 15+5->nil on FAIL), widths i1/u1/u4/i8/u8/i16/i64/u63, #-offset addressing, i64 max (9223372036854775807),
+u63 large, INCRBY positive+negative saturation (i16 -32768 + -5 SAT), mixed multi-op sequences, GET beyond end (->0),
+BITFIELD_RO, error cases (SET u64 -> width error, GET u8 -1 -> offset error). **RESULT: 18/18 byte-exact, 0 DIFF.** fr's
+BITFIELD overflow arithmetic, signed/unsigned two's-complement handling, bit addressing, and error surface all match redis
+precisely. Bitmap command family (SETBIT/GETBIT/BITCOUNT/BITPOS earlier + BITFIELD now) byte-exact.
