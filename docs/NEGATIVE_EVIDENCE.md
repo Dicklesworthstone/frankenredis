@@ -9872,3 +9872,14 @@ redis); DIRECT SET denial -> still "NOPERM..." (unchanged); script KEY-denial ->
 key" (unchanged); allowed script commands work; pcall-caught error matches. 5th real fix this session — a client-visible
 script-ACL error-parity gap (scripts inspecting redis.call errors now see redis-identical messages). Found via the ACL-
 restricted-context differential (extending the fast-path-ACL-bypass audit into scripts).
+
+### 2026-07-03 SURFACE (read-only replica write-gating — 18 checks, 0 DIFF; fast-path gate covers replica context) — CrimsonHawk
+Audited the read-only-replica restricted context (a fast-path-bypass risk per the vein) fr HEAD (fr-v5) vs redis 7.2.4:
+fr master + fr replica + redis replica (both replicas of the SAME fr master, for identical READONLY error parity). On the
+replica, all 12 write commands (SET/INCR/APPEND/LPUSH/HSET/SADD/ZADD/EXPIRE/DEL/GETDEL/SETEX/FLUSHDB) return the exact
+"-READONLY You can't write against a read only replica." + reads (GET/STRLEN/EXISTS/TTL/LRANGE) + WAIT all work. **RESULT:
+18/18 byte-exact, 0 DIFF.** The borrowed write fast paths do NOT bypass the replica gate — plain_borrowed_default_key_write_
+allows checks `role == Master` and bails to the generic path, which enforces READONLY. Replica-context write-gating is a
+verified drop-in (no fast-path bypass). Restricted-context vein coverage now: MULTI (3 fixes) + ACL command/key/channel
+(1 security fix + audit) + scripts (1 error-parity fix) + subscriber-mode + read-only-replica -- fast-path gate verified
+comprehensive across all restricted contexts tested.
