@@ -10546,3 +10546,23 @@ ops (single stateful connection, SELECT-tracked): 0 diffs. Byte-exact:
 Confirms multi-DB namespace isolation, cross-DB TTL handling, and all the collision/
 range/self-op error paths match redis 7.2.4. (Complements the existing
 multidb_namespace_leak_gate.) No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (RESP3 reply-TYPE correctness byte-exact vs redis 7.2.4 — 46 commands) — CrimsonHawk
+
+Differential over RESP3 container-type markers (normalizing scalar VALUES, preserving
+type markers + nesting) across 46 type-sensitive commands: 0 diffs. fr emits the correct
+RESP3 type for every one:
+- map `%`: HGETALL, CONFIG GET, XINFO STREAM/GROUPS, COMMAND DOCS, CLIENT TRACKINGINFO,
+  FUNCTION STATS/LIST.
+- set `~`: SMEMBERS, SPOP count, SINTER/SUNION/SDIFF, SRANDMEMBER count.
+- double `,`: ZSCORE, ZADD INCR, ZINCRBY, ZMSCORE, GEODIST, ZRANGE/ZRANGEBYSCORE/ZDIFF/
+  ZRANDMEMBER WITHSCORES (member,double pairs), ZPOPMIN/MAX.
+- verbatim `=`: CLIENT INFO, LOLWUT.
+- nested arrays: XRANGE, GEOPOS, GEOSEARCH WITHCOORD/WITHDIST, HRANDFIELD WITHVALUES,
+  LMPOP, XPENDING-summary.
+- integer/bulk/bool scalars: EXISTS, SISMEMBER, SMISMEMBER, TTL, TYPE, OBJECT ENCODING,
+  MEMORY USAGE, SINTERCARD, LPOS.
+Confirms RESP3 clients (which dispatch on the type byte) get the correct container type
+across the command surface. Combined with the earlier RESP2/RESP3 push-framing (pub/sub)
++ map/set/double checks, the RESP3 protocol surface is comprehensively verified. No
+lever. Rollback: n/a.
