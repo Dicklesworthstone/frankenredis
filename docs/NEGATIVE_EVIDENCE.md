@@ -9585,3 +9585,15 @@ the %.17Lg-equivalent shortest-representation path) matches redis at every preci
 atop values/encoding/RESP3/COMMAND/INFO/notifications/Lua/txn/blocking/representation/persistence/replication/MIGRATE. fr's
 Redis-7.2.4 fidelity is exhaustively verified across every differential-constructible surface. Open perf levers = ohsk5
 (~3-5%) + CoralOx ChunkedList/RAM.**
+
+### 2026-07-03 SURFACE (partial resync — replication EFFICIENCY: reconnect does +CONTINUE not full RDB) — CrimsonHawk
+Tested partial resync (the replication efficiency feature: brief replica disconnect -> resend only missed commands from the
+backlog via PSYNC +CONTINUE, NOT a costly full RDB). fr master + fr replica, established (sync_full:1, sync_partial_ok:0);
+master keeps a repl backlog (repl_backlog_active:1, size 1048576, stable master_replid + master_repl_offset). Forced the
+replica link to drop (CLIENT KILL TYPE replica on master) WITH writes during the blip, then let it reconnect. **RESULT:
+sync_partial_ok:1, sync_full STAYED at 1 (no new full resync) — fr did a PARTIAL resync.** Replica caught up to all 18 keys
+via the backlog and is DIGEST-IDENTICAL to master (0ccf5781...). So fr implements the full replication efficiency path:
+replication backlog + replid/offset tracking + PSYNC +CONTINUE partial resync on reconnect — a replica blip does NOT trigger
+a full RDB transfer (critical for large-dataset topologies). **REPLICATION dimension complete: bidirectional interop (fr<->
+redis digest-identical) + partial-resync efficiency + backlog. fr's replication is correct AND efficient.** fr's Redis-7.2.4
+fidelity spans every level tested. Open perf levers = ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.
