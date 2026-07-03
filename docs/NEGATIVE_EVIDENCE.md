@@ -9802,3 +9802,13 @@ others), pending counts (c3 pending=3 post-XAUTOCLAIM), XPENDING summary min/max
 (pending/last-delivered/entries-read/lag), XINFO CONSUMERS (names/pending), XACK decrement, XAUTOCLAIM cursor+claimed+
 deleted arrays. fr's consumer-group PEL/delivery/idle state semantics match redis 7.2.4 (only the unavoidable wall-clock
 idle-ms differ). Streams (XADD/XRANGE/XLEN + CG lifecycle) byte-exact.
+
+### 2026-07-03 SURFACE (CLIENT TRACKING / RESP3 client-side-caching invalidation — 7 checks, 0 DIFF) — CrimsonHawk
+Differentiated CLIENT TRACKING (intricate stateful RESP3 client-side caching: server pushes `invalidate` when tracked keys
+change) fr HEAD vs redis 7.2.4: (1) default tracking ON + GET tk + another conn SET tk -> **invalidation push byte-exact**
+`>2\r\n$10 invalidate\r\n*1\r\n$2 tk` (RESP3 push frame); (2) BCAST + PREFIX news: -> SET news:1 fires push
+`>2 invalidate [news:1]`; (3) SET other:1 (non-matching prefix) -> NO push (prefix filtering correct); (4) CLIENT
+TRACKINGINFO -> correct map (flags on, redirect 0, prefixes). **RESULT: 7/7 byte-exact, 0 DIFF.** fr's client-side-caching
+invalidation protocol (default + BCAST + prefix-filter + push framing + trackinginfo) matches redis 7.2.4 — clients using
+RESP3 tracking (redis-py client-side cache, lettuce) get correct invalidations. Another complex stateful feature verified
+alongside consumer-groups; no divergence.
