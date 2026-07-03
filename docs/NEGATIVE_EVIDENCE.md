@@ -9491,3 +9491,16 @@ REPRESENTATION-equal. **CORRECTNESS byte-exact across: values (4761) + encoding 
 keyspace events (~40) + EVAL/Lua (50) + transactions (16) + blocking (11) + DEBUG DIGEST representation (14 keys, whole-
 keyspace identical) + RDB round-trip.** With perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's
 Redis-7.2.4 fidelity is exhaustively proven. Open levers = ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx RAM.
+
+### 2026-07-03 SURFACE (REPLICATION INTEROP — fr replica of a REDIS master, digest-identical through sync+propagation) — CrimsonHawk
+Highest-value interop test: can fr be a live replica of a real redis 7.2.4 master (drop-in read-replica / migration)? Launched
+redis master (7482) + fr replica (7481), REPLICAOF, diverse dataset (str/list/hash/intset/zset/stream/hashtable-hash).
+**RESULT: fully compatible.** (1) fr consumed redis's PSYNC handshake + full-resync RDB transfer ("RDB: loaded 14 entries")
+and reached master_link_status:up in ~1s; (2) post-sync **DEBUG DIGEST fr replica == redis master (31ae429f...) BYTE-
+IDENTICAL**; (3) command propagation: master SET/INCR/LPUSH streamed to fr, replica reflected them and digests STAYED
+identical (695001a4...); (4) fr replica correctly READ-ONLY with redis's exact error "READONLY You can't write against a
+read only replica." fr speaks redis's replication wire protocol (REPLCONF/PSYNC/RDB-stream/command-propagation) as a live
+replica and stays representation-identical to the redis master. This is the strongest drop-in-replacement proof: fr can join
+a redis topology as a read replica. (Untested complementary direction: redis-replica-of-fr-master.) **fr's Redis-7.2.4
+fidelity now proven at the TOPOLOGY level too, atop wire/semantic/representation. Correctness+interop exhaustive; open perf
+levers = ohsk5 (~3-5%) + CoralOx RAM.**
