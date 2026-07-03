@@ -9096,3 +9096,19 @@ vs redis (beats redis). Byte-exact: 90 valid-range trials base==cand==redis repl
 excl/inf bounds, ±rank_tree); crash-fix: min>max returns empty, no panic. **ZSET TRIM FAMILY COMPLETE (rank/score/lex + pop
 front/back). LESSON: random-bound differential fuzzing found a pre-existing crash the ordered differential missed — always
 include INVALID/inverted bounds in range-op differentials.**
+
+### 2026-07-03 SURFACE (post-zset-trim: adversarial fuzz CLEAN + safe executor levers exhausted) — CrimsonHawk
+After the zset-trim family + DoS crash fix, hardened+swept the surface. (1) ADVERSARIAL FUZZ (40 probes: huge/negative/
+inverted indices+offsets+ranges, nan, +/-inf, on string/list/hash/zset/bitmap/stream) fr HEAD vs redis 7.2.4 = **0 crashes,
+0 divergences** — fr matches redis error-ness+values and stays alive. Confirms the inverted-range crash class is fully
+covered (my FullZSetOrder::range guard protects ALL 7 zset .range() call sites since they route through it; XRANGE already
+guards start>end; other .range() are unbounded/index-based). (2) BROAD SWEEP on current HEAD: remaining LOSSES are all
+DISPATCH-BOUND sub-ms (zrank_ws 0.46 [needs borrowed fast path, main.rs], zrank/zscore/getex/setbit/smove/strlen/lmpop/
+getdel/hincrbyfloat) — the ohsk5 frontier, UNSAFE (main.rs, agent-mail down). sintercard_lim 0.60 + bitop_and are ALREADY
+optimized (declustered early-stop + resolve-once; SWAR+no-clone) = dispatch/small-input. zpopmin_n/zremrangebyrank show
+0.59-0.68 on the sweep's SMALL zsets (dispatch) but my trim fixes target LARGE (129..2048) zsets, not in the sweep. NOTE:
+sub-ms sweep numbers are NOISY (zscore/zrank swung 1.06->0.75 / 1.07->0.65 between runs though their code is UNTOUCHED by
+my changes — zscore=dict.get, zrank=treap, neither uses range). **SAFE EXECUTOR/ALGORITHMIC LEVER VEIN EXHAUSTED this
+session (zset-trim + set/hash random-access + hash-once + RESTORE family all shipped). Remaining perf frontier = (a) ohsk5
+dispatch chain (main.rs, unsafe), (b) incremental-ZADD-into-Compact O(n^2) (deliberate read/write tradeoff), (c) ChunkedList
+(CoralOx). Correctness surface is robust (adversarial-fuzz-clean).**
