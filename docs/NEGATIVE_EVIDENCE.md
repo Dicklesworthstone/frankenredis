@@ -9597,3 +9597,17 @@ replication backlog + replid/offset tracking + PSYNC +CONTINUE partial resync on
 a full RDB transfer (critical for large-dataset topologies). **REPLICATION dimension complete: bidirectional interop (fr<->
 redis digest-identical) + partial-resync efficiency + backlog. fr's replication is correct AND efficient.** fr's Redis-7.2.4
 fidelity spans every level tested. Open perf levers = ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.
+
+### 2026-07-03 SURFACE (Sentinel HA interop — real redis-sentinel monitors fr master + auto-discovers fr replica) — CrimsonHawk
+Tested HA interop: can a REAL redis 7.2.4 sentinel monitor a fr master? fr master (7481) + fr replica (7482, REPLICAOF) +
+redis-sentinel (26379, monitor frmaster quorum 1). **RESULT: fully compatible.** redis-sentinel: (1) SENTINEL MASTER frmaster
+-> correct (ip/port 7481, flags=master, role-reported=master, num-slaves=1); (2) **SENTINEL SLAVES frmaster -> AUTO-DISCOVERED
+the fr replica** (127.0.0.1:7482, flags=slave, master-link-status=ok) — sentinel parsed fr master's INFO replication slave0:
+line to find the replica; (3) SENTINEL GET-MASTER-ADDR-BY-NAME -> 127.0.0.1 7481; (4) SENTINEL CKQUORUM -> "OK 1 usable
+Sentinels"; (5) sentinel log: "+monitor master frmaster" + "+slave slave 127.0.0.1:7482 @ frmaster". So fr's INFO/replication
++ role reporting + PING health are Sentinel-parseable — fr drops into a redis Sentinel HA topology as a monitored master with
+auto-discovered replicas. (Untested: actual failover promotion — sentinel would send REPLICAOF NO ONE to promote the fr
+replica on master-down; fr accepts REPLICAOF NO ONE so likely works.) **HA/topology interop confirmed atop replication(bidir+
+partial-resync)+MIGRATE(bidir)+persistence. fr's Redis-7.2.4 fidelity spans every level tested: correctness (all byte-exact)
++ interop (repl/migrate/sentinel) + persistence + perf (parity-or-faster) + robustness (188 probes). Open perf levers =
+ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.**
