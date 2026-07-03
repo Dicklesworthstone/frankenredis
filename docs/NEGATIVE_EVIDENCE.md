@@ -8959,3 +8959,14 @@ call sites are comparison/tie-break/boundary contexts (ZRANGEBYSCORE, member ded
 canonicalization for correctness and that scripts/zset_tiebreak_differ.py stays green. EV is modest (extreme edge case:
 negative-zero scores) but it IS a real byte-level differential-parity gap for a byte-exact port. Guarded by a new probe
 opportunity: extend zset_tiebreak_differ.py with a -0.0-in-skiplist case.
+
+### 2026-07-03 SHIP (intset RESTORE decode direct-to-i64, dd03b34a1) — CrimsonHawk
+RDB_TYPE_SET_INTSET RESTORE decoded each raw i64 -> formatted to a decimal STRING -> the arm parsed every string BACK to
+i64 -> then re-ran O(n log n) sort+dedup on data the decoder had ALREADY validated strictly-increasing. decode_intset_ints
+now returns Vec<i64> directly (no to_string/parse_i64) and the arm builds SetValue::Int straight from it (sorted+unique by
+the decode's strictly-increasing check, so sort/dedup were provable no-ops). Measured (instructions:u, 2/2): 500-int intset
+**-80.82%**, **0.304x->0.700x vs redis 7.2.4** (base 0.23s->cand 0.10s). Byte-exact vs control+redis: DIGEST-VALUE+ENCODING
++SMEMBERS across i16/i32/i64 widths, negatives, mixed, >512->hashtable. **RESTORE per-type NOW (post all fixes): dstr 1.17x,
+dhash 1.93x, dzset 1.95x, intset(<=512) big-win; REMAINING LOSSES: dlist 0.358x (architectural ChunkedList, off-limits),
+dset/>512-all-int 0.808-0.87x (RDB_TYPE_SET GenericSet::insert arm — next lever, same collect+dedup+bulk pattern but needs
+intset-vs-string encoding derivation). RESTORE decode vein: string LZF/hash/zset/intset all shipped this session.**
