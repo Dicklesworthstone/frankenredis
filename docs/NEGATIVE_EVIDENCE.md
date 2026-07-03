@@ -10433,3 +10433,23 @@ from the gate's exclude list so it is now guarded. Gate re-run: "195 CONFIG para
 match redis 7.2.4 compiled defaults" with proc-title-template now INCLUDED. Other
 CONFIG-GET-* value diffs (bind/port/save) are genuine host/startup artifacts (correctly
 excluded). Config-default surface now fully verified. Rollback: revert the 2 lines.
+
+### 2026-07-03 SURFACE (INFO field-name set + structured-stat sub-fields byte-exact vs redis 7.2.4) — CrimsonHawk
+
+Following the proc-title-template config fix, swept the other big server-metadata surface
+monitoring/tooling depends on: INFO. Field-NAME sets match exactly (values are runtime,
+excluded):
+- INFO everything on a fresh server: 196 == 196 field names, 0 missing, 0 extra.
+- Under identical driven state (keys of every type, varied commands, a WRONGTYPE error,
+  latency-monitor on): 205 == 205 field names incl. the CONDITIONAL sections —
+  cmdstat_* (11==11, same command set), latencystat (latency_percentiles_usec_*),
+  errorstat_*, keyspace dbN.
+Structured stat LINES match sub-field-for-sub-field:
+- cmdstat_get: calls,usec,usec_per_call,rejected_calls,failed_calls (all 5).
+- latency_percentiles_usec_get: p50,p99,p99.9.
+- errorstat_WRONGTYPE: count.
+- db0: keys,expires,avg_ttl.
+CONCLUSION: the INFO surface (every monitoring agent reads it) is byte-exact in field
+coverage + structure. Combined with the now-fully-gated config-defaults (195/195) and
+COMMAND INFO metadata, the server-introspection/metadata surface is comprehensively
+verified. No lever. Rollback: n/a (no code change).
