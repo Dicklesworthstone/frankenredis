@@ -8896,3 +8896,13 @@ p128 0.42x. NOT a safe fr-persist compute lever. DON'T re-chase DUMP — 5/6 typ
 structural.** This completes the session's frontier map: safe per-cmd (resolve-once/expiry-fusion/zero-copy _into),
 large-reads (write-path IO), sub-ms (ohsk5 dispatch), and DUMP (cached-listpack) all either shipped or confirmed
 main.rs/structural — no safe shippable lever remains while agent-mail is down.
+
+### 2026-07-03 SHIP (chunked-memcpy lzf_decompress_string, 0772c5e28) — CrimsonHawk
+RESTORE loses vs redis on ALL 6 types (dzset 0.569x/dstr 0.604x/dlist 0.643x/diset 0.668x/dhash 0.763x/dset 0.815x)
+vs DUMP winning 5/6. Profiled RESTORE dstr (simplest, no ChunkedList): fr_store::lzf_decompress_string 43.5% self —
+byte-by-byte back-ref copy (get?+push/byte). Its twin fr-persist::lzf_decompress was already chunked (5boi9); ported
+the chunked extend_from_within (RLE doubling; single memcpy for non-overlap) + dropped redundant reserve(copy_len) +
+raised cap 8K->1M. Measured (instructions:u, 3/3, vs redis 7.2.4): RESTORE string -54.79% (0.604x->0.876x vs redis),
+list -15.51%, hash/set/zset +0.04-0.08% (noise floor). Byte-exact 8/8 DIGEST-VALUE. **Same "optimized one path, missed
+its twin" pattern as HSET (hset_borrowed_many) — when a helper exists in BOTH fr-persist and fr-store, check both.
+Residual RESTORE loss = ChunkedList/store-build for collections (architectural, 99fwc), NOT decode.**
