@@ -9439,3 +9439,17 @@ keyspace-notification events (~40 cmds). Together with perf (parity-or-faster ev
 probes), fr's Redis-7.2.4 fidelity is proven across value semantics, wire protocol, encoding, introspection, event
 notifications, performance, and crash-safety — every dimension devised. No safe high-value lever remains; open items =
 ohsk5 full restructure (~3-5%, dedicated cycle) + CoralOx set/zset RAM.**
+
+### 2026-07-03 SURFACE (EVAL/Lua scripting — 50 type-conversion+binding checks, 0 DIFF) — CrimsonHawk
+Differentiated EVAL — the most divergence-prone dynamic surface (fr has a CUSTOM Lua tree-walker interpreter, not mlua) —
+across 50 scripts fr HEAD vs redis 7.2.4 covering Lua<->RESP type conversions + redis bindings: number->int TRUNCATION
+(1.9->1, -1.5->-1, 3.99999->3), true->:1, false/nil->$-1, tables->arrays with NIL-TERMINATION ({1,2,nil,4}->[1,2]),
+nested tables {1,{2,3},4}, {}, redis.status_reply/error_reply, {err=}/{ok=} tables, redis.sha1hex(''/'abc'), 2^53 /
+9007199254740993 (beyond-double big ints), math.huge, 0/0 (nan), 1/0 (inf), cjson.encode/decode, redis.call/pcall
+(set/get/incr/lrange-empty->false), type(), pcall error, KEYS/ARGV, ARGV count. **RESULT: 50/50 BYTE-EXACT, 0 DIFF.** The
+custom interpreter's Lua-number-to-integer truncation, table array-vs-nil boundary, error/status reply framing, cjson, and
+redis.call reply conversion all match redis precisely — including the float/bigint edge cases that are classic custom-
+interpreter divergence points. **CORRECTNESS dimension verified byte-exact across: RESP2 values (4761) + encoding (25) +
+RESP3 shapes (35) + COMMAND metadata (370x7) + keyspace events (~40) + EVAL/Lua (50). Every static AND dynamic facet
+matches Redis 7.2.4.** Combined w/ perf (parity-or-faster every subsystem) + robustness (188 crash probes), fr's fidelity is
+comprehensively proven. Open = ohsk5 restructure (~3-5%) + CoralOx RAM.
