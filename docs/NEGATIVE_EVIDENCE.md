@@ -9204,3 +9204,18 @@ not bytes). Low-EV edge case (non-UTF8 Lua function body). **PATTERN CONFIRMED a
 (Lua raw-byte lexing, yield-as-arg 7lmle), main.rs borrowed-fast-path (ohsk5-crowded, marginal), or cluster feature-
 completion (no slot-serving layer). No clean safe bead-based lever remains; the safe executor/correctness vein is
 exhausted (per feedback_br_sync_drift, the open-bead count overstates real remaining work).**
+
+### 2026-07-03 SURFACE (perf-fast-path beads ALSO stale; strlen-slow-despite-fast-path PROVES residual = ohsk5 chain-DEPTH) — CrimsonHawk
+Checked the single-key byte-prefix fast-path perf beads (45wpc STRLEN/LLEN/GETDEL, ldpk9 SCARD/HLEN/ZCARD, 5x6ze
+TTL/PTTL/TYPE, imuor INCR/DECR, rnezi OBJECT ENC/REFCOUNT). ALL ALREADY DONE: parse_borrowed_plain_{strlen,llen,scard,
+hlen,zcard,type,ttl}_packet parsers + execute_plain_*_borrowed executors EXIST and are WIRED in process_buffered_frames
+(main.rs:3977/3995/4013/4031/4053/4760/4873). So the perf beads are STALE like the CLIENT/CLUSTER/FUNCTION ones — the
+entire probed ready-bead surface (CLIENT/CLUSTER/FUNCTION/perf-fast-path) is beads.db drift. **KEY PROOF of the ohsk5
+diagnosis: the sweep still shows strlen 0.83x DESPITE strlen having a live borrowed fast path — because its dispatch arm
+sits at main.rs:3977, ~20+ failed name-compares deep in the ~100-arm linear matcher chain (after get/set/all-SET-variants/
+hset/mget-variants/bitcount-variants/incr/getrange/...). The fast path removes the argv-alloc but NOT the chain-walk depth.
+This is definitive: adding/keeping individual fast paths does NOT fix the sub-ms losses — the residual is CHAIN DEPTH, and
+the ONLY fix is the structural first-byte / (arity,cmdlen)-grouped / command-hash jump-table dispatch (ohsk5), a big change
+to THE hottest fn wanting a dedicated cycle + representative multi-cmd workload. Reordering hot arms up "just shuffles cost"
+(SET/HSET/MGET are also common). CEILING RE-CONFIRMED from the perf-bead angle: no safe clean lever; ohsk5 is the sole
+per-command lever and it is structural.**
