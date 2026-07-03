@@ -10584,3 +10584,22 @@ Confirms fr's overflow/size-limit rejection matches redis 7.2.4 (incl. the impor
 reject-before-allocate for proto-max-bulk-len, which prevents an OOM DoS). METHOD NOTE:
 probe only the ERROR paths (offset > limit); at-limit values genuinely allocate 512MB
 and wedge a loaded box. No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE→BUG (replication: WAIT slow + undercounts — master never sends REPLCONF GETACK; bead 97shd) — CrimsonHawk
+
+First broad replication-correctness sweep this arc (fr master+replica vs redis 7.2.4
+master+replica). MOST of replication is byte-exact: write propagation (SET/RPUSH/EXPIRE
+-> replica GET/LLEN/TTL), replica READONLY rejection (SET/GETSET/EXPIRE), role/
+slave_read_only INFO fields, slave0 line format, master_link_status, offset alignment
+(166=166), REPLICAOF handshake. ONE REAL BUG found (not WONTFIX-order): WAIT.
+- redis: SET k v; WAIT 1 5000 -> :1 in ~0ms; WAIT 1 200 -> :1.
+- fr:    SET k v; WAIT 1 5000 -> :1 in 668ms; WAIT 1 200 -> :0 (UNDERCOUNTS).
+ROOT CAUSE (handle_wait_command fr-runtime:37042 + main.rs:20648): fr's WAIT blocks +
+refreshes ack snapshots but the master NEVER sends 'REPLCONF GETACK *' to solicit an
+immediate replica ack (the only GETACK sends in main.rs are test-only). So WAIT resolves
+only on the replica's 1Hz periodic ACK (REPLICA_ACK_INTERVAL_MS=1000) instead of ~1 RTT:
+short-timeout WAIT undercounts, successful WAITs are up to ~1s slow, idle replica lag
+misreported (saw lag=116). redis sends GETACK at WAIT time. IMPACT: WAIT is the
+durability primitive; undercount = false "not replicated". Filed bead 97shd (P2) with
+the cross-layer fix (WAIT enqueues GETACK to replica write bufs; needs reservations up
+for the replication-subsystem change). Rollback: n/a (surface + bead only).
