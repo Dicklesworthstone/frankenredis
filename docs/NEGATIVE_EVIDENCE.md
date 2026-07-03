@@ -9915,3 +9915,14 @@ redis's in-MULTI reject_cmd_on_oom=1). Needs the over-maxmemory (post-eviction) 
 script-inner OOM fix needs. **Both OOM-timing residuals (MULTI-queue-all + script-inner denyoom) deferred as a focused
 maxmemory-subsystem effort (maxmemory/eviction is structurally complex per memory); the HIGH-value OOM RECOVERY TRAP is
 FIXED (391544c07). Direct-command OOM gating byte-exact; MULTI-queue + script-inner OOM timing are the documented residuals.**
+
+### 2026-07-03 SURFACE (min-replicas-to-write NOREPLICAS gating — 11 checks, 0 DIFF; validates is-write vs is-denyoom distinction) — CrimsonHawk
+Tested min-replicas-to-write=1 with 0 replicas (write-safety restricted context) fr-v8 vs redis 7.2.4: all writes
+(SET/INCR/APPEND/DEL/EXPIRE/LPUSH/HSET/FLUSHALL) -> exact "-NOREPLICAS Not enough good replicas to write."; reads
+(GET/EXISTS/TTL) proceed. **RESULT: 0 DIFF.** The borrowed write fast paths correctly bail (plain_borrowed_default_key_write_
+allows checks min_replicas_to_write != 0) to the generic path which enforces NOREPLICAS. NOTABLE VALIDATION: DEL/EXPIRE ARE
+rejected here (NOREPLICAS applies to ALL writes — they replicate) whereas they are ALLOWED under OOM (not denyoom) — proving
+fr's just-fixed OOM gate correctly distinguishes is-write (NOREPLICAS) from is-denyoom (OOM), matching redis's two separate
+command-flag gates. Write-safety restricted context is a verified drop-in. Restricted-context coverage: MULTI + ACL(cmd/key/
+channel) + scripts + subscriber-mode + read-only-replica + OOM(denyoom) + min-replicas-to-write -- fast-path gate verified
+across all, with the OOM-timing residuals (MULTI-queue/script-inner) the only documented open items.
