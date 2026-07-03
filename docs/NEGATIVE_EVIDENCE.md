@@ -8931,3 +8931,15 @@ ENCODING + HGETALL order match redis at n=1/5/128/129/300/1000, corrupt-payload 
 pattern, deferred for the canonicalize/dup semantics): RDB_TYPE_ZSET/ZSET_2 per-element insert_with_limits (line ~22590)
 — needs canonicalize_zero_score + dup-reject in a bulk path. RDB_TYPE_SET uses GenericSet::insert (O(1) IndexSet, less
 of a win) + from_index_set. Hash was the clear O(n^2) win; zset is O(n log n) build so smaller EV.**
+
+### 2026-07-03 SHIP (bulk-build skiplist-zset RESTORE, 70a6c9e69) — CrimsonHawk
+Completed the RESTORE missed-twin vein: RDB_TYPE_ZSET/ZSET_2 built via N insert_with_limits (ordered-structure insert
+each) = ~O(n^2). Collect + HashSet dedup-check (preserves dup-member reject; limits promote not reject) + canonicalize +
+SortedSet::from_unique_pairs_with_limits (single sorted build). Measured (instructions:u, 3/3): 3000-member skiplist zset
+47.60B->12.16B = **-74.4%**, **0.569x->1.695x vs redis 7.2.4** (was the WORST RESTORE type, now beats redis). Listpack
+zsets (<=128) exact parity (different unchanged arm). Byte-exact: DIGEST-VALUE+ENCODING+ZRANGE WITHSCORES match redis
+n=1..1000 plain scores; base==cand incl -0.0/-inf. **DISCOVERED PRE-EXISTING (not my change, base==cand!=redis): RESTORE
+of a zset with -inf/-0.0 scores yields a different DEBUG DIGEST-VALUE than the same zset built via ZADD / than redis's
+RESTORE — a separate correctness item worth a differential probe.** RESTORE bulk-build vein now: hash+zset shipped; SET
+uses O(1) IndexSet insert (small EV); intset/listpack arms already bulk. Session RESTORE tally: string LZF -54.8%, hash
+-23%, zset -74%.
