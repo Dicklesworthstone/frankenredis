@@ -1313,6 +1313,29 @@ impl FullSortedSet {
         out
     }
 
+    fn ordered_is_compact(&self) -> bool {
+        matches!(self.ordered, FullZSetOrder::Compact(_))
+    }
+
+    /// (CrimsonHawk) Remove the contiguous rank range [s_idx, s_idx+count) from a
+    /// Compact(Vec)-ordered zset via a SINGLE `drain` (one O(len) tail-shift) instead
+    /// of `count`× `remove(member)` (each an O(len) `Vec::remove`) — the O(count·len)
+    /// that made ZREMRANGEBYRANK on a 129..2048-member zset quadratic. Returns the
+    /// removed count. Caller MUST have verified `ordered_is_compact()`. Byte-identical
+    /// to collecting the same ascending rank slice and removing each: same members,
+    /// same ascending dict `swap_remove` order, same residual ordered/dict/rank_tree.
+    fn remove_rank_range_compact(&mut self, s_idx: usize, count: usize) -> usize {
+        let drained: Vec<ScoreMember> = {
+            let FullZSetOrder::Compact(keys) = &mut self.ordered else {
+                return 0;
+            };
+            let start = s_idx.min(keys.len());
+            let end = start.saturating_add(count).min(keys.len());
+            keys.drain(start..end).collect()
+        };
+        self.collect_drained(drained).len()
+    }
+
     /// Ensure the order-statistic index exists, building it from `ordered`
     /// (the source of truth) on first use. O(n) one-time; thereafter it
     /// is maintained incrementally at the mutation choke points.
@@ -2002,6 +2025,29 @@ impl SortedSet {
             }
             SortedSetInner::Full(f) => f.pop_max_n(count),
         }
+    }
+
+    /// (CrimsonHawk) Remove the contiguous rank range [s_idx, s_idx+count) and return
+    /// the removed count. A Full+Compact zset drains the range in one O(len) shift; the
+    /// Tree and Packed encodings fall back to the prior collect-slice + per-member
+    /// remove (Tree removal is O(count log n), Packed is bounded) — behaviour-identical
+    /// to the old ZREMRANGEBYRANK path, so those encodings are unchanged.
+    fn remove_rank_range(&mut self, s_idx: usize, count: usize) -> usize {
+        if let SortedSetInner::Full(f) = &mut self.inner
+            && f.ordered_is_compact()
+        {
+            return f.remove_rank_range_compact(s_idx, count);
+        }
+        let to_remove: Vec<Vec<u8>> = self
+            .index_slice_asc_adaptive(s_idx, count)
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect();
+        let removed = to_remove.len();
+        for m in &to_remove {
+            self.remove(m);
+        }
+        removed
     }
 
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
@@ -16557,15 +16603,11 @@ impl Store {
                     // old entries) builds the treap rather than paying the
                     // O(s_idx) skip on every call — the cold path that left this
                     // at O(n). (frankenredis-idtng)
-                    let to_remove: Vec<Vec<u8>> = zs
-                        .index_slice_asc_adaptive(s_idx, count)
-                        .into_iter()
-                        .map(|(m, _)| m)
-                        .collect();
-                    let removed_count = to_remove.len();
-                    for m in &to_remove {
-                        zs.remove(m);
-                    }
+                    // (CrimsonHawk) Bulk rank-range removal: a Compact(Vec) zset drains
+                    // [s_idx, s_idx+count) in one shift (O(len)) instead of count× the
+                    // O(len) `remove(member)` — byte-identical (same ascending slice,
+                    // same residual). Tree/Packed keep the prior collect+remove path.
+                    let removed_count = zs.remove_rank_range(s_idx, count);
                     let is_empty = zs.is_empty();
                     if removed_count > 0 {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
