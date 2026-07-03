@@ -9262,3 +9262,17 @@ the arm is just deep). XADD/GEOADD/PFADD are fr wins. The ONLY per-command perf 
 command-hash dispatch.** This session's measurement campaign (perf sweeps x3, crash fuzz 90, value-exact 4761, RSS, ZADD
 threshold, this family) has now falsified every hypothesized safe lever — the frontier is exactly ohsk5 (main.rs, dedicated
 cycle) + set/zset member-dup RAM ~1.38x (CoralOx). Nothing else safe/clean remains.
+
+### 2026-07-03 SURFACE (executor-heavy ops sweep — ALL fr-win/parity; definitively no executor lever exists anywhere) — CrimsonHawk
+Measured the ops MOST likely to hide a fixable executor gap (sorting/scanning/set-algebra on large data) fr HEAD vs redis
+7.2.4 (best-of): SORT 2000-elem ALPHA **2.03x fr**, SORT numeric **1.60x fr**, SINTERSTORE(5000∩5000) **1.75x fr**,
+SUNIONSTORE **5.65x fr**, HSCAN(5000) 1.00x parity. fr WINS or ties EVERY executor-heavy op. Combined with the
+stream/geo/hll/bitfield sweep (XADD 1.28x, GEOADD/PFADD parity, losses all dispatch) and the extended2 sweep (zrangestore
+3.18x, linsert 4.59x, lrem 1.54x, lpos 1.42x wins), the conclusion is DEFINITIVE: **fr's EXECUTORS are competitive-or-
+faster across the entire command surface; there is NO executor-bound gap anywhere. Every measured loss is a sub-ms command
+that is DISPATCH-bound — ohsk5 chain-depth (its borrowed fast-path arm sits deep in the ~100-arm linear matcher; the
+executor + any cache work but the walk to reach the arm dominates, e.g. PFCOUNT process_buffered_frames 27.76% self with a
+working cache).** The sole remaining per-command perf lever is the ohsk5 structural command-hash/first-byte jump-table
+dispatch (main.rs, dedicated cycle + representative read-heavy workload to measure the reorder net; piecemeal reorder
+"shuffles cost" between equally-common reads/writes). Non-perf frontier = set/zset member-dup RAM ~1.38x (CoralOx). This
+session's measurement campaign is COMPLETE: every command family swept, every hypothesized safe lever falsified or shipped.
