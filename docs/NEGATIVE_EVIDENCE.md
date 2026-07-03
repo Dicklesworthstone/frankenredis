@@ -9735,3 +9735,12 @@ preserved (k=v), master_failover_state:no-failover (clean completion). fr's coor
 FAILOVER promotes via a direct (non-MULTI) path so it was NEVER hit by the EXEC-bypass REPLICAOF bug; both HA failover paths
 now work — manual FAILOVER (this, always worked) + Sentinel-orchestrated failover (fixed b22c2c110). fr's HA surface
 (monitoring + Sentinel failover + manual FAILOVER + bidirectional replication + partial resync) verified end-to-end.
+
+### 2026-07-03 SURFACE (WAIT/WAITAOF with a real replica — correct ack-counting/timeout/errors) — CrimsonHawk
+Tested WAIT/WAITAOF durability semantics with a real fr replica (memory flagged replica-ACK-snapshot refresh as a risk).
+fr master + fr replica: WAIT 1 2000 -> 1 (replica acked); WAIT 1 0 (block until ack) -> 1 (no hang); WAIT 2 1000 (only 1
+replica) -> 1 after 1.09s (correct: times out returning the ACTUAL acked count, not error); WAITAOF 0 0 100 (aof off) -> "0
+0"; WAITAOF 1 0 100 (numlocal=1, aof off) -> exact redis error "ERR WAITAOF cannot be used when numlocal is set but
+appendonly is disabled." **All byte/behavior-exact vs redis 7.2.4 — replica ACK counting + blocking + timeout + WAITAOF
+gating correct.** fr's full replication/HA/durability surface now verified: bidirectional replication + partial resync +
+MIGRATE + Sentinel monitoring&failover(fixed) + manual FAILOVER + WAIT/WAITAOF — all correct.
