@@ -9951,3 +9951,14 @@ OR, all-missing -> len 0 (dest deleted), NOT-missing -> 0, NOT-multi-key -> "ERR
 source key.", unknown-op -> "ERR syntax error". **RESULT: 13/13 byte-exact, 0 DIFF.** fr's BITOP bit arithmetic, zero-padding
 to the longest operand, missing-key-as-empty semantics, dest-deletion-on-empty-result, and error surface all match redis
 7.2.4. Bitmap family fully verified (SETBIT/GETBIT/BITCOUNT/BITPOS/BITFIELD + BITOP).
+
+### 2026-07-03 SURFACE (read-only scripts EVAL_RO/EVALSHA_RO/FCALL_RO write-rejection — 9 checks, 0 DIFF) — CrimsonHawk
+Differentiated read-only-script write enforcement fr-v8 vs redis 7.2.4, 9 checks: EVAL_RO/EVALSHA_RO GET/STRLEN -> allowed;
+SET/INCR/DEL/EXPIRE -> "-ERR Write commands are not allowed from read-only scripts. script: <sha>..." (exact incl SHA
+suffix); pcall-caught error matches; writable EVAL SET -> OK. **RESULT: 9/9 byte-exact, 0 DIFF.** fr correctly rejects writes
+from read-only scripts per-inner-call via store.script_read_only (set at fr-command:12264 script entry, checked at 2294).
+NOTE for the deferred script-OOM residual: this CONFIRMS fr HAS a per-inner-call script gate + a script-context store-flag
+pattern (script_read_only) — the script-OOM fix can MIRROR it (add store.script_over_maxmemory set at the same script-entry
+site, checked next to the ACL/read-only checks at fr-command:~2320 for denyoom inner calls). Remaining subtlety = computing
+"over maxmemory (post-eviction)" at script entry (eviction-policy + not-counted-bytes handling from the maxmemory subsystem);
+de-risked but still a focused effort. Read-only-script restricted context = verified drop-in.
