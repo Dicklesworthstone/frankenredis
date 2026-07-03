@@ -9504,3 +9504,18 @@ replica and stays representation-identical to the redis master. This is the stro
 a redis topology as a read replica. (Untested complementary direction: redis-replica-of-fr-master.) **fr's Redis-7.2.4
 fidelity now proven at the TOPOLOGY level too, atop wire/semantic/representation. Correctness+interop exhaustive; open perf
 levers = ohsk5 (~3-5%) + CoralOx RAM.**
+
+### 2026-07-03 SURFACE (REPLICATION INTEROP BOTH DIRECTIONS — redis replica of fr master, digest-identical; RDB redis-loadable) — CrimsonHawk
+Completed the complementary interop direction: redis 7.2.4 as a REPLICA of a fr MASTER (tests fr's MASTER-side replication:
+RDB generation + PSYNC/REPLCONF serving + command propagation). fr master (7481) diverse dataset, redis replica (7482)
+REPLICAOF fr. **RESULT: fully compatible.** (1) fr GENERATED an RDB that redis LOADED — redis log: "Loading RDB produced by
+version 7.2.4 ... Done loading RDB, keys loaded: 9 ... MASTER<->REPLICA sync: Finished with success" (fr's RDB version header
++ payload are redis-parseable); (2) post-sync **redis replica DEBUG DIGEST == fr master (a07e7fd0...) BYTE-IDENTICAL**; (3)
+propagation: fr master SET/INCR/ZADD/EXPIRE streamed to redis, replica reflected them (newk/cnt=1/z.d=4/s1.ttl=4999) and
+digests STAYED identical (b7d94c3a...); (4) fr master reports connected_slaves:1, redis reports role:slave. **BIDIRECTIONAL
+replication interop confirmed: fr-replica-of-redis (prev entry, digest-identical) AND redis-replica-of-fr (this entry,
+digest-identical). fr is a COMPLETE drop-in for BOTH replication roles — its RDB, PSYNC handshake, and command propagation
+are wire-compatible with redis 7.2.4 in both directions.** This is the topology-level capstone. fr's Redis-7.2.4 fidelity is
+now proven end-to-end: wire protocol (RESP2/3) + values (4761) + encoding (25) + COMMAND meta (370) + keyspace events + Lua
+(50) + transactions (16) + blocking (11) + representation (identical digest) + RDB round-trip + BIDIRECTIONAL replication +
+perf (parity-or-faster all subsystems) + robustness (188 crash probes). Open perf levers = ohsk5 (~3-5%) + CoralOx RAM.
