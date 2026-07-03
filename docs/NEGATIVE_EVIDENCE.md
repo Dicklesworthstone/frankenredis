@@ -9633,3 +9633,23 @@ rl0qz pre-replica behavior, not the cause. **IMPACT: HA via redis Sentinel is BR
 Needs dedicated fr-repl/fr-sentinel investigation (why sentinel's command-link SLAVEOF NO ONE doesn't promote fr); NOT a
 quick fix. Reproduction fully scripted above. This is the highest-value open item found this session — a functional HA bug,
 distinct from the (low-ROI) ohsk5 perf lever + CoralOx RAM.**
+
+### 2026-07-03 ROOT CAUSE PINPOINTED (Sentinel failover bug = REPLICAOF/SLAVEOF is a NO-OP inside MULTI/EXEC) — CrimsonHawk
+Root-caused the Sentinel-failover bug (prev entries) to a PRECISE, general MULTI/EXEC defect via systematic reproduction:
+**REPLICAOF/SLAVEOF NO ONE executed inside a MULTI/EXEC transaction returns +OK but does NOT apply the replication state
+change (role stays slave).** Reproduced directly: send `MULTI; SLAVEOF NO ONE; CONFIG REWRITE; CLIENT KILL TYPE normal;
+CLIENT KILL TYPE pubsub; EXEC` (redis 7.x sentinel's EXACT promotion transaction) to a fr replica with a dead master ->
+EXEC returns `*4 +OK / -ERR(config rewrite no file) / :0 / :0` but role STAYS slave. Outside MULTI, the SAME SLAVEOF NO ONE
+promotes correctly.
+MECHANISM: fr has TWO dispatch paths. (1) Normal path `execute_frame_internal` (fr-runtime lib.rs:28140) special-cases
+RuntimeSpecialCommand::{Replicaof,Slaveof} -> `handle_replicaof_command` (37368) which sets role=Master +
+replica_reconfigure_requested=true + rotate_backlog_identity. (2) EXEC path `handle_exec_command` (37717) dispatches each
+queued command via `execute_db_scoped_command` (30516) -> `dispatch_with_client_context`, which does NOT route REPLICAOF/
+SLAVEOF to handle_replicaof_command -> the queued command returns +OK with NO side effect. So the promotion never happens.
+Confirmed non-bug adjacents: fr's promotion logic works (manual + mimic incl dead-master + pre-established conn all promote);
+sentinel's cc stays connected; offset advances correctly. The ONLY defect is REPLICAOF-in-EXEC being a no-op.
+**FIX DIRECTION: route RuntimeSpecialCommand handlers (at least Replicaof/Slaveof, likely also others that carry server-side
+side effects) through their handle_*_command in the EXEC queued-execution path (handle_exec_command / execute_db_scoped_
+command), mirroring redis's EXEC->call()->cmd->proc. Replication-critical + fr-runtime shared crate -> implement carefully +
+re-test full sentinel failover AND regular MULTI/EXEC byte-exactness.** This is the highest-value functional bug of the
+session, now root-caused to a one-mechanism defect. Recorded in [[project_sentinel_failover_promotion_bug]].
