@@ -10012,3 +10012,13 @@ small+big union = 19612. Internal representation byte-identical: STRLEN sparse =
 PFCOUNT missing -> 0. **fr's HLL registers, sparse<->dense encoding, PFADD hashing, LogLog-Beta estimate, and PFMERGE union
 are all byte-identical to redis 7.2.4 -> HLL is fully cross-compatible (DUMP/RESTORE + PFCOUNT interop, an HLL built on redis
 gives the same PFCOUNT on fr).** HyperLogLog family verified as a drop-in.
+
+### 2026-07-03 SURFACE (stream trimming XADD/XTRIM MAXLEN/MINID/NOMKSTREAM/XSETID — 10 checks, 0 DIFF) — CrimsonHawk
+Differentiated stream trimming (exact vs approximate, MINID, edge cases) fr-v8 vs redis 7.2.4, 10 checks: XADD MAXLEN = 5 ->
+XLEN 5 (exact trim), XTRIM MAXLEN = 3 -> removes 17 leaving 3, XTRIM MINID = 15 -> keeps entries >=15-1 (6 left, first=15-1,
+14 removed), XADD MINID = 18 (trim-on-add), XADD NOMKSTREAM on missing stream -> nil (no create), XADD MAXLEN = 0 -> XLEN 0,
+XADD dup/smaller ID -> "ERR The ID specified in XADD is equal or smaller than the target stream top item", XADD MAXLEN 5
+LIMIT without ~ -> "ERR syntax error, LIMIT cannot be used without the special ~ option", XSETID + XADD * continues auto-ID,
+XADD 0-0 -> "ERR The ID specified in XADD must be greater than 0-0". **RESULT: 10/10 byte-exact, 0 DIFF.** fr's stream
+trim-by-length/trim-by-minid + NOMKSTREAM + LIMIT-gating + ID validation all match redis 7.2.4. Stream family fully verified
+(XADD/XRANGE/XLEN/XREAD + consumer-groups earlier + trimming now).
