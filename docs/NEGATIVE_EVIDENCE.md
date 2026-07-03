@@ -9764,3 +9764,12 @@ u63 large, INCRBY positive+negative saturation (i16 -32768 + -5 SAT), mixed mult
 BITFIELD_RO, error cases (SET u64 -> width error, GET u8 -1 -> offset error). **RESULT: 18/18 byte-exact, 0 DIFF.** fr's
 BITFIELD overflow arithmetic, signed/unsigned two's-complement handling, bit addressing, and error surface all match redis
 precisely. Bitmap command family (SETBIT/GETBIT/BITCOUNT/BITPOS earlier + BITFIELD now) byte-exact.
+
+### 2026-07-03 SURFACE (SCAN cursor completeness + filters byte-exact; NOVALUES correctly absent per 7.2.4) — CrimsonHawk
+Verified the core SCAN guarantee (every element returned at least once across a full cursor iteration) + filters fr HEAD vs
+redis 7.2.4 over a 5003-key DB + 3000-field hash/set/zset (COUNT 17 to force many iterations): **SCAN all -> fr 5003 ==
+redis 5003 (complete, no misses/dupes-lost); SCAN MATCH key:1* -> 1111==1111; SCAN TYPE hash -> 1==1; HSCAN bh -> 3000==3000;
+SSCAN/ZSCAN full + reply byte-exact.** HSCAN NOVALUES -> BOTH return "ERR syntax error" (NOVALUES is a redis 7.4 feature;
+fr correctly does NOT implement it, matching the 7.2.4 target — a feature-parity WIN, not a gap). fr's SCAN cursor
+(reverse-binary-iteration-equivalent completeness) + MATCH/COUNT/TYPE filters + per-type scan replies all match redis 7.2.4.
+No divergence. Tools that rely on SCAN full-iteration (redis-cli --scan, migration, --bigkeys) work correctly against fr.
