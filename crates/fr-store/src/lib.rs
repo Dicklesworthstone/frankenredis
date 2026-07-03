@@ -23936,7 +23936,12 @@ fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut output = Vec::with_capacity(expected_len.min(8192));
+    // (CrimsonHawk) Match the fr-persist lzf_decompress cap (frankenredis-cc lzfcap):
+    // 1 MiB pre-sizes the overwhelming majority of real blobs in ONE alloc (vs the old
+    // 8 KiB that paid ~log2(len/8K) realloc+copy grows) while still bounding the
+    // speculative reservation against a hostile RESTORE header. Capacity never affects
+    // content. (expected_len is already gated by RDB_STRING_MAX_ALLOC above.)
+    let mut output = Vec::with_capacity(expected_len.min(1 << 20));
     let mut cursor = 0usize;
 
     while cursor < input.len() && output.len() < expected_len {
@@ -23965,9 +23970,25 @@ fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
         }
 
         let copy_start = output.len() - backref;
-        for idx in 0..copy_len {
-            let byte = *output.get(copy_start + idx)?;
-            output.push(byte);
+        // (CrimsonHawk) Replicate the back-reference as chunked memcpys instead of
+        // pushing one byte at a time — ports the fr-persist lzf_decompress fast path
+        // (frankenredis-5boi9) to RESTORE/DUMP-payload decode (this fn was the missed
+        // twin, still byte-by-byte = 43% of RESTORE-string CPU). For overlapping runs
+        // (backref < copy_len, e.g. RLE) each `extend_from_within` reads the just-grown
+        // tail so the available source doubles every iteration, reproducing the
+        // byte-by-byte propagation EXACTLY; for non-overlapping copies it is a single
+        // memcpy. Byte-identical to the scalar loop (backref <= output.len() checked
+        // above, so every source range is in bounds — no OOB/None path is reachable).
+        // (No explicit `reserve(copy_len)`: extend_from_within already reserves per
+        // chunk, and the redundant call measurably taxed the short-backref collection
+        // path (+0.18% dhash/dset) for no gain on the RLE string path — the output Vec
+        // is already pre-sized to min(expected_len, 1 MiB).)
+        let mut remaining = copy_len;
+        while remaining > 0 {
+            let avail = output.len() - copy_start;
+            let chunk = remaining.min(avail);
+            output.extend_from_within(copy_start..copy_start + chunk);
+            remaining -= chunk;
         }
     }
 
