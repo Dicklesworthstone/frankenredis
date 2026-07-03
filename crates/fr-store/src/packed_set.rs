@@ -928,11 +928,18 @@ impl CompactFieldMap {
     /// index lets removers tombstone/repoint the slot directly instead of
     /// re-probing by field bytes (frankenredis-ym6ih).
     fn lookup_slot(&self, field: &[u8]) -> Option<(usize, usize)> {
+        self.lookup_slot_prehashed(field, self.hash(field))
+    }
+
+    /// (CrimsonHawk) `lookup_slot` with a precomputed hash, so an insert can hash
+    /// the field ONCE and reuse it for both the existence probe and the empty-slot
+    /// placement (the new-field path re-hashed the same bytes a second time). `h`
+    /// MUST equal `self.hash(field)`; byte-identical to `lookup_slot`.
+    fn lookup_slot_prehashed(&self, field: &[u8], h: u64) -> Option<(usize, usize)> {
         if self.slots.is_empty() {
             return None;
         }
         let mask = self.slots.len() - 1;
-        let h = self.hash(field);
         let tag = (h >> 56) as u8;
         let mut slot = (h as usize) & mask;
         loop {
@@ -994,7 +1001,12 @@ impl CompactFieldMap {
     /// Insert `field`→`value`; returns the previous value if the field existed.
     /// Matches `IndexMap::insert` (existing field keeps its position).
     pub(crate) fn insert(&mut self, field: &[u8], value: &[u8]) -> Option<Vec<u8>> {
-        if let Some(pos) = self.lookup(field) {
+        // (CrimsonHawk) Hash the field ONCE and reuse it for the existence probe and
+        // (on the new-field path) the empty-slot placement — the placement re-hashed the
+        // same bytes. `h` is stable across the rehash below (it hashes field bytes, not
+        // slot layout), so reuse is byte-identical.
+        let h = self.hash(field);
+        if let Some((pos, _)) = self.lookup_slot_prehashed(field, h) {
             let old_off = self.order[pos];
             let (_, vr) = cfm_decode(&self.buf, old_off);
             let old_value = self.buf[vr.clone()].to_vec();
@@ -1017,9 +1029,8 @@ impl CompactFieldMap {
         let new_off = self.append_entry(field, value);
         let pos = self.order.len();
         self.order.push(new_off);
-        // Probe for an EMPTY or reusable TOMBSTONE slot.
+        // Probe for an EMPTY or reusable TOMBSTONE slot (reuse the hash from above).
         let mask = self.slots.len() - 1;
-        let h = self.hash(field);
         let tag = (h >> 56) as u8;
         let mut slot = (h as usize) & mask;
         let mut first_tomb: Option<usize> = None;
@@ -1049,7 +1060,9 @@ impl CompactFieldMap {
     /// the replacement value has the same byte length, the arena entry is
     /// rewritten in place instead of appending a dead record.
     pub(crate) fn insert_borrowed(&mut self, field: &[u8], value: &[u8]) -> bool {
-        if let Some(pos) = self.lookup(field) {
+        // (CrimsonHawk) Hash once; reuse for the probe and the new-field placement.
+        let h = self.hash(field);
+        if let Some((pos, _)) = self.lookup_slot_prehashed(field, h) {
             let old_off = self.order[pos];
             let (_, vr) = cfm_decode(&self.buf, old_off);
             if value.len() == vr.len() {
@@ -1073,7 +1086,6 @@ impl CompactFieldMap {
         let pos = self.order.len();
         self.order.push(new_off);
         let mask = self.slots.len() - 1;
-        let h = self.hash(field);
         let tag = (h >> 56) as u8;
         let mut slot = (h as usize) & mask;
         let mut first_tomb: Option<usize> = None;
