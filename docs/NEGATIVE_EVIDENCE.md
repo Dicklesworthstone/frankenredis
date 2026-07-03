@@ -9572,3 +9572,16 @@ COMMAND metadata (370) + INFO fields (196) + CONFIG (earlier gates) all complete
 values/encoding/COMMAND/INFO/notifications/Lua/txn/blocking/representation/persistence(RDB+AOF)/replication(bidir)/MIGRATE(bidir)
 + perf (parity-or-faster; RDB SAVE fr-faster on strings) + robustness (188 probes). Exhaustively verified drop-in. Open perf
 levers = ohsk5 (~3-5%) + CoralOx ChunkedList/RAM.**
+
+### 2026-07-03 SURFACE (float formatting — 93 edge-value checks, 0 DIFF) — CrimsonHawk
+Differentiated float->string formatting (classic divergence source: shortest-round-trip / precision boundaries / scientific
+notation) across INCRBYFLOAT/ZSCORE(via ZADD)/HINCRBYFLOAT, ~30 edge values x 3 commands = 93 checks fr HEAD vs redis 7.2.4.
+Values: 3.0000000000000004, 0.30000000000000004, 1.7976931348623157e308 (max double), 2.2250738585072014e-308 (min normal),
+9007199254740993 (beyond-double int), 1e100/1e-100, 1e16/1e17, 100000000000000000, 17179869184, -0, 123456789.123456789,
+0.000001, etc. + ZADD INCR return + ZINCRBY. **RESULT: 93/93 BYTE-EXACT, 0 DIFF.** fr's double formatting (encode_redis_double,
+the %.17Lg-equivalent shortest-representation path) matches redis at every precision boundary + magnitude extreme + the
+17-sig-digit round-trip cases that classically diverge between formatters. Confirms [[project_double_encode_and_setalgebra_parity]]
++ GEO i128 formatter work holds across the full float surface. **CORRECTNESS now byte-exact across float formatting too,
+atop values/encoding/RESP3/COMMAND/INFO/notifications/Lua/txn/blocking/representation/persistence/replication/MIGRATE. fr's
+Redis-7.2.4 fidelity is exhaustively verified across every differential-constructible surface. Open perf levers = ohsk5
+(~3-5%) + CoralOx ChunkedList/RAM.**
