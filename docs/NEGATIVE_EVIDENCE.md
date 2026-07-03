@@ -9309,3 +9309,20 @@ change. Measure-before-assuming ruled out a hypothesized bug. **SESSION CEILING 
 wins + 1 DoS fix + 3 measured-corrections; every command family swept (executors competitive-or-faster everywhere), surface
 byte-exact (4761-check) + crash-robust (90-probe); sole remaining levers = ohsk5 structural dispatch (main.rs) + set/zset
 member-dup RAM (CoralOx) + list-DUMP-cache (low real-world EV, correctness-multi-part). No clean safe quick lever remains.**
+
+### 2026-07-03 REFRAMING (right-sizing ohsk5: MODEST ~3-5% aggregate, not transformative — the perf frontier is essentially CLOSED) — CrimsonHawk
+Applied measure/reason-before-assuming to the EV of "the sole remaining per-command lever, ohsk5 dispatch" — which I'd been
+implicitly treating as a big win. It is NOT: (1) the COMMON commands (GET/SET/HSET/MGET) sit at the FRONT of the borrowed
+matcher chain (GET arm 3; SET-variants fail fast on arity/name) AND are already at PARITY-or-faster vs redis (P16 GET/SET
+steady-state parity, syscall-bound — project_p16_pipeline). They barely walk the chain, so a command-hash saves them ~2-3%.
+(2) Only the MINORITY deep sub-ms commands (strlen/pfcount/scard/llen/type/ttl, arms ~20 deep) pay real chain-depth (0.6-0.9x).
+(3) process_buffered_frames' 20-28% self is ~half RESP-parse (unavoidable, stays) + ~half chain-walk — so a command-hash
+jump-table removes at most ~10-14% of it, i.e. ~2-4% overall on dispatch-bound commands, weighted by typical GET/SET-heavy
+traffic => **~3-5% aggregate, MODEST**. So ohsk5 is a real but LOW-ROI, HIGH-RISK (rewrite THE hottest fn) change that helps
+a minority of commands modestly — NOT a 2x lever. **CAPSTONE CONCLUSION of the session's measurement campaign: fr is at
+PARITY-OR-FASTER vs redis 7.2.4 across the ENTIRE command surface (executors faster everywhere: SORT 2.0x, SINTERSTORE 1.75x,
+SUNIONSTORE 5.65x, zrangestore 3.2x, linsert 4.6x, XADD 1.28x, + the 15 wins shipped this session incl the whole zset-trim
+family beating redis; common GET/SET/HSET at parity; only a minority of deep sub-ms commands are ~0.6-0.9x dispatch-bound
+with ~3-5% aggregate headroom). The perf frontier is ESSENTIALLY CLOSED. Remaining: ohsk5 (~3-5%, low-ROI/high-risk,
+dedicated cycle IF prioritized) + set/zset member-dup RAM ~1.38x (CoralOx). No high-value safe lever exists; further perf
+work has diminishing returns.**
