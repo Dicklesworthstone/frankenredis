@@ -10092,3 +10092,22 @@ is main.rs-structural (~3-5% aggregate, needs the command-hash jump-table; estab
 1.65% is parity-required (INFO commandstats) + subcommand-keyed so not a simple array-index. **CONCLUSION: the clean per-
 crate perf frontier is CLOSED (re-confirmed by fresh profile); remaining levers = ohsk5 command-hash (main.rs, structural)
 + CoralOx ChunkedList/RAM. fr is parity-or-faster (broad sweep this session) with no safe per-crate lever available.**
+
+### 2026-07-03 SURFACE (large-value SET/GET measured + profiled per /alien-graveyard — no safe per-crate lever; EV<2.0) — CrimsonHawk
+Engaged alien-graveyard (profile-first) on the large-value framing gap (original session's #1 candidate). Measured fr-v8 vs
+redis 7.2.4 (connected_slaves:0 verified — no stray-PSYNC crater), best-of-5, 400-op pipelines:
+  SET   4KB=1.94x  64KB=0.98x  256KB=1.22x  1MB=0.57x LOSS   (fr 1.9 GB/s @1MB)
+  GET   4KB=0.68x  64KB=1.07x  256KB=1.87x  1MB=3.16x        (fr faster >=64KB)
+KEY FINDING: it's a CLIFF, not a flat plateau — SET 256KB=1.22x (fr FASTER) drops to 1MB=0.57x. GET is fr-faster at all
+sizes >=64KB (up to 3.16x); GET 4KB 0.68x is DISPATCH-bound (ohsk5 small-value, amortizes away by 64KB — not framing).
+PROFILE of 1MB SET (11264 samples): __memmove_avx_unaligned_erms 15.9% called FROM TcpStream::read (socket->userspace copy)
++ ~17% kernel[k] (read syscalls), via fr's continue_large_plain_set_read chunked-read continuation. **mimalloc alloc = only
+0.14% -> the cliff is NOT allocation; it is READ-SYSCALL/COPY-bound** (the ~256KB->1MB cliff = fr's read buffer needing
+multiple chunked reads above ~256KB, more syscalls than redis's larger read). RECOMMENDATION CONTRACT: Change=enlarge large-
+SET read buffer (fewer syscalls). Hotspot=15.9% memmove-under-read + 17% kernel. **EV<2.0 (REJECTED): (Impact 3 * Conf 2 *
+Reuse 2)/(Effort 3 * Friction 4)=0.5** — location is fr-server/main.rs read path (SHARED, edits risky per session constraint
+= high AdoptionFriction), it's CoralOx's large-value-framing domain (qesp3), and memory [[feedback_mimalloc_defeats_buffer_
+reuse_levers]] records CoralOx ALREADY measured buffer-reuse levers here REGRESSING (0.77-0.93x). Both large-value losses map
+to the two KNOWN structural blockers (ohsk5 dispatch small-value + main.rs large-read framing), neither a safe per-crate
+lever. **CONCLUSION: no safe shippable per-crate perf lever exists (EV<2.0 on the only candidate); the clean frontier is
+closed. fr is parity-or-faster on the vast majority of the size/op matrix.** Rollback: n/a (no change made).
