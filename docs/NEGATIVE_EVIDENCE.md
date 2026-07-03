@@ -10374,3 +10374,27 @@ SCAN/RANDOMKEY through it; note the one tradeoff — losing ordered_keys drops f
 KEYS/SCAN-MATCH literal-prefix range-prune (2wgom/9cg1c), reverting those to redis's
 own O(n) full-scan (a correctness-neutral loss of an fr-only speedup, acceptable for
 the RAM parity). Rollback: n/a (bench-only, KeyDict still unwired = 0 prod refs).
+
+### 2026-07-03 SURFACE (fresh broad head-to-head vs redis 7.2.4 — fr faster-or-parity; apparent <0.9x losses are LOAD NOISE, not real gaps) — CrimsonHawk
+
+Ran scripts/broad_command_headtohead.py vs fresh redis 7.2.4, unpinned then pinned
+(servers c2/c3), to hunt a fresh perf lever. Result: fr is faster-or-parity across the
+board, and every apparent "loss" is measurement noise on this shared (multi-agent) box —
+the same reading flips 2-4x between runs:
+- getrange (GETRANGE bigstr 0 10000): unpinned 0.64x -> pinned **1.25x (fr faster)**.
+- srandmember (SRANDMEMBER setA 100): 0.69x -> **1.61x**.
+- lrange_full (LRANGE biglist 0 -1): 0.87x -> **1.05x**.
+- sinter3: 1.01x (run1) <-> 0.386x (run2) — a 2.6x swing = pure noise.
+- zcount ~0.71-0.91x = the KNOWN documented warm-threshold residual (bdcc79a02), not new.
+- smismember ~0.71-0.875x sub-ms = documented noise-prone class (needs >=400 batch/>=21
+  trials to trust; still flips REDIS/fr between runs).
+fr WINS reliably: bitcount 1.9x, sintercard 2.4x, sinterstore 2.5x, sunionstore 7.3x,
+sdiffstore 1.7x, zrange_rev 1.6x, lpos 2.5x, hrandfield/zrandmember 1.1x, getrange/
+srandmember (pinned) 1.25-1.6x.
+LESSON (reconfirmed, cost me an almost-chased phantom): wall-clock head-to-head is
+NOISE-DOMINATED on this box — losses swing 2-4x run-to-run and pinning flips them to
+wins. The ONLY reliable perf signal here is `perf stat -e instructions:u` over a fixed
+op count. Do NOT chase sweep "<0.9x" readings; re-measure pinned or by instructions
+first. Perf frontier reconfirmed CLOSED (no stable, reliably-measurable loss exists;
+remaining real gaps are structural: large-value framing qesp3, list ChunkedList 99fwc,
+keyspace RAM uhthd). Rollback: n/a (no code change).
