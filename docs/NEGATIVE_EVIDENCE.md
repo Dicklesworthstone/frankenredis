@@ -10726,3 +10726,28 @@ rename_to), INCRBYFLOAT/HINCRBYFLOAT, LPUSH/LSET/LINSERT, ZADD/ZINCRBY/ZRANGESTO
 Combined with the prior 52-command probe, keyspace notifications are comprehensively
 verified (~94 commands, incl the stream-consumer-group + expire-family + store-variant
 events apps subscribe to). No lever. Rollback: n/a.
+
+### 2026-07-03 SURFACE (DEBUG subcommands byte-exact vs redis 7.2.4) + CAPSTONE (differential frontier fully closed) — CrimsonHawk
+
+DEBUG subcommand differential: 0 diffs. Byte-exact: SET-ACTIVE-EXPIRE 0/1, JMAP,
+QUICKLIST-PACKED-THRESHOLD (100/1K/0), STRINGMATCH-LEN, DEBUG OBJECT for every encoding
+(quicklist/int/embstr/raw/listpack/intset/skiplist; only the documented at:/lru: fields
+differ = WONTFIX, normalized), LISTPACK-ENTRIES, SLEEP, CHANGE-REPL-ID, arity errors,
+bogus-subcommand.
+
+CAPSTONE — the differential-probing frontier vs redis 7.2.4 is now FULLY CLOSED. This arc
+verified byte-exact across EVERY reachable dimension: data commands (159k-op randomized
+fuzz), server metadata (config defaults 195/195, CONFIG SET validation 194/195, INFO
+fields+structure, COMMAND INFO), scripting engine (EVAL library 53/54 + FUNCTION incl the
+now-resolved compile-check gap), security (ACL serialization), connection (CLIENT), pub/sub
+framing (RESP2+RESP3) + keyspace notifications (~94 cmds), multi-DB isolation, RESP3 reply
+types, overflow/size-limit errors, RESP protocol parser, replication (propagation/READONLY/
+roles/offsets/replica-expiry), AOF durability round-trip, cluster (standalone), DEBUG.
+COMPLETE RESIDUAL SET (only 3 classes): (1) dict/hash-iteration-order — deterministic,
+semantically-irrelevant, impractical to match redis's hash order (FUNCTION LIST, ACL CAT,
+COMMAND INFO subcmds, cjson keys, PUBSUB CHANNELS, UNSUBSCRIBE-all); (2) host-dependent
+locale-collate CONFIG SET validation (needs setlocale/unsafe); (3) ONE real open bug —
+WAIT/WAITAOF GETACK (bead 97shd, fully specced + gated by scripts/wait_getack_gate.py).
+Remaining high-value work is NOT differential-findable: the WAIT/GETACK fix + KeyDict
+wiring (-35% keyspace RAM, feature-complete/RAM-proven) — both scoped for dedicated
+reservations-up coding sessions. Rollback: n/a.
