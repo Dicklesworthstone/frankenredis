@@ -9707,3 +9707,15 @@ three fixed (REPLICAOF/SLAVEOF b22c2c110, CONFIG 6856ae988, ACL 172a46cb8) were 
 already persist correctly in the EXEC context. EXEC-bypass bug class = FOUND (3), FIXED (3), AUDITED-CLOSED. Net session HA/
 transaction outcome: redis-Sentinel failover works end-to-end + CONFIG SET + ACL SETUSER + all audited special cmds correct
 inside MULTI/EXEC, byte-exact vs redis 7.2.4.
+
+### 2026-07-03 SURFACE (Lua redis.call() secondary-dispatch — no EXEC-bypass bug; noscript byte-exact) — CrimsonHawk
+Checked the other secondary command-dispatch path (Lua redis.call(), the direct parallel to the EXEC path that harbored the
+3 EXEC-bypass bugs) fr HEAD vs redis 7.2.4: 14 scripts. **0 DIFF.** All noscript admin commands correctly REJECTED from Lua
+with the exact "-ERR This Redis command is not allowed from script script: <sha>" (CONFIG SET/GET, SAVE, DEBUG SLEEP,
+REPLICAOF, ACL SETUSER, SUBSCRIBE, MULTI, CLIENT SETNAME, SHUTDOWN — all blocked identically); allowed data commands apply
+correctly (SET/GET->lv, INCR side effect->6, SADD+SCARD->3); pcall error text matches. So Lua's redis.call() has NO EXEC-
+bypass-class bug — and this explains WHY the class was MULTI/EXEC-specific: Lua's noscript flag blocks the side-effecting
+admin commands (CONFIG/REPLICAOF/ACL) from ever reaching a dispatch path, whereas MULTI/EXEC allows ALL commands (no
+noscript gate), exposing the missing special-handler routing. Both secondary-dispatch paths now verified: EXEC = 3 bugs
+found+fixed+audited-closed; Lua redis.call() = clean (noscript-protected). Transaction+scripting command-dispatch surface
+byte-exact vs redis 7.2.4.
