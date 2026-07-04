@@ -4,6 +4,21 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — unified `ZRANGE key min max BYLEX` reuses the member-borrow `_into` (7.53x path)
+
+Follow-on completing the BYLEX family: the modern unified `ZRANGE .. BYLEX`
+(recorded as `zrange`) still cloned members via `store.zrangebylex`. New thin
+`execute_plain_zrange_bylex_borrowed_into` routes it through the SAME
+`zrangebylex_members_borrow_scan` shipped in the prior commit; the fr-server BYLEX
+arm of the ZRANGE BYSCORE|BYLEX|REV dispatch block now → FastEncodedReply (that
+block's BYSCORE/REV/BYLEX arms are ALL member-borrow `_into` now). No new store
+code or bench — same borrow scan benched at **7.53x**
+(`bylex_members_borrow_full_range` 5.776µs vs `_clone` 43.471µs). Conformance
+GREEN: byte-exact `plain_zrange_bylex_member_borrowed_into_matches_generic`
+(`-`/`+`, mixed `[`/`(`, empty, wrong-type, malformed-defer) + command stat
+parity; fr-server + fr-runtime compile clean. Rollback: revert the BYLEX dispatch
+arm to `execute_plain_zrange_bylex_borrowed`.
+
 ## 2026-07-04 BlackThrush: KEEP — ZRANGEBYLEX / ZREVRANGEBYLEX (member-only) borrow members — 7.53x store-level
 
 The lexicographic-range forms cloned every member (via `zrangebylex`/
