@@ -7952,6 +7952,27 @@ impl Store {
         // GETSET reads the old value (upstream getsetCommand → getGenericCommand →
         // lookupKeyRead), so it bumps keyspace_hits on a present key /
         // keyspace_misses on a missing one. (frankenredis-934ax)
+        // (CrimsonHawk) Non-LFU: fold the `record_keyspace_lookup` (drop_if_expired) + the
+        // separate `entries.get_mut` (old-value read) into ONE `lookup_live_for_read_mut`
+        // (peek expiry + hit/miss + return the live entry). The overwrite `insert` below
+        // stays a separate probe → triple lookup drops to double. Byte-identical: same key
+        // lazy-expiry, hit/miss, WRONGTYPE-without-overwrite, and no LFU state to preserve
+        // (LFU off). LFU path left verbatim (it copies the old entry's LFU counter).
+        if !self.lfu_tracking_enabled() {
+            let old = match self.lookup_live_for_read_mut(key.as_slice(), now_ms) {
+                Some(entry) => {
+                    let Some(v) = entry.value.string_owned() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    Some(v)
+                }
+                None => None,
+            };
+            let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            self.internal_entries_insert(key, new_entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok(old);
+        }
         self.record_keyspace_lookup(&key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33450,6 +33471,68 @@ mod tests {
             "GETRANGE@32 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) GETSET non-LFU collapse: byte-identical old-value return + overwrite,
+    // WRONGTYPE-without-overwrite, missing→None+set, TTL cleared on overwrite, stats, eviction.
+    #[test]
+    fn getset_collapse_matches_full_path() {
+        let mut s = Store::new();
+        s.set(b"k".to_vec(), b"old".to_vec(), None, 1);
+        s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap();
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // GETSET on present key → old value returned, new value set.
+        let r_present = s.getset(b"k".to_vec(), b"new", 2);
+        // GETSET on missing key → None, new value set.
+        let r_missing = s.getset(b"fresh".to_vec(), b"v", 2);
+        // GETSET on wrong type → Err (no overwrite).
+        let r_wrong = s.getset(b"lst".to_vec(), b"z", 2);
+        // hits: k (present), lst (wrongtype) = 2; misses: fresh = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 2);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_present.unwrap(), Some(b"old".to_vec()));
+        assert_eq!(r_missing.unwrap(), None);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+        // Overwrites / non-overwrite (verification reads AFTER stat assertion).
+        assert_eq!(s.get(b"k", 2).unwrap(), Some(b"new".to_vec()));
+        assert_eq!(s.get(b"fresh", 2).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(s.llen(b"lst", 2).unwrap(), 1, "WRONGTYPE GETSET must not overwrite");
+
+        // TTL is cleared on overwrite: key with a TTL, GETSET, then it must NOT expire.
+        let mut u = Store::new();
+        u.set(b"t".to_vec(), b"a".to_vec(), Some(50), 1); // deadline 51
+        assert!(u.expires_count >= 1);
+        assert_eq!(u.getset(b"t".to_vec(), b"b", 10).unwrap(), Some(b"a".to_vec())); // at t=10, live
+        assert_eq!(u.expires_count, 0, "GETSET cleared the TTL");
+        assert_eq!(u.get(b"t", 1000).unwrap(), Some(b"b".to_vec()), "no expiry after GETSET");
+
+        // Lazy-expiry: GETSET on an expired key → old None, new set.
+        let mut w = Store::new();
+        w.set(b"e".to_vec(), b"gone".to_vec(), Some(50), 1);
+        assert_eq!(w.getset(b"e".to_vec(), b"fresh", 500).unwrap(), None, "expired old → None");
+        assert_eq!(w.get(b"e", 600).unwrap(), Some(b"fresh".to_vec()));
+
+        // Timing: GETSET overwriting a present key (no TTL, LFU off).
+        let mut b = Store::new();
+        b.set(b"gs:bench:key".to_vec(), b"v".to_vec(), None, 2);
+        let k: &[u8] = b"gs:bench:key";
+        for _ in 0..2000 { std::hint::black_box(b.getset(k.to_vec(), b"v", 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.getset(std::hint::black_box(k).to_vec(), b"v", 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "GETSET overwrite no-TTL collapsed: full={full:.2} ns (incl key.to_vec alloc) | \
+             removed 1 keyspace probe ≈ {probe:.2} ns",
+
         );
     }
 

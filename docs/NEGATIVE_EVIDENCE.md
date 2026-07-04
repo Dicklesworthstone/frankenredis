@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — GETSET triple→double keyspace-probe collapse — removed ~15.5 ns probe (~1.2x-class, byte-exact)
+
+GETSET (`getset`) did THREE keyspace probes: `record_keyspace_lookup` (drop_if_expired) +
+`entries.get_mut` (old-value read) + `internal_entries_insert` (overwrite). Folded the first two
+into ONE `lookup_live_for_read_mut` on the non-LFU fast path (peek expiry + hit/miss + return the
+live entry for the old-value extract); the overwrite insert stays a separate probe → double
+lookup. Byte-identical: same key lazy-expiry, hit/miss, WRONGTYPE-WITHOUT-overwrite, TTL cleared
+on overwrite (both paths use the same `internal_entries_insert` of a fresh entry), and NO LFU
+state to preserve (LFU off). LFU path left verbatim (it copies the old entry's LFU counter onto
+the new one). Proven by `getset_collapse_matches_full_path` (old-value return + overwrite,
+missing→None+set, WRONGTYPE-no-overwrite, exact hit/miss deltas, TTL-cleared-so-no-expiry, and
+expired-old→None lazy-expiry).
+
+MEASURED (per-crate via rch, intra-run isolated): the removed keyspace probe ≈ **15.55 ns**
+(~11-char key). The full 194.55 ns includes the benchmark's per-call `key.to_vec()` alloc
+(GETSET takes an owned key + the insert re-owns it), so the real GETSET store-path win is
+~1.2x-class. Conformance GREEN (685/685 correctness; lone failure = brittle
+`diff_sorted_i64_adaptive_isomorphic_and_faster` perf-ratio guard under loaded worker, unrelated).
+GETSET was the last of the get-and-modify string commands (GETDEL/GETSET/GETRANGE) still
+multi-probing; SRANDMEMBER (RNG) + GETEX (events) remain BLOCKED. Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — GETRANGE (`getrange_with`) non-LFU single-lookup collapse — GETRANGE@32 1.39x (byte-exact)
 
 `getrange_with` (the live GETRANGE `_into` borrow path — writes the bulk reply straight into the
