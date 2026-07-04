@@ -32,6 +32,27 @@ Focused clippy with `--no-deps` did not reach any new Lua fast-path warnings, bu
 pre-existing `fr-command/src/lib.rs` test lint debt (`type_complexity` at 41176 and excessive float
 precision at 56566-56569). `cargo fmt --check -p fr-command` remains blocked by broad pre-existing
 fr-command formatting drift outside this lever; no unrelated rustfmt churn was mixed in.
+## 2026-07-04 CrimsonHawk: KEEP — last `to_vec().into()` double-alloc site fixed (APPEND-create-new SmallStr) — 2.73x short-string construction (byte-transparent); pattern SWEEP COMPLETE
+
+Applied last commit's general lesson (`Type::from(x.to_vec())` into an inline/heap slice-type = wasted
+alloc; pass `&x`) as a crate-wide sweep. Grepped ALL crates for `.to_vec().into()` / `Arc|Box|Rc::from(
+..to_vec())`: EXACTLY ONE remaining site — `Value::String(value.to_vec().into())` in `append()` (the
+APPEND-to-a-non-existent-key path). Every other string-store site already uses `.into()` on a borrowed
+slice or a genuinely-owned computed value, and the hot SET/MSET path (`canonical_string_value_from_slice`
+→ `SmallStr::from_slice`) is already inline-optimal. Changed the one site to `Value::String(value.into())`
+(= `SmallStr::from_slice`): a value ≤ `SMALL_STR_INLINE_CAP` (15B) is now stored INLINE with ZERO alloc,
+instead of `to_vec()` allocating a `Vec` that was copied into the inline buffer and dropped (wasted).
+APPEND stays raw-String (no int-parse — matches redis, unlike the SET canonical helper), preserved.
+
+BYTE-TRANSPARENT: `smallstr_from_slice_avoids_short_string_alloc` asserts `from_slice(v).as_slice() == v
+== from_vec(v.to_vec()).as_slice()` across empty / short / exactly-15B / heap; existing append (11) +
+string (52) suites stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, SmallStr construction of an 11-byte value): old
+`to_vec()+from_vec` (Vec alloc + inline copy) = 17.1 ns/op vs `from_slice` (inline, 0 alloc) = **6.3 ns/op
+= 2.73x**. Applies to APPEND-create-new short values (niche vs SET but real + zero-risk). DOUBLE-ALLOC
+`to_vec().into()` PATTERN NOW SWEPT TO ZERO across all crates. Alloc-elim arc tally: rank_of 1.38x +
+compact_position 1.84x + lex-bound 1.76x + SmallStr 2.73x (4 commits, all byte-transparent).
 
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX range bounds halve their alloc (borrowed `actual` arg) — 1.76x bound-construction (byte-transparent)
 

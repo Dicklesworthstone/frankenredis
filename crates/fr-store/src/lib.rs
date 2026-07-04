@@ -7947,7 +7947,7 @@ impl Store {
             let len = value.len();
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::String(value.to_vec().into()), now_ms),
+                Entry::new(Value::String(value.into()), now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
@@ -41222,6 +41222,42 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) SmallStr::from_slice INLINES a short (<=15B) value with ZERO alloc; the old
+    // `value.to_vec().into()` (from_vec) always allocated a Vec that was then copied into the inline
+    // buffer and dropped (wasted). The APPEND-create-new value path now uses `value.into()` (from_slice).
+    #[test]
+    fn smallstr_from_slice_avoids_short_string_alloc() {
+        use crate::SmallStr;
+        for v in [
+            b"".as_slice(),
+            b"hi",
+            b"exactly15bytes!",       // == inline cap
+            b"one byte over the inline cap boundary now", // heap
+        ] {
+            assert_eq!(SmallStr::from_slice(v).as_slice(), v);
+            assert_eq!(
+                SmallStr::from_slice(v).as_slice(),
+                SmallStr::from_vec(v.to_vec()).as_slice()
+            );
+        }
+        let short: &[u8] = b"hello world"; // 11 bytes ⇒ inline
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(SmallStr::from_vec(std::hint::black_box(short).to_vec()));
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(SmallStr::from_slice(std::hint::black_box(short)));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "SmallStr short-string construct: to_vec()+from_vec={old_ns:.1} ns | from_slice={new_ns:.1} ns = {:.2}x",
+            old_ns / new_ns
+        );
     }
 
     // (CrimsonHawk) ScoreMember::actual(s, &slice) builds the Arc<[u8]> in ONE alloc, vs the old
