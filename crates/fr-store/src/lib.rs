@@ -8690,7 +8690,10 @@ impl Store {
         value: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (BITFIELD SET write.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
 
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
@@ -13546,7 +13549,12 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: when nothing is
+        // volatile no key can be expired, so drop is a pure no-op; the lookup below re-probes.
+        // Byte-identical. (LTRIM — common capped-list/bounded-log pattern.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -19105,7 +19113,10 @@ impl Store {
     }
 
     pub fn xdel(&mut self, key: &[u8], ids: &[StreamId], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. The get_mut below re-probes.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let mut max_deleted = None;
         let result = match self.entries.get_mut(key) {
@@ -19154,7 +19165,10 @@ impl Store {
         limit: Option<usize>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (XTRIM MAXLEN.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -19204,7 +19218,10 @@ impl Store {
         limit: Option<usize>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (XTRIM MINID variants.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -19262,7 +19279,10 @@ impl Store {
         limit: Option<usize>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (XTRIM MINID variants.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -20159,7 +20179,10 @@ impl Store {
         // (frankenredis-b0exs) A re-created group must not inherit a stale
         // summary left behind by a destroyed/DEL'd predecessor of the same name.
         self.invalidate_stream_pel_summary(key, group);
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (Stream consumer-group write.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let key_exists_as_stream = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => true,
@@ -20207,7 +20230,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.invalidate_stream_pel_summary(key, group);
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (Stream consumer-group write.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -20474,7 +20500,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<u64>, StoreError> {
         self.invalidate_stream_pel_summary(key, group);
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (Stream consumer-group write.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -20528,7 +20557,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.invalidate_stream_pel_summary(key, group);
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (Stream consumer-group write.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -35095,6 +35127,66 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZPOPMIN small-zset no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) LTRIM/XDEL/XTRIM/BITFIELD SET bare-drop guard: byte-identical results,
+    // NO keyspace stat, eviction via expires_count>0.
+    #[test]
+    fn ltrim_xstream_bitfield_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec(), b"e".to_vec()], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"x".to_vec())], 1).unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"y".to_vec())], 1).unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"z".to_vec())], 1).unwrap();
+        s.bitfield_set(b"bf", 0, 8, 42, 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // Guarded bare-drop writes (record NO stat).
+        s.ltrim(b"l", 1, 3, 2).unwrap(); // keep indices 1..=3 → [b,c,d]
+        let x_del = s.xdel(b"st", &[(2, 0)], 2).unwrap();
+        let x_trim = s.xtrim(b"st", 1, None, 2).unwrap(); // keep newest 1
+        let bf_old = s.bitfield_set(b"bf", 0, 8, 99, 2).unwrap(); // returns old 42
+        let r_wrong = s.ltrim(b"str", 0, 1, 2);
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+        assert_eq!(x_del, 1);
+        assert_eq!(x_trim, 1); // removed 1 of the remaining 2
+        assert_eq!(bf_old, 42);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+        // Verify (these reads DO record — after the stat assertion).
+        assert_eq!(s.lrange(b"l", 0, -1, 2).unwrap(), vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(s.xlen(b"st", 2).unwrap(), 1);
+        assert_eq!(s.bitfield_get(b"bf", 0, 8, false, 2).unwrap(), 99);
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.rpush(b"exp", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        t.ltrim(b"exp", 0, 0, 500).unwrap(); // on an expired key
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired list evicted by LTRIM");
+
+        // Timing: LTRIM keep-all on a 16-element list (idempotent; always get_mut to size).
+        let mut b = Store::new();
+        b.rpush(b"lt:bench", &(0..16u32).map(|_| b"v".to_vec()).collect::<Vec<_>>(), 1).unwrap();
+        let k: &[u8] = b"lt:bench";
+        for _ in 0..2000 { b.ltrim(k, 0, -1, 2).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.ltrim(std::hint::black_box(k), 0, -1, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "LTRIM(0,-1)@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

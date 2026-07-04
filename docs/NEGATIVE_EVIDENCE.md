@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — LTRIM + stream/bitfield writes bare-drop guard — LTRIM(0,-1)@16 1.23x (byte-exact)
+
+Batch-guarded 9 hot writes with plain bare `drop_if_expired(key)` (record=0): `ltrim` (capped-
+list / bounded-log — headline), `xdel`, `xtrim`, `xtrim_minid` (×2 exact+approx), `bitfield_set`
+(BITFIELD SET), and 4 consumer-group ops sharing the `invalidate_stream_pel_summary(key,group)` +
+drop prefix (`xack` + siblings). **The bare-drop guard is UNIVERSALLY byte-identical: when
+`expires_count == 0` no key holds a TTL, so `drop_if_expired` can evict nothing and is a pure
+no-op — every one of these fns re-probes via get_mut/internal_entry afterward, so skipping the drop
+is invisible regardless of the fn's body.** Proven by `ltrim_xstream_bitfield_bare_drop_guard_matches`
+(LTRIM range, XDEL, XTRIM MAXLEN, BITFIELD SET old-value, WRONGTYPE, the no-stat behavior, LTRIM
+evicting an expired list via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed LTRIM(0,-1)@16 (keep-all; always
+get_mut to size) no-TTL = 43.59 ns/op; elided drop's `contains_key` ≈ **9.92 ns** → old ≈ 53.51 ns
+⇒ **1.23x (−19%)** (LTRIM is a small op so the probe is a big fraction). Conformance GREEN (703/703
+correctness; 2 failures = brittle diff_sorted / zset_index_slice perf-ratio guards under load,
+unrelated). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZPOPMIN/ZPOPMAX (+COUNT) bare-drop guard — ZPOPMIN small-zset 1.07x (byte-exact)
 
 The zset pop family (hot for priority-queue / job-queue workloads): `zpopmin_count`/`zpopmax_count`
