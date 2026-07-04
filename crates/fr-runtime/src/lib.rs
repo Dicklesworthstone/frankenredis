@@ -19479,6 +19479,144 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of
+    /// [`Self::execute_plain_zrangebylex_limit_borrowed`] — `ZRANGEBYLEX key min max
+    /// LIMIT offset count`, member array streamed with borrowed members via
+    /// `zrangebylex_members_limit_borrow_scan` (no clone; lazy skip/take). Same gate
+    /// / well-formed-bound defer / preamble / record_source_key_lookups / metrics as
+    /// the owned form. Owned form retained.
+    pub fn execute_plain_zrangebylex_limit_borrowed_into(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        offset_arg: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
+            return None;
+        }
+        let offset_raw = parse_i64_arg(offset_arg).ok()?;
+        if offset_raw < 0 {
+            return None;
+        }
+        let offset = usize::try_from(offset_raw).ok()?;
+        let count_raw = parse_i64_arg(count_arg).ok()?;
+        if count_raw < 0 {
+            return None;
+        }
+        let count = usize::try_from(count_raw).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrangebylex",
+            b"ZRANGEBYLEX".len()
+                + key.len()
+                + min.len()
+                + max.len()
+                + b"LIMIT".len()
+                + offset_arg.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let error_msg = self.stream_bylex_limit_members_into(
+            key,
+            min,
+            max,
+            false,
+            offset,
+            count,
+            now_ms,
+            suppress_reply,
+            out,
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangebylex",
+            "ZRANGEBYLEX",
+            || {
+                vec![
+                    b"ZRANGEBYLEX".to_vec(),
+                    key.to_vec(),
+                    min.to_vec(),
+                    max.to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset_arg.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
+    /// (frankenredis-zrange-into) Shared helper: stream the borrowed member-only
+    /// BYLEX-LIMIT reply into `out` via `zrangebylex_members_limit_borrow_scan`.
+    /// Returns the error code string (for error-stat accounting) on an error reply.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared BYLEX-LIMIT stream carries key/bounds/rev/offset/count/now plus suppress+out"
+    )]
+    fn stream_bylex_limit_members_into(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: usize,
+        now_ms: u64,
+        suppress_reply: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<String> {
+        let mut error_msg = None;
+        let scan = self.server.store.zrangebylex_members_limit_borrow_scan(
+            key,
+            min,
+            max,
+            rev,
+            offset,
+            count,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            },
+        );
+        if let Err(err) = scan {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
+            }
+        }
+        error_msg
+    }
+
     /// (frankenredis-zrbylexfast) Conservative borrowed READ fast path for the
     /// no-option form `ZREVRANGEBYLEX key max min`. Mirror of
     /// execute_plain_zrangebylex_borrowed with the wire arg order `key max min` and
@@ -20480,6 +20618,90 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of
+    /// [`Self::execute_plain_zrevrangebylex_limit_borrowed`] — `ZREVRANGEBYLEX key
+    /// max min LIMIT offset count` (descending), member array streamed with borrowed
+    /// members via `stream_bylex_limit_members_into` (rev=true; store bounds in
+    /// (min, max) order). Owned form retained.
+    pub fn execute_plain_zrevrangebylex_limit_borrowed_into(
+        &mut self,
+        key: &[u8],
+        max: &[u8],
+        min: &[u8],
+        offset_arg: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms)
+        {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
+            return None;
+        }
+        let offset_raw = parse_i64_arg(offset_arg).ok()?;
+        if offset_raw < 0 {
+            return None;
+        }
+        let offset = usize::try_from(offset_raw).ok()?;
+        let count_raw = parse_i64_arg(count_arg).ok()?;
+        if count_raw < 0 {
+            return None;
+        }
+        let count = usize::try_from(count_raw).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebylex",
+            b"ZREVRANGEBYLEX".len()
+                + key.len()
+                + max.len()
+                + min.len()
+                + b"LIMIT".len()
+                + offset_arg.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let error_msg = self.stream_bylex_limit_members_into(
+            key,
+            min,
+            max,
+            true,
+            offset,
+            count,
+            now_ms,
+            suppress_reply,
+            out,
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebylex",
+            "ZREVRANGEBYLEX",
+            || {
+                vec![
+                    b"ZREVRANGEBYLEX".to_vec(),
+                    key.to_vec(),
+                    max.to_vec(),
+                    min.to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset_arg.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
     }
 
     /// (BlackThrush) Borrowed READ fast path for the unified `ZRANGE key start stop
@@ -43902,6 +44124,79 @@ mod tests {
         assert!(
             direct
                 .execute_plain_zrangebyscore_limit_borrowed_into(b"z", b"-inf", b"+inf", b"-1", b"5", 90, &mut Vec::new())
+                .is_none()
+        );
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+    }
+
+    // (frankenredis-zrange-into) ZRANGEBYLEX / ZREVRANGEBYLEX ... LIMIT offset count
+    // member-only borrow-scan `_into` must match the generic replies (single-score
+    // zset — the canonical BYLEX case) across offset/count windows, count 0, offset
+    // past end, and wrong-type; negative offset/count defers.
+    #[test]
+    fn plain_bylex_limit_member_borrowed_into_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d", b"0", b"e",
+                ]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+        let enc = |g: &mut Runtime, argv: &[&[u8]], ts: u64| -> Vec<u8> {
+            let mut v = Vec::new();
+            g.execute_frame(command(argv), ts).encode_into(&mut v);
+            v
+        };
+
+        // ZRANGEBYLEX key min max LIMIT offset count.
+        for (ts, (key, min, max, off, cnt)) in (2..).zip([
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"1".as_slice(), b"3".as_slice()),
+            (b"z".as_slice(), b"[b".as_slice(), b"[d".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"0".as_slice()), // count 0
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"10".as_slice(), b"5".as_slice()), // offset past end
+            (b"str".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"5".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrangebylex_limit_borrowed_into(key, min, max, off, cnt, ts, &mut out)
+                .expect("ZRANGEBYLEX LIMIT _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZRANGEBYLEX", key, min, max, b"LIMIT", off, cnt], ts),
+                "ZRANGEBYLEX LIMIT key={key:?} {min:?}..{max:?} off={off:?} cnt={cnt:?}"
+            );
+        }
+
+        // ZREVRANGEBYLEX key max min LIMIT offset count.
+        for (ts, (key, max, min, off, cnt)) in (40..).zip([
+            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"1".as_slice(), b"3".as_slice()),
+            (b"z".as_slice(), b"[d".as_slice(), b"[b".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"0".as_slice()),
+            (b"str".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"5".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrevrangebylex_limit_borrowed_into(key, max, min, off, cnt, ts, &mut out)
+                .expect("ZREVRANGEBYLEX LIMIT _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZREVRANGEBYLEX", key, max, min, b"LIMIT", off, cnt], ts),
+                "ZREVRANGEBYLEX LIMIT key={key:?} {max:?}..{min:?} off={off:?} cnt={cnt:?}"
+            );
+        }
+
+        assert!(
+            direct
+                .execute_plain_zrangebylex_limit_borrowed_into(b"z", b"-", b"+", b"-1", b"5", 90, &mut Vec::new())
                 .is_none()
         );
         assert_eq!(

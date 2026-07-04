@@ -403,6 +403,37 @@ fn bench_zrange_withscores(c: &mut Criterion) {
             std::hint::black_box(acc)
         })
     });
+    // ZRANGEBYLEX - + LIMIT 0 200 (paginated lex): clone vs member-only borrow.
+    g.bench_function("bylex_limit_clone_full_range", |b| {
+        b.iter(|| {
+            let members = store
+                .zrangebylex_limited(std::hint::black_box(b"z"), b"-", b"+", false, 0, Some(200), 2_000)
+                .unwrap();
+            std::hint::black_box(members.iter().map(Vec::len).sum::<usize>())
+        })
+    });
+    g.bench_function("bylex_limit_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrangebylex_members_limit_borrow_scan(
+                    std::hint::black_box(b"z"),
+                    b"-",
+                    b"+",
+                    false,
+                    0,
+                    200,
+                    2_000,
+                    |ev| {
+                        if let SmembersScanEvent::Member(m) = ev {
+                            acc += m.len();
+                        }
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
     // ZRANGEBYLEX - + (whole lex range): clone vs member-only borrow.
     g.bench_function("bylex_members_clone_full_range", |b| {
         b.iter(|| {

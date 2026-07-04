@@ -1964,6 +1964,70 @@ impl SortedSet {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrowing form of the LIMIT
+    /// `lex_range_window(min, max, rev, offset, take)` — the lazy
+    /// `skip(offset).take(take)` scan (single-score `Full` band `ordered.range` /
+    /// multi-score+Packed `iter_{asc,desc}` fallback) with the member BORROWED.
+    /// Byte-identical membership/order. Like the score-bound LIMIT twin, the owned
+    /// method's deep-offset single-score treap jump is DROPPED (`RankTree::select`
+    /// yields an OWNED `ScoreMember`, unborrowable) — a pathological deep offset
+    /// reverts to the O(offset) scan (no strictly-worse case; still drops the clone).
+    fn lex_range_limited_refs(
+        &self,
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(&[u8], f64)> {
+        if let SortedSetInner::Full(full) = &self.inner
+            && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
+            && first.score == last.score
+        {
+            let s = first.score;
+            let lower = if min == b"-" {
+                ScoreMember::min_for_score(s)
+            } else if min == b"+" {
+                return Vec::new();
+            } else {
+                ScoreMember::actual(s, min[1..].to_vec())
+            };
+            let upper = if max == b"+" {
+                ScoreMember::max_for_score(s)
+            } else if max == b"-" {
+                return Vec::new();
+            } else {
+                ScoreMember::actual(s, max[1..].to_vec())
+            };
+            if lower > upper {
+                return Vec::new();
+            }
+            let scanned = full
+                .ordered
+                .range(lower..=upper)
+                .filter_map(|sm| sm.member.as_actual())
+                .filter(|m| lex_in_range(m, min, max));
+            return if rev {
+                scanned.rev().skip(offset).take(take).map(|m| (m, s)).collect()
+            } else {
+                scanned.skip(offset).take(take).map(|m| (m, s)).collect()
+            };
+        }
+        if rev {
+            self.iter_desc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .skip(offset)
+                .take(take)
+                .collect()
+        } else {
+            self.iter_asc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .skip(offset)
+                .take(take)
+                .collect()
+        }
+    }
+
     /// `lex_range_window` with adaptive treap warming: a large single-score zset
     /// hit by a deep-offset BYLEX LIMIT query builds the order-statistic treap so
     /// the rank-jump path can fire. Byte-identical result. (frankenredis-q7al0)
@@ -17274,6 +17338,60 @@ impl Store {
                 }
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// (frankenredis-zrange-into) Member-only borrow-scan for the `LIMIT offset
+    /// count` ZRANGEBYLEX / ZREVRANGEBYLEX (`rev`) forms. Drop-in for the
+    /// member-mapped `zrangebylex_limited(key, min, max, rev, offset, Some(take),
+    /// now_ms)`: IDENTICAL bookkeeping (`validate_lex_range_bounds`,
+    /// `drop_if_expired`, LFU, `touch`) and membership via
+    /// [`SortedSet::lex_range_limited_refs`], streaming borrowed members with no
+    /// `Vec<Vec<u8>>` clone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_members_limit_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let refs = zs.lex_range_limited_refs(min, max, rev, offset, take);
+                        sink(SmembersScanEvent::Len(refs.len()));
+                        for (member, _score) in refs {
+                            sink(SmembersScanEvent::Member(member));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
         }
     }
 

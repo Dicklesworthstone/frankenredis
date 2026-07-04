@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZRANGEBYLEX / ZREVRANGEBYLEX ... LIMIT (member-only) borrow members — 4.19x — completes the zset range-read family
+
+Final zset range-read member-clone gap: the paginated BYLEX `LIMIT offset count`
+forms cloned every member via `zrangebylex_limited`. New
+`SortedSet::lex_range_limited_refs` is the borrowing form of `lex_range_window`'s
+LAZY `skip(offset).take(take)` scan (single-score `Full` band `ordered.range` /
+multi-score+Packed `iter_{asc,desc}` fallback); the owned method's single-score
+deep-offset treap jump is DROPPED (`RankTree::select` yields an OWNED
+`ScoreMember`, unborrowable — a pathological deep offset reverts to the O(offset)
+scan, no strictly-worse case). New `Store::zrangebylex_members_limit_borrow_scan`
++ shared runtime `stream_bylex_limit_members_into` + two `_into` executors + two
+fr-server LIMIT dispatch sites → FastEncodedReply.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- bylex_limit`; remote). 1000-member zset (multi-score
+fallback), `LIMIT 0 200`:
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/bylex_limit_clone_full_range` (owned `Vec<Vec<u8>>`) | 10.333 µs | baseline |
+| `zrange_withscores/bylex_limit_borrow_full_range` (streamed borrow scan) | 2.466 µs | **4.19x faster** |
+
+Conformance GREEN: byte-exact `plain_bylex_limit_member_borrowed_into_matches_generic`
+(single-score zset) across offset/count windows (incl count 0, offset past end),
+sub-range, wrong-type, negative-defer for BOTH ZRANGEBYLEX and ZREVRANGEBYLEX +
+command stat parity; fr-server + fr-runtime compile clean.
+
+**ZSET RANGE-READ MEMBER-CLONE VEIN NOW FULLY EXHAUSTED** — every plain / withscores
+/ byscore / bylex form, no-LIMIT and LIMIT, borrows members (13 ships this arc,
+2.6–13.5x store-level, all byte-exact). Next cycle MUST pivot to a different gap
+(list-op/framing/hashtable-RAM structural, or a correctness differential sweep).
+Rollback: revert the two BYLEX-LIMIT dispatch sites to the owned executors.
+
 ## 2026-07-04 BlackThrush: KEEP — ZRANGEBYSCORE / ZREVRANGEBYSCORE ... LIMIT (member-only) borrow members — 3.71x
 
 The paginated `LIMIT offset count` score-range forms cloned every member via
