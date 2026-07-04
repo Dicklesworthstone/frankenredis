@@ -853,6 +853,22 @@ impl ScoreMember {
     }
 }
 
+/// (CrimsonHawk) Compare a stored `ScoreMember` `key` against a BORROWED `(score, member)` query,
+/// returning `key.cmp(&ScoreMember::actual(score, member))` byte-for-byte — WITHOUT materializing a
+/// `ScoreMember` (the per-call `member.to_vec()` + `Arc<[u8]>` the `binary_search`/rank paths built
+/// only to key the query). Score first (`canonicalize_zero_score().total_cmp()`), then the member
+/// (`Arc<[u8]>`/`MemberPart` order lexicographically, `Min < Actual < Max`; stored keys are always
+/// `Actual` — the sentinels are handled for totality).
+fn score_member_cmp_to_borrowed(key: &ScoreMember, score: f64, member: &[u8]) -> std::cmp::Ordering {
+    canonicalize_zero_score(key.score)
+        .total_cmp(&canonicalize_zero_score(score))
+        .then_with(|| match &key.member {
+            MemberPart::Actual(km) => km.as_ref().cmp(member),
+            MemberPart::Min => std::cmp::Ordering::Less,
+            MemberPart::Max => std::cmp::Ordering::Greater,
+        })
+}
+
 #[derive(Debug, Clone)]
 enum FullZSetOrder {
     Compact(Vec<ScoreMember>),
@@ -1343,10 +1359,9 @@ impl FullSortedSet {
     /// score/lex run (whose members are already collected) be bulk-drained by rank.
     fn compact_position(&self, score: f64, member: &[u8]) -> Option<usize> {
         match &self.ordered {
-            FullZSetOrder::Compact(keys) => {
-                let target = ScoreMember::actual(score, member.to_vec());
-                keys.binary_search(&target).ok()
-            }
+            FullZSetOrder::Compact(keys) => keys
+                .binary_search_by(|k| score_member_cmp_to_borrowed(k, score, member))
+                .ok(),
             FullZSetOrder::Tree(_) => None,
         }
     }
@@ -1468,17 +1483,16 @@ impl FullSortedSet {
     /// skipped. Compact ordering answers in O(log n) via binary search (no rank-tree
     /// build); the Tree ordering uses the order-statistic rank tree.
     fn resume_index_after(&mut self, member: &[u8], score: f64) -> usize {
-        let target = ScoreMember::actual(score, member.to_vec());
         if let FullZSetOrder::Compact(keys) = &self.ordered {
             // Ok(i): target present at i -> resume past it (i+1).
             // Err(i): target absent -> i is the insertion point = first key > target.
-            return match keys.binary_search(&target) {
+            return match keys.binary_search_by(|k| score_member_cmp_to_borrowed(k, score, member)) {
                 Ok(i) => i + 1,
                 Err(i) => i,
             };
         }
         let present = self.get_score(member).is_some();
-        self.ensure_rank_tree().rank_of(&target) + usize::from(present)
+        self.ensure_rank_tree().rank_of_borrowed(score, member) + usize::from(present)
     }
 }
 
@@ -1878,7 +1892,7 @@ impl SortedSet {
                     0
                 } else {
                     let x = &min[1..];
-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    let r = tree.rank_of_borrowed(s, x);
                     if min[0] == b'(' {
                         r + usize::from(full.get_score(x).is_some())
                     } else {
@@ -1889,7 +1903,7 @@ impl SortedSet {
                     total
                 } else {
                     let x = &max[1..];
-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    let r = tree.rank_of_borrowed(s, x);
                     if max[0] == b'[' {
                         r + usize::from(full.get_score(x).is_some())
                     } else {
@@ -2151,7 +2165,7 @@ impl SortedSet {
                     total
                 } else {
                     let x = &min[1..];
-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    let r = tree.rank_of_borrowed(s, x);
                     // `[x` excludes members < x (rank_of); `(x` also excludes x.
                     if min[0] == b'(' {
                         r + usize::from(full.get_score(x).is_some())
@@ -2165,7 +2179,7 @@ impl SortedSet {
                     0
                 } else {
                     let x = &max[1..];
-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    let r = tree.rank_of_borrowed(s, x);
                     // `[x` includes x; `(x` stops before x.
                     if max[0] == b'[' {
                         r + usize::from(full.get_score(x).is_some())
@@ -41208,6 +41222,52 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) compact_position / score_member_cmp_to_borrowed (borrowed binary_search) matches
+    // the sorted index / clone-key path, and measures the per-call ScoreMember alloc elimination on the
+    // Compact-zset range/resume path.
+    #[test]
+    fn zset_compact_position_borrowed_matches_and_reports_ab() {
+        let n = 1500u64; // < SORTED_SET_COMPACT_FULL_MAX_ENTRIES (2048) ⇒ Compact(Vec) order
+        let input: Vec<(Vec<u8>, f64)> = (0..n)
+            .map(|i| (format!("m{i:05}").into_bytes(), (i % 30) as f64))
+            .collect();
+        let zs = crate::FullSortedSet::from_unique_pairs(input);
+        let pairs: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.to_vec(), *s)).collect();
+        assert_eq!(pairs.len(), n as usize);
+        for (pos, (m, s)) in pairs.iter().enumerate() {
+            assert_eq!(zs.compact_position(*s, m), Some(pos), "compact_position at {pos}");
+        }
+        assert_eq!(zs.compact_position(0.0, b"absent_zzzzz"), None);
+        let crate::FullZSetOrder::Compact(keys) = &zs.ordered else {
+            panic!("expected Compact encoding");
+        };
+        let reps = 5000u64;
+        let mut sink = 0usize;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            for (m, s) in &pairs {
+                sink ^= keys
+                    .binary_search(&crate::ScoreMember::actual(*s, m.clone()))
+                    .unwrap();
+            }
+        }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / (reps * pairs.len() as u64) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            for (m, s) in &pairs {
+                sink ^= keys
+                    .binary_search_by(|k| crate::score_member_cmp_to_borrowed(k, *s, m))
+                    .unwrap();
+            }
+        }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / (reps * pairs.len() as u64) as f64;
+        std::hint::black_box(sink);
+        println!(
+            "compact_position binary_search @{n}: clone-key={clone_ns:.1} ns | borrowed={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
     }
 
     // (CrimsonHawk) rank_of_borrowed gives BYTE-IDENTICAL ranks to the clone-target path

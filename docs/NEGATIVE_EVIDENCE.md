@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — swept the throwaway-owned-key vein: 6 MORE ZSET query sites go alloc-free — compact_position 1.84x + rank sites 1.38x (byte-transparent)
+
+Followed the vein opened by the ZRANK fix: grepped `ScoreMember::actual(...to_vec()...)` for every hot
+path that materializes a throwaway `ScoreMember` (Vec+Arc double-alloc) ONLY to key a query. Found and
+converted SIX more sites (all byte-transparent — same ordering):
+- 4× `tree.rank_of(&ScoreMember::actual(s, x.to_vec()))` in the ZRANGEBYLEX/ZRANGEBYSCORE-LIMIT
+  rank-difference bound computation → `tree.rank_of_borrowed(s, x)` (reuses last commit's method; the
+  `x = &min[1..]`/`&max[1..]` lex/score bound is already a borrowed slice). ~1.38x per rank_of.
+- 2× owned-key `binary_search` on the Compact(Vec) order → `binary_search_by(borrowed)` via a new
+  `score_member_cmp_to_borrowed(key, score, &[u8])` helper (returns `key.cmp(&ScoreMember::actual(score,
+  member))` byte-for-byte: `canonicalize_zero_score().total_cmp()` then member cmp; `Min<Actual<Max`).
+  Sites: `compact_position` (contiguous score/lex run bulk-drain-by-rank) + `resume_index_after` (the
+  deletion-safe ZSCAN resume point, both Compact binary_search AND Tree rank_of paths).
+
+BYTE-TRANSPARENT: new `zset_compact_position_borrowed_matches_and_reports_ab` asserts `compact_position`
+== true sorted index for all 1500 members + absent→None; the existing zset (37) + scan/zscan fuzz-vs-
+oracle suites (which drive the lex/score-range + ZSCAN-resume paths) stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch): `compact_position` binary_search over a 1500-member Compact zset
+— clone-key (`ScoreMember::actual(s, member.clone())` + `binary_search`) = 188.2 ns/op vs borrowed
+`binary_search_by` = **102.6 ns/op = 1.84x** (bigger than the rank 1.38x — the score-first comparisons
+are cheap so the Vec+Arc alloc is a larger share). The 4 rank_of sites inherit the 1.38x rank_of A/B.
+Applies to ZRANGEBYLEX/BYSCORE(+LIMIT), ZSCAN resume, and compact range drains — all now alloc-free on
+the query key.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANK rank-treap descent goes alloc-free (rank_of_borrowed) — 1.38x store A/B (byte-transparent)
 
 Dug into the ZSET treap-rank cluster (Bucket B of the residual-gap map) for a BOUNDED lever inside the
