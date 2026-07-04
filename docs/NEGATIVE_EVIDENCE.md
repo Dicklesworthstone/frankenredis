@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: RESIDUAL-GAP MAP — extended sweep (30 cmds) categorizes ALL sub-parity losses into 2 STRUCTURAL root-causes (dispatch-chain + ZSET treap-rank)
+
+Ran `scripts/extended2_headtohead_ch.py` (30 wider cmds, fr vs redis-7.2.4, pipe=200) to catch anything
+the broad sweep missed. fr WINS the compute-heavy ones (zrangestore 2.35x, linsert 3.36x, lpos_count
+1.75x, lrem 1.56x, srandmember_neg/hrandfield_neg 1.1-1.2x). The ~15 sub-0.9x losses are ALL sub-
+millisecond commands (0.3-1.4ms / 200 ops = 2-7us/op) and root-cause into exactly TWO structural buckets
+— NO bounded per-crate lever in either:
+
+BUCKET A — DISPATCH-CHAIN / fixed-per-command overhead (the ohsk5 command-hash lever). Proof: `ZREMRANGEBYRANK
+nope 0 10` on a MISSING key (zero compute) still measures 0.60x — the 1.5us gap is pure dispatch +
+arg-parse + preamble (clock/packet_id/last_command_name, all load-bearing per prior GET profiling). Same
+class: getex 0.70, setbit 0.75, getdel 0.85, type 0.85, object_freq 0.86, getbit 0.89, smove 0.78,
+sintercard_lim 0.83, hincrbyfloat 0.82. Universal fix = O(1) command-hash / first-level (arity,cmdlen)
+switch dispatch replacing the linear `if-parse-else` chain (structural; hot cmds are already front-loaded
+so a reorder is zero-sum — only the hash restructure is universal).
+
+BUCKET B — ZSET treap-rank CONSTANT-FACTOR (fr's order-statistic treap vs redis's skiplist rank). zrank_ws
+0.58 (already rank+score-FUSED in one traversal per store.zrank_withscore — so NOT a fusion gap; the cost
+is the treap select on the large `bigz`), zremrangebyrank 0.60, zpopmin_n 0.76, zscore 0.84 (dict, borderline),
+zrank 0.90, zmpop 0.90, zcount 0.77 (from the broad sweep). Fix = optimize the rank treap or move to a
+skiplist (structural, multi-day; a naive VecDeque/decode swap already measured SLOWER per lojpt).
+
+CONCLUSION: two data-driven sweeps (46 commands total) + root-cause confirm the clean per-crate perf
+frontier is COMPLETE. Every residual loss is structural: (A) ~10 sub-ms commands dispatch-bound → ohsk5
+command-hash; (B) ~6 ZSET commands treap-rank-constant → skiplist/treap-opt. These are the two highest-
+value remaining perf levers, now mapped by evidence. No single-turn per-crate LAND exists. Docs-only.
+
 ## 2026-07-04 CrimsonHawk: NEGATIVE (verified) — SMISMEMBER set-lookup path is already h2-optimized; residual is fundamental packed-layout cost, not a bounded lever
 
 Follow-up to the sweep negative below: VERIFIED (not assumed) the SMISMEMBER `s.contains` root-cause is
