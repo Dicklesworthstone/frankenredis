@@ -8005,6 +8005,68 @@ impl Store {
         Ok(old)
     }
 
+    pub fn getset_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(value) => {
+                        let old = integer_decimal_bytes(*value);
+                        sink(Some(&old));
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => sink(None),
+            }
+            let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            self.internal_entries_insert(key.to_vec(), new_entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok(());
+        }
+
+        self.record_keyspace_lookup(key, now_ms);
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let lfu_state = match self.entries.get_mut(key) {
+            Some(entry) => {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(value) => {
+                        let old = integer_decimal_bytes(*value);
+                        sink(Some(&old));
+                    }
+                    _ => return Err(StoreError::WrongType),
+                }
+                Some(lfu)
+            }
+            None => {
+                sink(None);
+                None
+            }
+        };
+        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+        if let Some((freq, last_touch)) = lfu_state {
+            new_entry.lfu_freq = freq;
+            new_entry.lfu_last_touch_min = last_touch;
+        }
+        self.internal_entries_insert(key.to_vec(), new_entry);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
     pub fn incrby(&mut self, key: &[u8], delta: i64, now_ms: u64) -> Result<i64, StoreError> {
         self.incrby_existing_or_insert(key, delta, now_ms)
     }
@@ -33176,7 +33238,6 @@ mod tests {
     // reply stream (Len + members), WRONGTYPE, keyspace hit/miss, lazy-expiry eviction.
     #[test]
     fn smembers_lrange_borrow_scan_collapse_matches_full_path() {
-        use crate::SmembersScanEvent;
         fn collect_smembers(s: &mut Store, key: &[u8], now: u64) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
             use crate::SmembersScanEvent;
             let mut len = 0usize;
@@ -33809,6 +33870,24 @@ mod tests {
         assert_eq!(s.get(b"k", 2).unwrap(), Some(b"new".to_vec()));
         assert_eq!(s.get(b"fresh", 2).unwrap(), Some(b"v".to_vec()));
         assert_eq!(s.llen(b"lst", 2).unwrap(), 1, "WRONGTYPE GETSET must not overwrite");
+
+        let mut z = Store::new();
+        z.set(b"k".to_vec(), vec![b'x'; 4096], None, 1);
+        z.rpush(b"lst", &[b"x".to_vec()], 1).unwrap();
+        let mut borrowed_old = None;
+        z.getset_with(b"k", b"new", 2, |old| borrowed_old = old.map(<[u8]>::to_vec))
+            .unwrap();
+        assert_eq!(borrowed_old, Some(vec![b'x'; 4096]));
+        assert_eq!(z.get(b"k", 2).unwrap(), Some(b"new".to_vec()));
+        let mut missing_old = Some(Vec::new());
+        z.getset_with(b"fresh", b"v", 2, |old| missing_old = old.map(<[u8]>::to_vec))
+            .unwrap();
+        assert_eq!(missing_old, None);
+        assert!(matches!(
+            z.getset_with(b"lst", b"z", 2, |_| ()),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(z.llen(b"lst", 2).unwrap(), 1);
 
         // TTL is cleared on overwrite: key with a TTL, GETSET, then it must NOT expire.
         let mut u = Store::new();

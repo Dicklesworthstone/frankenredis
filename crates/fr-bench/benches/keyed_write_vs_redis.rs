@@ -41,6 +41,7 @@ const DUMP_ZSET_MEMBERS: usize = 64;
 const GETEX_PERSIST_EXAT: &str = "4102444800";
 const GETEX_ABS_EXAT: &str = "4102444800";
 const GETEX_ABS_PXAT: &str = "4102444800000";
+const GETSET_VALUE_LEN: usize = 4096;
 
 #[derive(Clone, Copy)]
 struct Engine {
@@ -462,6 +463,33 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
 
     set_get_group.finish();
 
+    let mut getset_group = c.benchmark_group("getset_large_vs_redis");
+    getset_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let getset_prefill = pipelined_getset_large_prefill_packet(COMMANDS_PER_ITER);
+    let getset = pipelined_getset_large_packet(COMMANDS_PER_ITER);
+    for engine in engines {
+        getset_group.bench_with_input(
+            BenchmarkId::new(format!("GETSET_{GETSET_VALUE_LEN}B"), engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&getset_prefill, COMMANDS_PER_ITER);
+                        let start = Instant::now();
+                        client.run_resp_packet(&getset, COMMANDS_PER_ITER);
+                        elapsed += start.elapsed();
+                    }
+                    client.flushall();
+                    elapsed
+                });
+            },
+        );
+    }
+    getset_group.finish();
+
     let mut smismember_group = c.benchmark_group("smismember_vs_redis");
     smismember_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
     let smismember_prefill = smismember_prefill_packet();
@@ -793,6 +821,31 @@ fn pipelined_set_get_packet(count: usize) -> Vec<u8> {
         let key = format!("sg{index:03}");
         let value = format!("new{index:03}");
         packet.extend_from_slice(&encode_command(&["SET", &key, &value, "GET"]));
+    }
+    packet
+}
+
+fn pipelined_getset_large_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * (48 + GETSET_VALUE_LEN));
+    let value = vec![b'x'; GETSET_VALUE_LEN];
+    for index in 0..count {
+        packet.extend_from_slice(&encode_command_vecs(&[
+            b"SET".to_vec(),
+            format!("gs{index:03}").into_bytes(),
+            value.clone(),
+        ]));
+    }
+    packet
+}
+
+fn pipelined_getset_large_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 64);
+    for index in 0..count {
+        packet.extend_from_slice(&encode_command_vecs(&[
+            b"GETSET".to_vec(),
+            format!("gs{index:03}").into_bytes(),
+            b"n".to_vec(),
+        ]));
     }
     packet
 }

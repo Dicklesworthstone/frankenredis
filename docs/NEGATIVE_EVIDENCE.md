@@ -4,6 +4,45 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — GETSET direct old-value encode — GETSET_4096B 1.077x vs ORIG, 1.36x vs Redis
+
+`GETSET key value` on an existing large string cloned the old value into a
+`RespFrame::BulkString(Vec<u8>)`, then immediately copied it again into the
+network write buffer. Added `Store::getset_with` plus
+`Runtime::execute_plain_getset_borrowed_into` so the server fast path encodes
+the borrowed old string directly into `conn.write_buf` before overwriting the
+entry. Semantics stay byte-identical: miss returns null bulk and inserts, integer
+old values are serialized as their decimal bytes, WRONGTYPE returns the same
+store error without overwrite, dirty/hit/miss/LFU bookkeeping matches the
+generic path. Tests cover present 4 KiB string, integer, missing key, WRONGTYPE,
+post-state, and stats.
+
+MEASURED same-worker on `vmi1156319`, per-crate `fr-bench` Criterion row
+`getset_large_vs_redis/GETSET_4096B` (64 pipelined GETSETs returning 4096-byte
+bulk strings), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod`.
+The requested exact form
+`rch exec -- cargo bench --release -p fr-bench --bench keyed_write_vs_redis -- GETSET_4096B --noplot`
+was attempted and Cargo rejected `--release` for `bench`; accepted equivalent
+used `cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- GETSET_4096B --noplot`.
+
+ORIG control worktree (`origin/main` plus the benchmark row only): FrankenRedis
+median **359.00 us**; Redis 7.2.4 median **413.55 us**. Candidate: FrankenRedis
+median **333.37 us**; Redis 7.2.4 median **454.73 us**. Direct ORIG ratio =
+`359.00 / 333.37` = **1.077x**; candidate Redis-relative throughput ratio =
+`454.73 / 333.37` = **1.36x**.
+
+Validation: `rch exec -- cargo check -p fr-store -p fr-runtime -p fr-server
+-p fr-bench --all-targets` GREEN; focused store/runtime equivalence tests GREEN;
+real local `cargo test -p fr-conformance -- --nocapture` GREEN after linking the
+scratch worktree to the existing vendored Redis oracle metadata. `cargo clippy
+-p fr-store -p fr-runtime -p fr-server -p fr-bench --all-targets -- -D warnings`
+remains blocked by pre-existing lint debt outside this lever (`fr-store`
+`zrangebyscore_members_limit_borrow_scan` and, after allowing that, `fr-persist`
+`chunks_exact_to_as_chunks`). `cargo fmt --check` is still blocked by existing
+workspace rustfmt drift from `origin/main`; no broad formatting churn was applied.
+`ubs --only=rust` on touched source files emitted no findings before timing out
+under a bounded 120s run, so the scanner gate did not complete.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYSCORE family borrow-scan double-probe collapse — ZRANGEBYSCORE@16 1.08x (byte-exact)
 
 Continued the `_borrow_scan` double-probe sub-vein into the ZRANGEBYSCORE family (hot: time-series
