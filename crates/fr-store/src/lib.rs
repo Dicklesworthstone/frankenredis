@@ -11382,6 +11382,65 @@ impl Store {
         }
     }
 
+    /// (frankenredis-hmgetinto) Borrowed HMGET: invokes `emit` once per requested
+    /// field, in order, with the value borrowed directly from the hash
+    /// (`Some(&[u8])`) or `None` (missing field / missing key), WITHOUT cloning it
+    /// into an owned `Vec<u8>`. Byte-identical to [`Store::hmget`] in keyspace
+    /// lookup, per-field expiry, single `touch`, and single LFU bump — the only
+    /// difference is the caller streams the reply instead of collecting an owned
+    /// `Vec<Option<Vec<u8>>>` (which allocs + clones every value). A wrong-type key
+    /// returns `Err(WrongType)` and `emit` is NEVER called, so the caller can
+    /// encode a whole-command error without having written any array element,
+    /// matching HMGET's whole-command WRONGTYPE semantics.
+    pub fn hmget_for_each<F: FnMut(Option<&[u8]>)>(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+        mut emit: F,
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            for _ in fields {
+                emit(None);
+            }
+            return Ok(());
+        }
+        for field in fields {
+            self.drop_hash_field_if_expired(key, field, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        for field in fields {
+                            emit(m.get(field));
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                for _ in fields {
+                    emit(None);
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn hincrby(
         &mut self,
         key: &[u8],
@@ -32771,6 +32830,71 @@ mod tests {
         assert_eq!(result, vec![None]);
     }
 
+    // (frankenredis-hmgetinto) The borrowed `hmget_for_each` must reproduce
+    // `hmget`'s reply element-for-element (present value / nil) AND its side
+    // effects (keyspace hits/misses, touch, wrong-type) across every shape:
+    // present + missing field, missing key, wrong-type key, and — crucially —
+    // matching keyspace hit/miss stats so metrics stay byte-exact.
+    #[test]
+    fn hmget_for_each_matches_hmget() {
+        let shapes: &[(&[&[u8]], &[&[u8]])] = &[
+            // (fields present in the hash, fields to request)
+            (&[b"a", b"b", b"c"], &[b"a", b"missing", b"c", b"b"]),
+            (&[b"x"], &[b"x", b"x"]), // duplicate requested field
+            (&[b"only"], &[b"absent1", b"absent2"]),
+        ];
+        for (present, request) in shapes {
+            let seed = |store: &mut Store| {
+                for (i, f) in present.iter().enumerate() {
+                    store
+                        .hset(b"h", f.to_vec(), format!("v{i}").into_bytes(), 0)
+                        .unwrap();
+                }
+            };
+            // Reference reply + stats from the owned `hmget`.
+            let mut a = Store::new();
+            seed(&mut a);
+            let want = a.hmget(b"h", request, 1).unwrap();
+            let (want_hits, want_misses) = (a.stat_keyspace_hits, a.stat_keyspace_misses);
+
+            // Borrowed `hmget_for_each` streamed into a Vec of owned copies.
+            let mut b = Store::new();
+            seed(&mut b);
+            let mut got: Vec<Option<Vec<u8>>> = Vec::new();
+            b.hmget_for_each(b"h", request, 1, |v| got.push(v.map(<[u8]>::to_vec)))
+                .unwrap();
+            assert_eq!(got, want, "reply mismatch for shape {request:?}");
+            assert_eq!(b.stat_keyspace_hits, want_hits, "hits mismatch {request:?}");
+            assert_eq!(
+                b.stat_keyspace_misses, want_misses,
+                "misses mismatch {request:?}"
+            );
+
+            // Missing key: both yield all-None and identical miss accounting.
+            let mut c = Store::new();
+            let want_miss = c.hmget(b"nokey", request, 1).unwrap();
+            let mut d = Store::new();
+            let mut got_miss: Vec<Option<Vec<u8>>> = Vec::new();
+            d.hmget_for_each(b"nokey", request, 1, |v| got_miss.push(v.map(<[u8]>::to_vec)))
+                .unwrap();
+            assert_eq!(got_miss, want_miss, "missing-key reply mismatch");
+            assert_eq!(c.stat_keyspace_misses, d.stat_keyspace_misses);
+
+            // Wrong-type key: both return Err(WrongType); the borrowed form must
+            // NOT have emitted any element (caller relies on this to encode a
+            // whole-command error with a clean buffer).
+            let mut e = Store::new();
+            e.set(b"s".to_vec(), b"str".to_vec(), None, 0);
+            assert!(matches!(e.hmget(b"s", request, 1), Err(StoreError::WrongType)));
+            let mut g = Store::new();
+            g.set(b"s".to_vec(), b"str".to_vec(), None, 0);
+            let mut emitted = 0usize;
+            let r = g.hmget_for_each(b"s", request, 1, |_| emitted += 1);
+            assert!(matches!(r, Err(StoreError::WrongType)));
+            assert_eq!(emitted, 0, "wrong-type must not emit any element");
+        }
+    }
+
     #[test]
     fn hmget_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
         let mut store = Store::new();
@@ -43025,6 +43149,58 @@ mod tests {
 
     // (frankenredis-387i6) Concrete before/after timing for the LREM bounded
     // early-stop lever. `cargo test -- --ignored --nocapture lrem_bench`.
+    #[test]
+    // (frankenredis-hmgetinto) Concrete before/after timing of the value-copy work
+    // HMGET does per reply: owned `hmget` clones every hit value into a fresh
+    // `Vec<u8>` inside a `Vec<Option<Vec<u8>>>`; borrowed `hmget_for_each` streams
+    // the borrowed slices with zero per-value allocation. This bench isolates the
+    // clone/alloc portion (the RESP-frame savings live in fr-runtime). Run with
+    // `cargo test -p fr-store -- --ignored --nocapture hmget_bench_borrow_vs_clone`.
+    #[test]
+    #[ignore]
+    fn hmget_bench_borrow_vs_clone() {
+        use std::time::Instant;
+        const NFIELDS: usize = 32;
+        const VALUE_LEN: usize = 64; // wide-ish values where copy cost shows
+        const ITERS: usize = 200_000;
+
+        let mut store = Store::new();
+        let field_names: Vec<Vec<u8>> = (0..NFIELDS).map(|i| format!("f{i:03}").into_bytes()).collect();
+        for f in &field_names {
+            store.hset(b"h", f.clone(), vec![b'v'; VALUE_LEN], 0).unwrap();
+        }
+        let fields: Vec<&[u8]> = field_names.iter().map(|f| f.as_slice()).collect();
+
+        // OLD path: owned hmget clones every value into Vec<Option<Vec<u8>>>.
+        let mut sink = 0usize;
+        let t = Instant::now();
+        for _ in 0..ITERS {
+            let values = store.hmget(b"h", &fields, 0).unwrap();
+            sink += values.iter().filter(|v| v.is_some()).count();
+        }
+        let old_us = t.elapsed().as_secs_f64() * 1e6;
+
+        // NEW path: borrowed hmget_for_each streams slices, no per-value alloc.
+        let t = Instant::now();
+        for _ in 0..ITERS {
+            store
+                .hmget_for_each(b"h", &fields, 0, |v| {
+                    if let Some(v) = v {
+                        sink += v.len() & 1;
+                    }
+                })
+                .unwrap();
+        }
+        let new_us = t.elapsed().as_secs_f64() * 1e6;
+
+        eprintln!(
+            "HMGET {NFIELDS}x{VALUE_LEN}B x{ITERS}: OLD(clone Vec<Option<Vec>>)={old_us:.0}us  \
+             NEW(borrow for_each)={new_us:.0}us  speedup={:.2}x  (sink={sink})",
+            old_us / new_us
+        );
+        assert!(new_us < old_us, "borrowed path should not be slower");
+    }
+
     #[test]
     #[ignore]
     fn lrem_bench_index_vs_retain() {

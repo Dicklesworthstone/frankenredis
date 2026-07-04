@@ -7242,14 +7242,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hmget2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_hmget_borrowed(
-                        packet.key,
-                        &[packet.start, packet.end],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hmget_borrowed_into(
+                            packet.key,
+                            &[packet.start, packet.end],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7264,14 +7269,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hmget3_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_hmget_borrowed(
-                        packet.key,
-                        &[packet.f1, packet.f2, packet.f3],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hmget_borrowed_into(
+                            packet.key,
+                            &[packet.f1, packet.f2, packet.f3],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7286,14 +7296,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hmget_multi_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_hmget_borrowed(
-                        packet.key,
-                        &packet.fields[..packet.len],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hmget_borrowed_into(
+                            packet.key,
+                            &packet.fields[..packet.len],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

@@ -14435,6 +14435,111 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-hmgetinto) `_into` form of [`Self::execute_plain_hmget_borrowed`]:
+    /// streams the `*N` array of bulk strings DIRECTLY into `out` via
+    /// [`Store::hmget_for_each`] instead of building an owned `RespFrame::Array`
+    /// from `Store::hmget` (which clones every value into a `Vec<u8>` and allocates
+    /// N `RespFrame`s). Mirrors the already-`_into` GET/HGET/LINDEX paths; the
+    /// value-encode churn left HMGET ~0.72x vs redis at wide field counts. The read
+    /// gate (`can_execute_plain_hmget_borrowed`) forces maxmemory==0 so LFU is off,
+    /// and the callback reproduces `hmget`'s keyspace-lookup / per-field expiry /
+    /// single-touch semantics byte-for-byte. A wrong-type key yields a whole-command
+    /// WRONGTYPE error with no array element written (matching HMGET). Records ONE
+    /// `hmget` command. Returns `None` (fall back to the generic path) on any
+    /// disabling state.
+    pub fn execute_plain_hmget_borrowed_into(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hmget");
+        self.session.last_argv_len_sum =
+            b"HMGET".len() + key.len() + fields.iter().map(|f| f.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Write the `*N` array header lazily on the first emitted element: a
+        // wrong-type key returns Err WITHOUT emitting, so `out` stays free of a
+        // stray header and the whole-command error below is the only bytes written.
+        let mut header_written = false;
+        let result = self
+            .server
+            .store
+            .hmget_for_each(key, fields, now_ms, |value| {
+                if suppress_reply {
+                    return;
+                }
+                if !header_written {
+                    fr_protocol::encode_aggregate_header(fields.len(), false, out);
+                    header_written = true;
+                }
+                encode_bulk_string_slice(value, resp3, out);
+            });
+        let elapsed_us = self.finish_chained_command(start);
+
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        } else if !suppress_reply && !header_written {
+            // Defensive: an Ok reply that emitted zero elements would leave no
+            // header. The fast-path parsers require >=2 fields, so this cannot fire
+            // in practice, but keep the reply well-formed if it ever does.
+            fr_protocol::encode_aggregate_header(fields.len(), false, out);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_hmget_borrowed_metrics(
+            key, fields, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     fn record_plain_hmget_borrowed_metrics(
         &mut self,
         key: &[u8],
