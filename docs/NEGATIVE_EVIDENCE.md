@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX borrow-scan bare-drop guard — ZRANGEBYLEX@16 1.05x (byte-exact)
+
+Completed the `_borrow_scan` double-probe sub-vein with the ZRANGEBYLEX variants
+(`zrangebylex_members_borrow_scan`, `zrangebylex_members_limit_borrow_scan`, fwd+rev+LIMIT).
+**These differ from the byscore family: ZRANGEBYLEX records NO keyspace stat — it does a BARE
+`drop_if_expired` (not `record_keyspace_lookup`) then `get_mut`.** So `lookup_live` (which records
+a hit) would be WRONG here (over-count). The correct fix is the bare-drop GUARD:
+`if expires_count != 0 { drop_if_expired }` — drop's no-TTL fast-exit `contains_key` is pure
+overhead when nothing is volatile, and `get_mut` re-probes anyway. Byte-identical (an expired key
+needs a TTL ⇒ count>0 ⇒ drop runs). Proven by `zrangebylex_borrow_scan_guard_matches` (all/incl/
+excl/rev/LIMIT lex ranges, WRONGTYPE, absent, **stats UNCHANGED (asserts the no-stat behavior)**,
+eviction via the count>0 branch).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZRANGEBYLEX@16 no-TTL = 221.39 ns/op;
+elided drop's no-TTL `contains_key` ≈ **10.05 ns** → old ≈ 231.44 ns ⇒ **1.05x (−4%)** (mid-size —
+the `lex_range_refs` build + lex-compare scan dominate; narrow bands ~1.2x). Conformance GREEN
+(698/698 correctness; lone failure = brittle `diff_sorted_i64_adaptive` perf-ratio guard under
+load, unrelated). **`_borrow_scan` DOUBLE-PROBE SUB-VEIN NOW COMPLETE: ZRANGE/ZREVRANGE + all
+BYSCORE (members/withscores/limit) + all BYLEX (members/limit) single-probe.** Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — GETSET direct old-value encode — GETSET_4096B 1.077x vs ORIG, 1.36x vs Redis
 
 `GETSET key value` on an existing large string cloned the old value into a

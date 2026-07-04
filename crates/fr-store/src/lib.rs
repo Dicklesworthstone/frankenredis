@@ -17900,7 +17900,13 @@ impl Store {
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: ZRANGEBYLEX
+        // records NO keyspace stat (bare drop, not record_keyspace_lookup), so the drop's
+        // no-TTL fast-exit `contains_key` is pure overhead when nothing is volatile; the
+        // `get_mut` below re-probes. Byte-identical (an expired key needs a TTL ⇒ count>0).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -18047,7 +18053,10 @@ impl Store {
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see zrangebylex_members_borrow_scan.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -34651,6 +34660,75 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZRANGEBYSCORE@16 (4..9) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZRANGEBYLEX borrow-scan bare-drop guard: byte-identical lex range
+    // (fwd/rev + LIMIT), WRONGTYPE, missing→Len(0), NO keyspace stat (bare drop), eviction.
+    #[test]
+    fn zrangebylex_borrow_scan_guard_matches() {
+        use crate::SmembersScanEvent;
+        fn lex(s: &mut Store, k: &[u8], lo: &[u8], hi: &[u8], rev: bool, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut o = Vec::new();
+            s.zrangebylex_members_borrow_scan(k, lo, hi, rev, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            Ok(o)
+        }
+        fn lexlim(s: &mut Store, k: &[u8], lo: &[u8], hi: &[u8], rev: bool, off: usize, take: usize, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut o = Vec::new();
+            s.zrangebylex_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            Ok(o)
+        }
+        let mut s = Store::new();
+        // Equal scores → pure lex ordering.
+        s.zadd(b"z", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec()), (0.0, b"d".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_all = lex(&mut s, b"z", b"-", b"+", false, 2);
+        let r_incl = lex(&mut s, b"z", b"[b", b"[c", false, 2);
+        let r_excl = lex(&mut s, b"z", b"(a", b"(d", false, 2);
+        let r_rev = lex(&mut s, b"z", b"-", b"+", true, 2);
+        let r_lim = lexlim(&mut s, b"z", b"-", b"+", false, 1, 2, 2);
+        let r_absent = lex(&mut s, b"absent", b"-", b"+", false, 2);
+        let r_wrong = lex(&mut s, b"str", b"-", b"+", false, 2);
+        // ZRANGEBYLEX records NO keyspace stat (bare drop) → hits/misses UNCHANGED.
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+        assert_eq!(r_all.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(r_incl.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(r_excl.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(r_rev.unwrap(), vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(r_lim.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Eviction: expires_count>0 branch still drops the expired key.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(0.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(lex(&mut t, b"exp", b"-", b"+", false, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing ZRANGEBYLEX@16 (band, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"zbl:bench", &[(0.0, format!("m{i:02}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"zbl:bench";
+        for _ in 0..2000 { b.zrangebylex_members_borrow_scan(k, b"[m04", b"[m09", false, 2, |_| {}).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zrangebylex_members_borrow_scan(std::hint::black_box(k), b"[m04", b"[m09", false, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZRANGEBYLEX@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
