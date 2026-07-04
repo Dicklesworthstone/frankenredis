@@ -76,6 +76,16 @@ type PlainBitcountUnitArg<'a> = Option<&'a [u8]>;
 type PlainBitcountRangeArgs<'a> = (&'a [u8], &'a [u8], PlainBitcountUnitArg<'a>);
 type PlainBitcountRange<'a> = Option<PlainBitcountRangeArgs<'a>>;
 
+struct PlainSubstrMetricsInput<'a> {
+    key: &'a [u8],
+    start: &'a [u8],
+    end: &'a [u8],
+    elapsed_us: u64,
+    now_ms: u64,
+    packet_id: u64,
+    failed: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppendFsyncMode {
     No,
@@ -3844,8 +3854,11 @@ pub struct ServerState {
     /// Per-client outbox: client_id → pending messages for delivery.
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>,
     /// Key → client IDs that should receive client-tracking invalidations.
-    client_tracking_observed_keys:
-        HashMap<Vec<u8>, HashSet<u64, foldhash::quality::RandomState>, foldhash::quality::RandomState>,
+    client_tracking_observed_keys: HashMap<
+        Vec<u8>,
+        HashSet<u64, foldhash::quality::RandomState>,
+        foldhash::quality::RandomState,
+    >,
     /// Client IDs with CLIENT TRACKING enabled in BCAST mode.
     client_tracking_bcast_clients: BTreeSet<u64>,
     /// Inverse mapping: client_id → set of channels they are subscribed to.
@@ -4247,7 +4260,10 @@ impl ServerState {
         // Non-bcast clients: remove each expired key from the tracking table and
         // remember its observers (upstream deletes the key from the table on
         // invalidation; a later read re-adds it).
-        let observed: Vec<(Vec<u8>, std::collections::HashSet<u64, foldhash::quality::RandomState>)> = keys
+        let observed: Vec<(
+            Vec<u8>,
+            std::collections::HashSet<u64, foldhash::quality::RandomState>,
+        )> = keys
             .iter()
             .filter_map(|key| {
                 self.client_tracking_observed_keys
@@ -4566,8 +4582,7 @@ impl ServerState {
         let record = AofRecord {
             argv: argv.to_vec(),
         };
-        let encoded_len =
-            u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
+        let encoded_len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
         self.aof_records.push(record);
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state
@@ -4670,8 +4685,7 @@ impl ServerState {
         let record = AofRecord {
             argv: argv.to_vec(),
         };
-        let encoded_len =
-            u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
+        let encoded_len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
         self.aof_records.push(record);
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state
@@ -5550,18 +5564,16 @@ impl Runtime {
         let mut store = Store::new();
         // (frankenredis-63p1s) live encoding thresholds before rebuild.
         copy_encoding_thresholds(&mut store, &self.server.store);
-        let counts = match apply_rdb_entries_to_store(
-            &mut store,
-            decoded.entries,
-            now_ms.saturating_add(1),
-        ) {
-            Ok(counts) => counts,
-            Err(_) => {
-                return RespFrame::Error(
-                    "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
-                );
-            }
-        };
+        let counts =
+            match apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms.saturating_add(1))
+            {
+                Ok(counts) => counts,
+                Err(_) => {
+                    return RespFrame::Error(
+                        "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+                    );
+                }
+            };
         // Restore FUNCTION libraries through the round-trip too. (frankenredis-c0u9q)
         for code in &decoded.functions {
             let _ = store.function_load(code, true);
@@ -7720,7 +7732,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(build);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -8501,7 +8514,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(build);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -10378,14 +10392,15 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self
-            .server
-            .store
-            .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
-        {
-            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
-            Err(err) => CommandError::Store(err).to_resp(),
-        };
+        let reply =
+            match self
+                .server
+                .store
+                .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
+            {
+                Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+                Err(err) => CommandError::Store(err).to_resp(),
+            };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
@@ -10980,7 +10995,13 @@ impl Runtime {
         {
             return None;
         }
-        let mut opts = fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: false, ch: false };
+        let mut opts = fr_store::ZaddOptions {
+            nx: false,
+            xx: false,
+            gt: false,
+            lt: false,
+            ch: false,
+        };
         for f in [flag1, flag2] {
             if f.eq_ignore_ascii_case(b"NX") {
                 opts.nx = true;
@@ -11076,7 +11097,12 @@ impl Runtime {
         failed: bool,
     ) {
         let mut argv: Option<Vec<Vec<u8>>> = None;
-        let build = |key: &[u8], flag1: &[u8], flag2: &[u8], score_arg: &[u8], member: &[u8]| -> Vec<Vec<u8>> {
+        let build = |key: &[u8],
+                     flag1: &[u8],
+                     flag2: &[u8],
+                     score_arg: &[u8],
+                     member: &[u8]|
+         -> Vec<Vec<u8>> {
             vec![
                 b"ZADD".to_vec(),
                 key.to_vec(),
@@ -11153,15 +11179,45 @@ impl Runtime {
             return None;
         }
         let opts = if flag_arg.eq_ignore_ascii_case(b"NX") {
-            fr_store::ZaddOptions { nx: true, xx: false, gt: false, lt: false, ch: false }
+            fr_store::ZaddOptions {
+                nx: true,
+                xx: false,
+                gt: false,
+                lt: false,
+                ch: false,
+            }
         } else if flag_arg.eq_ignore_ascii_case(b"XX") {
-            fr_store::ZaddOptions { nx: false, xx: true, gt: false, lt: false, ch: false }
+            fr_store::ZaddOptions {
+                nx: false,
+                xx: true,
+                gt: false,
+                lt: false,
+                ch: false,
+            }
         } else if flag_arg.eq_ignore_ascii_case(b"GT") {
-            fr_store::ZaddOptions { nx: false, xx: false, gt: true, lt: false, ch: false }
+            fr_store::ZaddOptions {
+                nx: false,
+                xx: false,
+                gt: true,
+                lt: false,
+                ch: false,
+            }
         } else if flag_arg.eq_ignore_ascii_case(b"LT") {
-            fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: true, ch: false }
+            fr_store::ZaddOptions {
+                nx: false,
+                xx: false,
+                gt: false,
+                lt: true,
+                ch: false,
+            }
         } else if flag_arg.eq_ignore_ascii_case(b"CH") {
-            fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: false, ch: true }
+            fr_store::ZaddOptions {
+                nx: false,
+                xx: false,
+                gt: false,
+                lt: false,
+                ch: true,
+            }
         } else {
             return None;
         };
@@ -11238,15 +11294,16 @@ impl Runtime {
         failed: bool,
     ) {
         let mut argv: Option<Vec<Vec<u8>>> = None;
-        let build = |key: &[u8], flag_arg: &[u8], score_arg: &[u8], member: &[u8]| -> Vec<Vec<u8>> {
-            vec![
-                b"ZADD".to_vec(),
-                key.to_vec(),
-                flag_arg.to_vec(),
-                score_arg.to_vec(),
-                member.to_vec(),
-            ]
-        };
+        let build =
+            |key: &[u8], flag_arg: &[u8], score_arg: &[u8], member: &[u8]| -> Vec<Vec<u8>> {
+                vec![
+                    b"ZADD".to_vec(),
+                    key.to_vec(),
+                    flag_arg.to_vec(),
+                    score_arg.to_vec(),
+                    member.to_vec(),
+                ]
+            };
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
@@ -11313,12 +11370,22 @@ impl Runtime {
     ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"ZADD".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || flags.iter().any(|f| f.len() > self.policy.gate.max_bulk_len)
-            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+            || flags
+                .iter()
+                .any(|f| f.len() > self.policy.gate.max_bulk_len)
+            || pairs
+                .iter()
+                .any(|p| p.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
-        let mut opts = fr_store::ZaddOptions { nx: false, xx: false, gt: false, lt: false, ch: false };
+        let mut opts = fr_store::ZaddOptions {
+            nx: false,
+            xx: false,
+            gt: false,
+            lt: false,
+            ch: false,
+        };
         for f in flags {
             if f.eq_ignore_ascii_case(b"NX") {
                 opts.nx = true;
@@ -11370,7 +11437,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.zadd_with_options(key, members, opts, now_ms) {
+        let reply = match self
+            .server
+            .store
+            .zadd_with_options(key, members, opts, now_ms)
+        {
             Ok((count, _changed)) => RespFrame::Integer(count as i64),
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -11435,7 +11506,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| build(key, flags, pairs));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -13100,7 +13172,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(build);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -13139,8 +13212,7 @@ impl Runtime {
     /// logical name); reply is the chosen key bulk string, or nil on an empty db. Same
     /// store primitive + RNG advancement as the generic handler.
     pub fn execute_plain_randomkey_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 1
-            || self.policy.gate.max_bulk_len < b"RANDOMKEY".len()
+        if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"RANDOMKEY".len()
         {
             return None;
         }
@@ -13303,7 +13375,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(build);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -13612,9 +13685,15 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_substr_borrowed_metrics(
-            key, start_arg, end_arg, elapsed_us, now_ms, packet_id, failed,
-        );
+        self.record_plain_substr_borrowed_metrics(PlainSubstrMetricsInput {
+            key,
+            start: start_arg,
+            end: end_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        });
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -13639,16 +13718,17 @@ impl Runtime {
         Some(reply)
     }
 
-    fn record_plain_substr_borrowed_metrics(
-        &mut self,
-        key: &[u8],
-        start: &[u8],
-        end: &[u8],
-        elapsed_us: u64,
-        now_ms: u64,
-        packet_id: u64,
-        failed: bool,
-    ) {
+    fn record_plain_substr_borrowed_metrics(&mut self, input: PlainSubstrMetricsInput<'_>) {
+        let PlainSubstrMetricsInput {
+            key,
+            start,
+            end,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        } = input;
+
         let mut argv: Option<Vec<Vec<u8>>> = None;
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
@@ -21541,7 +21621,13 @@ impl Runtime {
         self.record_plain_zremrange_borrowed_metrics(
             name_lc,
             name_uc,
-            || vec![name_uc.as_bytes().to_vec(), key.to_vec(), count_arg.to_vec()],
+            || {
+                vec![
+                    name_uc.as_bytes().to_vec(),
+                    key.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
             elapsed_us,
             now_ms,
             packet_id,
@@ -27147,11 +27233,8 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("zrevrange");
-        self.session.last_argv_len_sum = b"ZREVRANGE".len()
-            + key.len()
-            + start_arg.len()
-            + stop_arg.len()
-            + b"WITHSCORES".len();
+        self.session.last_argv_len_sum =
+            b"ZREVRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"WITHSCORES".len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -42349,7 +42432,9 @@ mod tests {
             assert_eq!(out, encode_frame(owned.clone()), "ZREVRANGE _into != owned");
             assert_eq!(
                 out,
-                encode_frame(generic.execute_frame(command(&[b"ZREVRANGE", b"z", start, stop]), ts)),
+                encode_frame(
+                    generic.execute_frame(command(&[b"ZREVRANGE", b"z", start, stop]), ts)
+                ),
                 "ZREVRANGE _into != generic bytes"
             );
             ts += 1;
@@ -42362,10 +42447,16 @@ mod tests {
             let owned2 = owned_rt
                 .execute_plain_zrange_rev_borrowed(b"z", start, stop, ts)
                 .expect("ZRANGE REV owned fast path");
-            assert_eq!(out2, encode_frame(owned2.clone()), "ZRANGE REV _into != owned");
             assert_eq!(
                 out2,
-                encode_frame(generic.execute_frame(command(&[b"ZRANGE", b"z", start, stop, b"REV"]), ts)),
+                encode_frame(owned2.clone()),
+                "ZRANGE REV _into != owned"
+            );
+            assert_eq!(
+                out2,
+                encode_frame(
+                    generic.execute_frame(command(&[b"ZRANGE", b"z", start, stop, b"REV"]), ts)
+                ),
                 "ZRANGE REV _into != generic bytes"
             );
             ts += 1;
@@ -42396,8 +42487,7 @@ mod tests {
 
         // Faithful-replacement stat parity: _into path == owned fast path.
         assert_eq!(
-            into_rt.server.store.stat_keyspace_hits,
-            owned_rt.server.store.stat_keyspace_hits,
+            into_rt.server.store.stat_keyspace_hits, owned_rt.server.store.stat_keyspace_hits,
             "keyspace_hits _into != owned"
         );
         assert_eq!(
@@ -42595,9 +42685,9 @@ mod tests {
                 (b"z".as_slice(), b"(2".as_slice(), b"5".as_slice()), // exclusive min
                 (b"z".as_slice(), b"1".as_slice(), b"(3.5".as_slice()), // exclusive max
                 (b"z".as_slice(), b"(1".as_slice(), b"(5".as_slice()), // both exclusive
-                (b"z".as_slice(), b"2".as_slice(), b"2".as_slice()),   // single point (dup scores)
+                (b"z".as_slice(), b"2".as_slice(), b"2".as_slice()),  // single point (dup scores)
                 (b"z".as_slice(), b"10".as_slice(), b"20".as_slice()), // empty (out of range)
-                (b"z".as_slice(), b"5".as_slice(), b"1".as_slice()),   // inverted -> empty
+                (b"z".as_slice(), b"5".as_slice(), b"1".as_slice()),  // inverted -> empty
                 (b"nokey".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()),
                 (b"str".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()), // wrong type
             ]) {
@@ -42671,9 +42761,9 @@ mod tests {
                 (b"z".as_slice(), b"5".as_slice(), b"(2".as_slice()), // exclusive min
                 (b"z".as_slice(), b"(3.5".as_slice(), b"1".as_slice()), // exclusive max
                 (b"z".as_slice(), b"(5".as_slice(), b"(1".as_slice()), // both exclusive
-                (b"z".as_slice(), b"2".as_slice(), b"2".as_slice()),   // single point (dup scores)
+                (b"z".as_slice(), b"2".as_slice(), b"2".as_slice()),  // single point (dup scores)
                 (b"z".as_slice(), b"20".as_slice(), b"10".as_slice()), // empty (out of range)
-                (b"z".as_slice(), b"1".as_slice(), b"5".as_slice()),   // inverted -> empty
+                (b"z".as_slice(), b"1".as_slice(), b"5".as_slice()),  // inverted -> empty
                 (b"nokey".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()),
                 (b"str".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()), // wrong type
             ]) {
@@ -47313,13 +47403,11 @@ mod tests {
             }
 
             assert_eq!(
-                direct.server.store.stat_keyspace_hits,
-                generic.server.store.stat_keyspace_hits,
+                direct.server.store.stat_keyspace_hits, generic.server.store.stat_keyspace_hits,
                 "keyspace hits for {key:?} {db:?}"
             );
             assert_eq!(
-                direct.server.store.stat_keyspace_misses,
-                generic.server.store.stat_keyspace_misses,
+                direct.server.store.stat_keyspace_misses, generic.server.store.stat_keyspace_misses,
                 "keyspace misses for {key:?} {db:?}"
             );
             assert_eq!(
