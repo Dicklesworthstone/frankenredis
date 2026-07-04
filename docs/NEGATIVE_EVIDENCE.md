@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — hset_borrowed + xadd bare-drop guard — HSET(borrowed) 1.22x (byte-exact)
+
+Two HOT writes with unguarded bare drops (the guard was applied to ~13 other writes earlier but
+these slipped through). `hset_borrowed` = a LIVE HSET/HMSET path (fr-runtime calls it directly +
+`hset_borrowed_many`'s LFU loop) — distinct from the already-guarded `hset_borrowed_many` fast path
+and from the COLD `store.hset` (which memory records as a prior 0.00%/reverted guard — NOT
+re-touched here). `xadd` = the hot stream-append backend. Both did a bare `drop_if_expired` then a
+re-probing `internal_entry`/`get_mut` (XADD auto-creates on absent); guarded with
+`if expires_count != 0 { drop }`. Byte-identical (no volatile key ⇒ none expired). Proven by
+`hset_borrowed_xadd_bare_drop_guard_matches` (field set/update, stream append+XLEN, WRONGTYPE, the
+no-stat behavior, eviction via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed HSET(borrowed) field-update no-TTL =
+74.93 ns/op; elided drop's `contains_key` ≈ **16.53 ns** → old ≈ 91.47 ns ⇒ **1.22x (−18%)** on
+one of the hottest write commands. Conformance GREEN (702/702 correctness; lone failure = brittle
+`record_keyspace_lookup...ab` perf-ratio guard under load, unrelated). Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD/ZRANDMEMBER (+COUNT) bare-drop guard — HRANDFIELD@16 1.11x (byte-exact)
 
 Continued the bare-drop-guard vein into the random-sample family: `hrandfield`, `hrandfield_count`,

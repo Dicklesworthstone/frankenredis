@@ -11311,7 +11311,13 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: internal_entry
+        // below re-probes (get-or-insert), so drop's no-TTL fast-exit contains_key is pure
+        // overhead when nothing is volatile. Byte-identical (no volatile key ⇒ none expired).
+        // hset_borrowed is LIVE: fr-runtime calls it directly + hset_borrowed_many's LFU loop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -18809,7 +18815,13 @@ impl Store {
         fields: &[StreamField],
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: the get_mut
+        // below re-probes (and XADD auto-creates the stream when absent), so drop's no-TTL
+        // fast-exit contains_key is pure overhead when nothing is volatile. Byte-identical
+        // (no volatile key ⇒ none expired). XADD is a hot stream-append write.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -34951,6 +34963,57 @@ mod tests {
         println!(
             "HRANDFIELD@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x (+ elided empty hash-field drop)",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) hset_borrowed + xadd bare-drop guard: byte-identical field set/update,
+    // stream append, WRONGTYPE, NO keyspace stat, eviction via expires_count>0.
+    #[test]
+    fn hset_borrowed_xadd_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.set(b"str".to_vec(), b"x".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        assert!(s.hset_borrowed(b"h", b"f", b"v".to_vec(), 2).unwrap()); // new field
+        assert!(!s.hset_borrowed(b"h", b"f", b"v2".to_vec(), 2).unwrap()); // update
+        assert_eq!(s.hget(b"h", b"f", 2).unwrap(), Some(b"v2".to_vec()));
+        assert!(matches!(s.hset_borrowed(b"str", b"f", b"v".to_vec(), 2), Err(StoreError::WrongType)));
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 2).unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 2).unwrap();
+        assert_eq!(s.xlen(b"st", 2).unwrap(), 2);
+        assert!(matches!(s.xadd(b"str", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 2), Err(StoreError::WrongType)));
+        // hset_borrowed + xadd record NO keyspace stat (bare drop). The reads DO: hget + xlen = 2 hits.
+        assert_eq!(s.stat_keyspace_hits, h0 + 2);
+        assert_eq!(s.stat_keyspace_misses, m0);
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.hset_borrowed(b"h", b"f", b"v".to_vec(), 1).unwrap();
+        t.expire_at_milliseconds(b"h", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert!(t.hset_borrowed(b"h", b"f2", b"w".to_vec(), 500).unwrap(), "expired hash dropped → fresh field is new");
+        assert_eq!(t.hget(b"h", b"f", 500).unwrap(), None, "old field gone after eviction");
+
+        // Timing: hset_borrowed updating an existing field (rotating value avoids no-op path).
+        let mut b = Store::new();
+        b.hset_borrowed(b"hb:bench", b"f", b"v0".to_vec(), 1).unwrap();
+        let k: &[u8] = b"hb:bench";
+        let reps = 3_000_000u64;
+        let mut n = 0u64;
+        for _ in 0..2000 { n += 1; b.hset_borrowed(k, b"f", n.to_le_bytes().to_vec(), 2).ok(); }
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { n += 1; std::hint::black_box(b.hset_borrowed(std::hint::black_box(k), b"f", n.to_le_bytes().to_vec(), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box((acc, n));
+        println!(
+            "HSET(borrowed) update no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
     }
