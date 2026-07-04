@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD count zero-copy `_into` WIRED LIVE — 3.38x store A/B (byte-exact)
+
+Second command in the member-clone-elimination arc (after SRANDMEMBER). Added `Store::
+hrandfield_count_field_borrow_scan` (mirrors `hrandfield_count`'s RNG selection VERBATIM, sinks the
+borrowed FIELD via `get_index(idx).0.as_ref()` — the plain HRANDFIELD reply is field names only) +
+`execute_plain_hrandfield_count_borrowed_into` (fr-runtime) + swapped the fr-server
+`parse_borrowed_plain_hrandfield_count_packet` dispatch `FastReply`→`FastEncodedReply`. **Bigger win
+than SRANDMEMBER because `hrandfield_count` clones BOTH field AND value per pair (`(k.to_vec(),
+v.to_vec())`); the borrow-scan sinks just the borrowed field and never touches the value.** KEY
+accounting difference vs SRANDMEMBER: `hrandfield_count` is NO-STAT, so — exactly like the RespFrame
+`Hrandfield` arm — the `_into` records one `exists_no_touch` before the no-stat borrow-scan. Plain
+array in RESP2+RESP3 ⇒ `encode_aggregate_header(n, false)` = `*N` (mirrors HKEYS/HVALS `_into`).
+
+BYTE-EXACT: `hrandfield_count_field_borrow_scan_matches_clone` asserts the borrow-scan fields EQUAL
+`hrandfield_count(..).map(|(f,_)| f)` across {16 listpack, 1000 hashtable} × {+5,+200,-7,-300,0} +
+WRONGTYPE/missing (fixed rng_seed ⇒ identical draws). VERIFIED via local symlink-legacy build:
+`cargo test -p fr-server` — ALL HRANDFIELD dispatch/parser tests pass; only failure is the same
+PRE-EXISTING `borrowed_plain_mset_packet_dispatcher…` (confirmed last turn on origin/main).
+
+MEASURED (store-level A/B, per-crate rch, count=50 over a 2000-field HASHTABLE hash): clone
+`hrandfield_count` = 4097 ns/op vs borrow-scan = **1212 ns/op = 3.38x** — now live (live win ≥ this,
+also skips the `Vec<RespFrame>`). NEXT: ZRANDMEMBER count is PARTIALLY borrowable only — the Full-dict
+path borrows via `dict.get_index`, but the rank_tree path (large zsets) uses `sm.member.into_actual()`
+which OWNS (unborrowable, per the byscore-LIMIT note) — so ZRANDMEMBER would need a rank-tree borrow
+accessor first (harder); WITHVALUES/WITHSCORES variants + the SCAN family remain too. Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SRANDMEMBER count zero-copy `_into` WIRED LIVE — realizes the 2.39x store A/B (byte-exact)
 
 Wired last turn's `srandmember_count_borrow_scan` into the LIVE SRANDMEMBER-count path (the store
