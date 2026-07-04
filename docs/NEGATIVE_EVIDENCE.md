@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE (scoped blocker) — collection-read borrow-`_into` vein EXHAUSTED; remaining stream/read targets are write-entangled or structural
+
+After ~14 member-clone/borrow-`_into` ships this session (SMEMBERS/SSCAN/HSCAN/LRANGE/ZRANGE-family/
+HMGET/MGET/random-sample + XRANGE/XREVRANGE/XREAD single+multi, 1.5x–12.1x, all byte-exact), swept
+fr-runtime for the remaining "existing fast path builds a RespFrame by cloning stored bytes" pattern
+(the convertible one). Grepped every `execute_plain_*_borrowed` (non-`_into`) that builds
+`RespFrame::Array(Some(..))` AND clones (`to_vec`/`into_owned`/`clone`/`to_pairs`). Every hit is already
+covered or NOT a clone-borrow target:
+- ZRANGE/ZRANGEBYSCORE/BYLEX/REV/LIMIT + SSCAN0/HSCAN0/ZSCAN0 — the RespFrame fns are now the COLD
+  generic-args path; the HOT `process_buffered_frames` dispatch already routes to `_into` (shipped).
+- L/S/Z-POP + LMPOP/ZMPOP(count) — WRITES: the popped members are extracted OWNED post-mutation, no
+  borrowed clone to avoid (same dead-end as GETSET/GETDEL, confirmed earlier).
+- GEOPOS/GEOHASH/BITFIELD_GET — reply is COMPUTED (coords/hashes/ints), not stored bytes.
+- PUBLISH/SPUBLISH/PUBSUB — channel/receiver counts, computed.
+- ZINTER/ZDIFF — already optimized (resolve-once, 1.44x, memory) — reply members are computed-owned.
+
+REMAINING READ targets are NOT clean single-turn borrow `_into`s:
+- **XREADGROUP `>` (common)** — a genuine complex WRITE: per-serve it advances `entries_read` (via
+  `advance_stream_entries_read_counter`), sets `last_delivered_id`, and (unless NOACK) creates/reassigns
+  a PEL NACK per delivered entry (delivery_count, consumer, time) + consumer creation/dirty. A
+  field-borrow refactor would have to collect ids then run all this write while the sink borrow is live;
+  a bug is a consumer-group DATA-INTEGRITY defect, not a mere reply divergence. NOT worth the perf win.
+- **XREADGROUP history (explicit id)** — read-only + borrowable, BUT narrower (`>` dominates) and carries
+  tombstone semantics (XDEL'd PEL entries render as `[id, nil]`), needing a nil-fields event variant +
+  group/consumer-existence + two-map (`pending` × `entries`) walk. A dedicated effort.
+- **Keyspace SCAN / KEYS** — `scan_cache` + `rebuild_ordered_keys` + DB/TYPE filters, no fast path (big).
+- **SORT** — computed permutation, complex (BY/GET/LIMIT/ALPHA/STORE), no fast path.
+
+The biggest un-mined gap (large-value GET/SET framing, ~0.4–0.6x) is fr-server-IO zero-copy —
+delicate + NOT per-crate-benchable (memory frontier note). NEXT real levers = XREADGROUP history
+(dedicated, read-only) OR a structural crate (ChunkedList packed nodes / keyspace RAM). No clean
+per-crate borrow `_into` remained this turn. Docs-only surface.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREAD MULTI-key (2..=8) `_into` WIRED LIVE — reuses 12.14x borrow (byte+stats exact vs redis 7.2.4)
 
 Extended the single-key XREAD `_into` to 2..=8 streams (RESP2 non-blocking). Reuses the shipped
