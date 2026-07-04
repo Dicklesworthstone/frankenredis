@@ -11398,6 +11398,19 @@ impl Store {
     }
 
     pub fn hexists(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<bool, StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(m.contains_key(field)),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(false),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(false);
         }
@@ -11426,6 +11439,21 @@ impl Store {
     }
 
     pub fn hlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
+        // `drop_expired_hash_fields` fast-exits on an empty map (no-op), so gating the
+        // collapse on `hash_field_expires.is_empty()` is byte-identical.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(m.len()),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -11502,6 +11530,29 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => {
+                            sink(SmembersScanEvent::Len(m.len()));
+                            for (k, v) in m.iter() {
+                                sink(SmembersScanEvent::Member(k));
+                                sink(SmembersScanEvent::Member(v));
+                            }
+                            Ok(())
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -11557,6 +11608,34 @@ impl Store {
         values: bool,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => {
+                            sink(SmembersScanEvent::Len(m.len()));
+                            if values {
+                                for v in m.values() {
+                                    sink(SmembersScanEvent::Member(v));
+                                }
+                            } else {
+                                for k in m.keys() {
+                                    sink(SmembersScanEvent::Member(k));
+                                }
+                            }
+                            Ok(())
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -11876,6 +11955,19 @@ impl Store {
     }
 
     pub fn hstrlen(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(m.get(field).map_or(0, <[u8]>::len)),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -32782,6 +32874,87 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "HGET@8fields no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) HEXISTS/HSTRLEN/HLEN + HGETALL/HKEYS/HVALS borrow-scan field-TTL-gated
+    // collapse: byte-identical in the empty-map case AND still reaping expired fields in the
+    // non-empty-map fallback.
+    #[test]
+    fn hash_read_family_collapse_and_field_ttl_fallback() {
+        use crate::SmembersScanEvent;
+        fn scan_len_members(s: &mut Store, f: impl FnOnce(&mut Store, &mut dyn FnMut(SmembersScanEvent)) -> Result<(), StoreError>) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+            let mut len = 0usize; let mut out = Vec::new();
+            let mut sink = |e: SmembersScanEvent| match e { SmembersScanEvent::Len(n) => len = n, SmembersScanEvent::Member(m) => out.push(m.to_vec()) };
+            f(s, &mut sink)?; Ok((len, out))
+        }
+
+        let mut s = Store::new();
+        s.hset(b"h", b"a".to_vec(), b"1".to_vec(), 1).unwrap();
+        s.hset(b"h", b"bb".to_vec(), b"22".to_vec(), 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        assert!(s.hash_field_expires.is_empty());
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        assert!(s.hexists(b"h", b"a", 2).unwrap());
+        assert!(!s.hexists(b"h", b"none", 2).unwrap());
+        assert!(!s.hexists(b"absent", b"a", 2).unwrap());
+        assert_eq!(s.hstrlen(b"h", b"bb", 2).unwrap(), 2);
+        assert_eq!(s.hstrlen(b"h", b"none", 2).unwrap(), 0);
+        assert_eq!(s.hlen(b"h", 2).unwrap(), 2);
+        assert!(matches!(s.hexists(b"str", b"a", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.hlen(b"str", 2), Err(StoreError::WrongType)));
+        // hits: hexists(a),hexists(none),hstrlen(bb),hstrlen(none),hlen,hexists(str),hlen(str) = 7;
+        // misses: hexists(absent) = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 7);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+
+        // HGETALL borrow-scan: Len + interleaved k,v (insertion order).
+        let (glen, gkv) = scan_len_members(&mut s, |s, sink| s.hgetall_borrow_scan(b"h", 2, |e| sink(e))).unwrap();
+        assert_eq!(glen, 2);
+        assert_eq!(gkv, vec![b"a".to_vec(), b"1".to_vec(), b"bb".to_vec(), b"22".to_vec()]);
+        // HKEYS / HVALS.
+        let (klen, keys) = scan_len_members(&mut s, |s, sink| s.hcollection_borrow_scan(b"h", 2, false, |e| sink(e))).unwrap();
+        assert_eq!((klen, keys), (2, vec![b"a".to_vec(), b"bb".to_vec()]));
+        let (vlen, vals) = scan_len_members(&mut s, |s, sink| s.hcollection_borrow_scan(b"h", 2, true, |e| sink(e))).unwrap();
+        assert_eq!((vlen, vals), (2, vec![b"1".to_vec(), b"22".to_vec()]));
+
+        // Key lazy expiry via HLEN (collapse path).
+        let mut t = Store::new();
+        t.hset(b"hexp", b"a".to_vec(), b"1".to_vec(), 1).unwrap();
+        t.expire_at_milliseconds(b"hexp", 50, 1);
+        assert_eq!(t.hlen(b"hexp", 500).unwrap(), 0);
+        assert!(t.get(b"hexp", 600).unwrap().is_none());
+
+        // FIELD-TTL fallback: non-empty map → original path reaps the expired field.
+        let mut u = Store::new();
+        u.hset(b"h2", b"live".to_vec(), b"1".to_vec(), 1).unwrap();
+        u.hset(b"h2", b"dead".to_vec(), b"2".to_vec(), 1).unwrap();
+        u.hash_field_expires.insert((b"h2".to_vec(), b"dead".to_vec()), 50);
+        assert!(!u.hash_field_expires.is_empty());
+        assert!(!u.hexists(b"h2", b"dead", 500).unwrap(), "expired field invisible to HEXISTS");
+        assert!(u.hexists(b"h2", b"live", 500).unwrap());
+        assert_eq!(u.hlen(b"h2", 600).unwrap(), 1, "HLEN excludes reaped field");
+
+        // Timing headline HLEN@8fields (no field TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..8u32 { b.hset(b"benchhash:key", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        let k: &[u8] = b"benchhash:key";
+        for _ in 0..2000 { std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "HLEN@8fields no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

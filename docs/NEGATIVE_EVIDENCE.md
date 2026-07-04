@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — hash-read family (HEXISTS/HSTRLEN/HLEN/HGETALL/HKEYS/HVALS) field-TTL-gated single-lookup collapse — HLEN@8fields 1.49x (byte-exact)
+
+Completes the hash-read family using the same `hash_field_expires.is_empty() && !lfu` gate as
+HGET (below). Six more reads collapsed: `hexists`, `hstrlen` (single-field `drop_hash_field_if_
+expired`), `hlen`, `hgetall_borrow_scan`, `hcollection_borrow_scan` (HKEYS/HVALS) — the last
+three use the ALL-field `drop_expired_hash_fields`, which likewise fast-exits on the empty map
+(no-op). Each replaced `record_keyspace_lookup` + separate `entries.get_mut` with one
+`lookup_live_for_read_mut` on the gated fast path; original path (with the field-drop) retained
+for the non-empty-map / LFU cases. Byte-identical: value/len/membership, WRONGTYPE, keyspace
+hit/miss, UNCONDITIONAL touch (incl WRONGTYPE), key lazy-expiry, scan Len+member stream order;
+field-TTL fallback still reaps expired fields. Proven by
+`hash_read_family_collapse_and_field_ttl_fallback` (HEXISTS/HSTRLEN/HLEN values + hit/miss
+deltas + WRONGTYPE, HGETALL interleaved k/v + HKEYS/HVALS order, key eviction, AND non-empty-map
+fallback: HEXISTS invisible-to expired field + HLEN excludes reaped field).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed HLEN@8fields no-TTL = 33.46 ns/op;
+removed 2nd keyspace probe ≈ **16.29 ns** → old ≈ 49.75 ns ⇒ **1.49x (−33%)** — HLEN is a tiny
+op so the removed probe dominates; HEXISTS/HSTRLEN ~same, the scan variants scale down with
+field count (see SMEMBERS 1.18x). Conformance GREEN (677/677 correctness; lone failure =
+`record_keyspace_lookup_drops_redundant_contains_key_ab` brittle perf-ratio guard — got 1.14x
+under the loaded worker, its `h0==h1` correctness assert passed; unrelated to this diff, which
+never touches that benchmarked drop_if_expired/contains_key loop). **SINGLE-LOOKUP-COLLAPSE VEIN
+NOW COMPLETE for the entire read surface** (point + collection + hash). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HGET + hget_with single-lookup collapse (field-TTL-gated) — HGET@8fields 1.20x (byte-exact)
 
 Unblocks the hash-read family (previously deferred for the field-TTL wrinkle). The blocker:
