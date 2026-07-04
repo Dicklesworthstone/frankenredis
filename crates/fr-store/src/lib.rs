@@ -9527,7 +9527,12 @@ impl Store {
     }
 
     pub fn rename(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop on `expires_count != 0`: no volatile key ⇒ source
+        // can't be expired ⇒ drop is a no-op; the contains_key below re-probes and expiry_ms(key)
+        // returns None either way. Byte-identical. (RENAME.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         if !self.entries.contains_key(key) {
             return Err(StoreError::KeyNotFound);
         }
@@ -9568,8 +9573,12 @@ impl Store {
     }
 
     pub fn renamenx(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        self.drop_if_expired(newkey, now_ms);
+        // (CrimsonHawk) Guard the two bare drops on `expires_count != 0` — see rename. Neither
+        // key can be expired when nothing is volatile; the contains_key checks below re-probe.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+            self.drop_if_expired(newkey, now_ms);
+        }
         if !self.entries.contains_key(key) {
             return Err(StoreError::KeyNotFound);
         }
@@ -13452,8 +13461,13 @@ impl Store {
         destination: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(source, now_ms);
-        self.drop_if_expired(destination, now_ms);
+        // (CrimsonHawk) Guard the two bare drops on `expires_count != 0`: with no volatile keys
+        // neither source nor destination can be expired, so both drops are no-ops; the get(source)
+        // + destination lookup below re-probe. Byte-identical. (RPOPLPUSH / LMOVE — reliable queues.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(source, now_ms);
+            self.drop_if_expired(destination, now_ms);
+        }
 
         match self.entries.get(source) {
             Some(entry) => {
@@ -13746,8 +13760,13 @@ impl Store {
         whereto: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(source, now_ms);
-        self.drop_if_expired(destination, now_ms);
+        // (CrimsonHawk) Guard the two bare drops on `expires_count != 0`: with no volatile keys
+        // neither source nor destination can be expired, so both drops are no-ops; the get(source)
+        // + destination lookup below re-probe. Byte-identical. (RPOPLPUSH / LMOVE — reliable queues.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(source, now_ms);
+            self.drop_if_expired(destination, now_ms);
+        }
 
         match self.entries.get(source) {
             Some(entry) => {
@@ -15271,8 +15290,12 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(source, now_ms);
-        self.drop_if_expired(destination, now_ms);
+        // (CrimsonHawk) Guard the two bare drops on `expires_count != 0` — see rpoplpush.
+        // (SMOVE — move a member between sets.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(source, now_ms);
+            self.drop_if_expired(destination, now_ms);
+        }
 
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -35189,6 +35212,72 @@ mod tests {
             "LTRIM(0,-1)@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) RPOPLPUSH/SMOVE/RENAME multi-key bare-drop guard: byte-identical move
+    // semantics, TTL transfer on RENAME, NO keyspace stat, eviction via expires_count>0.
+    #[test]
+    fn move_ops_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.rpush(b"src", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap();
+        s.sadd(b"ss", &[b"x".to_vec(), b"y".to_vec()], 1).unwrap();
+        s.set(b"rk".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // Guarded multi-key moves (record NO stat).
+        let r_pop = s.rpoplpush(b"src", b"dst", 2); // moves "c" (tail) to dst head
+        let r_smove = s.smove(b"ss", b"sd", b"x", 2); // moves x → sd
+        let r_smove_absent = s.smove(b"ss", b"sd", b"nope", 2); // member absent → false
+        s.rename(b"rk", b"rk2", 2).unwrap();
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+        assert_eq!(r_pop.unwrap(), Some(b"c".to_vec()));
+        assert!(r_smove.unwrap());
+        assert!(!r_smove_absent.unwrap());
+        // Verify (reads record — after the stat assertion).
+        assert_eq!(s.lrange(b"src", 0, -1, 2).unwrap(), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(s.lrange(b"dst", 0, -1, 2).unwrap(), vec![b"c".to_vec()]);
+        assert!(s.sismember(b"sd", b"x", 2).unwrap());
+        assert!(!s.sismember(b"ss", b"x", 2).unwrap());
+        assert_eq!(s.get(b"rk2", 2).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(s.get(b"rk", 2).unwrap(), None);
+
+        // RENAME transfers the TTL (expires_count>0 path exercised).
+        let mut u = Store::new();
+        u.set(b"k".to_vec(), b"v".to_vec(), Some(100_000), 1); // TTL
+        assert!(u.expires_count >= 1);
+        u.rename(b"k", b"k2", 2).unwrap();
+        assert!(u.expires_count >= 1, "TTL transferred (still one volatile key: k2)");
+        assert_eq!(u.get(b"k2", 200).unwrap(), Some(b"v".to_vec()), "k2 present, not expired at now=200");
+
+        // Eviction: expired source → RPOPLPUSH sees nothing.
+        let mut t = Store::new();
+        t.rpush(b"es", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"es", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.rpoplpush(b"es", b"ed", 500).unwrap(), None, "expired source → None");
+        assert!(t.get(b"es", 600).unwrap().is_none());
+
+        // Timing: RPOPLPUSH self-rotate (source==dest, non-destructive) on a 16-elem list.
+        let mut b = Store::new();
+        b.rpush(b"rl:bench", &(0..16u32).map(|i| format!("m{i}").into_bytes()).collect::<Vec<_>>(), 1).unwrap();
+        let k: &[u8] = b"rl:bench";
+        for _ in 0..2000 { b.rpoplpush(k, k, 2).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.rpoplpush(std::hint::black_box(k), std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "RPOPLPUSH self-rotate@16 no-TTL guarded: full={full:.2} ns | elided 2 drops ≈ {:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            2.0 * probe, full + 2.0 * probe, (full + 2.0 * probe) / full
         );
     }
 

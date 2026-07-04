@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — RPOPLPUSH/LMOVE/SMOVE/RENAME/RENAMENX bare-drop guard — RPOPLPUSH 1.13x (byte-exact)
+
+Multi-key MOVE ops, each with 2 unguarded bare drops (source + destination), like COPY:
+`rpoplpush` + `lmove` (reliable-queue transfer — headline), `smove` (set member move), `rename`
+(1 drop), `renamenx` (2 drops). Guarded each drop-group with `if expires_count != 0 { drop(src);
+drop(dst) }`. Universal byte-identity (expires_count==0 ⇒ no volatile key ⇒ drops evict nothing;
+the get(source)/contains_key lookups re-probe). RENAME's TTL-transfer is preserved (when
+expires_count>0 the drops run exactly as before; `expiry_ms(key)` reads the source deadline). Proven
+by `move_ops_bare_drop_guard_matches` (RPOPLPUSH element move, SMOVE present/absent-member, RENAME +
+TTL transfer, no-stat behavior, RPOPLPUSH on an expired source→None + evicted).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed RPOPLPUSH self-rotate@16 (source==dest,
+non-destructive) no-TTL = 169.64 ns/op; elided 2 drops (source+dest `contains_key`) ≈ **22.69 ns**
+→ old ≈ 192.34 ns ⇒ **1.13x (−12%)**. Conformance GREEN (704/704 correctness; 2 failures = brittle
+foldhash / diff_sorted perf-ratio guards under load, unrelated). **Bare-drop-guard vein now covers
+single-key + multi-key writes across list/set/zset/hash/stream/string + rename/move — the hot write
+surface is comprehensively guarded.** Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — LTRIM + stream/bitfield writes bare-drop guard — LTRIM(0,-1)@16 1.23x (byte-exact)
 
 Batch-guarded 9 hot writes with plain bare `drop_if_expired(key)` (record=0): `ltrim` (capped-
