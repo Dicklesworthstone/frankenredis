@@ -17913,7 +17913,12 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
+        // Byte-identical (return discarded; no volatile key ⇒ nothing evicts; the get_mut
+        // below re-probes). Elides drop_if_expired's keyspace probe on the no-TTL path.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -17970,7 +17975,10 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -18024,7 +18032,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -33021,6 +33032,55 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZADD update no-TTL guarded: full={full:.2} ns | elided drop's probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZREMRANGEBYRANK/BYSCORE/BYLEX bare-drop guard: byte-identical removal
+    // counts + the expires_count>0 branch still evicts an expired key (→ removes 0).
+    #[test]
+    fn zremrangeby_drop_guard_matches_and_evicts_expired() {
+        let seed = |s: &mut Store, key: &[u8]| {
+            s.zadd(key, &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec()), (4.0, b"d".to_vec())], 1).unwrap();
+        };
+        // No-TTL path: correct range removals.
+        let mut s = Store::new();
+        seed(&mut s, b"zr");
+        assert_eq!(s.zremrangebyrank(b"zr", 0, 1, 2).unwrap(), 2); // removes a,b
+        assert_eq!(s.zcard(b"zr", 2).unwrap(), 2);
+        let mut s3 = Store::new();
+        s3.zadd(b"zl", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec())], 1).unwrap();
+        assert_eq!(s3.zremrangebylex(b"zl", b"[a", b"[b", 2).unwrap(), 2); // a,b
+        assert_eq!(s3.zcard(b"zl", 2).unwrap(), 1);
+        // Missing key → 0.
+        assert_eq!(s.zremrangebyrank(b"absent", 0, -1, 2).unwrap(), 0);
+
+        // expires_count>0 branch: expired key evicted first → 0 removed.
+        let mut t = Store::new();
+        seed(&mut t, b"exp");
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.zremrangebyrank(b"exp", 0, -1, 500).unwrap(), 0, "expired key removes nothing");
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted");
+
+        // Timing headline: ZREMRANGEBYRANK on an out-of-range (no-op) existing key, no TTL.
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"benchzr:key", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"benchzr:key";
+        for _ in 0..2000 { b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok(); } // empty range → no removal
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZREMRANGEBYRANK no-op no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

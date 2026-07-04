@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZREMRANGEBYRANK/BYSCORE/BYLEX bare-drop `expires_count` guard — ZREMRANGEBYRANK no-op 1.44x (byte-exact)
+
+Continues the write bare-drop-guard vein. All three range-remove writes called a BARE unguarded
+`drop_if_expired(key, now_ms)` (return discarded) followed by `entries.get_mut(key)` — the drop's
+keyspace probe (= `contains_key` via the bd358b400 fast-exit) was pure waste on the no-TTL path
+since get_mut re-probes. Wrapped each in `if expires_count != 0 { drop }` (the lpush/rpush/sadd/
+zadd pattern). Byte-identical: an expired key requires a TTL (expires_count>0 → full drop path
+runs); nothing evicts otherwise. Proven by `zremrangeby_drop_guard_matches_and_evicts_expired`
+(BYRANK/BYLEX range removals + missing-key→0 + the expires_count>0 branch: an expired zset key
+is evicted → removes 0).
+
+MEASURED (per-crate via rch, intra-run isolated): ZREMRANGEBYRANK on an out-of-range/no-op
+existing key, no TTL = 21.87 ns/op; elided drop probe ≈ **9.60 ns** → old ≈ 31.47 ns ⇒
+**1.44x (−31%)** (small op — an empty range does only get_mut + bounds, so the removed probe
+dominates; actual-removal calls amortize it lower). ZREMRANGEBYSCORE/BYLEX share the guard.
+Conformance GREEN (680/680, fully clean). NOTE: ZADD's `zadd`/`zadd_plain_owned` existing-key
+path still double-hashes (contains_key + get_mut, unlike SADD's get_mut-first) — a get_mut-first
+restructure would save another ~10ns but is risky (single/multi-member + digest/encoding/dirty
+bookkeeping); DEFERRED as not-worth-the-risk. Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZADD + ZINCRBY bare-drop `expires_count` guard (WRITE-path pivot) — ZADD 1.13x (byte-exact)
 
 Pivot to the write path (read surface now fully single-lookup-collapsed). ZADD (`zadd`) and
