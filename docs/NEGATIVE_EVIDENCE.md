@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE — per-crate-benchable perf frontier (fr-store + fr-protocol) verified SATURATED; remaining gaps are all fr-server-IO / multi-day-structural — cannot be landed under the per-crate-bench mandate
+
+Post-context-reset land-or-dig pass. Working tree clean, up to date with origin/main
+(nothing uncommitted to land). Independently re-verified — not from memory — that the
+two layers a per-crate `cargo bench` can A/B (fr-store, fr-protocol) hold **no clean,
+safe, uncontended, unshipped lever**:
+
+- **RESP encode (fr-protocol/src/lib.rs)** — fully saturated: `decimal_{u64,usize}_len`
+  already branchless `ilog10` (bead e4fu8 is STALE/shipped), `write_u64_digits` is
+  two-digits-per-step table itoa (itoa2), `encode_bulk_string_slice`/`_aggregate_header`/
+  `_map_header` are borrow-encode (no `Vec<RespFrame>` materialization),
+  `push_redis_double_ascii` optimized. Nothing to shave.
+- **fr-store collections** — the p8dd2 "compact collection storage" lever is already
+  substantially built in `packed_set.rs` (`CompactStrSet`/`CompactFieldMap`/`PackedStrMap`
+  + `foldhash::quality::RandomState`, NOT std SipHash — so the suspected "hashlookup"
+  residual for HMGET/ZMSCORE is not a slow-hasher gap). ChunkedList packed-listpack nodes
+  (99fwc: `ListChunk::Owned`→`Listpack` seal-on-interior) are implemented. DUMP encode
+  (`encode_dump_quicklist2`) already incremental-byte-tracked + presized (q5ody, was 360x→~5x).
+- **Every hot command already has a fast-path packet** in `process_buffered_frames`
+  (GET/MGET/EXISTS/STRLEN/LLEN/SCARD/HLEN/ZCARD/TTL/PTTL/TYPE/INCR/DECR/HGET/HGETALL/
+  SMEMBERS/LRANGE/LINDEX/ZSCORE/…). The only hot commands *lacking* one — SADD (measured
+  ~parity 1.05x clean-fresh A/B), LPUSH/RPUSH (0.77-0.83x, **ChunkedList-structural**, not
+  dispatch-bound), EXISTS-single (covered via the keys-multi packet) — are not clean levers.
+
+**Biggest measured gap** remains large-value GET (~0.6x) / SET (~0.4-0.5x). Root cause
+confirmed unchanged: `SmallStr::Heap(Vec<u8>)` (not `Arc`), and the reply is copied once
+into `conn.write_buf` before `try_flush`. Redis avoids this via refcounted-object writev.
+A zero-copy reply needs either Arc-wrapped string values + an IoSlice reply queue, or a
+cross-event borrow state machine in the fr-server write loop (apg7r >16KB-hang-class risk).
+**Both are delicate fr-server-IO changes that (a) cannot be A/B'd per-crate — they need a
+live socket — and (b) violate the safe/uncontended constraint.** Shipping such a change
+unmeasured would violate this campaign's core "measure fresh-interleaved or it LIES"
+discipline. Not landable under the stated mandate; scoped for a dedicated fr-server session.
+
+**Coordination blocker:** MCP agent-mail DB is corrupted this session ("database disk image
+is malformed" on `file_reservation_paths`) — file reservations are DOWN, so the remaining
+structural work (which requires reservations-up coordination in the shared tree) cannot be
+started safely. `am doctor` repair is central shared infra (all projects/agents) with a
+co-active peer (AmberRiver) — not repaired unilaterally per file-safety rules; surfaced for
+a human/owner decision. Rollback: n/a (no code change).
+
 ## 2026-07-04 BlackThrush: KEEP — ZRANGEBYLEX / ZREVRANGEBYLEX ... LIMIT (member-only) borrow members — 4.19x — completes the zset range-read family
 
 Final zset range-read member-clone gap: the paginated BYLEX `LIMIT offset count`
