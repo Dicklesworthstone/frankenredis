@@ -27449,45 +27449,65 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
 
         let st = self.chained_command_start();
-        let result: Result<Vec<(Vec<u8>, f64)>, RespFrame> =
-            match fr_command::zscore_inverted_wrongtype_guard(
-                &mut self.server.store,
-                key,
-                min,
-                max,
-                now_ms,
-            ) {
-                Ok(true) => Ok(Vec::new()),
-                Ok(false) => self
-                    .server
-                    .store
-                    .zrangebyscore_withscores_limited(key, min, max, true, 0, None, now_ms)
-                    .map_err(|err| CommandError::Store(err).to_resp()),
-                Err(err) => Err(err.to_resp()),
-            };
-        let elapsed_us = self.finish_chained_command(st);
-
+        // (frankenredis-zrange-into) Stream borrowed (member, score) pairs directly
+        // into `out` via `zrevrangebyscore_withscores_borrow_scan` — a faithful
+        // drop-in for `zrangebyscore_withscores_limited(min, max, true, 0, None)`
+        // that skips the `Vec<(Vec<u8>, f64)>` member clone. Same inverted/wrong-type
+        // guard first (Ok(true)=inverted → empty; Err → wrong-type error).
         let mut error_msg = None;
-        match result {
-            Ok(pairs) => {
+        match fr_command::zscore_inverted_wrongtype_guard(
+            &mut self.server.store,
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
+            Ok(true) => {
                 if !suppress_reply {
-                    if resp3 {
-                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
-                        for (member, score) in pairs {
-                            fr_protocol::encode_aggregate_header(2, false, out);
-                            encode_bulk_string_slice(Some(&member), resp3, out);
-                            fr_protocol::encode_redis_double(score, resp3, out);
+                    fr_protocol::encode_aggregate_header(0, false, out);
+                }
+            }
+            Ok(false) => {
+                let scan = self.server.store.zrevrangebyscore_withscores_borrow_scan(
+                    key,
+                    min,
+                    max,
+                    now_ms,
+                    |ev| {
+                        if suppress_reply {
+                            return;
                         }
-                    } else {
-                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
-                        for (member, score) in pairs {
-                            encode_bulk_string_slice(Some(&member), resp3, out);
-                            fr_protocol::encode_redis_double(score, resp3, out);
+                        match ev {
+                            fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                                let entries = if resp3 { n } else { n * 2 };
+                                fr_protocol::encode_aggregate_header(entries, false, out);
+                            }
+                            fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                                if resp3 {
+                                    fr_protocol::encode_aggregate_header(2, false, out);
+                                }
+                                encode_bulk_string_slice(Some(member), resp3, out);
+                                fr_protocol::encode_redis_double(score, resp3, out);
+                            }
                         }
+                    },
+                );
+                if let Err(err) = scan {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    if let RespFrame::Error(msg) = reply {
+                        error_msg = Some(msg);
                     }
                 }
             }
-            Err(reply) => {
+            Err(err) => {
+                let reply = err.to_resp();
                 if !suppress_reply {
                     if resp3 {
                         reply.encode_into_resp3(out);
@@ -27500,6 +27520,7 @@ impl Runtime {
                 }
             }
         }
+        let elapsed_us = self.finish_chained_command(st);
         let failed = error_msg.is_some();
 
         self.record_plain_zremrange_borrowed_metrics(
@@ -42603,6 +42624,82 @@ mod tests {
                         b"z",
                         b"notanumber",
                         b"+inf",
+                        90,
+                        resp3,
+                        &mut Vec::new(),
+                    )
+                    .is_none(),
+                "non-float bound stays on generic dispatch for canonical error text"
+            );
+            assert_eq!(
+                direct.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+    }
+
+    // (frankenredis-zrange-into) ZREVRANGEBYSCORE ... WITHSCORES borrow-scan `_into`
+    // (descending score range) must emit wire bytes byte-identical to the generic
+    // reply in RESP2 and RESP3 across full, sub-range, EXCLUSIVE bounds, single-point
+    // dup scores, empty, inverted, and wrong-type. Note the arg order is `key MAX MIN`.
+    #[test]
+    fn plain_zrevrangebyscore_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                rt.execute_frame(
+                    command(&[
+                        b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"c", b"3.5", b"d", b"5", b"e",
+                    ]),
+                    1,
+                );
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            }
+
+            // (max_arg, min_arg) — ZREVRANGEBYSCORE takes the high bound first.
+            for (ts, (key, max, min)) in (2..).zip([
+                (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()),
+                (b"z".as_slice(), b"3.5".as_slice(), b"2".as_slice()),
+                (b"z".as_slice(), b"5".as_slice(), b"(2".as_slice()), // exclusive min
+                (b"z".as_slice(), b"(3.5".as_slice(), b"1".as_slice()), // exclusive max
+                (b"z".as_slice(), b"(5".as_slice(), b"(1".as_slice()), // both exclusive
+                (b"z".as_slice(), b"2".as_slice(), b"2".as_slice()),   // single point (dup scores)
+                (b"z".as_slice(), b"20".as_slice(), b"10".as_slice()), // empty (out of range)
+                (b"z".as_slice(), b"1".as_slice(), b"5".as_slice()),   // inverted -> empty
+                (b"nokey".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()),
+                (b"str".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()), // wrong type
+            ]) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_zrevrangebyscore_withscores_borrowed_into(
+                        key, max, min, ts, resp3, &mut out,
+                    )
+                    .expect("ZREVRANGEBYSCORE WITHSCORES should take borrowed fast path");
+                let generic_reply = generic.execute_frame(
+                    command(&[b"ZREVRANGEBYSCORE".as_slice(), key, max, min, b"WITHSCORES"]),
+                    ts,
+                );
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} max={max:?} min={min:?}"
+                );
+            }
+
+            assert!(
+                direct
+                    .execute_plain_zrevrangebyscore_withscores_borrowed_into(
+                        b"z",
+                        b"notanumber",
+                        b"-inf",
                         90,
                         resp3,
                         &mut Vec::new(),

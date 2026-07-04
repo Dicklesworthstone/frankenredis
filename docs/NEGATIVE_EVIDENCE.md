@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZREVRANGEBYSCORE ... WITHSCORES reply borrows members (descending score range)
+
+Descending twin of the ZRANGEBYSCORE WITHSCORES borrow-scan. The `_into`
+(`execute_plain_zrevrangebyscore_withscores_borrowed_into`) skipped generic
+dispatch but still cloned every member via `zrangebyscore_withscores_limited(..,
+rev=true, ..)`. New `SortedSet::score_bound_range_desc_refs` (descending mirror of
+`score_bound_range_asc_refs`: Packed `iter_desc().filter(score_in_range)`, Full
+`ordered.range(score_bounds(min,max)).rev()`) + `Store::zrevrangebyscore_withscores_borrow_scan`
+(drop-in for `...limited(min,max,true,0,None)`) drive the `ZRangeWithScoresScanEvent`
+sink; the executor keeps the inverted/wrong-type guard and streams the reply.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; remote). 1000-member zset,
+32-byte members, whole set (`+inf`/`-inf` descending):
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/revbyscore_clone_full_range` (owned `Vec<(Vec<u8>,f64)>`) | 21.784 µs | baseline |
+| `zrange_withscores/revbyscore_borrow_full_range` (streamed borrow scan) | 2.593 µs | **8.40x faster** |
+
+Conformance GREEN: byte-exact
+`plain_zrevrangebyscore_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3`
+across full (`+inf -inf`), sub-range, EXCLUSIVE bounds (`(2`, `(3.5`, `(1`/`(5`),
+single-point dup scores, empty, inverted, wrong-type, RESP2+RESP3; commands/error
+stat parity. Completes the WITHSCORES zset-range family (ZRANGE/ZREVRANGE/
+ZRANGEBYSCORE/ZREVRANGEBYSCORE all now borrow members). Rollback: revert the
+executor to `zrangebyscore_withscores_limited(.., true, ..)`.
+
 ## 2026-07-04 CrimsonHawk: SURFACE — cold compact-zset DUMP is now 1.138x Redis 7.2.4; no unmeasured production lever retained
 
 Added a focused per-crate `fr-bench` Criterion row for cold first-pass `DUMP`

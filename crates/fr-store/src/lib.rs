@@ -2306,6 +2306,29 @@ impl SortedSet {
         }
     }
 
+    /// (frankenredis-zrange-into) Descending twin of [`Self::score_bound_range_asc_refs`]
+    /// — the borrowing form of `score_bound_range_limited(min, max, rev=true,
+    /// offset=0, take=MAX)`. Mirrors that method's rev branch EXACTLY (Packed:
+    /// `iter_desc().filter(score_in_range)`; Full: `ordered.range(score_bounds).rev()`),
+    /// returning the matching `(member, score)` pairs in DESCENDING order with the
+    /// member borrowed (no per-member `Vec<u8>` clone).
+    fn score_bound_range_desc_refs(&self, min: ScoreBound, max: ScoreBound) -> Vec<(&[u8], f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p
+                .iter_desc()
+                .filter(|(_, score)| score_in_range(*score, min, max))
+                .collect(),
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                full.ordered
+                    .range((lower, upper))
+                    .rev()
+                    .filter_map(|sm| sm.member.as_actual().map(|member| (member, sm.score)))
+                    .collect()
+            }
+        }
+    }
+
     /// `score_bound_range_limited` with adaptive treap warming: a large zset hit
     /// by a deep-offset LIMIT query builds the order-statistic treap so the jump
     /// path can fire. Byte-identical result. (frankenredis-yozwx)
@@ -16046,6 +16069,63 @@ impl Store {
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         let refs = zs.score_bound_range_asc_refs(min, max);
+                        sink(ZRangeWithScoresScanEvent::Len(refs.len()));
+                        for (member, score) in refs {
+                            sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
+    /// (frankenredis-zrange-into) Descending twin of
+    /// [`Store::zrangebyscore_withscores_borrow_scan`] — borrow-scan drop-in for
+    /// `zrangebyscore_withscores_limited(key, min, max, rev=true, offset=0,
+    /// count=None, now_ms)` (i.e. ZREVRANGEBYSCORE ... WITHSCORES). IDENTICAL
+    /// bookkeeping (same `record_keyspace_lookup`, `score_bound_value(min) >
+    /// score_bound_value(max)` empty guard, LFU, `touch`) and membership, via
+    /// [`SortedSet::score_bound_range_desc_refs`] (descending), with the members
+    /// borrowed instead of cloned into `Vec<(Vec<u8>, f64)>`.
+    pub fn zrevrangebyscore_withscores_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
+        mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
+        }
+        if score_bound_value(min) > score_bound_value(max) {
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let refs = zs.score_bound_range_desc_refs(min, max);
                         sink(ZRangeWithScoresScanEvent::Len(refs.len()));
                         for (member, score) in refs {
                             sink(ZRangeWithScoresScanEvent::Pair(member, score));
