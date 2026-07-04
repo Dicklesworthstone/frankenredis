@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HGET + hget_with single-lookup collapse (field-TTL-gated) — HGET@8fields 1.20x (byte-exact)
+
+Unblocks the hash-read family (previously deferred for the field-TTL wrinkle). The blocker:
+`drop_hash_field_if_expired` sits BETWEEN `record_keyspace_lookup` and `get_mut`, and can
+empty→remove the hash, so a naive collapse (stat counted at get_mut) miscounts the keyspace
+hit when a field-drop removes the key. INSIGHT: that miscount is only reachable when
+`hash_field_expires` is NON-empty; when it's EMPTY (the common case — HEXPIRE is rare), the
+field-drop is a guaranteed no-op. So GATE the collapse on `hash_field_expires.is_empty() &&
+!lfu` and fall back to the original path otherwise. HGET + `hget_with` (the zero-copy `_into`
+borrow, live path) both collapsed. Byte-identical: same value/borrow, WRONGTYPE, keyspace
+hit/miss (counted once), UNCONDITIONAL `touch` (incl WRONGTYPE), key lazy-expiry; the
+field-TTL fallback path still reaps expired fields. Proven by
+`hget_single_lookup_collapse_and_field_ttl_fallback` (collapse values/misses/WRONGTYPE/hit-miss
+deltas + key eviction, AND the non-empty-map fallback reaping an expired field while a live
+field remains).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed HGET@8fields no-TTL = 47.84 ns/op;
+removed 2nd keyspace probe ≈ **9.67 ns** → old ≈ 57.51 ns ⇒ **1.20x (−17%)** on the hottest
+hash read; `hget_with` shares it. Conformance GREEN (677/677, fully clean). VEIN: same
+`is_empty()`-gated collapse now fits HLEN/HEXISTS/HSTRLEN/HGETALL/HKEYS/HVALS (each just needs
+its per-field/all-field drop guarded by the same map-empty gate). Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SMEMBERS + LRANGE borrow-scan single-lookup collapse — SMEMBERS@8 1.18x (byte-exact)
 
 Extends the single-lookup-collapse vein to the collection-scan `_into` reply paths
