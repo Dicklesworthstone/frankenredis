@@ -15235,7 +15235,14 @@ impl Store {
         members: &[(f64, Vec<u8>)],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired (return discarded, called only for
+        // the eviction side-effect) on `expires_count != 0` — mirrors lpush/rpush/sadd.
+        // With no volatile keys nothing can evict, so the whole call is dead; skipping it
+        // elides drop_if_expired's keyspace probe on top of the `contains_key` below.
+        // Byte-identical: an expired key requires a TTL, which keeps expires_count>0.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         if !self.entries.contains_key(key) {
             let zset_max_entries = self.zset_max_listpack_entries;
@@ -16890,7 +16897,11 @@ impl Store {
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
+        // Byte-identical (return discarded; no volatile key ⇒ nothing to evict).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
 
         let key_existed = self.entries.contains_key(key);
         if opts.xx && !key_existed {
@@ -32955,6 +32966,61 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "HLEN@8fields no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZADD/ZINCRBY bare-drop guard must be byte-identical, incl the
+    // expires_count>0 branch: an expired zset key is evicted before the write (so ZADD
+    // creates a fresh set / ZINCRBY starts from 0), exactly as the unguarded call did.
+    #[test]
+    fn zadd_zincrby_drop_guard_matches_and_evicts_expired() {
+        use crate::ZaddOptions;
+        // No-TTL path: normal add/increment.
+        let mut s = Store::new();
+        assert_eq!(s.expires_count, 0);
+        assert_eq!(s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap(), 2);
+        assert_eq!(s.zadd(b"z", &[(3.0, b"a".to_vec())], 1).unwrap(), 0); // update, not new
+        assert_eq!(s.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
+        let inc = s.zincrby_with_options(b"z", b"a".to_vec(), 1.5, ZaddOptions::default(), 1).unwrap();
+        assert_eq!(inc, Some(4.5));
+
+        // expires_count>0 branch: expired zset key evicted, then ZADD makes a fresh set.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(9.0, b"old".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1); // due by t=500
+        assert!(t.expires_count >= 1);
+        // ZADD at t=500 must not see the expired "old"; fresh set with only "new".
+        assert_eq!(t.zadd(b"exp", &[(1.0, b"new".to_vec())], 500).unwrap(), 1);
+        assert_eq!(t.zscore(b"exp", b"old", 500).unwrap(), None, "expired member gone");
+        assert_eq!(t.zscore(b"exp", b"new", 500).unwrap(), Some(1.0));
+
+        // ZINCRBY on an expired key starts fresh from 0.
+        let mut u = Store::new();
+        u.zadd(b"e2", &[(100.0, b"m".to_vec())], 1).unwrap();
+        u.expire_at_milliseconds(b"e2", 50, 1);
+        let r = u.zincrby_with_options(b"e2", b"m".to_vec(), 5.0, ZaddOptions::default(), 500).unwrap();
+        assert_eq!(r, Some(5.0), "ZINCRBY on expired key starts from 0");
+
+        // Timing headline: ZADD update on existing key (no TTL, LFU off).
+        let mut b = Store::new();
+        b.zadd(b"benchz:key", &[(1.0, b"m".to_vec())], 1).unwrap();
+        let k: &[u8] = b"benchz:key";
+        let m = &[(2.0, b"m".to_vec())];
+        for _ in 0..2000 { b.zadd(std::hint::black_box(k), m, 2).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zadd(std::hint::black_box(k), m, 2).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZADD update no-TTL guarded: full={full:.2} ns | elided drop's probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

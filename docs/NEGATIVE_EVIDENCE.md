@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZADD + ZINCRBY bare-drop `expires_count` guard (WRITE-path pivot) — ZADD 1.13x (byte-exact)
+
+Pivot to the write path (read surface now fully single-lookup-collapsed). ZADD (`zadd`) and
+ZINCRBY (`zincrby_with_options`) called a BARE unguarded `drop_if_expired(key, now_ms)`
+(return discarded — invoked only for the eviction side-effect) — unlike lpush/rpush/sadd/hset
+which all guard it with `if expires_count != 0`. So with no volatile keys the call was dead but
+still cost a keyspace probe (drop_if_expired = `contains_key` since the bd358b400 fast-exit),
+ON TOP of ZADD's own `contains_key` new-vs-existing check. Wrapped both in `if expires_count
+!= 0 { drop }`. Byte-identical: an expired key requires a TTL (expires_count>0 → full drop path
+runs unchanged); with expires_count==0 nothing can evict. Proven by
+`zadd_zincrby_drop_guard_matches_and_evicts_expired` (normal add/update/increment AND the
+expires_count>0 branch: an expired zset key is evicted before the write → ZADD makes a fresh
+set, ZINCRBY starts from 0).
+
+MEASURED (per-crate via rch, intra-run isolated): ZADD update-existing no-TTL = 85.30 ns/op;
+elided drop's probe ≈ **10.70 ns** → old ≈ 95.99 ns ⇒ **1.13x (−11%)** (ZADD is a bigger op —
+member sort/insert — so the probe is a smaller fraction than the tiny reads). ZINCRBY shares
+it. Conformance GREEN (679/679, fully clean run). Remaining unguarded zset-write bare drops:
+ZREMRANGEBYRANK/BYSCORE/BYLEX (moderately hot, same guard — drop is at a different offset,
+verify per-fn next). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — hash-read family (HEXISTS/HSTRLEN/HLEN/HGETALL/HKEYS/HVALS) field-TTL-gated single-lookup collapse — HLEN@8fields 1.49x (byte-exact)
 
 Completes the hash-read family using the same `hash_field_expires.is_empty() && !lfu` gate as
