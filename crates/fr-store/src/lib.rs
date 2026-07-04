@@ -8034,16 +8034,33 @@ impl Store {
     }
 
     pub fn getdel(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(None);
-        }
-        match self.entries.get(key) {
-            Some(entry) => {
-                if !entry.value.is_string_like() {
-                    return Err(StoreError::WrongType);
+        // (CrimsonHawk) Non-LFU: fold the slow path's `record_keyspace_lookup` (a keyspace
+        // probe via drop_if_expired) + the separate `entries.get` type-check into ONE
+        // `lookup_live_for_read_mut` (peek expiry + record hit/miss + return the live entry).
+        // The `internal_entries_remove` below is still a separate probe, but this drops the
+        // TRIPLE lookup to a double. Byte-identical: same key lazy-expiry, hit/miss, WRONGTYPE
+        // (no removal), and — like the slow path — NO `touch` (GETDEL removes). LFU verbatim.
+        if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    if !entry.value.is_string_like() {
+                        return Err(StoreError::WrongType);
+                    }
                 }
+                None => return Ok(None),
             }
-            None => return Ok(None),
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(None);
+            }
+            match self.entries.get(key) {
+                Some(entry) => {
+                    if !entry.value.is_string_like() {
+                        return Err(StoreError::WrongType);
+                    }
+                }
+                None => return Ok(None),
+            }
         }
         let Some(entry) = self.internal_entries_remove(key) else {
             return Ok(None);
@@ -33305,6 +33322,60 @@ mod tests {
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
+    }
+
+    // (CrimsonHawk) GETDEL non-LFU collapse (triple→double probe): byte-identical value +
+    // removal, WRONGTYPE without removal, missing→None, integer value, key lazy-expiry, stats.
+    #[test]
+    fn getdel_collapse_matches_full_path() {
+        let mut s = Store::new();
+        s.set(b"k".to_vec(), b"v".to_vec(), None, 1);
+        s.set(b"n".to_vec(), b"12345".to_vec(), None, 1); // may be int-encoded
+        s.rpush(b"lst", &[b"a".to_vec()], 1).unwrap();
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // Do all four getdels FIRST (only these count toward the stat window), capturing
+        // results — the removal-verification reads below record their own stats.
+        let r_k = s.getdel(b"k", 2);
+        let r_n = s.getdel(b"n", 2);
+        let r_absent = s.getdel(b"absent", 2);
+        let r_lst = s.getdel(b"lst", 2);
+        // hits: getdel(k), getdel(n), getdel(lst wrongtype) = 3; misses: getdel(absent) = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 3);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        // Results.
+        assert_eq!(r_k.unwrap(), Some(b"v".to_vec()));
+        assert_eq!(r_n.unwrap(), Some(b"12345".to_vec())); // int-encoded → decimal bytes
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(matches!(r_lst, Err(StoreError::WrongType)));
+        // Removal / non-removal (these reads happen AFTER the stat assertion).
+        assert!(s.get(b"k", 2).unwrap().is_none(), "GETDEL removed the string key");
+        assert!(s.get(b"n", 2).unwrap().is_none());
+        assert_eq!(s.llen(b"lst", 2).unwrap(), 1, "WRONGTYPE GETDEL must not delete");
+
+        // Lazy-expiry: expired key → None + evicted.
+        let mut t = Store::new();
+        t.set(b"exp".to_vec(), b"v".to_vec(), Some(50), 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.getdel(b"exp", 500).unwrap(), None, "expired key → None");
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: GETDEL collapse removes ONE of the former THREE keyspace probes
+        // (record_keyspace_lookup + get + remove → lookup_live + remove). Measure that
+        // removed probe (a keyspace hash+lookup) in isolation; GETDEL's own baseline
+        // (get + remove + value extract) is ~40-50 ns, so this is a ~1.2x-class win.
+        let mut b = Store::new();
+        let k: &[u8] = b"getdel:bench:key";
+        b.set(k.to_vec(), b"v".to_vec(), None, 2);
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t2 = std::time::Instant::now();
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
+        let probe = t2.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!("GETDEL collapse: removed 1 of 3 keyspace probes ≈ {probe:.2} ns/probe");
     }
 
     #[test]

@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — GETDEL triple→double keyspace-probe collapse — removed ~14 ns probe (~1.3x-class, byte-exact)
+
+GETDEL did THREE keyspace probes: `record_keyspace_lookup` (drop_if_expired) + `entries.get`
+(WRONGTYPE type-check) + `internal_entries_remove`. Folded the first two into ONE
+`lookup_live_for_read_mut` on the non-LFU fast path (peek expiry + record hit/miss + return the
+live entry for the type check); the remove stays a separate probe → double lookup. Byte-identical:
+same key lazy-expiry, hit/miss, WRONGTYPE-without-removal, integer-value decode, and (like the
+slow path) NO `touch` (GETDEL removes). LFU path left verbatim. Proven by
+`getdel_collapse_matches_full_path` (string+int value/removal, WRONGTYPE-no-delete, missing→None,
+key eviction, exact hit/miss deltas). Memory's old "GETDEL = N/A" note was about VALUE-clone
+zero-copy (still true — value is owned post-remove), NOT this keyspace-probe collapse.
+
+MEASURED (per-crate via rch, intra-run isolated): the removed keyspace probe ≈ **14.16 ns**
+(~20-char key) on GETDEL's ~40-50 ns baseline (get + remove + value extract) ⇒ **~1.3x-class**.
+Conformance GREEN (684/684, fully clean run). NOTE: initial run failed on the test's own
+hit/miss expectation — the verification reads (s.get after each getdel) record their OWN stats;
+fixed by asserting stats immediately after the getdels, before the verification reads. The
+CODE was byte-identical throughout. Also confirmed `Entry::touch` is already optimal (const
+thread_local TOUCH_DISABLED = fast TLS path; lru_access_millis = a cast). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HMGET key-lookup collapse (field-TTL-gated) — HMGET@8 1.04x / bigger for small HMGET (byte-exact)
 
 The last MISSED hot read: `hmget`/`hmget_for_each` (the live borrow path) still did
