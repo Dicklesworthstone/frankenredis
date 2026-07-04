@@ -4,6 +4,38 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE (scoped blocker) — random-sample member-clone sub-vein COMPLETE (5 ships); next member-clone targets are dedicated efforts
+
+The random-sample member-clone-elimination sub-vein is exhausted for all BORROWABLE forms — 5 live
+byte-exact ships this arc: SRANDMEMBER count 2.39x, HRANDFIELD count 3.38x, ZRANDMEMBER count 2.60x,
+SRANDMEMBER single 1.62x, HRANDFIELD single 1.49x. ZRANDMEMBER single is unborrowable
+(`index_slice_asc_adaptive`→treap `into_actual()` OWNS). These were tractable because each had an
+EXISTING borrowed fast path (`execute_plain_rand_member*_borrowed`) merely routing to a clone/RespFrame
+reply — the conversion was just: store `*_borrow`/`*_borrow_scan` (RNG verbatim, clone→as_ref sink) +
+`_into` executor (`encode_aggregate_header(n,FALSE)`=*N + `encode_bulk_string_slice`) + dispatch
+`FastReply`→`FastEncodedReply`.
+
+INVESTIGATED this turn — the remaining member-clone reads are dedicated efforts, NOT clean single-turn
+ships:
+- **SSCAN/HSCAN/ZSCAN cursor-0** DO have a borrowed fast path (`execute_plain_scan0_borrowed`, shared by
+  S/H/Z) that clones members into `Vec<RespFrame>`. But: (a) the listpack/intset full-shot case is
+  DECODE-bound (listpack members are decoded to owned `Vec<u8>` regardless — the borrow only saves the
+  intermediate `Vec<Vec<u8>>`/`Vec<RespFrame>`, a MODEST win, NOT the per-member clone); (b) the real
+  clone win is the HASHTABLE batch (members are `&Vec<u8>`, borrowable) — but that needs the
+  cursor-BEFORE-members RESP ordering solved (viable via collecting `Vec<&[u8]>` fat-pointer refs during
+  the dictScan walk + returning `next_cursor`, then writing `[cursor, [refs]]`) AND byte-exact mirroring
+  of sscan's reverse-binary dictScan + `next_cursor` (mid-scan-deletion guarantee, see
+  project_scan_deletion_guarantee_vein) AND the `_into` must replicate the shared executor's `key_type`
+  (no-stat, idempotent drop — so declining after it is safe) + `sscan`(no-stat) double-drop accounting +
+  the decline path. Correctness-sensitive; a dedicated turn.
+- **HRANDFIELD WITHVALUES / ZRANDMEMBER WITHSCORES** have NO borrowed fast path (the count parser DEFERS
+  the *4 WITHVALUES/WITHSCORES form to generic). Needs a NEW borrowed parser + fast path + a pair-encoder
+  handling RESP2-flat vs RESP3-pairs (the ZRANGE-WITHSCORES `_into` encoder is reusable for WITHSCORES).
+
+NEXT DEDICATED EFFORT: SSCAN-hashtable `_into` via the refs-Vec approach (highest value — common, truly
+clone-bound), starting from `execute_plain_scan0_borrowed` @ fr-runtime ~22123. Keyspace-probe + bare-
+drop-guard veins remain exhausted. No clean single-turn per-crate win was available this turn.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD single (no count) zero-copy `_into` WIRED LIVE — 1.49x store A/B (byte-exact)
 
 Fifth ship in the member-clone-elimination arc: the single `HRANDFIELD key` form (no count — common,
