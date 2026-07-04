@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE (blocker) — clean single-turn per-crate keyspace-probe/bare-drop vein EXHAUSTED; next levers are multi-part/structural
+
+After 39 byte-exact ships this arc (keyspace-probe single-lookup collapses across the entire read
+surface + bare-drop `expires_count` guards across the entire write surface — single-key AND
+multi-key, list/set/zset/hash/stream/string + rename/move + SCAN reads), the vein of clean,
+single-turn, per-crate `fr-store` wins is comprehensively exhausted. Verified exhausted THIS turn by
+two independent re-greps: (1) no `*_borrowed`/other fn has an unguarded bare `drop_if_expired(key)`
+left on a hot live path; (2) no fn has a redundant bare-drop + `record_keyspace_lookup` double-lookup
+(COPY was the only one, already fixed).
+
+**The next real lever — SCAN member-CLONE elimination — is a correctness-sensitive MULTI-PART change,
+deliberately NOT rushed in a 60m turn:** SSCAN/HSCAN/ZSCAN are clone-bound (SSCAN@16 = 368 ns, ~350 ns
+of which is the reply-Vec member clones; the keyspace probe is a tiny fraction — see the 1.03x
+marginal guard entry). Eliminating the clone requires the full zero-copy `_into` path:
+(a) a store `*scan_borrow_scan` method that STREAMS borrowed members via a sink while preserving the
+exact per-encoding cursor semantics (intset/listpack full-shot at cursor 0 vs hashtable-batched — see
+`ENTRY_FORCE_SET_HASHTABLE_ENCODING`), PLUS (b) a NEW fr-server `_into` encoder that writes the
+nested `[cursor, [members]]` reply's borrowed members directly to the output buffer (FastEncodedReply),
+routed from `process_buffered_frames`. SCAN's cursor semantics carry a documented mid-scan-deletion
+guarantee (see project_scan_deletion_guarantee_vein) — a rushed borrow-scan risks a correctness
+regression on a hot, subtle path. This is a dedicated effort (est. multi-hour, 3 commands), not a
+clean single-turn per-crate ship. Related smaller sub-observation: the fr-command SCAN path does a
+DOUBLE key lookup (`store.key_type(key)` for the pre-parse empty/wrongtype check — which carries the
+load-bearing keyspace stat — then `store.hscan(key)`); collapsing it is blocked by the upstream
+ordering requirement (empty-scan reply must precede arg-parse) + the stat being parity-load-bearing.
+
+Other remaining levers are all structural (multi-day / contended crates): ChunkedList packed-node
+rewrite (RPUSH/LPUSH 0.77-0.83x), SortedSet `score_bound_range_*_refs` Vec elimination, hashbrown
+`raw_entry_mut` for the write-path get-or-insert single-probe (blocked on std HashMap + polonius,
+see the internal_entry E0499 note). NO clean per-crate single-turn win remains on `fr-store`.
+
 ## 2026-07-04 CrimsonHawk: KEEP (marginal) — HSCAN/SSCAN/ZSCAN bare-drop guard — SSCAN@16 1.03x (byte-exact)
 
 Completed the bare-drop-guard vein into the last untested bare-drop READS: `hscan` (+ hash-field
