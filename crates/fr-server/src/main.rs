@@ -19889,10 +19889,20 @@ fn process_argv_frame(
         if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts) {
             encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
         } else {
+            // (frankenredis-97shd) When a WAIT/WAITAOF blocks, solicit an immediate
+            // replica ack via REPLCONF GETACK so the blocked command resolves within
+            // ~1 RTT instead of waiting for the replica's ~1Hz periodic ACK (which
+            // made short-timeout WAIT undercount to :0 vs redis :1). No-op with no
+            // replicas attached.
+            let solicit_ack =
+                matches!(blocked.op, BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. });
             conn.blocked = Some(blocked);
             blocked_tokens.insert(token);
             if let Some(blocked) = &conn.blocked {
                 blocked_wake_index.insert(token, blocked);
+            }
+            if solicit_ack {
+                runtime.solicit_replica_ack();
             }
             runtime.mark_client_blocked(runtime.client_id());
             return ProcessArgvAction::BreakAfterConsume;

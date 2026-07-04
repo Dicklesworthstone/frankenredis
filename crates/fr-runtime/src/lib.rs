@@ -3397,8 +3397,16 @@ fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
 /// never persisted to the append-only file. The AOF disk flush filters these
 /// records back out by name so the on-disk AOF matches upstream.
 fn command_is_replication_only(argv: &[Vec<u8>]) -> bool {
-    argv.first()
-        .is_some_and(|cmd| eq_ascii_token(cmd, b"PUBLISH") || eq_ascii_token(cmd, b"SPUBLISH"))
+    argv.first().is_some_and(|cmd| {
+        eq_ascii_token(cmd, b"PUBLISH")
+            || eq_ascii_token(cmd, b"SPUBLISH")
+            // REPLCONF (e.g. GETACK, injected by WAIT to solicit an immediate replica
+            // ack) rides the replication backlog to feed replicas but is a
+            // replication-control command that must NEVER be persisted to the AOF —
+            // upstream never writes REPLCONF to the AOF, and replaying it on load would
+            // be a bogus command. (frankenredis-97shd)
+            || eq_ascii_token(cmd, b"REPLCONF")
+    })
 }
 
 /// Single-key PFCOUNT is a "may-replicate" read: when the cached HLL
@@ -5969,6 +5977,21 @@ impl Runtime {
     #[must_use]
     pub fn has_connected_replicas(&self) -> bool {
         !self.server.replication_runtime_state.replicas.is_empty()
+    }
+
+    /// (frankenredis-97shd) Solicit an immediate ack from every connected replica by
+    /// injecting `REPLCONF GETACK *` into the replication stream. Called once when a
+    /// WAIT/WAITAOF(numreplicas>0) blocks: without it, replica ack offsets advance
+    /// only on the replica's ~1Hz periodic ACK, so a short-timeout WAIT undercounts
+    /// (`WAIT 1 200` -> :0 where redis returns :1) and successful WAITs are up to ~1s
+    /// slow. The GETACK record rides the offset-tracked backlog to the replicas
+    /// (advancing master_repl_offset like upstream) but `command_is_replication_only`
+    /// keeps it out of the AOF. No-op when no replica is attached.
+    pub fn solicit_replica_ack(&mut self) {
+        if !self.has_connected_replicas() {
+            return;
+        }
+        self.capture_aof_record(&[b"REPLCONF".to_vec(), b"GETACK".to_vec(), b"*".to_vec()]);
     }
 
     /// The client-output-buffer-limit HARD limit (in bytes) that applies to the
@@ -50554,6 +50577,10 @@ mod tests {
         assert!(crate::command_is_replication_only(&[b"PUBLISH".to_vec()]));
         assert!(crate::command_is_replication_only(&[b"publish".to_vec()]));
         assert!(crate::command_is_replication_only(&[b"SPUBLISH".to_vec()]));
+        // (97shd) REPLCONF (GETACK injected by WAIT) is repl-only: rides the backlog
+        // to replicas but never persisted to the AOF.
+        assert!(crate::command_is_replication_only(&[b"REPLCONF".to_vec()]));
+        assert!(crate::command_is_replication_only(&[b"replconf".to_vec()]));
         assert!(!crate::command_is_replication_only(&[b"SET".to_vec()]));
         assert!(!crate::command_is_replication_only(
             &[b"SUBSCRIBE".to_vec()]
