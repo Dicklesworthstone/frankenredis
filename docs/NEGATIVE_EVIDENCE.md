@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREVRANGE zero-copy `_into` WIRED LIVE — 11.95x store A/B (byte-exact)
+
+Reverse mirror of the XRANGE `_into` (shipped hours ago, 11.88x). `execute_plain_xrevrange_borrowed`
+also cloned every field of every entry (`fields.to_pairs()`). Since `store.xrevrange` is IDENTICAL to
+`store.xrange` except the walk is `range(start..=end).rev()`, I added a single `rev: bool` param to the
+existing `Store::xrange_borrow_scan` (branches the collect loop `.rev()` vs forward — the ONLY
+difference) rather than duplicating the method. `execute_plain_xrevrange_borrowed_into` mirrors the
+XRANGE `_into` with the XREVRANGE wire order (`end start`) and `rev = true`, reusing the SAME
+`XrangeReplyEvent` encoder (nested `[[id,[f,v,…]],…]`, plain array RESP2+3) + gate/parse/count/preamble/
+metrics/error accounting. Swapped all 3 fr-server XREVRANGE dispatch sites (no-COUNT ×2 + COUNT)
+FastReply → FastEncodedReply.
+
+BYTE-EXACT: extended `xrange_borrow_scan_matches_clone` to assert BOTH directions — forward vs clone
+`xrange` AND reverse vs clone `xrevrange` (wire order end,start) — across full / sub / count-limited /
+`start>end` ranges × {4, 500} entries + WRONGTYPE (both dirs) + missing (both dirs). VERIFIED local
+symlink-legacy build: compiles clean; fr-server 217/218 (lone fail the PRE-EXISTING
+`mset_packet_dispatcher`).
+
+MEASURED (store-level A/B, per-crate rch, full range over a 500-entry stream × 3 fields): clone
+`xrange` = 69460 ns/op vs borrow = **5813 ns/op = 11.95x** (the reverse walk has the same per-entry
+field-clone cost, so the same ratio holds). STREAM read-clone vein now covers XRANGE + XREVRANGE. NEXT:
+XREAD/XREADGROUP (multi-stream, nested-per-key reply). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XRANGE zero-copy `_into` WIRED LIVE — 11.88x store A/B (byte-exact)
 
 New member-clone class: STREAM reads. `execute_plain_xrange_borrowed` had a fast path but built a

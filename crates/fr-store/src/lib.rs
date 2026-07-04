@@ -19802,6 +19802,7 @@ impl Store {
         end: StreamId,
         count: Option<usize>,
         now_ms: u64,
+        rev: bool,
         mut sink: impl FnMut(XrangeReplyEvent<'_>),
     ) -> Result<(), StoreError> {
         let entry = if !self.lfu_tracking_enabled() {
@@ -19841,13 +19842,26 @@ impl Store {
                     sink(XrangeReplyEvent::RecordCount(0));
                     false
                 } else {
+                    // (CrimsonHawk) `rev` = XREVRANGE: the ONLY difference from XRANGE is walking the
+                    // same `start..=end` range descending (mirrors `xrevrange`'s `.rev()`).
                     let mut records = Vec::new();
-                    for (id, fields) in entries.range(start..=end) {
-                        records.push((*id, fields));
-                        if let Some(limit) = count
-                            && records.len() >= limit
-                        {
-                            break;
+                    if rev {
+                        for (id, fields) in entries.range(start..=end).rev() {
+                            records.push((*id, fields));
+                            if let Some(limit) = count
+                                && records.len() >= limit
+                            {
+                                break;
+                            }
+                        }
+                    } else {
+                        for (id, fields) in entries.range(start..=end) {
+                            records.push((*id, fields));
+                            if let Some(limit) = count
+                                && records.len() >= limit
+                            {
+                                break;
+                            }
                         }
                     }
                     sink(XrangeReplyEvent::RecordCount(records.len()));
@@ -36722,10 +36736,10 @@ mod tests {
             s
         }
         type Rec = Vec<(crate::StreamId, Vec<(Vec<u8>, Vec<u8>)>)>;
-        fn borrow(s: &mut Store, start: crate::StreamId, end: crate::StreamId, count: Option<usize>) -> Rec {
+        fn borrow(s: &mut Store, start: crate::StreamId, end: crate::StreamId, count: Option<usize>, rev: bool) -> Rec {
             let mut recs: Rec = Vec::new();
             let mut pending: Option<Vec<u8>> = None;
-            s.xrange_borrow_scan(b"st", start, end, count, 0, |ev| match ev {
+            s.xrange_borrow_scan(b"st", start, end, count, 0, rev, |ev| match ev {
                 XrangeReplyEvent::RecordCount(_) => {}
                 XrangeReplyEvent::RecordStart(id, _) => recs.push((id, Vec::new())),
                 XrangeReplyEvent::Field(f) => match pending.take() {
@@ -36746,27 +36760,31 @@ mod tests {
                 ((2, 0), (n.saturating_sub(1).max(1), 0), None),
                 ((10, 0), (5, 0), None), // start > end ⇒ empty
             ] {
+                // Forward (XRANGE) and reverse (XREVRANGE — wire order end,start).
                 let clone = s.xrange(b"st", start, end, count, 0).unwrap();
-                let borrowed = borrow(&mut s, start, end, count);
-                assert_eq!(clone, borrowed, "n={n} range={start:?}..{end:?} count={count:?}");
+                assert_eq!(clone, borrow(&mut s, start, end, count, false), "fwd n={n} {start:?}..{end:?} c={count:?}");
+                let rclone = s.xrevrange(b"st", end, start, count, 0).unwrap();
+                assert_eq!(rclone, borrow(&mut s, start, end, count, true), "rev n={n} {start:?}..{end:?} c={count:?}");
             }
         }
         // WRONGTYPE + missing.
         let mut w = Store::new();
         w.set(b"st".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, |_| {}), Err(StoreError::WrongType)));
-        assert_eq!(borrow(&mut Store::new(), min, max, None), Vec::new());
+        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, false, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, true, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow(&mut Store::new(), min, max, None, false), Vec::new());
+        assert_eq!(borrow(&mut Store::new(), min, max, None, true), Vec::new());
 
         // Timing A/B: 500-entry stream, 3 fields each, full range.
         let mut cl = build(500);
         let mut bo = build(500);
-        for _ in 0..200 { std::hint::black_box(cl.xrange(b"st", min, max, None, 0)).ok(); std::hint::black_box(borrow(&mut bo, min, max, None)); }
+        for _ in 0..200 { std::hint::black_box(cl.xrange(b"st", min, max, None, 0)).ok(); std::hint::black_box(borrow(&mut bo, min, max, None, false)); }
         let reps = 20_000u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps { std::hint::black_box(cl.xrange(std::hint::black_box(b"st"), min, max, None, 0)).ok(); }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.xrange_borrow_scan(std::hint::black_box(b"st"), min, max, None, 0, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps { bo.xrange_borrow_scan(std::hint::black_box(b"st"), min, max, None, 0, false, |ev| { std::hint::black_box(&ev); }).ok(); }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "XRANGE full-range @500 entries x3 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
