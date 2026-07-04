@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD single (no count) zero-copy `_into` WIRED LIVE — 1.49x store A/B (byte-exact)
+
+Fifth ship in the member-clone-elimination arc: the single `HRANDFIELD key` form (no count — common,
+EXISTING `parse_borrowed_plain_hrandfield_packet`, no new parser). Added `Store::hrandfield_borrow`
+(sinks the one random FIELD borrowed or `None`; RNG draw `rand_val` reused for LFU bump + index,
+`get_index(rand_val % len)` — the original already hoists bump/touch before the field read, so NO
+borrow-conflict rework) + `execute_plain_hrandfield_borrowed_into` (no-stat ⇒ `exists_no_touch` first,
+unlike SRANDMEMBER single; member zero-copy via `encode_bulk_string_slice`, nil via
+`RespFrame::BulkString(None)`) + swapped the fr-server HRANDFIELD single dispatch
+`FastReply`→`FastEncodedReply`.
+
+BYTE-EXACT: `hrandfield_borrow_single_matches_clone` asserts borrowed field == clone field across
+{16 listpack, 1000 hashtable} + WRONGTYPE/missing (hash `get_index` insertion-ordered). VERIFIED via
+local symlink-legacy build: all HRANDFIELD dispatch tests pass; only failure = the same PRE-EXISTING
+`borrowed_plain_mset_packet_dispatcher…`.
+
+MEASURED (store-level A/B, per-crate rch, single field over a 2000-field HASHTABLE hash): clone
+`hrandfield` = 49.8 ns/op vs borrow = **33.4 ns/op = 1.49x** — now live. **ZRANDMEMBER single is NOT
+borrowable: it picks the idx-th in SORTED order via `index_slice_asc_adaptive` → treap `select()`/
+`into_actual()` = OWNED (memory's unborrowable note WAS right for this method, unlike the count form's
+`random_members_at_indices`); skipped.** **MEMBER-CLONE-ELIM ARC: 5 live ships — SRANDMEMBER count
+2.39x, HRANDFIELD count 3.38x, ZRANDMEMBER count 2.60x, SRANDMEMBER single 1.62x, HRANDFIELD single
+1.49x.** NEXT: WITHVALUES/WITHSCORES (new parser + RESP3 pair-encode) or SCAN (nested+cursor). Landed
+via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SRANDMEMBER single (no count) zero-copy `_into` WIRED LIVE — 1.62x store A/B (byte-exact)
 
 Extended the member-clone-elimination arc to the single `SRANDMEMBER key` form (no count — the MOST

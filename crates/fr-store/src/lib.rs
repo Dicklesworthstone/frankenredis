@@ -12313,6 +12313,57 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow twin of [`Store::hrandfield`] — sinks the single random FIELD NAME
+    /// BORROWED (or `None`) instead of cloning it into an `Option<Vec<u8>>`, eliminating the one
+    /// field-clone alloc on hashtable hashes. IDENTICAL bookkeeping: same expiry guards, the SAME
+    /// `next_rand()` draw (`rand_val`, reused for the LFU bump and the index), LFU bump + `touch`
+    /// (already hoisted before the field read in the original ⇒ no borrow-conflict rework needed),
+    /// and `get_index(rand_val % len)`.
+    pub fn hrandfield_borrow(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_val = self.next_rand();
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_val);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        if m.is_empty() {
+                            sink(None);
+                        } else {
+                            let idx = (rand_val as usize) % m.len();
+                            match m.get_index(idx) {
+                                Some((f, _)) => sink(Some(f.as_ref())),
+                                None => sink(None),
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(None);
+                Ok(())
+            }
+        }
+    }
+
     /// Return `count` random fields from a hash.
     /// Positive count: up to `count` distinct fields.
     /// Negative count: `|count|` fields with possible repeats.
@@ -35848,6 +35899,52 @@ mod tests {
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "HRANDFIELD count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
+    // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield
+    // (hash get_index is insertion-ordered ⇒ two fixed-seed stores agree) + measures the single
+    // field-clone-elimination A/B.
+    #[test]
+    fn hrandfield_borrow_single_matches_clone() {
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i}").into_bytes(), 1).unwrap();
+            }
+            s
+        }
+        fn borrow_one(s: &mut Store) -> Option<Vec<u8>> {
+            let mut out = None;
+            s.hrandfield_borrow(b"h", 2, |m| out = m.map(|b| b.to_vec())).unwrap();
+            out
+        }
+        for &n in &[16u32, 1000] {
+            for _ in 0..8 {
+                let mut a = build(n);
+                let mut b = build(n);
+                assert_eq!(a.hrandfield(b"h", 2).unwrap(), borrow_one(&mut b), "n={n}: borrow != clone");
+            }
+        }
+        let mut z = Store::new();
+        z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(z.hrandfield_borrow(b"h", 2, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow_one(&mut Store::new()), None);
+
+        // Timing A/B: hashtable hash, single field.
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.hrandfield(b"h", 2)).ok(); std::hint::black_box(borrow_one(&mut bo)); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.hrandfield(std::hint::black_box(b"h"), 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.hrandfield_borrow(std::hint::black_box(b"h"), 2, |m| { std::hint::black_box(&m); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "HRANDFIELD single @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
             clone_ns / borrow_ns
         );
     }
