@@ -27034,44 +27034,49 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let started = Instant::now();
-        let result = self
-            .server
-            .store
-            .zrange_withscores(key, start_idx, stop_idx, now_ms);
+        // (frankenredis-zrange-into) Stream borrowed (member, score) pairs directly
+        // into `out` — the `zrange_withscores` owned form cloned every member into
+        // `Vec<(Vec<u8>, f64)>`. Byte-identical framing: RESP3 emits an `*N` array
+        // of `[member,double]` pairs (Len(N) header + a 2-header per pair); RESP2
+        // emits a flat `*(N*2)` array (Len·2 header, member then double per pair).
+        let result = self.server.store.zrange_withscores_borrow_scan(
+            key,
+            start_idx,
+            stop_idx,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                        let entries = if resp3 { n } else { n * 2 };
+                        fr_protocol::encode_aggregate_header(entries, false, out);
+                    }
+                    fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                        }
+                        encode_bulk_string_slice(Some(member), resp3, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                }
+            },
+        );
         let elapsed_us = started.elapsed().as_micros() as u64;
 
         let mut error_msg = None;
-        match result {
-            Ok(pairs) => {
-                if !suppress_reply {
-                    if resp3 {
-                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
-                        for (member, score) in pairs {
-                            fr_protocol::encode_aggregate_header(2, false, out);
-                            encode_bulk_string_slice(Some(&member), resp3, out);
-                            fr_protocol::encode_redis_double(score, resp3, out);
-                        }
-                    } else {
-                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
-                        for (member, score) in pairs {
-                            encode_bulk_string_slice(Some(&member), resp3, out);
-                            fr_protocol::encode_redis_double(score, resp3, out);
-                        }
-                    }
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
                 }
             }
-            Err(err) => {
-                let reply = CommandError::Store(err).to_resp();
-                if !suppress_reply {
-                    if resp3 {
-                        reply.encode_into_resp3(out);
-                    } else {
-                        reply.encode_into(out);
-                    }
-                }
-                if let RespFrame::Error(msg) = reply {
-                    error_msg = Some(msg);
-                }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
             }
         }
         let failed = error_msg.is_some();

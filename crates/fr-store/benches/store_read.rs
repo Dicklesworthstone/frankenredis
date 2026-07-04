@@ -172,5 +172,52 @@ fn bench_get(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_get);
+// (frankenredis-zrange-into) Per-crate A/B for the ZRANGE ... WITHSCORES reply
+// build: the owned `zrange_withscores` clones every member into
+// `Vec<(Vec<u8>, f64)>`, while `zrange_withscores_borrow_scan` streams each
+// (member, score) with the member borrowed (zero per-member alloc). Both sinks do
+// identical work (sum member lengths + scores) so the delta is purely the clone.
+fn bench_zrange_withscores(c: &mut Criterion) {
+    use fr_store::ZRangeWithScoresScanEvent;
+    const N: usize = 1_000;
+    const MEMBER_LEN: usize = 32;
+    let mut store = Store::new();
+    for i in 0..N {
+        let mut m = vec![b'm'; MEMBER_LEN];
+        m[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+        store.zadd(b"z", &[(i as f64, m)], 1_000).unwrap();
+    }
+
+    let mut g = c.benchmark_group("zrange_withscores");
+    // OWNED clone path (what the reply built before this lever).
+    g.bench_function("clone_full_range", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zrange_withscores(std::hint::black_box(b"z"), 0, -1, 2_000)
+                .unwrap();
+            let mut acc = 0usize;
+            for (m, s) in &pairs {
+                acc += m.len() + (*s as usize & 1);
+            }
+            std::hint::black_box(acc)
+        })
+    });
+    // BORROW scan path (streamed, no per-member alloc).
+    g.bench_function("borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrange_withscores_borrow_scan(std::hint::black_box(b"z"), 0, -1, 2_000, |ev| {
+                    if let ZRangeWithScoresScanEvent::Pair(m, s) = ev {
+                        acc += m.len() + (s as usize & 1);
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, bench_get, bench_zrange_withscores);
 criterion_main!(benches);

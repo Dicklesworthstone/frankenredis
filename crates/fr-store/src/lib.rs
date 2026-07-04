@@ -2789,6 +2789,17 @@ pub enum SmembersScanEvent<'a> {
     Member(&'a [u8]),
 }
 
+/// (frankenredis-zrange-into) Event stream driven by
+/// [`Store::zrange_withscores_borrow_scan`] / [`Store::zrevrange_withscores_borrow_scan`]:
+/// the pair count (emitted once, first) followed by each `(member, score)` with
+/// the member borrowed. Lets the WITHSCORES reply path write the RESP header then
+/// each member+score with zero per-member `Vec<u8>` allocation — the owned
+/// `zrange_withscores` clones every member into `Vec<(Vec<u8>, f64)>`.
+pub enum ZRangeWithScoresScanEvent<'a> {
+    Len(usize),
+    Pair(&'a [u8], f64),
+}
+
 /// Minimum member count before the fresh-key SADD path attempts the bulk
 /// all-non-integer build ([`SetValue::try_bulk_unique_strings`]). Below this the
 /// O(n²) listpack rebuild is negligible and not worth the O(n) pre-scan; the
@@ -16390,6 +16401,66 @@ impl Store {
                 }
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// (frankenredis-zrange-into) Borrow-scan variant of [`Store::zrange_withscores`]
+    /// for the WITHSCORES zero-copy reply fast path: byte-identical bookkeeping to
+    /// `zrange_withscores` (the SAME `drop_if_expired`, LFU bump, `touch`-only-on-
+    /// non-empty-range, and `normalize_index` rank math) but drives a
+    /// `ZRangeWithScoresScanEvent` sink — `Len(count)` then one `Pair(&member, score)`
+    /// per rank in ascending (score, member) order — so the runtime encodes the
+    /// interleaved member/score reply straight into the output buffer with no
+    /// `Vec<(Vec<u8>, f64)>` member clone. `Len(0)` for a missing / out-of-range /
+    /// empty result; `Err(WrongType)` for a non-zset value.
+    pub fn zrange_withscores_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            sink(ZRangeWithScoresScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        sink(ZRangeWithScoresScanEvent::Len(count));
+                        for (member, score) in zs.iter_asc().skip(s_idx).take(count) {
+                            sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                Ok(())
+            }
         }
     }
 

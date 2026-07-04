@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZRANGE ... WITHSCORES reply borrows members (zero per-member clone)
+
+Extends the plain-ZRANGE/ZREVRANGE zero-copy `_into` member-borrow vein
+(c1312623a / 7d0d91dd8) to the WITHSCORES rank-range reply. The owned
+`Store::zrange_withscores` clones every member into `Vec<(Vec<u8>, f64)>` and the
+runtime `_into` then encoded from those owned pairs (it only avoided the
+`Vec<RespFrame>`, not the member clone). New `Store::zrange_withscores_borrow_scan`
+drives a `ZRangeWithScoresScanEvent` sink (`Len(count)` + `Pair(&member, score)`
+per rank via `iter_asc().skip(s).take(count)`), byte-identical bookkeeping to
+`zrange_withscores` (same `drop_if_expired` / LFU / touch-on-non-empty / rank
+math). `execute_plain_zrange_withscores_borrowed_into` now streams the interleaved
+member/score reply straight into the write buffer with zero per-member alloc.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; rch fell back to LOCAL after a
+30s remote-sync timeout, so both rows are same-machine — a valid A/B for the
+clone-vs-borrow delta). 1000-member zset, 32-byte members, full range:
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/clone_full_range` (owned `Vec<(Vec<u8>,f64)>`) | 23.221 µs | baseline |
+| `zrange_withscores/borrow_full_range` (streamed borrow scan) | 4.087 µs | **5.68x faster** |
+
+The 5.68x is the store-level member-copy elimination (1000 owned `Vec<u8>` +
+pairs Vec vs zero per-member alloc); the end-to-end command win is smaller
+because score encoding + the network dominate the full reply, but the member
+clone is fully removed. Conformance GREEN: byte-exact
+`plain_zrange_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3`
+passes (RESP2 flat `*(N*2)` array + RESP3 `*N` array of `[member,double]` pairs).
+Shipped. Remaining WITHSCORES clones (ZREVRANGE WITHSCORES, ZRANGEBYSCORE
+WITHSCORES) follow the same recipe next. Rollback: revert the executor to
+`store.zrange_withscores`.
+
 ## 2026-07-04 CrimsonHawk: REJECT — small CompactFieldMap linear `contains_key` did not clear the SMISMEMBER gate
 
 Re-applied the `frankenredis-f7iv3` candidate: for `CompactFieldMap::contains_key`

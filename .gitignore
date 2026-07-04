@@ -228,3 +228,4 @@ rust_out
 **/local-target/
 # Test-output RDB dumps (real .rdb fixtures stay tracked; dump.rdb already ignored).
 noexist_*.rdb
+.rch-targets/
