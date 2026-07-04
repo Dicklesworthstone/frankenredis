@@ -19154,6 +19154,163 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrangebylex_borrowed`]
+    /// — plain `ZRANGEBYLEX key min max`, member array streamed with borrowed members
+    /// via `zrangebylex_members_borrow_scan` (no `Vec<Vec<u8>>` clone). Byte-identical
+    /// bookkeeping (record_source_key_lookups then the no-stat store walk); malformed
+    /// lex bounds still defer to the generic for canonical wording. Owned form kept.
+    pub fn execute_plain_zrangebylex_borrowed_into(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrangebylex");
+        self.session.last_argv_len_sum = b"ZRANGEBYLEX".len() + key.len() + min.len() + max.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let mut error_msg = None;
+        let scan = self.server.store.zrangebylex_members_borrow_scan(
+            key,
+            min,
+            max,
+            false,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            },
+        );
+        if let Err(err) = scan {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_msg.is_some();
+
+        self.record_plain_zrangebylex_borrowed_metrics(
+            key, min, max, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrevrangebylex_borrowed`]
+    /// — plain `ZREVRANGEBYLEX key max min` (descending), member array streamed with
+    /// borrowed members via `zrangebylex_members_borrow_scan(.., rev=true, ..)`.
+    pub fn execute_plain_zrevrangebylex_borrowed_into(
+        &mut self,
+        key: &[u8],
+        max: &[u8],
+        min: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms) {
+            return None;
+        }
+        if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrevrangebylex");
+        self.session.last_argv_len_sum =
+            b"ZREVRANGEBYLEX".len() + key.len() + max.len() + min.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
+        let mut error_msg = None;
+        let scan = self.server.store.zrangebylex_members_borrow_scan(
+            key,
+            min,
+            max,
+            true,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            },
+        );
+        if let Err(err) = scan {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_msg.is_some();
+
+        self.record_plain_zrevrangebylex_borrowed_metrics(
+            key, max, min, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "borrowed zrangebylex metrics carry key/min/max slices plus failed flag"
@@ -43208,6 +43365,89 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_total_commands_processed,
             generic.server.store.stat_total_commands_processed
+        );
+    }
+
+    // (frankenredis-zrange-into) Plain ZRANGEBYLEX / ZREVRANGEBYLEX member-only
+    // borrow-scan `_into` must match the generic replies byte-for-byte over a
+    // single-score zset (the canonical BYLEX case) across `-`/`+`, inclusive `[`,
+    // exclusive `(`, mixed, empty, and wrong-type; malformed bounds defer.
+    #[test]
+    fn plain_bylex_member_borrowed_into_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            // All members share score 0 -> lex order is well-defined (BYLEX contract).
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d", b"0", b"e",
+                ]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+        let enc = |g: &mut Runtime, argv: &[&[u8]], ts: u64| -> Vec<u8> {
+            let mut v = Vec::new();
+            g.execute_frame(command(argv), ts).encode_into(&mut v);
+            v
+        };
+
+        // ZRANGEBYLEX key min max.
+        for (ts, (key, min, max)) in (2..).zip([
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice()),
+            (b"z".as_slice(), b"[b".as_slice(), b"[d".as_slice()),
+            (b"z".as_slice(), b"(b".as_slice(), b"(d".as_slice()),
+            (b"z".as_slice(), b"[b".as_slice(), b"(d".as_slice()),
+            (b"z".as_slice(), b"(c".as_slice(), b"+".as_slice()),
+            (b"z".as_slice(), b"[x".as_slice(), b"+".as_slice()), // empty (past end)
+            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice()),  // empty by bounds
+            (b"nokey".as_slice(), b"-".as_slice(), b"+".as_slice()),
+            (b"str".as_slice(), b"-".as_slice(), b"+".as_slice()), // wrong type
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrangebylex_borrowed_into(key, min, max, ts, &mut out)
+                .expect("ZRANGEBYLEX _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZRANGEBYLEX", key, min, max], ts),
+                "ZRANGEBYLEX key={key:?} min={min:?} max={max:?}"
+            );
+        }
+
+        // ZREVRANGEBYLEX key max min (descending).
+        for (ts, (key, max, min)) in (40..).zip([
+            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice()),
+            (b"z".as_slice(), b"[d".as_slice(), b"[b".as_slice()),
+            (b"z".as_slice(), b"(d".as_slice(), b"(b".as_slice()),
+            (b"z".as_slice(), b"+".as_slice(), b"(c".as_slice()),
+            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice()), // empty by bounds
+            (b"str".as_slice(), b"+".as_slice(), b"-".as_slice()), // wrong type
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrevrangebylex_borrowed_into(key, max, min, ts, &mut out)
+                .expect("ZREVRANGEBYLEX _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZREVRANGEBYLEX", key, max, min], ts),
+                "ZREVRANGEBYLEX key={key:?} max={max:?} min={min:?}"
+            );
+        }
+
+        // Malformed lex bound (no [/(/-/+ prefix) defers to generic.
+        assert!(
+            direct
+                .execute_plain_zrangebylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new())
+                .is_none()
+        );
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 

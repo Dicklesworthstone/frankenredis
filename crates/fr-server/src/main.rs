@@ -9042,12 +9042,18 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zrevrangebylex_borrowed(
-                        packet.key, packet.max, packet.min, ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_zrevrangebylex_borrowed_into(
+                            packet.key,
+                            packet.max,
+                            packet.min,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -9089,12 +9095,18 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_zrangebylex_borrowed(packet.key, packet.min, packet.max, ts)
+                    if runtime
+                        .execute_plain_zrangebylex_borrowed_into(
+                            packet.key,
+                            packet.min,
+                            packet.max,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

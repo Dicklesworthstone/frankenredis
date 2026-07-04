@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZRANGEBYLEX / ZREVRANGEBYLEX (member-only) borrow members — 7.53x store-level
+
+The lexicographic-range forms cloned every member (via `zrangebylex`/
+`zrevrangebylex` → `lex_range_window` → owned `Vec<Vec<u8>>`). New
+`SortedSet::lex_range_refs` mirrors `lex_range_window`'s no-LIMIT path EXACTLY —
+single-score `Full` band range-scans `ordered.range(lower..=upper)` (`.rev()` for
+descending) filtered by `lex_in_range`; multi-score / `Packed` fall back to
+`iter_{asc,desc}().filter` — returning borrowed member refs. New
+`Store::zrangebylex_members_borrow_scan` (drop-in for `zrangebylex`/`zrevrangebylex`
+with a `rev` param; same `validate_lex_range_bounds` / `drop_if_expired` / LFU /
+touch) + two `_into` executors keeping the exact record_source_key_lookups
+keyspace accounting + malformed-bound defer. Two fr-server dispatch sites →
+FastEncodedReply.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; remote). 1000-member zset (the
+multi-score fallback path — full `iter_asc().filter(lex_in_range)`), `-`/`+`:
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/bylex_members_clone_full_range` (owned `Vec<Vec<u8>>`) | 43.471 µs | baseline |
+| `zrange_withscores/bylex_members_borrow_full_range` (streamed borrow scan) | 5.776 µs | **7.53x faster** |
+
+Conformance GREEN: byte-exact `plain_bylex_member_borrowed_into_matches_generic`
+over a SINGLE-SCORE zset (the canonical BYLEX contract, exercises the single-score
+band) across `-`/`+`, inclusive `[`, exclusive `(`, mixed, empty, wrong-type, and
+malformed-bound-defer for BOTH ZRANGEBYLEX and ZREVRANGEBYLEX + command/error stat
+parity; fr-server + fr-runtime compile clean. Rollback: revert the two dispatch
+sites to `execute_plain_z{rev,}rangebylex_borrowed`.
+
 ## 2026-07-04 BlackThrush: KEEP — unified `ZRANGE key min max BYSCORE` reuses the member-borrow `_into` (13.54x path)
 
 Follow-on to the plain byscore member-borrow: the modern unified syntax

@@ -1911,6 +1911,59 @@ impl SortedSet {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrowing form of the no-LIMIT
+    /// `lex_range_window(min, max, rev, 0, MAX)`: the `[min, max]` members in
+    /// ascending (`rev=false`) or descending (`rev=true`) lex order, with the member
+    /// BORROWED (no per-member `Vec<u8>` clone). Mirrors `lex_range_window`'s
+    /// no-limit path EXACTLY — the single-score `Full` band range-scans
+    /// `ordered.range(lower..=upper)` (`.rev()` for descending) filtered by
+    /// `lex_in_range`; multi-score / `Packed` fall back to `iter_{asc,desc}().filter`
+    /// — so membership and order are byte-identical.
+    fn lex_range_refs(&self, min: &[u8], max: &[u8], rev: bool) -> Vec<(&[u8], f64)> {
+        if let SortedSetInner::Full(full) = &self.inner
+            && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
+            && first.score == last.score
+        {
+            let s = first.score;
+            let lower = if min == b"-" {
+                ScoreMember::min_for_score(s)
+            } else if min == b"+" {
+                return Vec::new();
+            } else {
+                ScoreMember::actual(s, min[1..].to_vec())
+            };
+            let upper = if max == b"+" {
+                ScoreMember::max_for_score(s)
+            } else if max == b"-" {
+                return Vec::new();
+            } else {
+                ScoreMember::actual(s, max[1..].to_vec())
+            };
+            if lower > upper {
+                return Vec::new();
+            }
+            let scanned = full
+                .ordered
+                .range(lower..=upper)
+                .filter_map(|sm| sm.member.as_actual())
+                .filter(|m| lex_in_range(m, min, max));
+            return if rev {
+                scanned.rev().map(|m| (m, s)).collect()
+            } else {
+                scanned.map(|m| (m, s)).collect()
+            };
+        }
+        if rev {
+            self.iter_desc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .collect()
+        } else {
+            self.iter_asc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .collect()
+        }
+    }
+
     /// `lex_range_window` with adaptive treap warming: a large single-score zset
     /// hit by a deep-offset BYLEX LIMIT query builds the order-statistic treap so
     /// the rank-jump path can fire. Byte-identical result. (frankenredis-q7al0)
@@ -16957,6 +17010,57 @@ impl Store {
                 }
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// (frankenredis-zrange-into) Member-only borrow-scan for `ZRANGEBYLEX` /
+    /// `ZREVRANGEBYLEX` (`rev`). Drop-in for the member-mapped
+    /// `zrangebylex`/`zrevrangebylex`: IDENTICAL bookkeeping
+    /// (`validate_lex_range_bounds`, `drop_if_expired`, LFU, `touch`) and membership
+    /// via [`SortedSet::lex_range_refs`], streaming `Len(count)` then each borrowed
+    /// `Member(&[u8])` with no per-member `Vec<u8>` clone. `Len(0)` for missing;
+    /// `Err(WrongType)` for a non-zset value; `Err` on invalid lex bounds.
+    pub fn zrangebylex_members_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let refs = zs.lex_range_refs(min, max, rev);
+                        sink(SmembersScanEvent::Len(refs.len()));
+                        for (member, _score) in refs {
+                            sink(SmembersScanEvent::Member(member));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
         }
     }
 

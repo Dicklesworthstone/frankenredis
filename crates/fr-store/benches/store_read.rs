@@ -363,6 +363,35 @@ fn bench_zrange_withscores(c: &mut Criterion) {
             std::hint::black_box(acc)
         })
     });
+    // ZRANGEBYLEX - + (whole lex range): clone vs member-only borrow.
+    g.bench_function("bylex_members_clone_full_range", |b| {
+        b.iter(|| {
+            let members = store
+                .zrangebylex(std::hint::black_box(b"z"), b"-", b"+", 2_000)
+                .unwrap();
+            std::hint::black_box(members.iter().map(Vec::len).sum::<usize>())
+        })
+    });
+    g.bench_function("bylex_members_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrangebylex_members_borrow_scan(
+                    std::hint::black_box(b"z"),
+                    b"-",
+                    b"+",
+                    false,
+                    2_000,
+                    |ev| {
+                        if let SmembersScanEvent::Member(m) = ev {
+                            acc += m.len();
+                        }
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
     g.finish();
 }
 
