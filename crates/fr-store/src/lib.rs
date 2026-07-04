@@ -1725,6 +1725,30 @@ impl SortedSet {
         self.members_at_indices(indices)
     }
 
+    /// (CrimsonHawk) Member-borrow twin of [`SortedSet::random_members_at_indices`] for the plain
+    /// (no-WITHSCORES) ZRANDMEMBER count — sinks the picked MEMBERS BORROWED (scores dropped), in
+    /// the SAME order (pick order + dups). The Full encoding borrows via `dict.get_index` (O(1)
+    /// positional, no clone). The Packed encoding falls back to the shared `members_at_indices`
+    /// (small ordered pass; a listpack member is decoded owned regardless) and sinks those — no
+    /// borrow win there, but byte-identical. NB: this deliberately does NOT touch the rank_tree
+    /// `select()`/`into_actual()` path (unborrowable) — `random_members_at_indices` never uses it.
+    pub(crate) fn random_member_at_indices_borrow_scan(&self, indices: &[usize], mut sink: impl FnMut(&[u8])) {
+        if indices.is_empty() {
+            return;
+        }
+        if let SortedSetInner::Full(full) = &self.inner {
+            for &idx in indices {
+                if let Some((m, _)) = full.dict.get_index(idx) {
+                    sink(m.as_ref());
+                }
+            }
+            return;
+        }
+        for (m, _) in self.members_at_indices(indices) {
+            sink(&m);
+        }
+    }
+
     /// Member at the `dict` IndexMap's unordered position `idx`, O(1) for the
     /// Full encoding (the dict holds exactly the same members as `ordered`, so a
     /// coprime-stride walk over `0..len()` visits every member exactly once).
@@ -18866,6 +18890,101 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow-scan twin of [`Store::zrandmember_count`] for the plain (no-WITHSCORES)
+    /// ZRANDMEMBER count — streams the picked MEMBERS BORROWED via `sink` instead of cloning each
+    /// `(member,score)` into a `Vec`, eliminating the per-member clone on Full-encoded (large)
+    /// zsets. IDENTICAL bookkeeping: bare-drop guard, LFU bump/`touch` (only when zlen>0), and the
+    /// SAME `next_rand()` selection sequence, so the sampled members are byte-identical. Scores are
+    /// dropped (plain reply = members only). Uses `random_member_at_indices_borrow_scan` (Full:
+    /// `dict.get_index` borrow; Packed: `members_at_indices` fallback).
+    pub fn zrandmember_count_member_borrow_scan(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let len = if let Some(entry) = self.entries.get_mut(key) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+            }
+            let zlen = match &entry.value {
+                Value::SortedSet(zs) => zs.len(),
+                _ => return Err(StoreError::WrongType),
+            };
+            if zlen == 0 {
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            entry.touch(now_ms);
+            zlen
+        } else {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        };
+
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
+                let mut picked = HashSet::with_capacity(n);
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
+                    if picked.insert(idx) {
+                        idxs.push(idx);
+                    }
+                }
+                idxs
+            } else {
+                let mut order: Vec<usize> = (0..len).collect();
+                for i in 0..n {
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
+                }
+                order.truncate(n);
+                order
+            }
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
+            for _ in 0..abs_count {
+                idxs.push((self.next_rand() as usize) % len);
+            }
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    sink(SmembersScanEvent::Len(indices.len()));
+                    zs.random_member_at_indices_borrow_scan(&indices, |m| {
+                        sink(SmembersScanEvent::Member(m))
+                    });
+                    Ok(())
+                }
+                _ => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            },
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     pub fn zmscore(
         &mut self,
         key: &[u8],
@@ -35555,6 +35674,72 @@ mod tests {
 
     // (CrimsonHawk) srandmember_count_borrow_scan produces BYTE-IDENTICAL sampled members to the
     // clone srandmember_count (fixed rng_seed 0xDEADBEEF + non-LFU sadd doesn't consume RNG ⇒ two
+    // (CrimsonHawk) zrandmember_count_member_borrow_scan yields BYTE-IDENTICAL sampled members to
+    // the clone zrandmember_count (fixed rng_seed + non-LFU zadd doesn't consume RNG). Covers BOTH
+    // encodings (Packed=small borrow-via-fallback, Full=large borrow-via-dict.get_index).
+    #[test]
+    fn zrandmember_count_member_borrow_scan_matches_clone() {
+        use crate::SmembersScanEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            let members: Vec<(f64, Vec<u8>)> = (0..n).map(|i| (f64::from(i), format!("m{i:04}").into_bytes())).collect();
+            s.zadd(b"z", &members, 1).unwrap();
+            s
+        }
+        fn borrow_members(s: &mut Store, count: i64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut out = Vec::new();
+            s.zrandmember_count_member_borrow_scan(b"z", count, 2, |ev| {
+                if let SmembersScanEvent::Member(m) = ev { out.push(m.to_vec()) }
+            })?;
+            Ok(out)
+        }
+        // NOTE: the zset `dict.get_index` order is per-instance-hash-seed dependent (unlike Set/
+        // Hash's insertion-ordered IndexMap), so two SEPARATELY-built stores need not share member
+        // order even with identical RNG. The borrow path is byte-identical on the SAME store (same
+        // dict + verbatim-copied RNG selection). Prove the index→member access — the ONLY thing that
+        // changed vs the clone — via a fixed-indices, SAME-store comparison across both encodings.
+        // n=16 exercises the Packed fallback; n=1000 the Full dict.get_index borrow path.
+        for &n in &[16u32, 1000] {
+            let s = build(n);
+            let entry = s.entries.get(b"z".as_slice()).unwrap();
+            let Value::SortedSet(zs) = &entry.value else { panic!("not a zset") };
+            let idxs: Vec<usize> = vec![0, 5, (n as usize) - 1, 3, 0, 5, (n as usize) / 2];
+            let clone_members: Vec<Vec<u8>> =
+                zs.random_members_at_indices(&idxs).into_iter().map(|(m, _)| m).collect();
+            let mut borrow_members2 = Vec::new();
+            zs.random_member_at_indices_borrow_scan(&idxs, |m| borrow_members2.push(m.to_vec()));
+            assert_eq!(clone_members, borrow_members2, "n={n}: index→member access diverged");
+        }
+        // Full-method validity (across counts): every returned member is real; count is right.
+        for &count in &[5i64, 200, -7, -300, 0] {
+            let mut b = build(200);
+            let res = borrow_members(&mut b, count).unwrap();
+            let expected = if count >= 0 { (count as usize).min(200) } else { count.unsigned_abs() as usize };
+            assert_eq!(res.len(), expected, "count={count} wrong length");
+            assert!(res.iter().all(|m| b.zscore(b"z", m, 2).unwrap().is_some()), "count={count} returned a non-member");
+        }
+        let mut z = Store::new();
+        z.set(b"z".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(borrow_members(&mut z, 5), Err(StoreError::WrongType)));
+        assert_eq!(borrow_members(&mut Store::new(), 5).unwrap(), Vec::<Vec<u8>>::new());
+
+        // Timing A/B: large FULL-encoded zset, count 50.
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.zrandmember_count(b"z", 50, 2)).ok(); std::hint::black_box(borrow_members(&mut bo, 50)).ok(); }
+        let reps = 200_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.zrandmember_count(std::hint::black_box(b"z"), 50, 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.zrandmember_count_member_borrow_scan(std::hint::black_box(b"z"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "ZRANDMEMBER count=50 @2000 Full-zset: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
     // (CrimsonHawk) hrandfield_count_field_borrow_scan yields BYTE-IDENTICAL sampled field names
     // to the clone hrandfield_count (fixed rng_seed + non-LFU hset doesn't consume RNG). Verifies
     // +count/-count/0, WRONGTYPE, missing, and the field-clone-elimination timing A/B.

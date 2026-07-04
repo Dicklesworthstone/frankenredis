@@ -5960,15 +5960,23 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrandmember_count_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_rand_member_count_borrowed(
-                        PlainRandMemberCmd::Zrandmember,
-                        packet.key,
-                        packet.count,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // (CrimsonHawk) Zero-copy `_into` fast path — stream the sampled members
+                    // borrowed into the write buffer (member-clone elimination). Same parse/gate
+                    // decline conditions as the RespFrame path ⇒ generic fallthrough preserves
+                    // behaviour. Parser accepts only the no-WITHSCORES form (members only).
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zrandmember_count_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

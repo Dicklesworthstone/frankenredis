@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANDMEMBER count zero-copy `_into` WIRED LIVE — 2.60x store A/B (byte-exact)
+
+Third command in the member-clone-elimination arc (completes the random-sample count trio:
+SRANDMEMBER/HRANDFIELD/ZRANDMEMBER). CORRECTED memory's "ZRANDMEMBER unborrowable" note: the rank_tree
+`select()`/`into_actual()` OWNED path is `members_at_indices`, but `zrandmember_count` uses
+`random_members_at_indices`, which for the FULL encoding borrows via `dict.get_index` (only the Packed
+branch falls back). Added `SortedSet::random_member_at_indices_borrow_scan` (Full: `dict.get_index`
+borrow; Packed: `members_at_indices` fallback) + `Store::zrandmember_count_member_borrow_scan` +
+`execute_plain_zrandmember_count_borrowed_into` (fr-runtime, no-stat ⇒ `exists_no_touch` first, like
+HRANDFIELD) + swapped the fr-server `parse_borrowed_plain_zrandmember_count_packet` dispatch
+`FastReply`→`FastEncodedReply`. Plain array RESP2+3 ⇒ `*N`.
+
+BYTE-EXACT — and a TEST-DESIGN LESSON: the zset `dict.get_index` order is per-instance-hash-seed
+dependent (unlike Set/Hash's insertion-ordered IndexMap), so TWO separately-built stores do NOT share
+member order even with identical RNG (the naive two-store diff FAILED, exposing this). Fixed by
+proving the ONLY changed piece — the index→member access — via a SAME-store fixed-indices comparison
+(`random_members_at_indices` == `random_member_at_indices_borrow_scan`) across BOTH encodings, plus a
+full-method validity check (exact count + every returned member is a real member via zscore). The RNG
+selection is a verbatim copy ⇒ same draws ⇒ same indices on a given store.
+
+VERIFIED via local symlink-legacy build: `cargo test -p fr-server` — ALL ZRANDMEMBER dispatch/parser
+tests pass; only failure = the same PRE-EXISTING `borrowed_plain_mset_packet_dispatcher…` (confirmed
+prior turns on origin/main). MEASURED (store-level A/B, per-crate rch, count=50 over a 2000-member
+FULL zset): clone `zrandmember_count` = 2871 ns/op vs borrow-scan = **1103 ns/op = 2.60x** — now live.
+**MEMBER-CLONE-ELIM ARC: 3 live ships — SRANDMEMBER 2.39x, HRANDFIELD 3.38x, ZRANDMEMBER 2.60x.**
+NEXT: WITHVALUES/WITHSCORES variants (need new parsers + score-pair encode) or the SCAN family
+(nested reply). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD count zero-copy `_into` WIRED LIVE — 3.38x store A/B (byte-exact)
 
 Second command in the member-clone-elimination arc (after SRANDMEMBER). Added `Store::
