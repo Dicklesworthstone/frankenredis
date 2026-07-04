@@ -5950,6 +5950,36 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                        unparsed,
+                        &parser_config,
+                    )
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hrandfield_count_withvalues_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_rand_member_borrowed(
@@ -12469,6 +12499,44 @@ fn parse_borrowed_plain_hrandfield_count_packet<'a>(
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (count, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainHrandfieldCountPacket {
+        consumed,
+        key,
+        count,
+    })
+}
+
+struct BorrowedPlainHrandfieldCountWithvaluesPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    count: &'a [u8],
+}
+
+fn parse_borrowed_plain_hrandfield_count_withvalues_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHrandfieldCountWithvaluesPacket<'a>> {
+    if config.max_array_len < 4
+        || config.max_bulk_len < b"HRANDFIELD".len()
+        || config.max_bulk_len < b"WITHVALUES".len()
+    {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"HRANDFIELD"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (count, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (option, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !option.eq_ignore_ascii_case(b"WITHVALUES") {
+        return None;
+    }
+    Some(BorrowedPlainHrandfieldCountWithvaluesPacket {
         consumed,
         key,
         count,
@@ -28909,6 +28977,76 @@ mod tests {
             )
             .is_none(),
             "malformed count bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hrandfield_count_withvalues_packet_parser_accepts_canonical_modifier() {
+        let input =
+            b"*4\r\n$10\r\nhRaNdFiElD\r\n$4\r\nhash\r\n$2\r\n-3\r\n$10\r\nwItHvAlUeS\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+            input,
+            &ParserConfig::default(),
+        )
+        .expect("canonical HRANDFIELD key count WITHVALUES packet should parse");
+
+        assert_eq!(parsed.key, b"hash");
+        assert_eq!(parsed.count, b"-3");
+        assert_eq!(
+            parsed.consumed,
+            b"*4\r\n$10\r\nhRaNdFiElD\r\n$4\r\nhash\r\n$2\r\n-3\r\n$10\r\nwItHvAlUeS\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hrandfield_count_withvalues_packet_parser_defers_other_shapes_or_limited_inputs()
+    {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                b"*04\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n$10\r\nWITHVALUES\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                b"*3\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "plain count form stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                b"*4\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n$8\r\nWITHVALS\r\n",
+                &cfg
+            )
+            .is_none(),
+            "unknown option stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                b"*4\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n$10\r\nWITHVALUES\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                b"*4\r\n$10\r\nHRANDFIELD\r\n$1\r\nh\r\n$1\r\n2\r\n$10\r\nWITHVALUES\r\n",
+                &ParserConfig {
+                    max_bulk_len: 9,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "bulk-limit errors stay on the generic parser"
         );
     }
 

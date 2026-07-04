@@ -3079,6 +3079,15 @@ pub enum ZRangeWithScoresScanEvent<'a> {
     Pair(&'a [u8], f64),
 }
 
+/// Event stream driven by [`Store::hrandfield_count_pair_borrow_scan`]: the
+/// sampled pair count followed by each borrowed `(field, value)` pair. This is
+/// the WITHVALUES twin of `hrandfield_count_field_borrow_scan`, avoiding the
+/// owned `Vec<(Vec<u8>, Vec<u8>)>` on the reply path.
+pub enum HrandfieldWithValuesScanEvent<'a> {
+    Len(usize),
+    Pair(&'a [u8], &'a [u8]),
+}
+
 /// Minimum member count before the fresh-key SADD path attempts the bulk
 /// all-non-integer build ([`SetValue::try_bulk_unique_strings`]). Below this the
 /// O(n²) listpack rebuild is negligible and not worth the O(n) pre-scan; the
@@ -12361,7 +12370,7 @@ impl Store {
                         } else {
                             let idx = (rand_val as usize) % m.len();
                             match m.get_index(idx) {
-                                Some((f, _)) => sink(Some(f.as_ref())),
+                                Some((f, _)) => sink(Some(f)),
                                 None => sink(None),
                             }
                         }
@@ -12557,7 +12566,7 @@ impl Store {
                     sink(SmembersScanEvent::Len(indices.len()));
                     for &idx in &indices {
                         if let Some((k, _)) = m.get_index(idx) {
-                            sink(SmembersScanEvent::Member(k.as_ref()));
+                            sink(SmembersScanEvent::Member(k));
                         }
                     }
                     Ok(())
@@ -12569,6 +12578,108 @@ impl Store {
             },
             None => {
                 sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
+    /// Borrow-scan twin of [`Store::hrandfield_count`] for the WITHVALUES form:
+    /// streams each sampled `(field, value)` borrowed instead of cloning both
+    /// sides into `Vec<(Vec<u8>, Vec<u8>)>`. Bookkeeping and random index
+    /// selection intentionally mirror `hrandfield_count` and
+    /// `hrandfield_count_field_borrow_scan`.
+    pub fn hrandfield_count_pair_borrow_scan(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(HrandfieldWithValuesScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let len = if let Some(entry) = self.entries.get_mut(key) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+            }
+            entry.touch(now_ms);
+            match &entry.value {
+                Value::Hash(m) => {
+                    if m.is_empty() {
+                        sink(HrandfieldWithValuesScanEvent::Len(0));
+                        return Ok(());
+                    }
+                    m.len()
+                }
+                _ => return Err(StoreError::WrongType),
+            }
+        } else {
+            sink(HrandfieldWithValuesScanEvent::Len(0));
+            return Ok(());
+        };
+
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
+                let mut picked = HashSet::with_capacity(n);
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
+                    if picked.insert(idx) {
+                        idxs.push(idx);
+                    }
+                }
+                idxs
+            } else {
+                let mut order: Vec<usize> = (0..len).collect();
+                for i in 0..n {
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
+                }
+                order.truncate(n);
+                order
+            }
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
+            for _ in 0..abs_count {
+                idxs.push((self.next_rand() as usize) % len);
+            }
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Hash(m) => {
+                    sink(HrandfieldWithValuesScanEvent::Len(indices.len()));
+                    for &idx in &indices {
+                        if let Some((field, value)) = m.get_index(idx) {
+                            sink(HrandfieldWithValuesScanEvent::Pair(
+                                field,
+                                value,
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                _ => {
+                    sink(HrandfieldWithValuesScanEvent::Len(0));
+                    Ok(())
+                }
+            },
+            None => {
+                sink(HrandfieldWithValuesScanEvent::Len(0));
                 Ok(())
             }
         }
@@ -35926,6 +36037,41 @@ mod tests {
             "HRANDFIELD count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
             clone_ns / borrow_ns
         );
+    }
+
+    #[test]
+    fn hrandfield_count_pair_borrow_scan_matches_clone() {
+        use crate::HrandfieldWithValuesScanEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i}").into_bytes(), 1)
+                    .unwrap();
+            }
+            s
+        }
+        fn borrow_pairs(s: &mut Store, count: i64) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+            let mut out = Vec::new();
+            s.hrandfield_count_pair_borrow_scan(b"h", count, 2, |ev| {
+                if let HrandfieldWithValuesScanEvent::Pair(field, value) = ev {
+                    out.push((field.to_vec(), value.to_vec()));
+                }
+            })?;
+            Ok(out)
+        }
+        for &n in &[16u32, 1000] {
+            for &count in &[5i64, 200, -7, -300, 0] {
+                let mut a = build(n);
+                let mut b = build(n);
+                let clone_pairs = a.hrandfield_count(b"h", count, 2).unwrap();
+                let borrow_res = borrow_pairs(&mut b, count).unwrap();
+                assert_eq!(clone_pairs, borrow_res, "n={n} count={count}: borrow pairs != clone");
+            }
+        }
+        let mut z = Store::new();
+        z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(borrow_pairs(&mut z, 5), Err(StoreError::WrongType)));
+        assert_eq!(borrow_pairs(&mut Store::new(), 5).unwrap(), Vec::<(Vec<u8>, Vec<u8>)>::new());
     }
 
     // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield

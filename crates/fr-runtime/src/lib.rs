@@ -27626,6 +27626,122 @@ impl Runtime {
         Some(())
     }
 
+    /// Zero-copy `_into` fast path for `HRANDFIELD key count WITHVALUES`.
+    /// Streams borrowed `(field, value)` pairs directly into `out`, preserving
+    /// Redis' RESP split: RESP2 is a flat alternating array, RESP3 is an outer
+    /// array of two-element arrays.
+    pub fn execute_plain_hrandfield_count_withvalues_borrowed_into(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let count = parse_i64_arg(count_arg).ok()?;
+        let half = i64::MAX / 2;
+        if count < -half || count > half {
+            return None;
+        }
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"HRANDFIELD".len()
+            || self.policy.gate.max_bulk_len < b"WITHVALUES".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hrandfield");
+        self.session.last_argv_len_sum =
+            b"HRANDFIELD".len() + key.len() + count_arg.len() + b"WITHVALUES".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let _ = self.server.store.exists_no_touch(key, now_ms);
+        let result =
+            self.server
+                .store
+                .hrandfield_count_pair_borrow_scan(key, count, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
+                    }
+                    match ev {
+                        fr_store::HrandfieldWithValuesScanEvent::Len(n) => {
+                            if resp3 {
+                                fr_protocol::encode_aggregate_header(n, false, out);
+                            } else {
+                                fr_protocol::encode_aggregate_header(n * 2, false, out);
+                            }
+                        }
+                        fr_store::HrandfieldWithValuesScanEvent::Pair(field, value) => {
+                            if resp3 {
+                                fr_protocol::encode_aggregate_header(2, false, out);
+                            }
+                            fr_protocol::encode_bulk_string_slice(Some(field), false, out);
+                            fr_protocol::encode_bulk_string_slice(Some(value), false, out);
+                        }
+                    }
+                });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_rand_member_borrowed_metrics(
+            PlainRandMemberCmd::Hrandfield,
+            key,
+            Some(count_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     /// (CrimsonHawk) Zero-copy `_into` fast path for `ZRANDMEMBER key count` (no WITHSCORES) —
     /// streams the sampled MEMBER NAMES borrowed straight into `out` (`*N` array) via
     /// `zrandmember_count_member_borrow_scan`, eliminating the per-member clone on Full-encoded
@@ -43643,6 +43759,89 @@ mod tests {
             fast.server.store.stat_total_error_replies,
             generic.server.store.stat_total_error_replies
         );
+    }
+
+    #[test]
+    fn plain_hrandfield_count_withvalues_borrowed_into_matches_generic() {
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if resp3 {
+                fast.session.resp_protocol_version = 3;
+                generic.session.resp_protocol_version = 3;
+            }
+            for rt in [&mut fast, &mut generic] {
+                rt.execute_frame(
+                    command(&[
+                        b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3", b"f4", b"v4",
+                    ]),
+                    1,
+                );
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            }
+
+            for (ts, (key, count)) in (2u64..).zip([
+                (b"h".as_slice(), b"2".as_slice()),
+                (b"h".as_slice(), b"-3".as_slice()),
+                (b"nokey".as_slice(), b"2".as_slice()),
+                (b"str".as_slice(), b"2".as_slice()),
+            ]) {
+                let mut fast_bytes = Vec::new();
+                fast.execute_plain_hrandfield_count_withvalues_borrowed_into(
+                    key,
+                    count,
+                    ts,
+                    resp3,
+                    &mut fast_bytes,
+                )
+                .expect("well-formed HRANDFIELD WITHVALUES should take fast path");
+                let generic_reply =
+                    generic.execute_frame(command(&[b"HRANDFIELD", key, count, b"WITHVALUES"]), ts);
+                assert_eq!(
+                    fast_bytes,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} count={count:?}"
+                );
+            }
+
+            assert!(
+                fast.execute_plain_hrandfield_count_withvalues_borrowed_into(
+                    b"h",
+                    b"notint",
+                    10,
+                    resp3,
+                    &mut Vec::new(),
+                )
+                .is_none()
+            );
+            assert!(
+                fast.execute_plain_hrandfield_count_withvalues_borrowed_into(
+                    b"h",
+                    b"4611686018427387904",
+                    11,
+                    resp3,
+                    &mut Vec::new(),
+                )
+                .is_none()
+            );
+
+            assert_eq!(
+                fast.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                fast.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
     }
 
     #[test]

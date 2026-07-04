@@ -4,37 +4,56 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-04 CrimsonHawk: SURFACE (scoped blocker) — random-sample member-clone sub-vein COMPLETE (5 ships); next member-clone targets are dedicated efforts
+## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD count WITHVALUES zero-copy `_into` WIRED LIVE — 3.04x store A/B (byte-exact)
 
-The random-sample member-clone-elimination sub-vein is exhausted for all BORROWABLE forms — 5 live
-byte-exact ships this arc: SRANDMEMBER count 2.39x, HRANDFIELD count 3.38x, ZRANDMEMBER count 2.60x,
-SRANDMEMBER single 1.62x, HRANDFIELD single 1.49x. ZRANDMEMBER single is unborrowable
-(`index_slice_asc_adaptive`→treap `into_actual()` OWNS). These were tractable because each had an
-EXISTING borrowed fast path (`execute_plain_rand_member*_borrowed`) merely routing to a clone/RespFrame
-reply — the conversion was just: store `*_borrow`/`*_borrow_scan` (RNG verbatim, clone→as_ref sink) +
-`_into` executor (`encode_aggregate_header(n,FALSE)`=*N + `encode_bulk_string_slice`) + dispatch
-`FastReply`→`FastEncodedReply`.
+Sixth ship in the member-clone-elimination arc: `HRANDFIELD key count WITHVALUES` previously cloned
+each sampled `(field, value)` pair into `Vec<(Vec<u8>, Vec<u8>)>`, then copied those bytes again into
+the network reply. Added `Store::hrandfield_count_pair_borrow_scan` to stream sampled borrowed
+`(field, value)` pairs through `HrandfieldWithValuesScanEvent`, plus
+`Runtime::execute_plain_hrandfield_count_withvalues_borrowed_into` and a canonical `*4 HRANDFIELD
+key count WITHVALUES` parser/dispatch path. RESP2 remains a flat alternating array; RESP3 emits
+nested two-element arrays. RNG selection mirrors `hrandfield_count` for positive, large positive,
+negative, and zero counts; missing and WRONGTYPE behavior stay on the same observable path.
 
-INVESTIGATED this turn — the remaining member-clone reads are dedicated efforts, NOT clean single-turn
-ships:
-- **SSCAN/HSCAN/ZSCAN cursor-0** DO have a borrowed fast path (`execute_plain_scan0_borrowed`, shared by
-  S/H/Z) that clones members into `Vec<RespFrame>`. But: (a) the listpack/intset full-shot case is
-  DECODE-bound (listpack members are decoded to owned `Vec<u8>` regardless — the borrow only saves the
-  intermediate `Vec<Vec<u8>>`/`Vec<RespFrame>`, a MODEST win, NOT the per-member clone); (b) the real
-  clone win is the HASHTABLE batch (members are `&Vec<u8>`, borrowable) — but that needs the
-  cursor-BEFORE-members RESP ordering solved (viable via collecting `Vec<&[u8]>` fat-pointer refs during
-  the dictScan walk + returning `next_cursor`, then writing `[cursor, [refs]]`) AND byte-exact mirroring
-  of sscan's reverse-binary dictScan + `next_cursor` (mid-scan-deletion guarantee, see
-  project_scan_deletion_guarantee_vein) AND the `_into` must replicate the shared executor's `key_type`
-  (no-stat, idempotent drop — so declining after it is safe) + `sscan`(no-stat) double-drop accounting +
-  the decline path. Correctness-sensitive; a dedicated turn.
-- **HRANDFIELD WITHVALUES / ZRANDMEMBER WITHSCORES** have NO borrowed fast path (the count parser DEFERS
-  the *4 WITHVALUES/WITHSCORES form to generic). Needs a NEW borrowed parser + fast path + a pair-encoder
-  handling RESP2-flat vs RESP3-pairs (the ZRANGE-WITHSCORES `_into` encoder is reusable for WITHSCORES).
+MEASURED (SHORT per-crate rch bench, same-run A/B on `hz2`):
+`AGENT_NAME=CrimsonHawk CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod rch exec -- env
+FR_ALLOW_STUB_COMMANDS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod cargo bench
+--release -p fr-store --bench store_read -- hrandfield_withvalues --sample-size 20
+--measurement-time 2` reached `ovh-a` and Cargo rejected `--release` for `bench`. Accepted
+release-profile equivalent:
+`cargo bench --profile release -p fr-store --bench store_read -- hrandfield_withvalues
+--sample-size 20 --measurement-time 2`. ORIG clone path
+`hrandfield_withvalues/count50_clone_pairs` median **3.6335 us**; borrowed path
+`hrandfield_withvalues/count50_borrow_pairs` median **1.1953 us** ⇒ **3.04x vs ORIG**.
 
-NEXT DEDICATED EFFORT: SSCAN-hashtable `_into` via the refs-Vec approach (highest value — common, truly
-clone-bound), starting from `execute_plain_scan0_borrowed` @ fr-runtime ~22123. Keyspace-probe + bare-
-drop-guard veins remain exhausted. No clean single-turn per-crate win was available this turn.
+Validation: `rch exec -- cargo check -p fr-store -p fr-runtime -p fr-server --all-targets` GREEN
+with `FR_ALLOW_STUB_COMMANDS=1`; focused store pair parity, runtime encoded-vs-generic, and server
+parser tests GREEN. `cargo test -p fr-conformance -- --nocapture` passed the 194-test main suite but
+the smoke binary hit one `core_server_conformance` latency-history mismatch; focused rerun
+`cargo test -p fr-conformance --test smoke core_server_conformance -- --nocapture` GREEN. `cargo fmt
+--check -p fr-store -p fr-runtime -p fr-server` remains blocked by pre-existing workspace rustfmt
+drift plus surrounding already-landed random-member test formatting; `cargo clippy -p fr-store
+-p fr-runtime -p fr-server --all-targets -- -D warnings` is blocked after local fixes only by the
+pre-existing `fr-persist` `chunks_exact_to_as_chunks` lint debt. No broad formatting or lint cleanup
+was mixed into this lever.
+
+## 2026-07-04 CrimsonHawk: SURFACE (scoped blocker) — remaining random-sample member-clone targets need dedicated efforts
+
+The existing borrowed random-sample forms are now exhausted, and HRANDFIELD WITHVALUES is landed above:
+SRANDMEMBER count 2.39x, HRANDFIELD count 3.38x, ZRANDMEMBER count 2.60x, SRANDMEMBER single 1.62x,
+HRANDFIELD single 1.49x, HRANDFIELD WITHVALUES 3.04x. ZRANDMEMBER single remains unborrowable
+(`index_slice_asc_adaptive`→treap `into_actual()` OWNS). The remaining member-clone reads are
+correctness-sensitive dedicated efforts rather than clean follow-on edits.
+
+- **SSCAN/HSCAN/ZSCAN cursor-0** do have a borrowed fast path (`execute_plain_scan0_borrowed`, shared by
+  S/H/Z) that clones members into `Vec<RespFrame>`. The listpack/intset full-shot case is decode-bound,
+  while the real hashtable win needs cursor-before-members RESP ordering solved via collected borrowed
+  refs plus byte-exact dictScan/cursor behavior.
+- **ZRANDMEMBER WITHSCORES** still has no borrowed fast path; it needs a new borrowed parser plus
+  RESP2-flat/RESP3-pair score encoder.
+
+NEXT DEDICATED EFFORT: SSCAN-hashtable `_into` via the refs-Vec approach, starting from
+`execute_plain_scan0_borrowed` in `fr-runtime`.
 
 ## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD single (no count) zero-copy `_into` WIRED LIVE — 1.49x store A/B (byte-exact)
 

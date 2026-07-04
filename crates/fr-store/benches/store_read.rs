@@ -569,10 +569,53 @@ fn bench_restore_zset_listpack(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_hrandfield_withvalues(c: &mut Criterion) {
+    use fr_store::HrandfieldWithValuesScanEvent;
+
+    const N: usize = 2_000;
+    const VALUE_LEN: usize = 32;
+    let mut store = Store::new();
+    for i in 0..N {
+        let mut value = vec![b'v'; VALUE_LEN];
+        value[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+        store.hset(b"h", format!("f{i:04}").into_bytes(), value, 1_000).unwrap();
+    }
+
+    let mut g = c.benchmark_group("hrandfield_withvalues");
+    g.bench_function("count50_clone_pairs", |b| {
+        b.iter(|| {
+            let pairs = store
+                .hrandfield_count(std::hint::black_box(b"h"), 50, 2_000)
+                .unwrap();
+            std::hint::black_box(
+                pairs
+                    .iter()
+                    .map(|(field, value)| field.len() + value.len())
+                    .sum::<usize>(),
+            )
+        })
+    });
+    g.bench_function("count50_borrow_pairs", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .hrandfield_count_pair_borrow_scan(std::hint::black_box(b"h"), 50, 2_000, |ev| {
+                    if let HrandfieldWithValuesScanEvent::Pair(field, value) = ev {
+                        acc += field.len() + value.len();
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
     bench_zrange_withscores,
-    bench_restore_zset_listpack
+    bench_restore_zset_listpack,
+    bench_hrandfield_withvalues
 );
 criterion_main!(benches);
