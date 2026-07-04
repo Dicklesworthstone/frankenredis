@@ -11741,6 +11741,22 @@ impl Store {
         fields: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hmget_for_each`.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(fields
+                            .iter()
+                            .map(|f| m.get(f).map(<[u8]>::to_vec))
+                            .collect()),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(fields.iter().map(|_| None).collect()),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(fields.iter().map(|_| None).collect());
         }
@@ -11794,6 +11810,33 @@ impl Store {
         now_ms: u64,
         mut emit: F,
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`. When
+        // no per-field TTL exists the field-drop loop below is a guaranteed no-op, so the
+        // `record_keyspace_lookup` + separate `get_mut` double probe collapses to one
+        // `lookup_live_for_read_mut`. Byte-identical: same key lazy-expiry, hit/miss,
+        // unconditional touch (incl WRONGTYPE), and per-field emit.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => {
+                            for field in fields {
+                                emit(m.get(field));
+                            }
+                            Ok(())
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    for _ in fields {
+                        emit(None);
+                    }
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             for _ in fields {
                 emit(None);
@@ -33193,6 +33236,72 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "PFADD present-elem no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) HMGET key-lookup collapse (field-TTL-gated): byte-identical values,
+    // WRONGTYPE, hit/miss, owned vs borrowed parity, AND the non-empty-map fallback still
+    // reaping an expired field.
+    #[test]
+    fn hmget_key_lookup_collapse_and_field_ttl_fallback() {
+        let mut s = Store::new();
+        s.hset(b"h", b"a".to_vec(), b"1".to_vec(), 1).unwrap();
+        s.hset(b"h", b"b".to_vec(), b"2".to_vec(), 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        assert!(s.hash_field_expires.is_empty());
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let req: &[&[u8]] = &[b"a", b"missing", b"b"];
+        assert_eq!(s.hmget(b"h", req, 2).unwrap(), vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]);
+        // borrowed parity.
+        let mut borrowed = Vec::new();
+        s.hmget_for_each(b"h", req, 2, |v| borrowed.push(v.map(<[u8]>::to_vec))).unwrap();
+        assert_eq!(borrowed, vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]);
+        // Missing key → all None.
+        assert_eq!(s.hmget(b"absent", req, 2).unwrap(), vec![None, None, None]);
+        // WRONGTYPE.
+        assert!(matches!(s.hmget(b"str", req, 2), Err(StoreError::WrongType)));
+        // hits: hmget(h), hmget_for_each(h), hmget(str wrongtype) = 3; misses: hmget(absent) = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 3);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+
+        // Key lazy-expiry via HMGET.
+        let mut t = Store::new();
+        t.hset(b"hexp", b"a".to_vec(), b"1".to_vec(), 1).unwrap();
+        t.expire_at_milliseconds(b"hexp", 50, 1);
+        assert_eq!(t.hmget(b"hexp", &[b"a"], 500).unwrap(), vec![None]);
+        assert!(t.get(b"hexp", 600).unwrap().is_none());
+
+        // FIELD-TTL fallback (non-empty map → original path): expired field reads None,
+        // live field reads its value.
+        let mut u = Store::new();
+        u.hset(b"h2", b"live".to_vec(), b"L".to_vec(), 1).unwrap();
+        u.hset(b"h2", b"dead".to_vec(), b"D".to_vec(), 1).unwrap();
+        u.hash_field_expires.insert((b"h2".to_vec(), b"dead".to_vec()), 50);
+        assert!(!u.hash_field_expires.is_empty());
+        assert_eq!(u.hmget(b"h2", &[b"live", b"dead"], 500).unwrap(), vec![Some(b"L".to_vec()), None]);
+
+        // Timing headline HMGET@8 fields (no field TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..8u32 { b.hset(b"benchhash:key", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        let k: &[u8] = b"benchhash:key";
+        let q: Vec<Vec<u8>> = (0..8u32).map(|i| format!("f{i}").into_bytes()).collect();
+        let qr: Vec<&[u8]> = q.iter().map(Vec::as_slice).collect();
+        for _ in 0..2000 { std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok(); }
+        let reps = 1_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "HMGET@8 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HMGET key-lookup collapse (field-TTL-gated) — HMGET@8 1.04x / bigger for small HMGET (byte-exact)
+
+The last MISSED hot read: `hmget`/`hmget_for_each` (the live borrow path) still did
+`record_keyspace_lookup(key)` + separate `entries.get_mut(key)` (I'd earlier only hoisted their
+per-field drop loop, not collapsed the KEY lookup). Applied the same field-TTL gate as HGET:
+`if hash_field_expires.is_empty() && !lfu { lookup_live_for_read_mut(key) → touch → emit each
+field }`. When the map is empty the field-drop loop is a guaranteed no-op, so the collapse is
+byte-identical (key lazy-expiry, hit/miss counted once, unconditional touch incl WRONGTYPE,
+per-field emit, owned-vs-borrowed parity). Proven by
+`hmget_key_lookup_collapse_and_field_ttl_fallback` (values, owned/borrowed parity, missing→all-
+None, WRONGTYPE, exact hit/miss deltas, key eviction, AND the non-empty-map fallback reaping an
+expired field).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed HMGET@8 no-TTL = 297.95 ns/op;
+removed 2nd keyspace probe ≈ **11.02 ns** → old ≈ 308.97 ns ⇒ **1.04x (−3.6%)**. Modest ratio
+because HMGET@8 does 8 field lookups + 8 value clones (~298 ns baseline) so the removed probe is
+a small fraction; the SAME ~11 ns saving is a bigger fraction for the common small-HMGET (@2 ≈
+1.15x). Real byte-exact win on a very hot command; completes the single-lookup-collapse coverage
+for the read surface (HMGET was the last hot read still double-probing). Conformance GREEN
+(683/683, fully clean). Landed via clean origin/main worktree. (RPUSH/LPUSH re-confirmed genuinely
+structural: `push_back_owned` maintains `lp_bytes` incrementally = O(1)/push, not O(n²); the gap
+is the per-element `Vec<u8>` alloc — no clean per-crate lever.)
+
 ## 2026-07-04 CrimsonHawk: KEEP — PFADD bare-drop `expires_count` guard — PFADD present-elem 1.29x (byte-exact)
 
 `pfadd_impl` (HLL PFADD) called a BARE unguarded `drop_if_expired(key, now_ms)` (return
