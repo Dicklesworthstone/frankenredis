@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SMEMBERS + LRANGE borrow-scan single-lookup collapse — SMEMBERS@8 1.18x (byte-exact)
+
+Extends the single-lookup-collapse vein to the collection-scan `_into` reply paths
+(`smembers_borrow_scan`, `lrange_borrow_scan` — the LIVE FastEncodedReply paths). Both did
+`record_keyspace_lookup(key)` (keyspace probe via `drop_if_expired`) THEN `entries.get_mut(key)`
+— two key hashes; non-LFU branch collapsed to one `lookup_live_for_read_mut`, then stream the
+member/element events. Byte-identical: same Len+member stream, WRONGTYPE, keyspace hit/miss,
+single `touch`, empty-range/missing-key behavior, lazy-expiry eviction; LFU path verbatim.
+Proven by `smembers_lrange_borrow_scan_collapse_matches_full_path` (member streams, LRANGE
+sub-ranges, missing→Len(0), WRONGTYPE, exact hit/miss deltas, expired-key eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed SMEMBERS@8 no-TTL = 55.83 ns/op;
+removed 2nd keyspace probe ≈ **10.11 ns** → old ≈ 65.94 ns ⇒ **1.18x (−15%)**. LRANGE shares the
+transform + ratio. Ratio lands between the point reads (SCARD 1.48x) and SMISMEMBER (1.11x) —
+scales inversely with element count (small collections benefit most; large scans amortize the
+saved probe). Conformance GREEN (676/676, fully clean run). HGETALL/HKEYS/HVALS deferred
+(field-TTL wrinkle — `drop_expired_hash_fields` between record + get_mut, same HGET blocker:
+keyspace hit must be counted BEFORE the field-drop which can empty+remove the key). Landed via
+clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SMISMEMBER single-lookup collapse + ZMSCORE drop-guard — SMISMEMBER@8/4q 1.11x (byte-exact)
 
 Two multi-member reads, two mechanisms, same ~10 ns/probe saving:

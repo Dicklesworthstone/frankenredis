@@ -12521,6 +12521,35 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::List(l) => {
+                        let len = l.len() as i64;
+                        let s = normalize_index(start, len).max(0);
+                        let e = normalize_index(stop, len).min(len - 1);
+                        if s > e || s >= len || e < 0 {
+                            sink(SmembersScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s = s as usize;
+                        let e = e as usize;
+                        sink(SmembersScanEvent::Len(e - s + 1));
+                        for m in l.iter_from(s).take(e - s + 1) {
+                            sink(SmembersScanEvent::Member(m));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -13764,6 +13793,26 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        sink(SmembersScanEvent::Len(s.len()));
+                        for m in s.iter() {
+                            sink(SmembersScanEvent::Member(m.as_ref()));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -32554,6 +32603,85 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "SMISMEMBER@8/4q no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) SMEMBERS/LRANGE borrow-scan single-lookup collapse: byte-identical
+    // reply stream (Len + members), WRONGTYPE, keyspace hit/miss, lazy-expiry eviction.
+    #[test]
+    fn smembers_lrange_borrow_scan_collapse_matches_full_path() {
+        use crate::SmembersScanEvent;
+        fn collect_smembers(s: &mut Store, key: &[u8], now: u64) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+            use crate::SmembersScanEvent;
+            let mut len = 0usize;
+            let mut members = Vec::new();
+            s.smembers_borrow_scan(key, now, |e| match e {
+                SmembersScanEvent::Len(n) => len = n,
+                SmembersScanEvent::Member(m) => members.push(m.to_vec()),
+            })?;
+            Ok((len, members))
+        }
+        fn collect_lrange(s: &mut Store, key: &[u8], a: i64, b: i64, now: u64) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+            use crate::SmembersScanEvent;
+            let mut len = 0usize;
+            let mut items = Vec::new();
+            s.lrange_borrow_scan(key, a, b, now, |e| match e {
+                SmembersScanEvent::Len(n) => len = n,
+                SmembersScanEvent::Member(m) => items.push(m.to_vec()),
+            })?;
+            Ok((len, items))
+        }
+
+        let mut s = Store::new();
+        s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap();
+        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let (slen, mut smem) = collect_smembers(&mut s, b"set", 2).unwrap();
+        smem.sort();
+        assert_eq!(slen, 3);
+        assert_eq!(smem, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(collect_lrange(&mut s, b"list", 0, -1, 2).unwrap(),
+                   (3, vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]));
+        assert_eq!(collect_lrange(&mut s, b"list", 1, 1, 2).unwrap(), (1, vec![b"y".to_vec()]));
+        // Missing key → Len(0), empty; hit stats still recorded on hits.
+        assert_eq!(collect_smembers(&mut s, b"absent", 2).unwrap(), (0, vec![]));
+        assert_eq!(collect_lrange(&mut s, b"absent", 0, -1, 2).unwrap(), (0, vec![]));
+        // WRONGTYPE (still a hit).
+        assert!(matches!(collect_smembers(&mut s, b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(collect_lrange(&mut s, b"str", 0, -1, 2), Err(StoreError::WrongType)));
+        // hits: set,list(0-1),list(1-1),smembers(str),lrange(str) = 5; misses: 2 absents = 2.
+        assert_eq!(s.stat_keyspace_hits, h0 + 5);
+        assert_eq!(s.stat_keyspace_misses, m0 + 2);
+
+        // Lazy expiry via SMEMBERS on an expired set key.
+        let mut t = Store::new();
+        t.sadd(b"exp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(collect_smembers(&mut t, b"exp", 500).unwrap(), (0, vec![]));
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "SMEMBERS evicts expired key");
+
+        // Timing headline for SMEMBERS@8 (no-TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..8u32 { b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1).unwrap(); }
+        let k: &[u8] = b"benchset:key";
+        for _ in 0..2000 { b.smembers_borrow_scan(k, 2, |_| {}).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.smembers_borrow_scan(std::hint::black_box(k), 2, |e| { std::hint::black_box(&e); }).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "SMEMBERS@8 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
