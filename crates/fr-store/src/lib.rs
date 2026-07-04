@@ -15322,6 +15322,64 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow twin of [`Store::srandmember`] — sinks the single random member
+    /// BORROWED (or `None` for empty/missing) instead of cloning it into an `Option<Vec<u8>>`,
+    /// eliminating the one member-clone alloc on hashtable sets. IDENTICAL bookkeeping: same
+    /// `record_keyspace_lookup`, the SAME `next_rand()` draws (lfu_rand_sample + rand_val), same
+    /// `get_index(rand_val % len)`, LFU bump + touch. The bump/touch are hoisted BEFORE the borrowed
+    /// read (they mutate entry metadata only, not the set — output unobservably equal) to avoid the
+    /// sink-borrow-vs-mut-bump conflict.
+    pub fn srandmember_borrow(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(None);
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+        let rand_val = self.next_rand();
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                let idx = match &entry.value {
+                    Value::Set(s) => {
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some((rand_val as usize) % s.len())
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Set(s) => match idx {
+                        Some(i) => sink(s.get_index(i).as_deref()),
+                        None => sink(None),
+                    },
+                    _ => unreachable!("type checked above"),
+                }
+                Ok(())
+            }
+            None => {
+                sink(None);
+                Ok(())
+            }
+        }
+    }
+
     /// SRANDMEMBER key count — returns multiple random members.
     /// Positive count: up to `count` distinct members.
     /// Negative count: exactly `|count|` members, possibly with repeats.
@@ -35790,6 +35848,52 @@ mod tests {
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "HRANDFIELD count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
+    // (CrimsonHawk) srandmember_borrow (single) yields the BYTE-IDENTICAL member to clone
+    // srandmember (Set get_index is insertion-ordered ⇒ two fixed-seed stores agree) + measures
+    // the single-clone-elimination A/B, to judge whether it clears the ~0-gain bar before wiring.
+    #[test]
+    fn srandmember_borrow_single_matches_clone() {
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
+            s.sadd(b"s", &members, 1).unwrap();
+            s
+        }
+        fn borrow_one(s: &mut Store) -> Option<Vec<u8>> {
+            let mut out = None;
+            s.srandmember_borrow(b"s", 2, |m| out = m.map(|b| b.to_vec())).unwrap();
+            out
+        }
+        for &n in &[16u32, 1000] {
+            for _ in 0..8 {
+                let mut a = build(n);
+                let mut b = build(n);
+                assert_eq!(a.srandmember(b"s", 2).unwrap(), borrow_one(&mut b), "n={n}: borrow != clone");
+            }
+        }
+        // WRONGTYPE / missing / empty.
+        let mut z = Store::new();
+        z.set(b"s".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(z.srandmember_borrow(b"s", 2, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow_one(&mut Store::new()), None);
+
+        // Timing A/B: hashtable set, single member.
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.srandmember(b"s", 2)).ok(); std::hint::black_box(borrow_one(&mut bo)); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.srandmember(std::hint::black_box(b"s"), 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.srandmember_borrow(std::hint::black_box(b"s"), 2, |m| { std::hint::black_box(&m); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "SRANDMEMBER single @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
             clone_ns / borrow_ns
         );
     }

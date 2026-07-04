@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SRANDMEMBER single (no count) zero-copy `_into` WIRED LIVE — 1.62x store A/B (byte-exact)
+
+Extended the member-clone-elimination arc to the single `SRANDMEMBER key` form (no count — the MOST
+COMMON usage, uses the EXISTING `parse_borrowed_plain_srandmember_packet`, no new parser). Added
+`Store::srandmember_borrow` (sinks the one random member BORROWED or `None`; RNG draws +
+`get_index(rand_val % len)` verbatim; the LFU bump/touch are HOISTED before the borrowed read —
+they mutate entry metadata only, so output is unobservably equal — to dodge the sink-borrow-vs-
+mut-bump conflict that blocked the earlier lookup_live collapse) + `execute_plain_srandmember_
+borrowed_into` (member emitted zero-copy via `encode_bulk_string_slice`; nil via
+`RespFrame::BulkString(None)` for the exact RESP2 `$-1` / RESP3 `_`) + swapped the fr-server single
+dispatch `FastReply`→`FastEncodedReply`.
+
+BYTE-EXACT: `srandmember_borrow_single_matches_clone` asserts the borrowed member EQUALS clone
+`srandmember` across {16 listpack, 1000 hashtable} (Set `get_index` is insertion-ordered ⇒ two
+fixed-seed stores agree, unlike the zset dict) + WRONGTYPE/missing/empty. VERIFIED via local
+symlink-legacy build: all SRANDMEMBER dispatch tests pass; only failure = the same PRE-EXISTING
+`borrowed_plain_mset_packet_dispatcher…`.
+
+MEASURED (store-level A/B, per-crate rch, single member over a 2000-member HASHTABLE set): clone
+`srandmember` = 56.7 ns/op vs borrow = **35.1 ns/op = 1.62x** — surprisingly high because the single
+member-clone + `Option<Vec<u8>>` is a LARGE fraction of the tiny ~57 ns command; now live on the most
+common SRANDMEMBER form. **MEMBER-CLONE-ELIM ARC: 4 live ships — SRANDMEMBER count 2.39x, HRANDFIELD
+count 3.38x, ZRANDMEMBER count 2.60x, SRANDMEMBER single 1.62x.** NEXT: HRANDFIELD/ZRANDMEMBER single
+(same recipe; both no-stat ⇒ exists_no_touch), then WITHVALUES/WITHSCORES (new parser) or SCAN.
+Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANDMEMBER count zero-copy `_into` WIRED LIVE — 2.60x store A/B (byte-exact)
 
 Third command in the member-clone-elimination arc (completes the random-sample count trio:
