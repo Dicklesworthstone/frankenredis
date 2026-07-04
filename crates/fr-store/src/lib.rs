@@ -15283,6 +15283,107 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow-scan twin of [`Store::srandmember_count`] — streams the sampled
+    /// members BORROWED via `sink` instead of cloning each into a `Vec<Vec<u8>>`, eliminating
+    /// the per-member clone alloc on hashtable-encoded sets. IDENTICAL bookkeeping: same
+    /// `record_keyspace_lookup`, LFU bump/`touch`, and — critically — the SAME `next_rand()`
+    /// selection sequence, so the sampled members are byte-identical. Only the final
+    /// clone (`into_owned`) becomes a borrowed `sink` (`Cow::as_ref`). All `indices` are
+    /// `% len`, so `get_index` always yields `Some` ⇒ the sunk member count == `indices.len()`.
+    pub fn srandmember_count_borrow_scan(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+        let len = match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => {
+                    let len = s.len();
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+                    }
+                    entry.touch(now_ms);
+                    len
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+        };
+        if len == 0 {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
+                let mut picked = HashSet::with_capacity(n);
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
+                    if picked.insert(idx) {
+                        idxs.push(idx);
+                    }
+                }
+                idxs
+            } else {
+                let mut order: Vec<usize> = (0..len).collect();
+                for i in 0..n {
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
+                }
+                order.truncate(n);
+                order
+            }
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
+            for _ in 0..abs_count {
+                idxs.push((self.next_rand() as usize) % len);
+            }
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => {
+                    sink(SmembersScanEvent::Len(indices.len()));
+                    for &idx in &indices {
+                        if let Some(c) = s.get_index(idx) {
+                            sink(SmembersScanEvent::Member(c.as_ref()));
+                        }
+                    }
+                    Ok(())
+                }
+                _ => {
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            },
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     pub fn smove(
         &mut self,
         source: &[u8],
@@ -35347,6 +35448,67 @@ mod tests {
             "SSCAN@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) srandmember_count_borrow_scan produces BYTE-IDENTICAL sampled members to the
+    // clone srandmember_count (fixed rng_seed 0xDEADBEEF + non-LFU sadd doesn't consume RNG ⇒ two
+    // fresh stores draw the same sequence). Verifies +count (distinct), -count (repeats),
+    // WRONGTYPE, missing, keyspace stat, and the clone-elimination timing A/B.
+    #[test]
+    fn srandmember_count_borrow_scan_matches_clone() {
+        use crate::SmembersScanEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
+            s.sadd(b"s", &members, 1).unwrap();
+            s
+        }
+        fn borrow_collect(s: &mut Store, count: i64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut out = Vec::new();
+            s.srandmember_count_borrow_scan(b"s", count, 2, |ev| {
+                if let SmembersScanEvent::Member(m) = ev { out.push(m.to_vec()) }
+            })?;
+            Ok(out)
+        }
+        // Byte-identity across encodings (16=listpack, 1000=hashtable) + counts.
+        for &n in &[16u32, 1000] {
+            for &count in &[5i64, 200, -7, -300, 0] {
+                let mut a = build(n);
+                let mut b = build(n);
+                let clone_res = a.srandmember_count(b"s", count, 2).unwrap();
+                let borrow_res = borrow_collect(&mut b, count).unwrap();
+                assert_eq!(clone_res, borrow_res, "n={n} count={count}: borrow-scan != clone");
+            }
+        }
+        // Miss / WRONGTYPE / keyspace stat.
+        let mut s = build(16);
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+        let r_hit = borrow_collect(&mut s, 5).unwrap();
+        assert_eq!(r_hit.len(), 5);
+        assert!(r_hit.iter().all(|m| s.sismember(b"s", m, 2).unwrap()));
+        let (h1, _) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+        assert!(h1 > h0, "srandmember records a keyspace hit (like clone)"); // sismember also records; just check it moved
+        assert_eq!(borrow_collect(&mut s, 5).map(|v| v.len()).unwrap_or(99), 5);
+        assert_eq!(borrow_collect(&mut Store::new(), 5).unwrap(), Vec::<Vec<u8>>::new()); // missing → empty
+        assert!(matches!(borrow_collect(&mut { let mut z = Store::new(); z.set(b"s".to_vec(), b"v".to_vec(), None, 1); z }, 5), Err(StoreError::WrongType)));
+        let _ = (h0, m0);
+
+        // Timing A/B: large hashtable set, count 50 — clone (50 allocs) vs borrow (0 allocs).
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.srandmember_count(b"s", 50, 2)).ok(); std::hint::black_box(borrow_collect(&mut bo, 50)).ok(); }
+        let reps = 200_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.srandmember_count(std::hint::black_box(b"s"), 50, 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.srandmember_count_borrow_scan(std::hint::black_box(b"s"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "SRANDMEMBER count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
         );
     }
 

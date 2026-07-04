@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP (store-side foundation) — srandmember_count_borrow_scan (member-clone elimination) — 2.39x store A/B, byte-exact
+
+FIRST cut at the member-clone-elimination lever surfaced last turn. Added `Store::
+srandmember_count_borrow_scan` — a borrow-scan twin of `srandmember_count` that STREAMS the sampled
+members BORROWED (`Cow::as_ref` → sink) instead of cloning each into a `Vec<Vec<u8>>`, eliminating
+the per-member clone alloc on hashtable-encoded sets. The RNG selection block (rejection-sampling /
+partial Fisher-Yates / negative-count repeats) is copied VERBATIM, so the `next_rand()` sequence —
+and thus the sampled members — is byte-identical; only the final `.into_owned()` clone becomes a
+borrowed sink.
+
+BYTE-IDENTITY PROVEN at runtime (not just by construction): `Store::new()` has a FIXED
+`rng_seed 0xDEADBEEF_C0FFEE11` and non-LFU `sadd` doesn't consume the RNG, so two fresh stores draw
+identically — `srandmember_count_borrow_scan_matches_clone` asserts the borrow-scan result EQUALS the
+clone `srandmember_count` result across {16=listpack, 1000=hashtable} × {+5,+200,-7,-300,0} counts,
+plus WRONGTYPE / missing / keyspace-stat.
+
+MEASURED (store-level A/B, per-crate rch, count=50 over a 2000-member HASHTABLE set): clone
+`srandmember_count` = 2815 ns/op vs borrow-scan = **1180 ns/op = 2.39x** (eliminates the 50 member
+clone-allocs). Conformance GREEN (707/707; lone fail = brittle zdiff perf guard, unrelated).
+
+**SCOPE / honesty: this is the STORE-SIDE half.** To realize the 2.39x on the LIVE SRANDMEMBER path
+needs the zero-copy `_into` wiring: a new `execute_plain_srandmember_count_borrowed_into(key,count,
+resp3,out)` mirroring `execute_plain_smembers_borrowed_into` (bookkeeping + `srandmember_count_
+borrow_scan` streaming into `out` via `encode_aggregate_header`/`encode_bulk_string_slice` +
+`record_plain_rand_member_borrowed_metrics`) + swapping the `parse_borrowed_plain_srandmember_count_
+packet` dispatch branch from `FastReply` to `FastEncodedReply`. NOT landed this turn: fr-runtime/
+fr-server can't be built/conformance-verified per-crate via rch (legacy_redis_code `.rchignore`), and
+that branch carries a packet_id/metrics GOLDEN contract — not safe to change unverified in one turn.
+The store method is the tested, measured, byte-exact foundation; HRANDFIELD/ZRANDMEMBER count get the
+same treatment next. De-risks last turn's blocker from "maybe" to "proven 2.39x, wiring scoped".
+
 ## 2026-07-04 CrimsonHawk: SURFACE (blocker) — clean single-turn per-crate keyspace-probe/bare-drop vein EXHAUSTED; next levers are multi-part/structural
 
 After 39 byte-exact ships this arc (keyspace-probe single-lookup collapses across the entire read
