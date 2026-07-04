@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: REJECT — small CompactFieldMap linear `contains_key` did not clear the SMISMEMBER gate
+
+Re-applied the `frankenredis-f7iv3` candidate: for `CompactFieldMap::contains_key`
+with `len <= 128`, linearly scan insertion-order arena entries instead of doing
+the foldhash/open-addressing lookup. Byte-exactness was proven with a temporary
+128-entry hit/miss/removal equivalence test; RCH `hz1` passed:
+`cargo test -p fr-store compact_field_map_small_linear_contains_matches_lookup_semantics -- --nocapture`.
+The production hunk was reverted before commit.
+
+Per-crate RCH bench: `cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- SMISMEMBER --noplot`, release-perf `fr-server` binaries,
+Redis 7.2.4 oracle, same worker `hz1`.
+
+| run | row | Redis 7.2.4 thrpt | FrankenRedis thrpt | FR/Redis | candidate/control |
+| --- | --- | ---: | ---: | ---: | ---: |
+| candidate | SMISMEMBER_2v | 492.88 Kelem/s | 532.92 Kelem/s | 1.081x | 0.701x |
+| control `origin/main` 771158686 | SMISMEMBER_2v | 615.35 Kelem/s | 760.52 Kelem/s | 1.236x | baseline |
+| candidate | SMISMEMBER_3v | 475.60 Kelem/s | 466.94 Kelem/s | 0.982x | 0.877x |
+| control `origin/main` 771158686 | SMISMEMBER_3v | 739.23 Kelem/s | 532.24 Kelem/s | 0.720x | baseline |
+
+The 3-member normalized ratio improved, but the 2-member row regressed and the
+absolute Redis medians moved enough between runs that this is not a stable
+keep. Do not retry the blanket "small map contains_key = linear scan" lever.
+If SMISMEMBER remains suspect, use a paired fixture matching the original
+100-member listpack set and compare candidate/control in the same measurement
+window, or pursue a true listpack-backed set representation instead of a generic
+arena scan.
+
 ## 2026-07-02 CrimsonHawk: SURFACE — deep-saturation confirmed: COPY correct+15x FASTER (arena clone), Lua number-formatting byte-exact (28 edge cases), -0.0 "divergence" was a phantom. No new gap.
 
 Correctness + perf differential this cycle, all clean:
