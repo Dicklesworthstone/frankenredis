@@ -5980,6 +5980,39 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrandmember_count_withscores_packet(
+                        unparsed,
+                        &parser_config,
+                    )
+                {
+                    // (CrimsonHawk) Zero-copy `_into` for `ZRANDMEMBER key count WITHSCORES` —
+                    // stream (member borrowed, score) pairs into the buffer (2.60x member-clone
+                    // elimination). Same decline conditions as generic ⇒ fallthrough-safe.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zrandmember_count_withscores_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_rand_member_borrowed(
@@ -12559,6 +12592,47 @@ fn parse_borrowed_plain_hrandfield_count_withvalues_packet<'a>(
         return None;
     }
     Some(BorrowedPlainHrandfieldCountWithvaluesPacket {
+        consumed,
+        key,
+        count,
+    })
+}
+
+struct BorrowedPlainZrandmemberCountWithscoresPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    count: &'a [u8],
+}
+
+// (CrimsonHawk) Byte-prefix fast path for `ZRANDMEMBER key count WITHSCORES` (argc 4). Mirrors
+// the HRANDFIELD WITHVALUES parser. Every other shape (no WITHSCORES / other modifier / bad arity)
+// defers to generic borrowed dispatch.
+fn parse_borrowed_plain_zrandmember_count_withscores_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZrandmemberCountWithscoresPacket<'a>> {
+    if config.max_array_len < 4
+        || config.max_bulk_len < b"ZRANDMEMBER".len()
+        || config.max_bulk_len < b"WITHSCORES".len()
+    {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$11\r\n").and_then(|rest| {
+        rest.get(..11)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZRANDMEMBER"))
+            .map(|_| input.len() - rest.len() + 11)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (count, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (option, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !option.eq_ignore_ascii_case(b"WITHSCORES") {
+        return None;
+    }
+    Some(BorrowedPlainZrandmemberCountWithscoresPacket {
         consumed,
         key,
         count,

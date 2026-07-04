@@ -27972,6 +27972,125 @@ impl Runtime {
         Some(())
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` fast path for `ZRANDMEMBER key count WITHSCORES` — streams
+    /// the sampled `(member BORROWED, score)` pairs into `out` via
+    /// `zrandmember_count_withscores_borrow_scan`, eliminating the per-member clone. Mirrors the
+    /// HRANDFIELD WITHVALUES `_into` (RESP2 flat `2N` / RESP3 nested `N` two-element arrays) but the
+    /// value is the score formatted via `redis_score_to_string`. ZRANDMEMBER is no-stat ⇒ one
+    /// `exists_no_touch` first.
+    pub fn execute_plain_zrandmember_count_withscores_borrowed_into(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let count = parse_i64_arg(count_arg).ok()?;
+        let half = i64::MAX / 2;
+        if count < -half || count > half {
+            return None;
+        }
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZRANDMEMBER".len()
+            || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrandmember");
+        self.session.last_argv_len_sum =
+            b"ZRANDMEMBER".len() + key.len() + count_arg.len() + b"WITHSCORES".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let _ = self.server.store.exists_no_touch(key, now_ms);
+        let result = self
+            .server
+            .store
+            .zrandmember_count_withscores_borrow_scan(key, count, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        } else {
+                            fr_protocol::encode_aggregate_header(n * 2, false, out);
+                        }
+                    }
+                    fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                        }
+                        fr_protocol::encode_bulk_string_slice(Some(member), false, out);
+                        let ss = fr_store::redis_score_to_string(score);
+                        fr_protocol::encode_bulk_string_slice(Some(ss.as_bytes()), false, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_rand_member_borrowed_metrics(
+            PlainRandMemberCmd::Zrandmember,
+            key,
+            Some(count_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     /// (CrimsonHawk) Zero-copy `_into` fast path for `ZRANDMEMBER key count` (no WITHSCORES) —
     /// streams the sampled MEMBER NAMES borrowed straight into `out` (`*N` array) via
     /// `zrandmember_count_member_borrow_scan`, eliminating the per-member clone on Full-encoded

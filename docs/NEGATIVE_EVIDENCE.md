@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANDMEMBER count WITHSCORES zero-copy `_into` WIRED LIVE — 2.60x store A/B (byte-exact)
+
+ZSCAN0 is a DEAD END (skiplist branch uses `index_slice_asc_adaptive`→treap `into_actual()` = OWNED
+members; sorted order REQUIRES the treap, the dict is unordered — unborrowable, like ZRANDMEMBER
+single). Pivoted to ZRANDMEMBER count WITHSCORES (open + borrowable): member via `dict.get_index`
+(Full) + f64 score. Added `SortedSet::random_member_score_at_indices_borrow_scan` (Full borrows
+`(member, score)`; Packed fallback) + `Store::zrandmember_count_withscores_borrow_scan` (mirrors
+`zrandmember_count`, sinks `ZRangeWithScoresScanEvent::{Len, Pair(member,score)}` — REUSED the
+ZRANGE-WITHSCORES event, no new one). `execute_plain_zrandmember_count_withscores_borrowed_into` +
+`parse_borrowed_plain_zrandmember_count_withscores_packet` (`*4 ZRANDMEMBER key count WITHSCORES`) +
+dispatch branch — all MIRROR the peer's conformance-verified HRANDFIELD WITHVALUES `_into` (RESP2 flat
+`2N` / RESP3 nested `N`×`*2` pairs) except the value is the score via `redis_score_to_string`, and
+no-stat ⇒ `exists_no_touch` first.
+
+BYTE-EXACT: `zrandmember_count_withscores_borrow_scan_matches_clone` proves the index→(member,score)
+access equals clone `random_members_at_indices` (same-store fixed indices, both encodings) + full-method
+validity (exact count + every member real with matching `zscore`) + WRONGTYPE. VERIFIED via local
+symlink-legacy build: compiles clean; fr-server 217/218, lone failure the same PRE-EXISTING
+`mset_packet_dispatcher`, unrelated. Reply byte-exactness by construction (store pairs identical + the
+RESP2/RESP3 encoder is the peer's verified WITHVALUES shape + the standard score formatter).
+
+MEASURED (store-level A/B, per-crate rch, count=50 over a 2000-member FULL zset): clone
+`zrandmember_count` (clones members) = 2519 ns/op vs borrow-scan = **969 ns/op = 2.60x** — now live for
+the WITHSCORES form. **MEMBER-CLONE-ELIM ARC (mine): SSCAN 1.80x, HSCAN 2.20x, ZRANDMEMBER WITHSCORES
+2.60x + 5 earlier random-sample. ZSCAN + ZRANDMEMBER single unborrowable (treap sorted-index owns).**
+Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HSCAN key 0 zero-copy `_into` WIRED LIVE — 2.20x store A/B (byte-exact)
 
 Second SCAN-family `_into` (after SSCAN0). Added `Store::hscan0_borrow_scan` (REUSES `SscanReplyEvent`:
