@@ -4,6 +4,44 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE — RESP3-decline/hash-sidemap/XADD veins all confirmed dry; XREADGROUP-history de-risked into an executable recipe for next turn
+
+Audited three quick-win sub-veins this turn; all exhausted:
+- **RESP3-declining fast paths** (last turn's lead): grepped fr-runtime — ZERO `if resp3 { return None }`
+  remain (the XREAD ones were the last, extended last turn). The one dispatch `resp_protocol_version()
+  != 3` gate (main.rs ~20501) is SUBSCRIPTION-MODE correctness (RESP2 subscribers run a command subset),
+  not an optimization decline — leave it. XRANGE/XREVRANGE need no RESP3 change (their reply is a plain
+  array in both protocols). HGETALL already uses `encode_map_header`. RESP3 map-extension DONE.
+- **Hash empty-sidemap-fast-exit** (HGET −28.5% / HDEL −43% vein): HMGET is already guarded
+  (`hash_field_expires.is_empty() && !lfu` fast path + guarded per-field drop loop). HGET/HDEL/HMGET all
+  done; `drop_expired_hash_fields` itself fast-exits internally. Vein exhausted for hash reads.
+- **Stream sidemap (XADD)**: XADD's `stream_last_ids`/`stream_entries_added` probes already avoid the
+  per-op `key.to_vec()` alloc (get_mut-first, `entry(key.to_vec())` only on the first XADD). Clean.
+
+XREADGROUP-history `_into` (the one remaining stream read) — DE-RISKED into a clean recipe (the expiry
+edge that blocked it is solvable). RECIPE for next turn:
+- **Peek-gate (all no-stat ⇒ clean decline to generic):** serve ONLY when `peek_value_type(key)==Stream`
+  AND `stream_consumer_groups(key)` has the group AND the consumer exists AND the key has NO TTL
+  (`self.expiry_deadlines.contains_key(key)` is false / `pttl_no_stats`). The no-TTL gate SIDESTEPS the
+  expiry hazard (a no-drop peek can't gate an expired key; `record_keyspace_lookup` would then drop
+  mid-serve → NOGROUP divergence). Every declined case (missing/wrong-type/nogroup/consumer-missing/
+  bad-id/`>`/NOACK/multi/TTL'd) falls to the generic path byte+stats-exact.
+- **Store `xreadgroup_history_borrow_scan`:** `record_keyspace_lookup` (hit 2; no drop since no-TTL),
+  HOIST the consumer touch first (`group_state.get_mut` → `insert_consumer` [no-op, gated exists] +
+  `touch_consumer_active` — mut BEFORE the immut read, output-invariant), then walk
+  `group_state.pending.range((Excluded(start),Unbounded))` filtered by consumer, `entries.get(*id)` →
+  `Some(FieldsRef)` (borrow) or `None` (tombstone); collect refs to emit RecordCount first (disjoint
+  field borrows of `self.entries` + `self.stream_groups` are allowed). Executor does `exists_no_touch`
+  (hit 1) before it (2-hit accounting, per frankenredis-xrgkscount).
+- **Event:** new `XreadgroupHistEvent { RecordCount, RecordStart(id,pairs), RecordStartNil(id), Field }`
+  (own event — don't add a variant to XrangeReplyEvent, it'd break the XRANGE/XREAD exhaustive matches).
+  Tombstone `RecordStartNil` → `*2` + id + `*-1` (nil value array); history ALWAYS includes the stream
+  (even empty ⇒ `[key, []]`), reply `*1 *2 key entries` (RESP2) / `%1 key entries` (RESP3).
+- **Parser:** `XREADGROUP GROUP g c [COUNT n] STREAMS key id` (*7 / *9), decline `>`/NOACK/multi-key.
+- **Verify:** live fr-vs-redis-7.2.4 differential (reply bytes + `keyspace_hits`/`misses` — the stats
+  check catches the 2-phase accounting); consumer touch is correct-by-construction (reuse). Estimated
+  ~2h — a dedicated turn. Docs-only surface.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREAD `_into` EXTENDED to RESP3 (single + multi) — broadens 12.14x borrow to the modern default protocol (byte-exact)
 
 The shipped XREAD single/multi `_into` fast paths DECLINED RESP3 (`return None` → generic clone path),
