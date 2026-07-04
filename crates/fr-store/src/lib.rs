@@ -16371,49 +16371,62 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            sink(SmembersScanEvent::Len(0));
-            return Ok(());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::SortedSet(zs) => {
-                        let len = zs.len() as i64;
-                        let s = normalize_index(start, len);
-                        let e = normalize_index(stop, len);
-                        if s > e || s >= len || e < 0 {
-                            sink(SmembersScanEvent::Len(0));
-                            return Ok(());
-                        }
-                        let s_idx = s.max(0) as usize;
-                        let e_idx = e.min(len - 1) as usize;
-                        let count = e_idx - s_idx + 1;
-                        sink(SmembersScanEvent::Len(count));
-                        for (m, _score) in zs.iter_asc().skip(s_idx).take(count) {
-                            sink(SmembersScanEvent::Member(m));
-                        }
-                        entry.touch(now_ms);
-                        Ok(())
-                    }
-                    _ => Err(StoreError::WrongType),
+        // (CrimsonHawk) Unified-acquire single-lookup collapse — see `lpos_full`. The
+        // member-borrow vein avoided the member CLONE but left `record_keyspace_lookup` + a
+        // separate `get_mut` (two key hashes); fold to one `lookup_live_for_read_mut` on the
+        // non-LFU path, LFU verbatim, range body once. Byte-identical (lazy-expiry, hit/miss,
+        // single touch, WRONGTYPE, empty-range Len(0), member stream).
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
                 }
             }
-            None => {
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
                 sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            }
+        };
+        match &entry.value {
+            Value::SortedSet(zs) => {
+                let len = zs.len() as i64;
+                let s = normalize_index(start, len);
+                let e = normalize_index(stop, len);
+                if s > e || s >= len || e < 0 {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+                let s_idx = s.max(0) as usize;
+                let e_idx = e.min(len - 1) as usize;
+                let count = e_idx - s_idx + 1;
+                sink(SmembersScanEvent::Len(count));
+                for (m, _score) in zs.iter_asc().skip(s_idx).take(count) {
+                    sink(SmembersScanEvent::Member(m));
+                }
+                entry.touch(now_ms);
                 Ok(())
             }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -16433,49 +16446,58 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            sink(SmembersScanEvent::Len(0));
-            return Ok(());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::SortedSet(zs) => {
-                        let len = zs.len() as i64;
-                        let s = normalize_index(start, len);
-                        let e = normalize_index(stop, len);
-                        if s > e || s >= len || e < 0 {
-                            sink(SmembersScanEvent::Len(0));
-                            return Ok(());
-                        }
-                        let s_idx = s.max(0) as usize;
-                        let e_idx = e.min(len - 1) as usize;
-                        let count = e_idx - s_idx + 1;
-                        sink(SmembersScanEvent::Len(count));
-                        for (m, _score) in zs.iter_desc().skip(s_idx).take(count) {
-                            sink(SmembersScanEvent::Member(m));
-                        }
-                        entry.touch(now_ms);
-                        Ok(())
-                    }
-                    _ => Err(StoreError::WrongType),
+        // (CrimsonHawk) Unified-acquire single-lookup collapse — see `zrange_borrow_scan`.
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
                 }
             }
-            None => {
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
                 sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            }
+        };
+        match &entry.value {
+            Value::SortedSet(zs) => {
+                let len = zs.len() as i64;
+                let s = normalize_index(start, len);
+                let e = normalize_index(stop, len);
+                if s > e || s >= len || e < 0 {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+                let s_idx = s.max(0) as usize;
+                let e_idx = e.min(len - 1) as usize;
+                let count = e_idx - s_idx + 1;
+                sink(SmembersScanEvent::Len(count));
+                for (m, _score) in zs.iter_desc().skip(s_idx).take(count) {
+                    sink(SmembersScanEvent::Member(m));
+                }
+                entry.touch(now_ms);
                 Ok(())
             }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -34289,6 +34311,71 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "XINFO CONSUMERS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZRANGE/ZREVRANGE borrow-scan unified-acquire collapse: byte-identical
+    // member stream (asc/desc), empty-range, WRONGTYPE, missing→Len(0), hit/miss, eviction.
+    #[test]
+    fn zrange_borrow_scan_collapse_matches() {
+        use crate::SmembersScanEvent;
+        fn zr(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut out = Vec::new();
+            s.zrange_borrow_scan(k, a, b, now, |e| if let SmembersScanEvent::Member(m) = e { out.push(m.to_vec()) })?;
+            Ok(out)
+        }
+        fn zrev(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut out = Vec::new();
+            s.zrevrange_borrow_scan(k, a, b, now, |e| if let SmembersScanEvent::Member(m) = e { out.push(m.to_vec()) })?;
+            Ok(out)
+        }
+        let mut s = Store::new();
+        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_all = zr(&mut s, b"z", 0, -1, 2);
+        let r_sub = zr(&mut s, b"z", 0, 1, 2);
+        let r_rev = zrev(&mut s, b"z", 0, -1, 2);
+        let r_oob = zr(&mut s, b"z", 5, 10, 2);
+        let r_absent = zr(&mut s, b"absent", 0, -1, 2);
+        let r_wrong = zr(&mut s, b"str", 0, -1, 2);
+        // hits: z(all,sub,rev,oob), str(wrong) = 5; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 5);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_all.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(r_sub.unwrap(), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(r_rev.unwrap(), vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(r_oob.unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(zr(&mut t, b"exp", 0, -1, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing ZRANGE@16 (no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"zr:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"zr:bench";
+        for _ in 0..2000 { b.zrange_borrow_scan(k, 0, 5, 2, |_| {}).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zrange_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZRANGE@16 (0..5) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

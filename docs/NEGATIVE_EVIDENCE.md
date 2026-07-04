@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANGE/ZREVRANGE borrow-scan double-probe collapse — ZRANGE@16 1.25x (byte-exact)
+
+**NEW SUB-VEIN (found by re-grepping `record_keyspace_lookup(key` for fns with NO adjacent
+`lookup_live`):** the zset range-read `_borrow_scan` variants — the LIVE ZRANGE-family reply
+paths — were MISSED by the earlier member-borrow arc. That arc avoided the member CLONE but left
+`record_keyspace_lookup` + a separate `get_mut` (TWO key hashes) intact. Collapsed
+`zrange_borrow_scan` + `zrevrange_borrow_scan` via unified-acquire (non-LFU → one
+`lookup_live_for_read_mut`, LFU verbatim, range body once). Byte-identical: key lazy-expiry,
+hit/miss, single touch, WRONGTYPE, empty-range `Len(0)`, member stream (asc/desc). Proven by
+`zrange_borrow_scan_collapse_matches` (all/sub/rev/oob/absent/WRONGTYPE + exact hit/miss +
+eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZRANGE@16 (0..5, 6 members) no-TTL =
+39.41 ns/op; removed 2nd keyspace probe ≈ **9.94 ns** → old ≈ 49.36 ns ⇒ **1.25x (−20%)**.
+Conformance GREEN (696/696, fully clean run). **REMAINING in this sub-vein (same pattern, hot):
+`zrangebyscore_members_borrow_scan`, `zrangebyscore_withscores_borrow_scan`, byscore-LIMIT +
+bylex variants — all still double-probe.** Also confirmed BLOCKED: `internal_entry` get-or-insert
+single-probe (E0499 — polonius NLL case 3 unstable on edition 2024; std HashMap has no stable
+borrowed-key raw_entry; fix = migrate `entries` to hashbrown::HashMap raw_entry_mut, structural).
+Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREAD direct single-lookup collapse — XREAD poll 1.19x (byte-exact)
 
 XREAD (`xread`, non-group stream consumer — the primary stream-polling read) did
