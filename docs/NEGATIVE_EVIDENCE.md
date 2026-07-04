@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SCAN (`scan_walk`) + TOUCH (`touch_key`) per-key expiry-peek gated by `expires_count != 0` — SCAN@1000 −679 ns = 1.81% (byte-exact)
+
+Completes the per-element expiry-guard vein across the remaining multi-key read loops. Both
+ran `evaluate_expiry(now, self.expiry_ms(key))` per scanned/touched key; `expiry_ms`
+foldhash-hashes the key + probes the deadline map, wasted per element over a keyspace with
+no TTLs. Gated with `self.expires_count != 0 &&`. Byte-identical — no expiry ⇒ `should_evict`
+false ⇒ no key is skipped (SCAN) / evicted (TOUCH); the non-zero branch is unchanged (proven
+by `scan_and_touch_guard_still_handle_expired_when_expires_count_nonzero`: expired key absent
+from SCAN, TOUCH returns false + evicts).
+
+MEASURED (per-crate `cargo test -p fr-store --release` via rch, intra-run isolated A/B):
+full SCAN@1000 no-TTL keys ≈ 37 504 ns/op; the per-batch expiry peek (1000 keys) in isolation
+= **678.7 ns** (~0.68 ns/key, short cached keys) → **saved 679 ns = 1.81% of SCAN** (1.018x);
+TOUCH saves the same ~0.68 ns/key per TOUCHed key. Smallest of the vein (SCAN's cost is
+dominated by key iteration + result `to_vec`), but real, byte-exact, and scales with batch /
+keyspace size. Conformance: 670/670 correctness tests pass (incl the new guard-branch test);
+the sole suite failure is the PRE-EXISTING brittle perf-margin unit test
+`zdiff_resolve_once…_reports_ab_ratio` (`assert!(ratio > 1.15)` at lib.rs:36749 — got 1.07x
+on a loaded rch worker), unrelated to this diff (zdiff never calls scan_walk/touch_key).
+**PER-ELEMENT EXPIRY-GUARD VEIN NOW EXHAUSTED** for hot no-LFU reads: GET (whole fast path),
+HMGET, MGET, shared read helper (8 cmds), SCAN, TOUCH all guarded. Landed via clean
+origin/main worktree (peer zset-listpack WIP active in shared tree).
+
 ## 2026-07-04 CrimsonHawk: KEEP — RESTORE zset listpack decodes borrowed spans into PackedZSet — 1.31x vs original fr-store path (rch per-crate bench)
 
 `RDB_TYPE_ZSET_LISTPACK` RESTORE still used `decode_listpack_strings`, allocating one

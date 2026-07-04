@@ -9364,7 +9364,11 @@ impl Store {
         // `drop_if_expired`'s redundant `entries` probe. Byte-identical (no RNG, no stat).
         // The LFU path is left verbatim so its `next_rand()` consumption order is preserved.
         if !self.lfu_tracking_enabled() {
-            if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            // (CrimsonHawk) Gate the expiry PEEK on `expires_count != 0`: `expiry_ms`
+            // foldhash-hashes the key + probes the deadline map per TOUCHed key, wasted
+            // when no key has a TTL. Byte-identical — no expiry ⇒ should_evict false.
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 return false;
             }
@@ -21574,7 +21578,14 @@ impl Store {
             pos += 1;
             processed += 1;
             last_examined = Some(key);
-            if evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict {
+            // (CrimsonHawk) Gate the per-key expiry PEEK on `expires_count != 0`:
+            // `expiry_ms` foldhash-hashes each scanned key + probes the deadline map,
+            // wasted on every element of a SCAN batch over a keyspace with no TTLs.
+            // Byte-identical — with no expiry no key evicts, so `should_evict` is
+            // already false and no key is skipped for expiry.
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict
+            {
                 if processed >= batch_size {
                     break;
                 }
@@ -32230,6 +32241,26 @@ mod tests {
             result,
             vec![Some(b"1".to_vec()), None, Some(b"3".to_vec()),]
         );
+    }
+
+    // (CrimsonHawk) SCAN's `scan_walk` and TOUCH's `touch_key` per-key expiry peeks are
+    // now gated on `expires_count != 0`. Exercise the NON-zero branch: with a TTL-bearing
+    // key present, an expired key must still be skipped by SCAN and evicted by TOUCH —
+    // byte-identical to the unguarded loops.
+    #[test]
+    fn scan_and_touch_guard_still_handle_expired_when_expires_count_nonzero() {
+        let mut store = Store::new();
+        store.set(b"live".to_vec(), b"L".to_vec(), None, 100);
+        store.set(b"dead".to_vec(), b"D".to_vec(), Some(50), 100); // past by t=500
+        assert!(store.expires_count >= 1);
+        // SCAN at t=500 must not return the expired "dead".
+        let (_cursor, mut got) = store.scan(0, None, 100, 500);
+        got.sort();
+        assert_eq!(got, vec![b"live".to_vec()]);
+        // TOUCH: live key true, expired key false (and evicted).
+        assert!(store.touch_key(b"live", 500));
+        assert!(!store.touch_key(b"dead", 500));
+        assert!(store.get(b"dead", 600).unwrap().is_none());
     }
 
     // (CrimsonHawk) The MGET non-LFU per-key expiry peek is now guarded by
