@@ -3068,6 +3068,18 @@ pub enum SmembersScanEvent<'a> {
     Member(&'a [u8]),
 }
 
+/// (CrimsonHawk) Event stream for the SSCAN cursor-0 borrow-scan
+/// ([`Store::sscan0_borrow_scan`]): the `next_cursor` FIRST (so the `[cursor,
+/// [members]]` reply header + cursor bulk string can be written before the
+/// members), then the member count, then each member borrowed. Lets the SSCAN0
+/// reply path write the full nested reply with zero per-member `Vec<u8>`
+/// allocation (Cow::Borrowed members on the hashtable encoding).
+pub enum SscanReplyEvent<'a> {
+    Cursor(u64),
+    Len(usize),
+    Member(&'a [u8]),
+}
+
 /// (frankenredis-zrange-into) Event stream driven by
 /// [`Store::zrange_withscores_borrow_scan`] / [`Store::zrevrange_withscores_borrow_scan`]:
 /// the pair count (emitted once, first) followed by each `(member, score)` with
@@ -23289,6 +23301,111 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow-scan twin of [`Store::sscan`] — streams `(next_cursor, members)` via
+    /// `sink` with the members BORROWED (`Cow` from `get_index`), eliminating the per-member clone
+    /// the owned `Vec<Vec<u8>>` path incurs on the HASHTABLE encoding. IDENTICAL to `sscan`: same
+    /// bare-drop guard, LFU bump, NO touch (SCAN is read-only), the intset/listpack full-shot
+    /// short-circuit (cursor→0), and the hashtable positional `get_index(pos)` batch walk +
+    /// `next_cursor`. `Cursor` is sunk FIRST so the `[cursor, [members]]` reply can be written in
+    /// order; the members are collected into a `Vec<Cow>` (borrowed on hashtable) only to defer them
+    /// past the cursor. Byte-identical member sequence + cursor.
+    pub fn sscan0_borrow_scan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+        mut sink: impl FnMut(SscanReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let max_intset_entries = self.set_max_intset_entries;
+        let max_listpack_entries = self.set_max_listpack_entries;
+        let max_listpack_value = self.set_max_listpack_value;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::Set(s) => {
+                        let is_listpack_or_intset = !entry
+                            .has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
+                            && (Self::set_fits_intset(s, max_intset_entries)
+                                || Self::set_fits_listpack(
+                                    s,
+                                    max_listpack_entries,
+                                    max_listpack_value,
+                                ));
+                        if is_listpack_or_intset {
+                            let refs: Vec<Cow<'_, [u8]>> = s
+                                .iter()
+                                .filter(|member| scan_pattern_matches(pattern, member.as_ref()))
+                                .collect();
+                            sink(SscanReplyEvent::Cursor(0));
+                            sink(SscanReplyEvent::Len(refs.len()));
+                            for m in &refs {
+                                sink(SscanReplyEvent::Member(m.as_ref()));
+                            }
+                            return Ok(());
+                        }
+                        let start = cursor as usize;
+                        if start >= s.len() {
+                            sink(SscanReplyEvent::Cursor(0));
+                            sink(SscanReplyEvent::Len(0));
+                            return Ok(());
+                        }
+                        let batch_size = count.max(1);
+                        let total_members = s.len();
+                        let mut refs: Vec<Cow<'_, [u8]>> = Vec::new();
+                        let mut pos = start;
+                        let mut processed = 0;
+                        while pos < total_members {
+                            let Some(member) = s.get_index(pos) else {
+                                break;
+                            };
+                            pos += 1;
+                            processed += 1;
+                            if !scan_pattern_matches(pattern, member.as_ref()) {
+                                if processed >= batch_size {
+                                    break;
+                                }
+                                continue;
+                            }
+                            refs.push(member);
+                            if processed >= batch_size {
+                                break;
+                            }
+                        }
+                        let next = if pos >= total_members { 0 } else { pos as u64 };
+                        sink(SscanReplyEvent::Cursor(next));
+                        sink(SscanReplyEvent::Len(refs.len()));
+                        for m in &refs {
+                            sink(SscanReplyEvent::Member(m.as_ref()));
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SscanReplyEvent::Cursor(0));
+                sink(SscanReplyEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     /// ZSCAN: cursor-based iteration over sorted set members.
     #[allow(clippy::type_complexity)]
     pub fn zscan(
@@ -36075,6 +36192,68 @@ mod tests {
     }
 
     // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield
+    // (CrimsonHawk) sscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, members) to clone sscan
+    // across a FULL cursor walk, both encodings — SCAN is read-only (no bump/touch under non-LFU),
+    // so both can run on the SAME store. Measures the hashtable batch clone-elimination A/B.
+    #[test]
+    fn sscan0_borrow_scan_matches_clone() {
+        use crate::SscanReplyEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
+            s.sadd(b"s", &members, 1).unwrap();
+            s
+        }
+        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<Vec<u8>>) {
+            let mut cur = 0u64;
+            let mut out = Vec::new();
+            s.sscan0_borrow_scan(b"s", cursor, pattern, count, 2, |ev| match ev {
+                SscanReplyEvent::Cursor(c) => cur = c,
+                SscanReplyEvent::Len(_) => {}
+                SscanReplyEvent::Member(m) => out.push(m.to_vec()),
+            })
+            .unwrap();
+            (cur, out)
+        }
+        // n=16 = listpack full-shot (cursor 0, all); n=1000 = hashtable batched walk.
+        for &n in &[16u32, 1000] {
+            for pat in [None, Some(b"m00*".as_slice())] {
+                let mut s = build(n);
+                let mut cursor = 0u64;
+                let mut guard = 0;
+                loop {
+                    let (nc, members) = s.sscan(b"s", cursor, pat, 10, 2).unwrap();
+                    let (bc, bmembers) = borrow(&mut s, cursor, pat, 10);
+                    assert_eq!((nc, &members), (bc, &bmembers), "n={n} pat={pat:?} cursor={cursor}");
+                    cursor = nc;
+                    guard += 1;
+                    if cursor == 0 || guard > 5000 { break; }
+                }
+            }
+        }
+        // WRONGTYPE / missing.
+        let mut z = Store::new();
+        z.set(b"s".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(z.sscan0_borrow_scan(b"s", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
+
+        // Timing A/B: hashtable set, cursor-0 batch (count 10).
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.sscan(b"s", 0, None, 10, 2)).ok(); std::hint::black_box(borrow(&mut bo, 0, None, 10)); }
+        let reps = 1_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.sscan(std::hint::black_box(b"s"), 0, None, 10, 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.sscan0_borrow_scan(std::hint::black_box(b"s"), 0, None, 10, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "SSCAN cursor-0 batch(10) @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
     // (hash get_index is insertion-ordered ⇒ two fixed-seed stores agree) + measures the single
     // field-clone-elimination A/B.
     #[test]

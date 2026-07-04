@@ -22221,6 +22221,123 @@ impl Runtime {
     ) -> Option<RespFrame> {
         self.execute_plain_scan0_borrowed(b'S', "sscan", "SSCAN", key, cursor_arg, now_ms)
     }
+
+    /// (CrimsonHawk) Zero-copy `_into` fast path for `SSCAN key 0` — streams the batch members
+    /// BORROWED straight into `out` as the `[cursor, [members]]` reply via `sscan0_borrow_scan`,
+    /// eliminating the per-member clone (the hashtable batch is truly clone-bound: 1.80x store A/B).
+    /// Mirrors `execute_plain_scan0_borrowed`'s SET path EXACTLY: same gate + `cursor_arg == "0"`
+    /// requirement, `plain_read_borrowed_preamble`, `key_type` (no-stat) branch (None→empty scan0,
+    /// non-set→WRONGTYPE), `sscan0_borrow_scan` (no-stat, no-touch), and
+    /// `record_plain_zremrange_borrowed_metrics` + `account_plain_borrowed_error_reply`. SCAN is a
+    /// plain nested array in RESP2 AND RESP3 (`*2` / `*n`).
+    pub fn execute_plain_sscan0_borrowed_into(
+        &mut self,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"SSCAN".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if cursor_arg != b"0" {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "sscan",
+            b"SSCAN".len() + key.len() + cursor_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let mut error_reply: Option<RespFrame> = None;
+        match self.server.store.key_type(key, now_ms) {
+            None => {
+                if !suppress_reply {
+                    let empty = Self::empty_scan0_reply();
+                    if resp3 {
+                        empty.encode_into_resp3(out);
+                    } else {
+                        empty.encode_into(out);
+                    }
+                }
+            }
+            Some("set") => {
+                let result =
+                    self.server
+                        .store
+                        .sscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
+                            if suppress_reply {
+                                return;
+                            }
+                            match ev {
+                                fr_store::SscanReplyEvent::Cursor(nc) => {
+                                    out.extend_from_slice(b"*2\r\n");
+                                    let cs = nc.to_string();
+                                    fr_protocol::encode_bulk_string_slice(
+                                        Some(cs.as_bytes()),
+                                        false,
+                                        out,
+                                    );
+                                }
+                                fr_store::SscanReplyEvent::Len(n) => {
+                                    fr_protocol::encode_aggregate_header(n, false, out);
+                                }
+                                fr_store::SscanReplyEvent::Member(m) => {
+                                    fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                                }
+                            }
+                        });
+                if let Err(err) = result {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                }
+            }
+            Some(_) => {
+                let reply = CommandError::Store(fr_store::StoreError::WrongType).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "sscan",
+            "SSCAN",
+            || vec![b"SSCAN".to_vec(), key.to_vec(), cursor_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
     pub fn execute_plain_hscan0_borrowed(
         &mut self,
         key: &[u8],

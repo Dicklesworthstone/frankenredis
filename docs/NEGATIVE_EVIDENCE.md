@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SSCAN key 0 zero-copy `_into` WIRED LIVE — 1.80x store A/B (byte-exact)
+
+Executed last turn's scoped-blocker plan: the SSCAN-hashtable member-clone `_into`, the truly
+clone-bound SCAN case. Added `Store::sscan0_borrow_scan` + `SscanReplyEvent{Cursor,Len,Member}` —
+mirrors `sscan` EXACTLY (bare-drop guard, LFU bump, NO touch, intset/listpack full-shot short-circuit,
+hashtable positional `get_index(pos)` batch walk + `next_cursor`) but collects the batch into a
+`Vec<Cow>` (borrowed on the hashtable encoding — no per-member clone) and sinks `Cursor` FIRST so the
+`[cursor, [members]]` reply is writable in order. `execute_plain_sscan0_borrowed_into` (fr-runtime)
+replicates the shared `execute_plain_scan0_borrowed`'s SET path — `plain_read_borrowed_preamble`,
+`key_type` (no-stat, idempotent drop) None→empty-scan0 / non-set→WRONGTYPE branch, no-stat borrow-scan,
+`record_plain_zremrange_borrowed_metrics` + `account_plain_borrowed_error_reply` — writing borrowed
+members straight to `out`. Swapped the fr-server SSCAN-0 dispatch `FastReply`→`FastEncodedReply`.
+
+**Solved the cursor-before-members RESP ordering** (the blocker's crux): collect `Vec<Cow>` refs
+during the batch walk, compute `next_cursor`, THEN sink `Cursor`/`Len`/`Member` in order — cheap
+fat-pointer Cows (borrowed on hashtable), no member-data clone. Encoding byte-identical to
+`scan0_reply_from_items(nc, [members])` (`*2\r\n$<clen>\r\n<nc>\r\n*n\r\n<members>`), plain array in
+RESP2+RESP3.
+
+BYTE-EXACT: `sscan0_borrow_scan_matches_clone` iterates the FULL cursor walk comparing `(next_cursor,
+members)` to clone `sscan` across {16 listpack, 1000 hashtable} × {no-pattern, `m00*`} + WRONGTYPE/
+missing on the SAME store (SCAN read-only under non-LFU ⇒ no mutation). VERIFIED via local
+symlink-legacy build: compiles clean; fr-server 215/216 + fr-runtime 562/563, both failures
+(`mset_packet_dispatcher`, `acl_log_marks_script_denials_as_lua`) CONFIRMED PRE-EXISTING, unrelated.
+
+MEASURED (store-level A/B, per-crate rch, SSCAN cursor-0 batch(10) over a 2000-member HASHTABLE set):
+clone `sscan` = 313 ns/op vs borrow = **173.7 ns/op = 1.80x** — now live. NEXT: HSCAN0 / ZSCAN0 (same
+shared executor pattern — HSCAN field+value, ZSCAN member+score). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD count WITHVALUES zero-copy `_into` WIRED LIVE — 3.04x store A/B (byte-exact)
 
 Sixth ship in the member-clone-elimination arc: `HRANDFIELD key count WITHVALUES` previously cloned
