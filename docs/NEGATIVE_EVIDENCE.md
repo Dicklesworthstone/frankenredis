@@ -31,6 +31,25 @@ fr-conformance --lib --bins --tests -- --nocapture` GREEN on RCH `ovh-a` (194 li
 tests, 99 smoke tests passed). RCH remote builds used `FR_ALLOW_STUB_COMMANDS=1` because the worker sync
 does not include the legacy Redis command-doc directory; this is degraded for remote build/bench only,
 not production.
+## 2026-07-04 CrimsonHawk: KEEP — LRU/LFU eviction-candidate select defers the winner clone — 1.53x worst case (byte-transparent)
+
+Picked an UNTOUCHED hot path (avoiding the peer's active zset/lua work). `select_lru_eviction_candidate_
+from_keys` / `select_lfu_eviction_candidate_from_keys` (the maxmemory sample-and-evict selection, hot
+under memory pressure) did `best_key = Some(key.clone())` on EVERY new best during the O(samples) scan —
+a wasted `Vec<u8>` alloc per improvement. Track the winner by INDEX (`best_idx`) and clone ONCE at the
+end (`best_idx.map(|i| keys[i].clone())`). Same comparison + lex tie-break (`key.as_slice() <
+keys[b].as_slice()`), same winning key.
+
+BYTE-TRANSPARENT: `eviction_candidate_defers_clone_and_reports_ab` asserts the new selection == an
+independent oracle (all-tied ⇒ lex-smallest key) AND == the old clone-on-every-best logic inline; the
+existing eviction (14) + lru (10) fuzz/conformance suites stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, worst case: 100 all-tied-access keys ⇒ every smaller key is a new
+best ⇒ 100 clones old / 1 new): clone-each = 2416 ns/op vs defer-clone = **1581 ns/op = 1.53x** (the
+~835 ns delta ≈ the 99 saved key clones). Real for LRU/LFU eviction under memory pressure; the typical
+5-sample case saves fewer but still avoids the per-improvement alloc. General defer-clone lesson: a
+loop that tracks a running "best" owned value should track it by INDEX/reference and materialize ONCE at
+the end.
 
 ## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for accumulator fast path — EVAL compute 21.8x vs ORIG (byte-transparent)
 

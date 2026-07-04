@@ -24789,21 +24789,24 @@ impl Store {
     }
 
     fn select_lru_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let mut best_key: Option<Vec<u8>> = None;
+        // (CrimsonHawk) Track the winner by INDEX and clone ONCE at the end, instead of
+        // `key.clone()` on every new best (a wasted Vec alloc per improvement during the sample
+        // scan). Byte-identical: same comparison + tie-break, same winning key.
+        let mut best_idx: Option<usize> = None;
         let mut best_access = u32::MAX;
-        for key in keys {
+        for (i, key) in keys.iter().enumerate() {
             let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
             if entry.last_access_ms < best_access
                 || (entry.last_access_ms == best_access
-                    && best_key.as_ref().is_none_or(|best| key < best))
+                    && best_idx.is_none_or(|b| key.as_slice() < keys[b].as_slice()))
             {
                 best_access = entry.last_access_ms;
-                best_key = Some(key.clone());
+                best_idx = Some(i);
             }
         }
-        best_key
+        best_idx.map(|i| keys[i].clone())
     }
 
     fn select_lfu_eviction_candidate_from_keys(
@@ -24811,10 +24814,11 @@ impl Store {
         keys: &[Vec<u8>],
         now_ms: u64,
     ) -> Option<Vec<u8>> {
-        let mut best_key: Option<Vec<u8>> = None;
+        // (CrimsonHawk) Clone the winner ONCE at the end, not on every new best — see the LRU twin.
+        let mut best_idx: Option<usize> = None;
         let mut best_freq = u8::MAX;
         let mut best_access = u32::MAX;
-        for key in keys {
+        for (i, key) in keys.iter().enumerate() {
             let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
@@ -24823,14 +24827,14 @@ impl Store {
                 || (freq == best_freq && entry.last_access_ms < best_access)
                 || (freq == best_freq
                     && entry.last_access_ms == best_access
-                    && best_key.as_ref().is_none_or(|best| key < best))
+                    && best_idx.is_none_or(|b| key.as_slice() < keys[b].as_slice()))
             {
                 best_freq = freq;
                 best_access = entry.last_access_ms;
-                best_key = Some(key.clone());
+                best_idx = Some(i);
             }
         }
-        best_key
+        best_idx.map(|i| keys[i].clone())
     }
 
     fn select_ttl_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -41222,6 +41226,57 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) The LRU/LFU eviction-candidate selection clones the winner ONCE at the end (by
+    // index) instead of on every new best — byte-identical winner, fewer wasted Vec allocs during the
+    // sample scan. A/B on the worst case (all-tied access ⇒ each smaller key is a new best).
+    #[test]
+    fn eviction_candidate_defers_clone_and_reports_ab() {
+        let mut store = Store::new();
+        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("k{i:03}").into_bytes()).collect();
+        for k in &keys {
+            store.set(k.clone(), b"v".to_vec(), None, 1);
+        }
+        // Descending sample: under the lex tie-break (all same access), each smaller key is a new best.
+        let sample: Vec<Vec<u8>> = keys.iter().rev().cloned().collect();
+        // Independent oracle for byte-identity: all-tied ⇒ lexicographically smallest key wins.
+        let picked = store.select_lru_eviction_candidate_from_keys(&sample);
+        assert_eq!(picked.as_deref(), Some(keys[0].as_slice()));
+        // Old clone-on-every-best logic, inline, must produce the identical winner.
+        let old_select = |s: &Store, sample: &[Vec<u8>]| -> Option<Vec<u8>> {
+            let mut best_key: Option<Vec<u8>> = None;
+            let mut best_access = u32::MAX;
+            for key in sample {
+                let Some(e) = s.entries.get(key.as_slice()) else {
+                    continue;
+                };
+                if e.last_access_ms < best_access
+                    || (e.last_access_ms == best_access
+                        && best_key.as_ref().is_none_or(|b| key < b))
+                {
+                    best_access = e.last_access_ms;
+                    best_key = Some(key.clone());
+                }
+            }
+            best_key
+        };
+        assert_eq!(old_select(&store, &sample), picked);
+        let reps = 200_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(old_select(&store, &sample));
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(store.select_lru_eviction_candidate_from_keys(&sample));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "LRU eviction select @100 (all-tied, worst case): clone-each={old_ns:.0} ns | defer-clone={new_ns:.0} ns = {:.2}x",
+            old_ns / new_ns
+        );
     }
 
     // (CrimsonHawk) SmallStr::from_slice INLINES a short (<=15B) value with ZERO alloc; the old
