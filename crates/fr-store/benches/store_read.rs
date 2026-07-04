@@ -653,12 +653,41 @@ fn bench_zscan0_borrow(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_zlexcount_borrowed_bounds(c: &mut Criterion) {
+    const N: usize = 3_000;
+    let mut store = Store::new();
+    for i in 0..N {
+        store
+            .zadd(b"z", &[(0.0, format!("m{i:04}").into_bytes())], 1_000)
+            .unwrap();
+    }
+    let _ = store.zrank(b"z", b"m1500", 2_000).unwrap();
+
+    let mut g = c.benchmark_group("zlexcount_borrowed_bounds");
+    g.bench_function("warm_rank_tree", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                store
+                    .zlexcount(
+                        std::hint::black_box(b"z"),
+                        std::hint::black_box(b"[m0700"),
+                        std::hint::black_box(b"[m2300"),
+                        2_000,
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
     bench_zrange_withscores,
     bench_restore_zset_listpack,
     bench_hrandfield_withvalues,
-    bench_zscan0_borrow
+    bench_zscan0_borrow,
+    bench_zlexcount_borrowed_bounds
 );
 criterion_main!(benches);

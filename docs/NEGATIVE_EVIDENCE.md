@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP (marginal) — borrowed `ScoreMember` bounds for warm lex/rank lookups — ZLEXCOUNT 1.04x vs ORIG (byte-transparent)
+
+Dug the remaining ZSET treap-rank constant bucket after the landed ZRANK `rank_of_borrowed` keep.
+Found one bounded follow-on: several warm single-score lex/count/resume paths still built temporary
+`ScoreMember::actual(score, member.to_vec())` query keys solely to compare against already-stored
+`ScoreMember` nodes. Added `score_member_cmp_to_borrowed(key, score, member)` with the same score-first
+`canonicalize_zero_score().total_cmp()` and byte lexicographic member order, then used it in
+`compact_position` and `resume_index_after`; warm ZRANGEBYLEX/ZLEXCOUNT rank-bound paths now call
+`rank_of_borrowed` directly instead of materializing two bound keys.
+
+MEASURED (SHORT per-crate rch Criterion, same-worker `ovh-a`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`;
+literal `cargo bench --release` was attempted first and rejected by this Cargo, accepted equivalent was
+`cargo bench --profile release -p fr-store --bench store_read -- zlexcount_borrowed_bounds --sample-size 20 --measurement-time 2`):
+ORIG warm single-score `ZLEXCOUNT z [m0700 [m2300` after rank-tree warmup median **1.3055 us** vs
+borrowed-bound candidate median **1.2551 us** = **1.04x vs ORIG** (Criterion intervals did not overlap:
+ORIG [1.3005, 1.3102] us; candidate [1.2531, 1.2572] us). This is deliberately recorded as marginal:
+it removes two tiny allocations and does not change the structural treap-vs-skiplist residual, but it is
+a real measured per-crate win rather than a zero-gain variant.
+
+BYTE-TRANSPARENT: comparator order matches `ScoreMember::cmp` for stored `Actual` members and preserves
+the Min/Max sentinel ordering for totality. Focused store gates GREEN: `cargo test -p fr-store zlexcount`,
+`cargo test -p fr-store zrangebylex`, `cargo test -p fr-store zscan`. Conformance GREEN:
+`cargo test -p fr-conformance --lib --bins --tests -- --nocapture` plus `cargo test -p fr-conformance --doc -- --nocapture`
+both passed (the earlier full command's final doctest phase hit a transient shared-target `fr_runtime`
+lookup error; the doctest-only rerun passed after target artifacts rebuilt). `cargo check -p fr-store
+--all-targets` GREEN. `cargo fmt --check -p fr-store` remains blocked by broad pre-existing fr-store
+formatting drift outside this lever, so no unrelated formatting churn was mixed in.
+
 ## 2026-07-04 CrimsonHawk: NO-SHIP — OBJECT IDLETIME single-lookup collapse is ~1.02x vs ORIG, too small/noisy; reverted
 
 Dug the `OBJECT IDLETIME` borrowed runtime path because the residual-gap map still lists `object_freq`/
