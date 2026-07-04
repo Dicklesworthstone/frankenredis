@@ -19295,30 +19295,41 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamPendingSummary>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (CrimsonHawk) Non-LFU single-lookup collapse: fold `record_keyspace_lookup` + the
+        // separate `entries.get` type-check into one `lookup_live_for_read_mut`. XPENDING
+        // does no touch/LFU-bump and reads its data from `self.stream_groups` (not the
+        // entry), so a `is_stream` bool releases the entry borrow before the group access —
+        // shared body, no duplication. Byte-identical: same key lazy-expiry, hit/miss,
+        // WRONGTYPE, missing→None. LFU path uses record + get verbatim.
+        let is_stream = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(None);
+            }
+            match self.entries.get(key) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
+        }
+        let Some(groups) = self.stream_groups.get(key) else {
             return Ok(None);
-        }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(_) => {
-                    let Some(groups) = self.stream_groups.get(key) else {
-                        return Ok(None);
-                    };
-                    let Some(group_state) = groups.get(group) else {
-                        return Ok(None);
-                    };
-
-                    Ok(Some((
-                        group_state.pending.len(),
-                        group_state.pending.first_key_value().map(|(id, _)| *id),
-                        group_state.pending.last_key_value().map(|(id, _)| *id),
-                        group_state.pending_summary_consumers(),
-                    )))
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(None),
-        }
+        };
+        let Some(group_state) = groups.get(group) else {
+            return Ok(None);
+        };
+        Ok(Some((
+            group_state.pending.len(),
+            group_state.pending.first_key_value().map(|(id, _)| *id),
+            group_state.pending.last_key_value().map(|(id, _)| *id),
+            group_state.pending_summary_consumers(),
+        )))
     }
 
     /// (frankenredis-b0exs) Drop the memoized XPENDING summary for `(key, group)`.
@@ -19342,52 +19353,59 @@ impl Store {
         now_ms: u64,
         min_idle_ms: u64,
     ) -> Result<Option<Vec<StreamPendingRecord>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (CrimsonHawk) Non-LFU single-lookup collapse via `is_stream` — see `xpending_summary`.
+        let is_stream = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(None);
+            }
+            match self.entries.get(key) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
+        }
+        let Some(groups) = self.stream_groups.get(key) else {
             return Ok(None);
+        };
+        let Some(group_state) = groups.get(group) else {
+            return Ok(None);
+        };
+        let (start, end) = bounds;
+        if count == 0 || start > end {
+            return Ok(Some(Vec::new()));
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(_) => {
-                    let Some(groups) = self.stream_groups.get(key) else {
-                        return Ok(None);
-                    };
-                    let Some(group_state) = groups.get(group) else {
-                        return Ok(None);
-                    };
-                    let (start, end) = bounds;
-                    if count == 0 || start > end {
-                        return Ok(Some(Vec::new()));
-                    }
 
-                    let mut out = Vec::new();
-                    for (id, pending_entry) in group_state.pending.range(start..=end) {
-                        if let Some(filter_consumer) = consumer
-                            && pending_entry.consumer.as_slice() != filter_consumer
-                        {
-                            continue;
-                        }
-                        if min_idle_ms > 0 {
-                            let idle = now_ms.saturating_sub(pending_entry.last_delivered_ms);
-                            if idle < min_idle_ms {
-                                continue;
-                            }
-                        }
-                        out.push((
-                            *id,
-                            pending_entry.consumer.clone(),
-                            now_ms.saturating_sub(pending_entry.last_delivered_ms),
-                            pending_entry.deliveries,
-                        ));
-                        if out.len() >= count {
-                            break;
-                        }
-                    }
-                    Ok(Some(out))
+        let mut out = Vec::new();
+        for (id, pending_entry) in group_state.pending.range(start..=end) {
+            if let Some(filter_consumer) = consumer
+                && pending_entry.consumer.as_slice() != filter_consumer
+            {
+                continue;
+            }
+            if min_idle_ms > 0 {
+                let idle = now_ms.saturating_sub(pending_entry.last_delivered_ms);
+                if idle < min_idle_ms {
+                    continue;
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(None),
+            }
+            out.push((
+                *id,
+                pending_entry.consumer.clone(),
+                now_ms.saturating_sub(pending_entry.last_delivered_ms),
+                pending_entry.deliveries,
+            ));
+            if out.len() >= count {
+                break;
+            }
         }
+        Ok(Some(out))
     }
 
     pub fn xclaim(
@@ -33920,6 +33938,64 @@ mod tests {
         let probe = t0.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!("COPY/MOVE guard: elided 2 keyspace probes ≈ {:.2} ns total (2 × {probe:.2} ns)", 2.0 * probe);
+    }
+
+    // (CrimsonHawk) XPENDING summary/entries is_stream collapse: byte-identical key-lookup
+    // behavior (hit/miss, WRONGTYPE, missing→None) + unchanged group-state access.
+    #[test]
+    fn xpending_is_stream_collapse_matches() {
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        assert!(s.xgroup_create(b"st", b"g1", (0, 0), false, 1).unwrap());
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_group = s.xpending_summary(b"st", b"g1", 2); // group exists, 0 pending
+        let r_nogroup = s.xpending_summary(b"st", b"nope", 2); // group absent → None
+        let r_absent = s.xpending_summary(b"absent", b"g1", 2); // key absent → None (miss)
+        let r_wrong = s.xpending_summary(b"str", b"g1", 2); // wrong type → WrongType
+        let r_ent = s.xpending_entries(b"st", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 2, 0);
+        let r_ent_wrong = s.xpending_entries(b"str", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 2, 0);
+        // hits: summary(st), summary(st-nogroup), summary(str-wrong), entries(st), entries(str-wrong) = 5;
+        // misses: summary(absent) = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 5);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_group.unwrap().map(|(n, _, _, _)| n), Some(0)); // 0 pending
+        assert_eq!(r_nogroup.unwrap(), None);
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+        assert_eq!(r_ent.unwrap(), Some(Vec::new())); // group exists, no pending
+        assert!(matches!(r_ent_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry: expired stream → summary None + evicted.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.xpending_summary(b"exp", b"g", 500).unwrap(), None);
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: xpending_summary on a present stream+group (no TTL, LFU off).
+        let mut b = Store::new();
+        b.xadd(b"xp:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        b.xgroup_create(b"xp:bench", b"g", (0, 0), false, 1).unwrap();
+        let k: &[u8] = b"xp:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xpending_summary(k, b"g", 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.xpending_summary(std::hint::black_box(k), b"g", 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XPENDING summary no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
     }
 
     #[test]

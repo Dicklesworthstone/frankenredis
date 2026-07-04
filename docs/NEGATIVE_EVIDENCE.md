@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XPENDING summary/entries is_stream single-lookup collapse — XPENDING@summary 1.22x (byte-exact)
+
+XPENDING (`xpending_summary`, `xpending_entries`) did `record_keyspace_lookup` + separate
+`entries.get` (type check) before reading pending state from `self.stream_groups`. Since the
+entry data isn't used (only its type) and XPENDING does no touch/LFU-bump, folded the double
+probe into a single `lookup_live_for_read_mut` on the non-LFU path via an `is_stream` bool that
+RELEASES the entry borrow before the `stream_groups` access — shared group body runs once, no
+duplication. Byte-identical: key lazy-expiry, hit/miss, WRONGTYPE, missing/no-group→None; LFU
+path uses record + get verbatim. Proven by `xpending_is_stream_collapse_matches` (group-exists→
+0-pending, no-group→None, missing→None, WRONGTYPE for both summary+entries, exact hit/miss,
+eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed XPENDING summary no-TTL = 44.29 ns/op;
+removed 2nd keyspace probe ≈ **9.77 ns** → old ≈ 54.06 ns ⇒ **1.22x (−18%)**. xpending_entries
+shares the collapse. Conformance GREEN (691/691 correctness; lone failure = brittle
+`diff_sorted_i64_adaptive` perf-ratio guard under load, unrelated). **is_stream PATTERN: for reads
+that only TYPE-CHECK the entry then read from a side map (stream_groups), a bool releases the
+borrow before the side-map access — no body duplication, works for both summary+entries.** Landed
+via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — COPY + MOVE (copy_no_stat) bare-drop `expires_count` guards — elides 2 probes ≈ 32 ns (byte-exact)
 
 COPY and `copy_no_stat` (the MOVE backend) each did TWO bare unguarded `drop_if_expired` probes
