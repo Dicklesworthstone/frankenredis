@@ -16595,6 +16595,64 @@ impl Store {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrow-scan variant of [`Store::zrevrange_withscores`]
+    /// — the descending twin of [`Store::zrange_withscores_borrow_scan`]. Byte-identical
+    /// bookkeeping to `zrevrange_withscores` (same `drop_if_expired`, LFU bump,
+    /// `touch`-on-non-empty, and `normalize_index` rank math) but streams borrowed
+    /// `(member, score)` pairs in DESCENDING rank order via `iter_desc().skip(s).take(count)`
+    /// so the WITHSCORES reply avoids the `Vec<(Vec<u8>, f64)>` member clone. `Len(0)`
+    /// for a missing / out-of-range / empty result; `Err(WrongType)` for a non-zset value.
+    pub fn zrevrange_withscores_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            sink(ZRangeWithScoresScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        sink(ZRangeWithScoresScanEvent::Len(count));
+                        for (member, score) in zs.iter_desc().skip(s_idx).take(count) {
+                            sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     pub fn zrevrangebyscore(
         &mut self,
         key: &[u8],

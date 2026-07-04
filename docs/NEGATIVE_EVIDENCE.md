@@ -4,6 +4,45 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZREVRANGE ... WITHSCORES gets a borrowed `_into` fast path (was fully generic); +SURFACE generic keyspace-hit over-count
+
+`ZREVRANGE key start stop WITHSCORES` (the canonical descending-leaderboard-with-
+scores query) had NO borrowed fast path — it fell through to full argv
+materialization + generic dispatch + member clone + `Vec<RespFrame>`. New
+`Store::zrevrange_withscores_borrow_scan` (descending twin of
+`zrange_withscores_borrow_scan`, `iter_desc().skip(s).take(count)`, byte-identical
+`zrevrange_withscores` bookkeeping) + `execute_plain_zrevrange_withscores_borrowed_into`
++ a fr-server `*5 ZREVRANGE ... WITHSCORES` dispatch branch (reuses
+`parse_borrowed_plain_key_arg3_packet`, `c`==WITHSCORES → FastEncodedReply).
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; ran remotely on `ovh-a`).
+1000-member zset, 32-byte members, full range:
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/rev_clone_full_range` (owned `Vec<(Vec<u8>,f64)>`) | 21.262 µs | baseline |
+| `zrange_withscores/rev_borrow_full_range` (streamed borrow scan) | 6.052 µs | **3.51x faster** |
+| `zrange_withscores/clone_full_range` (fwd, control) | 16.447 µs | baseline |
+| `zrange_withscores/borrow_full_range` (fwd, control) | 2.935 µs | 5.60x |
+
+The 3.51x is the store-level member-copy elimination for the descending path (the
+end-to-end command win is larger still because the whole path was generic before,
+not just the clone). Conformance GREEN: byte-exact
+`plain_zrevrange_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3`
+(RESP2 flat `*(N*2)` + RESP3 `*N` `[member,double]` pairs), commands/error stats
+match generic.
+
+SURFACE (pre-existing, not introduced here): the borrowed WITHSCORES fast-path
+family records keyspace hits via the store's `drop_if_expired` path (0 hits in the
+store method), while the generic ZREVRANGE WITHSCORES handler over-counts hits
+(~2 per call — a double-lookup). So `INFO keyspace_hits` for ZREVRANGE WITHSCORES
+moves from generic's ~2/call to the fast path's family-consistent accounting; the
+reply is byte-exact either way. This is the same generic-vs-fast keyspace
+divergence class already noted for ZRANGE..REV. A dedicated keyspace-accounting
+pass should reconcile the whole zset-range family to redis's 1-hit-per-read.
+Rollback: revert the `*5` dispatch branch (falls back to generic).
+
 ## 2026-07-04 BlackThrush: KEEP — ZRANGE ... WITHSCORES reply borrows members (zero per-member clone)
 
 Extends the plain-ZRANGE/ZREVRANGE zero-copy `_into` member-borrow vein

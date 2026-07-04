@@ -216,6 +216,32 @@ fn bench_zrange_withscores(c: &mut Criterion) {
             std::hint::black_box(acc)
         })
     });
+    // Descending twin: ZREVRANGE ... WITHSCORES clone vs borrow.
+    g.bench_function("rev_clone_full_range", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zrevrange_withscores(std::hint::black_box(b"z"), 0, -1, 2_000)
+                .unwrap();
+            let mut acc = 0usize;
+            for (m, s) in &pairs {
+                acc += m.len() + (*s as usize & 1);
+            }
+            std::hint::black_box(acc)
+        })
+    });
+    g.bench_function("rev_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrevrange_withscores_borrow_scan(std::hint::black_box(b"z"), 0, -1, 2_000, |ev| {
+                    if let ZRangeWithScoresScanEvent::Pair(m, s) = ev {
+                        acc += m.len() + (s as usize & 1);
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
     g.finish();
 }
 

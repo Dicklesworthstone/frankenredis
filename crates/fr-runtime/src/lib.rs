@@ -27108,6 +27108,140 @@ impl Runtime {
         Some(())
     }
 
+    /// (frankenredis-zrange-into) Borrowed READ fast path for the canonical
+    /// leaderboard query `ZREVRANGE key start stop WITHSCORES` (descending rank
+    /// range with scores) — previously FULLY GENERIC (argv materialization +
+    /// generic dispatch + member clone + `Vec<RespFrame>`). Streams the interleaved
+    /// member/score reply straight into `out` via [`Store::zrevrange_withscores_borrow_scan`]
+    /// with every member borrowed. Descending twin of
+    /// [`Self::execute_plain_zrange_withscores_borrowed_into`]; byte-identical
+    /// framing (RESP3 `*N` array of `[member,double]` pairs / RESP2 flat `*(N*2)`).
+    /// Defers (None) on a bad integer arg for the generic's canonical error text.
+    pub fn execute_plain_zrevrange_withscores_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGE".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) || self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
+        {
+            return None;
+        }
+        let start_idx = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop_idx = fr_command::parse_i64_arg(stop_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrevrange");
+        self.session.last_argv_len_sum = b"ZREVRANGE".len()
+            + key.len()
+            + start_arg.len()
+            + stop_arg.len()
+            + b"WITHSCORES".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self.server.store.zrevrange_withscores_borrow_scan(
+            key,
+            start_idx,
+            stop_idx,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                        let entries = if resp3 { n } else { n * 2 };
+                        fr_protocol::encode_aggregate_header(entries, false, out);
+                    }
+                    fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                        }
+                        encode_bulk_string_slice(Some(member), resp3, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                }
+            },
+        );
+        let elapsed_us = started.elapsed().as_micros() as u64;
+
+        let mut error_msg = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
+            }
+        }
+        let failed = error_msg.is_some();
+
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrange",
+            "ZREVRANGE",
+            || {
+                vec![
+                    b"ZREVRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                    b"WITHSCORES".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     /// (BlackThrush) Borrowed READ fast path for `ZRANGEBYSCORE key min max
     /// WITHSCORES` (no LIMIT) — ascending score range with interleaved member/score,
     /// RESP2 flat array (member,score-bulk) vs RESP3 array of [member,double] pairs.
@@ -42307,6 +42441,83 @@ mod tests {
                 direct.server.store.stat_total_error_replies,
                 generic.server.store.stat_total_error_replies
             );
+        }
+    }
+
+    // (frankenredis-zrange-into) The new ZREVRANGE ... WITHSCORES borrowed `_into`
+    // (previously a fully-generic path) must emit wire bytes byte-identical to the
+    // generic `ZREVRANGE key start stop WITHSCORES` reply in RESP2 and RESP3, across
+    // full/partial/negative ranges, missing key, and wrong-type; defer (None) on a
+    // bad integer arg; and keep the same command/read stats as generic.
+    #[test]
+    fn plain_zrevrange_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3() {
+        for resp3 in [false, true] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut direct, &mut generic] {
+                if resp3 {
+                    rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                }
+                rt.execute_frame(
+                    command(&[b"ZADD", b"z", b"1.5", b"a", b"2", b"b", b"3.25", b"c"]),
+                    1,
+                );
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            }
+
+            for (ts, (key, start, stop)) in (2..).zip([
+                (b"z".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+                (b"z".as_slice(), b"0".as_slice(), b"1".as_slice()),
+                (b"z".as_slice(), b"-2".as_slice(), b"-1".as_slice()),
+                (b"z".as_slice(), b"5".as_slice(), b"1".as_slice()), // inverted -> empty
+                (b"nokey".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+                (b"str".as_slice(), b"0".as_slice(), b"-1".as_slice()),
+            ]) {
+                let mut out = Vec::new();
+                direct
+                    .execute_plain_zrevrange_withscores_borrowed_into(
+                        key, start, stop, ts, resp3, &mut out,
+                    )
+                    .expect("ZREVRANGE WITHSCORES should take borrowed fast path");
+                let generic_reply = generic.execute_frame(
+                    command(&[b"ZREVRANGE".as_slice(), key, start, stop, b"WITHSCORES"]),
+                    ts,
+                );
+                assert_eq!(
+                    out,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?} start={start:?} stop={stop:?}"
+                );
+            }
+
+            assert!(
+                direct
+                    .execute_plain_zrevrange_withscores_borrowed_into(
+                        b"z",
+                        b"bad",
+                        b"-1",
+                        9,
+                        resp3,
+                        &mut Vec::new(),
+                    )
+                    .is_none(),
+                "bad integer args stay on generic dispatch for canonical error text"
+            );
+            assert_eq!(
+                direct.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+            // NB: keyspace_hits are intentionally NOT asserted against the generic
+            // path here. The borrowed WITHSCORES fast-path family records keyspace
+            // stats via the store's `drop_if_expired` path (like the already-shipped
+            // ZRANGE WITHSCORES `_into`), whereas the generic ZREVRANGE WITHSCORES
+            // handler over-counts hits (~2 per call). That is a pre-existing
+            // systemic accounting divergence (see docs/NEGATIVE_EVIDENCE.md), not
+            // something this byte-exact reply migration introduces.
         }
     }
 

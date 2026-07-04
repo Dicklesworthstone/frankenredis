@@ -8647,6 +8647,53 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*5\r\n$9\r\n",
+                    b"ZREVRANGE",
+                ) {
+                    // ZREVRANGE key start stop WITHSCORES (a=start, b=stop,
+                    // c=option token). The only valid *5 ZREVRANGE form is
+                    // WITHSCORES; anything else falls to the generic for its
+                    // canonical syntax error. Zero-copy _into -> FastEncodedReply.
+                    if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
+                        let client_resp3 =
+                            runtime.client_session().resp_protocol_version() == 3;
+                        if runtime
+                            .execute_plain_zrevrange_withscores_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                client_resp3,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
+                        {
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                     unparsed,
                     &parser_config,
