@@ -19839,6 +19839,64 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrange_byscore_borrowed`]
+    /// — the modern unified `ZRANGE key min max BYSCORE` (no REV/WITHSCORES/LIMIT),
+    /// member-only reply streamed with borrowed members via the shared
+    /// `execute_plain_zrangebyscore_core_into`. Recorded under the `zrange` command
+    /// name with a `BYSCORE` argv, matching the owned form. Owned form retained.
+    pub fn execute_plain_zrange_byscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms)
+        {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrange",
+            b"ZRANGE".len() + key.len() + min_arg.len() + max_arg.len() + b"BYSCORE".len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg =
+            self.execute_plain_zrangebyscore_core_into(key, min, max, false, now_ms, suppress_reply, out);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrange",
+            "ZRANGE",
+            || {
+                vec![
+                    b"ZRANGE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                    b"BYSCORE".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
     /// (BlackThrush) Borrowed READ fast path for the modern unified
     /// `ZRANGE key min max BYLEX` (no REV/LIMIT) — same lexicographic-range
     /// semantics as ZRANGEBYLEX but recorded under the `zrange` command name.
@@ -43108,6 +43166,48 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_total_error_replies,
             generic.server.store.stat_total_error_replies
+        );
+    }
+
+    // (frankenredis-zrange-into) The unified `ZRANGE key min max BYSCORE` member-only
+    // `_into` (shares execute_plain_zrangebyscore_core_into) must match the generic
+    // reply bytes across full / sub-range / exclusive / empty / wrong-type.
+    #[test]
+    fn plain_zrange_byscore_member_borrowed_into_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3.5", b"c", b"5", b"d"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+        for (ts, (key, min, max)) in (2..).zip([
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()),
+            (b"z".as_slice(), b"2".as_slice(), b"3.5".as_slice()),
+            (b"z".as_slice(), b"(2".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"9".as_slice(), b"20".as_slice()), // empty
+            (b"str".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()), // wrong type
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrange_byscore_borrowed_into(key, min, max, ts, &mut out)
+                .expect("ZRANGE BYSCORE _into");
+            let mut want = Vec::new();
+            generic
+                .execute_frame(command(&[b"ZRANGE", key, min, max, b"BYSCORE"]), ts)
+                .encode_into(&mut want);
+            assert_eq!(out, want, "ZRANGE BYSCORE key={key:?} min={min:?} max={max:?}");
+        }
+        assert!(
+            direct
+                .execute_plain_zrange_byscore_borrowed_into(b"z", b"bad", b"+inf", 90, &mut Vec::new())
+                .is_none()
+        );
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
         );
     }
 

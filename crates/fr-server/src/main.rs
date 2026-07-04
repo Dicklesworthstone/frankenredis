@@ -7475,12 +7475,33 @@ fn process_buffered_frames(
                                 &mut argv_scratch,
                             )
                         }
-                    } else {
-                        let fast = if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
-                            runtime.execute_plain_zrange_byscore_borrowed(
-                                packet.key, packet.a, packet.b, ts,
+                    } else if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
+                        // Zero-copy member-borrow _into for the unified BYSCORE form.
+                        if runtime
+                            .execute_plain_zrange_byscore_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                &mut conn.write_buf,
                             )
-                        } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
+                            .is_some()
+                        {
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
+                    } else {
+                        let fast = if packet.c.eq_ignore_ascii_case(b"BYLEX") {
                             runtime.execute_plain_zrange_bylex_borrowed(
                                 packet.key, packet.a, packet.b, ts,
                             )

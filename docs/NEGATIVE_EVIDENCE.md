@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — unified `ZRANGE key min max BYSCORE` reuses the member-borrow `_into` (13.54x path)
+
+Follow-on to the plain byscore member-borrow: the modern unified syntax
+`ZRANGE key min max BYSCORE` (recorded under the `zrange` command name) also
+cloned members via `execute_plain_zrangebyscore_core`. New thin
+`execute_plain_zrange_byscore_borrowed_into` routes it through the SAME streaming
+`execute_plain_zrangebyscore_core_into` + `zrangebyscore_members_borrow_scan`
+already shipped, and the fr-server BYSCORE arm of the ZRANGE BYSCORE|BYLEX|REV
+dispatch block now → FastEncodedReply (BYLEX stays owned). No new store code or
+bench — it exercises the identical borrow scan benched at **13.54x**
+(`byscore_members_borrow_full_range` 2.448µs vs `_clone` 33.144µs). Conformance
+GREEN: byte-exact `plain_zrange_byscore_member_borrowed_into_matches_generic`
+(full / sub-range / exclusive / empty / wrong-type / non-float-defer) + command
+stat parity; fr-server + fr-runtime compile clean. Rollback: revert the BYSCORE
+dispatch arm to `execute_plain_zrange_byscore_borrowed`.
+
 ## 2026-07-04 BlackThrush: KEEP — plain ZRANGEBYSCORE / ZREVRANGEBYSCORE (member-only) borrow members — 13.54x store-level
 
 The plain (no WITHSCORES) score-range forms built their member-only `*N` reply by
