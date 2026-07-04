@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — COPY + MOVE (copy_no_stat) bare-drop `expires_count` guards — elides 2 probes ≈ 32 ns (byte-exact)
+
+COPY and `copy_no_stat` (the MOVE backend) each did TWO bare unguarded `drop_if_expired` probes
+(source + destination) before the source lookup — and COPY's source drop is even redundant with
+its own `record_keyspace_lookup(source)`. Wrapped both in `if expires_count != 0 { drop(source);
+drop(destination) }` (the lpush/rpush/sadd pattern). Byte-identical: an expired key needs a TTL
+(count>0 → both drops run in the original source-then-dest order); with no volatile keys neither
+can evict and the source/dest lookups below re-probe anyway. Did NOT remove the redundant
+source-drop (removing it reorders the source-vs-dest expired-event firing in the both-expired
+edge case — not byte-identical). Proven by `copy_drop_guard_matches_and_evicts_expired` (copy
+success/REPLACE/no-overwrite/missing + MOVE + the expires_count>0 branch: expired source→no-copy
++evicted, expired dest+REPLACE→evicted+copied).
+
+MEASURED (per-crate via rch, intra-run isolated): elided **2 keyspace probes ≈ 32.43 ns total**
+(2 × 16.21 ns, ~12-char keys) on the no-TTL COPY/MOVE path (~100-150 ns baseline w/ value clone
++ insert ⇒ ~20-30%). Conformance GREEN (691/691, fully clean run). Streams XPENDING/XINFO
+collapse-able but blocked-adjacent (access self.stream_groups after the entry → needs check-type-
+then-release restructure); OBJECT introspection skipped (~0-value). Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XLEN/XRANGE/XREVRANGE stream-read single-lookup collapse — XLEN@16 1.41x (byte-exact)
 
 Extended the collapse to the STREAM reads (real workloads: event sourcing / queues). XLEN =

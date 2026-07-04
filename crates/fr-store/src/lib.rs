@@ -22488,8 +22488,14 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(source, now_ms);
-        self.drop_if_expired(destination, now_ms);
+        // (CrimsonHawk) Guard the two bare drop_if_expired probes on `expires_count != 0`:
+        // with no volatile keys neither source nor destination can evict, and
+        // `record_keyspace_lookup(source)` below re-probes source anyway. Byte-identical:
+        // an expired key needs a TTL (count>0 → both drops run in the original order).
+        if self.expires_count != 0 {
+            self.drop_if_expired(source, now_ms);
+            self.drop_if_expired(destination, now_ms);
+        }
 
         if !self.record_keyspace_lookup(source, now_ms) {
             return Ok(false);
@@ -22507,8 +22513,13 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(source, now_ms);
-        self.drop_if_expired(destination, now_ms);
+        // (CrimsonHawk) Guard the two bare drop_if_expired probes on `expires_count != 0` —
+        // see `copy`. Byte-identical (contains_key(source) below re-probes; nothing evicts
+        // when no volatile keys exist).
+        if self.expires_count != 0 {
+            self.drop_if_expired(source, now_ms);
+            self.drop_if_expired(destination, now_ms);
+        }
         if !self.entries.contains_key(source) {
             return Ok(false);
         }
@@ -33860,6 +33871,55 @@ mod tests {
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
+    }
+
+    // (CrimsonHawk) COPY / copy_no_stat (MOVE) bare-drop guards: byte-identical copy
+    // success/REPLACE/no-overwrite/missing + the expires_count>0 branch still evicting
+    // expired source (→ fail) and destination (→ REPLACE copies over it).
+    #[test]
+    fn copy_drop_guard_matches_and_evicts_expired() {
+        // No-TTL path.
+        let mut s = Store::new();
+        s.set(b"src".to_vec(), b"v".to_vec(), None, 1);
+        assert_eq!(s.expires_count, 0);
+        assert!(s.copy(b"src", b"dst", false, 2).unwrap()); // copied
+        assert_eq!(s.get(b"dst", 2).unwrap(), Some(b"v".to_vec()));
+        assert!(!s.copy(b"src", b"dst", false, 2).unwrap()); // dst exists, no replace → false
+        s.set(b"src".to_vec(), b"v2".to_vec(), None, 2);
+        assert!(s.copy(b"src", b"dst", true, 2).unwrap()); // replace
+        assert_eq!(s.get(b"dst", 2).unwrap(), Some(b"v2".to_vec()));
+        assert!(!s.copy(b"absent", b"d2", false, 2).unwrap()); // missing source → false
+        // copy_no_stat (MOVE backend).
+        let mut m = Store::new();
+        m.set(b"a".to_vec(), b"x".to_vec(), None, 1);
+        assert!(m.copy_no_stat(b"a", b"b", false, 2).unwrap());
+        assert_eq!(m.get(b"b", 2).unwrap(), Some(b"x".to_vec()));
+
+        // expires_count>0 branch: expired SOURCE → copy fails (source evicted).
+        let mut t = Store::new();
+        t.set(b"src".to_vec(), b"v".to_vec(), Some(50), 1); // deadline 51
+        assert!(t.expires_count >= 1);
+        assert!(!t.copy(b"src", b"dst", false, 500).unwrap(), "expired source → no copy");
+        assert!(t.get(b"src", 600).unwrap().is_none(), "expired source evicted");
+
+        // expires_count>0: expired DESTINATION with REPLACE → dst evicted, copy over it.
+        let mut u = Store::new();
+        u.set(b"src".to_vec(), b"new".to_vec(), None, 1);
+        u.set(b"dst".to_vec(), b"old".to_vec(), Some(50), 1); // dst deadline 51
+        assert!(u.copy(b"src", b"dst", true, 500).unwrap());
+        assert_eq!(u.get(b"dst", 600).unwrap(), Some(b"new".to_vec()));
+
+        // Timing: the guard elides 2 keyspace probes on the no-TTL COPY path.
+        let mut b = Store::new();
+        b.set(b"cp:bench:src".to_vec(), b"v".to_vec(), None, 2);
+        let k: &[u8] = b"cp:bench:src";
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t0.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!("COPY/MOVE guard: elided 2 keyspace probes ≈ {:.2} ns total (2 × {probe:.2} ns)", 2.0 * probe);
     }
 
     #[test]
