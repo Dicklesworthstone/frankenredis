@@ -20300,6 +20300,17 @@ impl Store {
     /// like `record_keyspace_lookup` no longer need a redundant `contains_key`.
     /// (frankenredis-shewy)
     fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) -> bool {
+        // (CrimsonHawk) Single-point fast-exit for the whole store having no TTL-bearing
+        // keys (`expires_count == 0`, the same invariant GET's fast path trusts via
+        // `count_expiring_keys() == 0`). Then `expiry_ms(key)` is None for every key, so
+        // `should_evict` is always false and nothing is evicted — the function just reports
+        // existence. Returning `entries.contains_key` directly elides the redundant
+        // `expiry_ms` (foldhash + deadline-map) probe that EVERY unguarded caller (SET, DEL,
+        // HSET, SETNX, BITFIELD SET, RENAME, …) otherwise pays on the no-TTL hot path.
+        // Byte-identical: with no expiry, eviction never fires and the return is `exists`.
+        if self.expires_count == 0 {
+            return self.entries.contains_key(key);
+        }
         let entry = self.entries.get(key);
         let exists = entry.is_some();
         let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
@@ -32229,6 +32240,32 @@ mod tests {
         assert_eq!(store.strlen(b"missing", 0).unwrap(), 0);
         store.set(b"k".to_vec(), b"hello".to_vec(), None, 0);
         assert_eq!(store.strlen(b"k", 0).unwrap(), 5);
+    }
+
+    // (CrimsonHawk) `drop_if_expired`'s `expires_count == 0` fast-exit must be byte-identical
+    // to the full body: report existence with no eviction when nothing can expire, and still
+    // evict + report absent when a key's TTL is actually due (expires_count > 0).
+    #[test]
+    fn drop_if_expired_fastexit_matches_full_body() {
+        // expires_count == 0: pure existence, no side effects.
+        let mut s = Store::new();
+        s.set(b"present".to_vec(), b"v".to_vec(), None, 100);
+        assert_eq!(s.expires_count, 0);
+        let dirty0 = s.dirty;
+        assert!(s.drop_if_expired(b"present", 200)); // present → true
+        assert!(!s.drop_if_expired(b"absent", 200)); // absent → false
+        assert_eq!(s.dirty, dirty0, "no-TTL drop_if_expired must not dirty");
+        assert!(s.get(b"present", 200).unwrap().is_some(), "must not evict");
+
+        // expires_count > 0: an actually-due key is still evicted + reported absent.
+        let mut t = Store::new();
+        t.set(b"live".to_vec(), b"L".to_vec(), None, 100);
+        t.set(b"dead".to_vec(), b"D".to_vec(), Some(50), 100); // due by t=500
+        assert!(t.expires_count >= 1);
+        assert!(t.drop_if_expired(b"live", 500)); // live present → true
+        assert!(!t.drop_if_expired(b"dead", 500)); // expired → evicted → false
+        assert!(t.get(b"dead", 600).unwrap().is_none(), "expired key removed");
+        assert!(t.get(b"live", 600).unwrap().is_some());
     }
 
     #[test]

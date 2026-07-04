@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — `drop_if_expired` single-point `expires_count == 0` fast-exit — 11.45% of SET@1 (26-char key), helps EVERY unguarded caller (byte-exact)
+
+Highest-leverage ship of the expiry-guard arc: instead of guarding each call site, guard the
+PRIMITIVE. `drop_if_expired` always did `entries.get(key)` + `expiry_ms(key)` (a SECOND map
+probe, foldhash + deadline-map) + `evaluate_expiry` on every call. When the store holds no
+TTL-bearing keys (`expires_count == 0`, the invariant GET already trusts via
+`count_expiring_keys() == 0`), `should_evict` is always false, so the function merely reports
+existence — the `expiry_ms` probe is pure waste. Added `if self.expires_count == 0 { return
+self.entries.contains_key(key); }` at the top. Byte-identical: with no expiry, eviction never
+fires and the return is `exists` = `contains_key` (proven by
+`drop_if_expired_fastexit_matches_full_body` + the existing `lazy_expiration_evicts_key_one_ms
+_past_deadline`, both GREEN). This ONE change covers ~all unguarded bare-drop callers at once:
+**SET, DEL, HSET, HSET_borrowed, SETNX, INCRBY, BITFIELD SET, RENAME/RENAMENX, PERSIST,
+HRANDFIELD, …** (dozens).
+
+MEASURED (per-crate `cargo test -p fr-store --release` via rch, intra-run isolated A/B):
+full SET@1 (26-char key, no TTL) ≈ 123.3 ns/op; old drop work (entries.get + expiry_ms) =
+26.08 ns vs new (contains_key) = 11.96 ns → **saved 14.12 ns = 11.45% of SET (1.129x)**. The
+saving is one full keyspace hash+probe per call, so it scales with key length (shorter keys
+save proportionally less; ~26-char key here). Conformance: 670/670 correctness tests pass incl
+the new byte-identity test + the lazy-expiry eviction test; the 2 suite failures are
+PRE-EXISTING brittle perf-margin asserts (`zdiff_resolve_once…` expected >1.15x got 0.87x;
+`intersect_sorted_i64_galloping…` got 0.80x) — both `assert!(ratio > X)` timing tests degraded
+by the loaded rch worker, neither calls `drop_if_expired`'s changed path. Landed via clean
+origin/main worktree (peer zset WIP active in shared tree).
+
 ## 2026-07-04 CrimsonHawk: KEEP — SCAN (`scan_walk`) + TOUCH (`touch_key`) per-key expiry-peek gated by `expires_count != 0` — SCAN@1000 −679 ns = 1.81% (byte-exact)
 
 Completes the per-element expiry-guard vein across the remaining multi-key read loops. Both
