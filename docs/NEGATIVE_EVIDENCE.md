@@ -76,6 +76,46 @@ Shipped. Remaining WITHSCORES clones (ZREVRANGE WITHSCORES, ZRANGEBYSCORE
 WITHSCORES) follow the same recipe next. Rollback: revert the executor to
 `store.zrange_withscores`.
 
+## 2026-07-04 CrimsonHawk: MEASURED/REJECT — zset DUMP listpack in-place finish is ~0-gain; final candidate `0.692x` vs Redis 7.2.4, dropped
+
+Targeted `frankenredis-amsm9`, the remaining compact-zset first-`DUMP` encode
+residual after the prior payload-cache keep. The alien-graveyard match was a
+narrow ownership-transfer / zero-copy-buffer lever: start the compact-zset DUMP
+listpack buffer with its 6-byte header placeholder, append entries directly into
+that final buffer, and fill header+EOF in place. This removes the old
+`encoded_entries -> listpack` second allocation and full payload copy without
+changing entry order, score formatting, CRC, or RDB type selection.
+
+Temporary proof and bench code were reverted before commit. RCH `hz1` passed the
+byte-equivalence test:
+`cargo test -p fr-store listpack_in_place_finish_matches_copy_finish -- --nocapture`
+(`1` focused test, `676` filtered). RCH also built release `fr-server` binaries
+for candidate/control in dedicated target dirs. The literal requested
+`cargo bench --release -p fr-bench --bench keyed_write_vs_redis -- dump_zset_vs_redis/DUMP_zset_64m`
+was attempted through RCH on `vmi1227854` and failed before measurement because
+this Cargo rejects `--release` for `cargo bench`; the valid release-equivalent
+spelling is `cargo bench --profile release`. Actual measurement used local
+fallback with the RCH-built binaries because remote bench workers do not
+reliably share both the built server binary and the vendored Redis oracle.
+
+Per-crate bench row: temporary `fr-bench` Criterion group
+`dump_zset_vs_redis/DUMP_zset_64m`, 64 compact zsets x 64 members, prefill before
+every measured DUMP so the existing payload cache does not hide cold listpack
+encode cost. `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-crimsonhawk-amsm9`.
+
+| run | Redis 7.2.4 thrpt | FrankenRedis thrpt | FR/Redis | candidate/control signal |
+| --- | ---: | ---: | ---: | ---: |
+| candidate, first run | 247.50 Kelem/s | 179.33 Kelem/s | 0.725x | routing only |
+| clean `origin/main` control `7d0d91dd8` | 183.68 Kelem/s | 152.64 Kelem/s | 0.831x | noisy window; Redis also dropped 22.55% |
+| candidate rerun immediately after control | 215.65 Kelem/s | 149.34 Kelem/s | 0.692x | direct vs prior control 0.978x; Criterion: no change, p=0.57, throughput CI -10.82%..+6.26% |
+
+Decision: **REJECT / DROP**. The second allocation+copy at
+`finish_listpack_entries` is not a meaningful post-cache zset DUMP lever. Do not
+retry generic listpack header-in-place finishing for this gap. Next useful work
+is a lower-noise cold-DUMP profile that separates CRC, score formatting, zset
+iteration, and server command overhead, or a structural retained/serialized
+compact representation; not another final-buffer copy tweak.
+
 ## 2026-07-04 CrimsonHawk: REJECT — small CompactFieldMap linear `contains_key` did not clear the SMISMEMBER gate
 
 Re-applied the `frankenredis-f7iv3` candidate: for `CompactFieldMap::contains_key`
