@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SSCAN/HSCAN borrow `_into` EXTENDED past cursor-0 to the WHOLE iteration (byte-exact)
+
+The SSCAN0/HSCAN0 borrow `_into` fast paths (1.80x / 2.20x, shipped earlier today) only fired for
+cursor `"0"` — so the FIRST batch of a large-set iteration borrowed, but every CONTINUATION call
+(`SSCAN key <N>`) fell back to the generic CLONE path. Yet `sscan0_borrow_scan`/`hscan0_borrow_scan`
+already handle ANY cursor (I byte-verified the FULL cursor walk vs clone last turn). Removed the
+`cursor_arg == "0"` gate and parse the cursor via a new strict `Runtime::parse_canonical_scan_cursor`:
+accepts only a clean canonical base-10 `u64` (no leading zeros except `"0"`, all digits, no sign, no
+overflow) → passes it to the borrow-scan; declines every other form (`"007"`, `"+5"`, `"-1"`,
+non-digits, overflow) → generic path, which parses those IDENTICALLY (`parse_scan_cursor`, e.g.
+`"007"→7`, `"-1"→0`). So every accepted cursor routes byte-exact and every declined one is handled by
+the unchanged generic path — no behavior change, only broader fast-path coverage.
+
+WHY BYTE-EXACT: the per-cursor reply is `sscan0_borrow_scan`/`hscan0_borrow_scan` (proven byte-identical
+to clone `sscan`/`hscan` across the WHOLE cursor walk — `{sscan0,hscan0}_borrow_scan_matches_clone`
+iterate cursor 0→…→0 comparing every batch + `next_cursor`) encoded identically to
+`scan0_reply_from_items`. New `parse_canonical_scan_cursor_accepts_only_clean_u64` test pins the strict
+parse (accepts `0`/`10`/`255`/`u64::MAX`; declines the 10 ambiguous forms). VERIFIED local
+symlink-legacy build: compiles clean; fr-server 217/218 (lone fail the PRE-EXISTING
+`mset_packet_dispatcher`) + fr-runtime parse test GREEN.
+
+MEASURED: the per-batch A/B is a POSITIONAL `get_index(pos)` walk — cursor-independent — so the already-
+measured store-level ratios (**SSCAN 1.80x**, **HSCAN 2.20x**, clone vs borrow) now apply to EVERY batch
+of the iteration, not just the first. A full N-key SSCAN of a hashtable set goes from
+`1 borrow + (N/10−1) clone` batches to ALL-borrow. Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANDMEMBER count WITHSCORES zero-copy `_into` WIRED LIVE — 2.60x store A/B (byte-exact)
 
 ZSCAN0 is a DEAD END (skiplist branch uses `index_slice_asc_adaptive`→treap `into_actual()` = OWNED

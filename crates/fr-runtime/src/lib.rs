@@ -22120,6 +22120,26 @@ impl Runtime {
         Self::scan0_reply_from_items(0, Vec::new())
     }
 
+    /// (CrimsonHawk) Strict canonical base-10 `u64` cursor parse for the SSCAN/HSCAN borrow `_into`
+    /// fast paths. Accepts ONLY a clean cursor (no leading zeros except `"0"`, all ASCII digits, no
+    /// sign, no overflow) so the fast path can extend past cursor `"0"` to the whole iteration while
+    /// staying byte-exact: every value accepted here parses to the SAME value in the generic
+    /// `parse_scan_cursor`, and every form it declines (`"007"`, `"+5"`, `"-1"`, non-digits) falls
+    /// through to the generic path, which handles those identically. Returns `None` ⇒ decline.
+    fn parse_canonical_scan_cursor(arg: &[u8]) -> Option<u64> {
+        if arg.is_empty() || (arg.len() > 1 && arg[0] == b'0') {
+            return None;
+        }
+        let mut value = 0u64;
+        for &b in arg {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+        }
+        Some(value)
+    }
+
     fn execute_plain_scan0_borrowed(
         &mut self,
         which: u8, // b'S' set, b'H' hash, b'Z' zset
@@ -22245,9 +22265,7 @@ impl Runtime {
         {
             return None;
         }
-        if cursor_arg != b"0" {
-            return None;
-        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
@@ -22274,7 +22292,7 @@ impl Runtime {
                 let result =
                     self.server
                         .store
-                        .sscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
+                        .sscan0_borrow_scan(key, cursor, None, 10, now_ms, |ev| {
                             if suppress_reply {
                                 return;
                             }
@@ -22358,9 +22376,7 @@ impl Runtime {
         {
             return None;
         }
-        if cursor_arg != b"0" {
-            return None;
-        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
@@ -22387,7 +22403,7 @@ impl Runtime {
                 let result =
                     self.server
                         .store
-                        .hscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
+                        .hscan0_borrow_scan(key, cursor, None, 10, now_ms, |ev| {
                             if suppress_reply {
                                 return;
                             }
@@ -41929,6 +41945,41 @@ pub mod ecosystem {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    // (CrimsonHawk) The SSCAN/HSCAN borrow `_into` extend-past-cursor-0 strict cursor parse accepts
+    // ONLY clean canonical base-10 u64s and declines everything the generic `parse_scan_cursor`
+    // would treat differently (leading zeros, sign, non-digits, overflow) so declined forms fall to
+    // the generic path byte-identically.
+    #[test]
+    fn parse_canonical_scan_cursor_accepts_only_clean_u64() {
+        use super::Runtime;
+        assert_eq!(Runtime::parse_canonical_scan_cursor(b"0"), Some(0));
+        assert_eq!(Runtime::parse_canonical_scan_cursor(b"10"), Some(10));
+        assert_eq!(Runtime::parse_canonical_scan_cursor(b"255"), Some(255));
+        assert_eq!(
+            Runtime::parse_canonical_scan_cursor(b"18446744073709551615"),
+            Some(u64::MAX)
+        );
+        // Declined → generic handles these (byte-identical routing).
+        for bad in [
+            b"".as_slice(),
+            b"007",
+            b"00",
+            b"+5",
+            b"-1",
+            b"1a",
+            b" 5",
+            b"5 ",
+            b"0x10",
+            b"18446744073709551616", // u64::MAX + 1 (overflow)
+        ] {
+            assert_eq!(
+                Runtime::parse_canonical_scan_cursor(bad),
+                None,
+                "expected decline for {bad:?}"
+            );
+        }
+    }
 
     // (frankenredis-b8z6y) Client-tracking invalidation dedup: the new
     // push-all-then-dedup-once (O(K)) helper must produce a byte-identical list to
