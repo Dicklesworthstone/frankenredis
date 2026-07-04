@@ -1944,14 +1944,14 @@ impl SortedSet {
             } else if min == b"+" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, min[1..].to_vec())
+                ScoreMember::actual(s, &min[1..])
             };
             let upper = if max == b"+" {
                 ScoreMember::max_for_score(s)
             } else if max == b"-" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, max[1..].to_vec())
+                ScoreMember::actual(s, &max[1..])
             };
             if lower > upper {
                 return Vec::new();
@@ -2013,14 +2013,14 @@ impl SortedSet {
             } else if min == b"+" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, min[1..].to_vec())
+                ScoreMember::actual(s, &min[1..])
             };
             let upper = if max == b"+" {
                 ScoreMember::max_for_score(s)
             } else if max == b"-" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, max[1..].to_vec())
+                ScoreMember::actual(s, &max[1..])
             };
             if lower > upper {
                 return Vec::new();
@@ -2073,14 +2073,14 @@ impl SortedSet {
             } else if min == b"+" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, min[1..].to_vec())
+                ScoreMember::actual(s, &min[1..])
             };
             let upper = if max == b"+" {
                 ScoreMember::max_for_score(s)
             } else if max == b"-" {
                 return Vec::new();
             } else {
-                ScoreMember::actual(s, max[1..].to_vec())
+                ScoreMember::actual(s, &max[1..])
             };
             if lower > upper {
                 return Vec::new();
@@ -2194,14 +2194,14 @@ impl SortedSet {
             } else if min == b"+" {
                 return 0;
             } else {
-                ScoreMember::actual(s, min[1..].to_vec())
+                ScoreMember::actual(s, &min[1..])
             };
             let upper = if max == b"+" {
                 ScoreMember::max_for_score(s)
             } else if max == b"-" {
                 return 0;
             } else {
-                ScoreMember::actual(s, max[1..].to_vec())
+                ScoreMember::actual(s, &max[1..])
             };
             if lower > upper {
                 return 0;
@@ -41222,6 +41222,40 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) ScoreMember::actual(s, &slice) builds the Arc<[u8]> in ONE alloc, vs the old
+    // `slice.to_vec()` arg which built a Vec THEN an Arc (two allocs) — same ScoreMember. Used for the
+    // ZRANGEBYLEX/ZREVRANGEBYLEX range bounds (which feed BTreeMap.range, so the owned key stays).
+    #[test]
+    fn score_member_actual_borrowed_arg_halves_alloc() {
+        let m: &[u8] = b"lexmember01234";
+        assert_eq!(
+            crate::ScoreMember::actual(3.5, m),
+            crate::ScoreMember::actual(3.5, m.to_vec())
+        );
+        let members: Vec<Vec<u8>> = (0..500)
+            .map(|i| format!("lexmember{i:05}").into_bytes())
+            .collect();
+        let reps = 30000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            for m in &members {
+                std::hint::black_box(crate::ScoreMember::actual(1.0, m.clone()));
+            }
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / (reps * members.len() as u64) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            for m in &members {
+                std::hint::black_box(crate::ScoreMember::actual(1.0, m.as_slice()));
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / (reps * members.len() as u64) as f64;
+        println!(
+            "ScoreMember::actual lex bound: to_vec()+Arc={old_ns:.1} ns | borrowed &[u8]->Arc={new_ns:.1} ns = {:.2}x",
+            old_ns / new_ns
+        );
     }
 
     // (CrimsonHawk) compact_position / score_member_cmp_to_borrowed (borrowed binary_search) matches
