@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — ZRANGEBYSCORE / ZREVRANGEBYSCORE ... LIMIT (member-only) borrow members — 3.71x
+
+The paginated `LIMIT offset count` score-range forms cloned every member via
+`zrangebyscore_withscores_limited`. New `SortedSet::score_bound_range_limited_refs`
+is a mechanical `.to_vec()` → borrowed-`&[u8]` transform of the owned
+`score_bound_range_limited` LAZY scan (`skip(offset).take(take)` — only offset+take
+elements touched, optimal for the common offset=0 / small-offset pagination). The
+owned method's deep-offset order-statistic treap jump is DROPPED here because
+`RankTree::select` returns an OWNED `ScoreMember` (can't borrow its member); a
+pathological deep offset thus reverts to the O(offset) walk — the same scan the
+owned path itself uses whenever `offset <= n_emit*24`, and it still drops the
+per-member clone (no strictly-worse case). New
+`Store::zrangebyscore_members_limit_borrow_scan` + shared runtime
+`execute_plain_zbyscore_limit_core_into` + two `_into` executors + two fr-server
+LIMIT dispatch sites → FastEncodedReply.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- byscore_limit`; remote). 1000-member zset,
+`LIMIT 0 200`:
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/byscore_limit_clone_full_range` (owned `Vec<(Vec<u8>,f64)>`→members) | 6.009 µs | baseline |
+| `zrange_withscores/byscore_limit_borrow_full_range` (streamed borrow scan) | 1.618 µs | **3.71x faster** |
+
+Conformance GREEN: byte-exact `plain_byscore_limit_member_borrowed_into_matches_generic`
+across offset/count windows (incl count 0, offset past end), sub-range, wrong-type,
+and negative-offset/count-defer for BOTH ZRANGEBYSCORE and ZREVRANGEBYSCORE +
+command stat parity; fr-server + fr-runtime compile clean. Rollback: revert the two
+LIMIT dispatch sites to `execute_plain_z{rev,}rangebyscore_limit_borrowed`.
+
 ## 2026-07-04 BlackThrush: KEEP — unified `ZRANGE key min max BYLEX` reuses the member-borrow `_into` (7.53x path)
 
 Follow-on completing the BYLEX family: the modern unified `ZRANGE .. BYLEX`

@@ -2334,6 +2334,66 @@ impl SortedSet {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrowing twin of the FULL
+    /// `score_bound_range_limited(min, max, rev, offset, take)` — the lazy
+    /// `skip(offset).take(take)` scan with the member BORROWED (`&[u8]`) instead of
+    /// cloned. Byte-identical membership/order. Powers the borrowed
+    /// ZRANGEBYSCORE/ZREVRANGEBYSCORE **LIMIT** fast paths. (The owned method's
+    /// deep-offset treap jump is dropped here — see the body note.)
+    fn score_bound_range_limited_refs(
+        &self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(&[u8], f64)> {
+        // NB: unlike the owned `score_bound_range_limited`, there is NO order-statistic
+        // treap-jump for deep offsets here — `RankTree::select` returns an OWNED
+        // `ScoreMember`, so its member cannot be borrowed into the returned Vec. The
+        // lazy `skip(offset).take(take)` scan below is byte-identical and, for the
+        // common offset=0 / small-offset LIMIT pagination, optimal (take stops early);
+        // only a pathological DEEP offset reverts to the O(offset) walk — the same
+        // scan the owned path itself uses whenever `offset <= n_emit*24`, and it still
+        // eliminates the per-member clone. (frankenredis-zrange-into deep-offset caveat)
+        match &self.inner {
+            SortedSetInner::Packed(p) => {
+                if rev {
+                    p.iter_desc()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                } else {
+                    p.iter()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                }
+            }
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                if rev {
+                    full.ordered
+                        .range((lower, upper))
+                        .rev()
+                        .filter_map(|sm| sm.member.as_actual().map(|member| (member, sm.score)))
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                } else {
+                    full.ordered
+                        .range((lower, upper))
+                        .filter_map(|sm| sm.member.as_actual().map(|member| (member, sm.score)))
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                }
+            }
+        }
+    }
+
     /// (frankenredis-zrange-into) Borrowing twin of the no-LIMIT ascending
     /// `score_bound_range_limited(min, max, rev=false, offset=0, take=MAX)`: returns
     /// the matching `(member, score)` pairs with the member BORROWED from the set
@@ -16243,6 +16303,66 @@ impl Store {
                         } else {
                             zs.score_bound_range_asc_refs(min, max)
                         };
+                        sink(SmembersScanEvent::Len(refs.len()));
+                        for (member, _score) in refs {
+                            sink(SmembersScanEvent::Member(member));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
+    /// (frankenredis-zrange-into) Member-only borrow-scan for the `LIMIT offset
+    /// count` ZRANGEBYSCORE / ZREVRANGEBYSCORE (`rev`) forms. Drop-in for the
+    /// member-mapped `zrangebyscore_withscores_limited(key, min, max, rev, offset,
+    /// Some(take), now_ms)`: IDENTICAL bookkeeping (`record_keyspace_lookup`,
+    /// `score_bound_value(min) > score_bound_value(max)` empty guard, LFU, `touch`)
+    /// and membership/order via [`SortedSet::score_bound_range_limited_refs`] (which
+    /// preserves the deep-offset treap jump + lazy skip/take), streaming borrowed
+    /// members with no `Vec<(Vec<u8>, f64)>` clone.
+    pub fn zrangebyscore_members_limit_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        take: usize,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        if score_bound_value(min) > score_bound_value(max) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let refs = zs.score_bound_range_limited_refs(min, max, rev, offset, take);
                         sink(SmembersScanEvent::Len(refs.len()));
                         for (member, _score) in refs {
                             sink(SmembersScanEvent::Member(member));

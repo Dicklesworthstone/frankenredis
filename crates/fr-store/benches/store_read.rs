@@ -363,6 +363,46 @@ fn bench_zrange_withscores(c: &mut Criterion) {
             std::hint::black_box(acc)
         })
     });
+    // ZRANGEBYSCORE -inf +inf LIMIT 0 200 (paginated member-only): clone vs borrow.
+    g.bench_function("byscore_limit_clone_full_range", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zrangebyscore_withscores_limited(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    false,
+                    0,
+                    Some(200),
+                    2_000,
+                )
+                .unwrap();
+            let members: Vec<Vec<u8>> = pairs.into_iter().map(|(m, _)| m).collect();
+            std::hint::black_box(members.iter().map(Vec::len).sum::<usize>())
+        })
+    });
+    g.bench_function("byscore_limit_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrangebyscore_members_limit_borrow_scan(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    false,
+                    0,
+                    200,
+                    2_000,
+                    |ev| {
+                        if let SmembersScanEvent::Member(m) = ev {
+                            acc += m.len();
+                        }
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
     // ZRANGEBYLEX - + (whole lex range): clone vs member-only borrow.
     g.bench_function("bylex_members_clone_full_range", |b| {
         b.iter(|| {

@@ -8764,13 +8764,20 @@ fn process_buffered_frames(
                     // ZRANGEBYSCORE key min max LIMIT offset count: a=min, b=max,
                     // c=LIMIT token, d=offset, e=count. Only the LIMIT form here.
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
-                        && let Some(response) = runtime.execute_plain_zrangebyscore_limit_borrowed(
-                            packet.key, packet.a, packet.b, packet.d, packet.e, ts,
-                        )
+                        && runtime
+                            .execute_plain_zrangebyscore_limit_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                packet.d,
+                                packet.e,
+                                ts,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -8906,14 +8913,20 @@ fn process_buffered_frames(
                     // ZREVRANGEBYSCORE key max min LIMIT offset count: a=max, b=min,
                     // c=LIMIT, d=offset, e=count.
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
-                        && let Some(response) = runtime
-                            .execute_plain_zrevrangebyscore_limit_borrowed(
-                                packet.key, packet.a, packet.b, packet.d, packet.e, ts,
+                        && runtime
+                            .execute_plain_zrevrangebyscore_limit_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                packet.d,
+                                packet.e,
+                                ts,
+                                &mut conn.write_buf,
                             )
+                            .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

@@ -20301,6 +20301,98 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of
+    /// [`Self::execute_plain_zrevrangebyscore_limit_borrowed`] — `ZREVRANGEBYSCORE
+    /// key max min LIMIT offset count` (descending), member array streamed with
+    /// borrowed members via the shared `execute_plain_zbyscore_limit_core_into`
+    /// (rev=true). Owned form retained.
+    pub fn execute_plain_zrevrangebyscore_limit_borrowed_into(
+        &mut self,
+        key: &[u8],
+        max_arg: &[u8],
+        min_arg: &[u8],
+        offset_arg: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYSCORE".len(),
+            key,
+            max_arg,
+            min_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let (max, min) = match (
+            fr_command::parse_score_bound(max_arg),
+            fr_command::parse_score_bound(min_arg),
+        ) {
+            (Ok(mx), Ok(mn)) => (mx, mn),
+            _ => return None,
+        };
+        let offset_raw = parse_i64_arg(offset_arg).ok()?;
+        if offset_raw < 0 {
+            return None;
+        }
+        let offset = usize::try_from(offset_raw).ok()?;
+        let count_raw = parse_i64_arg(count_arg).ok()?;
+        if count_raw < 0 {
+            return None;
+        }
+        let count = usize::try_from(count_raw).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebyscore",
+            b"ZREVRANGEBYSCORE".len()
+                + key.len()
+                + max_arg.len()
+                + min_arg.len()
+                + b"LIMIT".len()
+                + offset_arg.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg = self.execute_plain_zbyscore_limit_core_into(
+            key,
+            min,
+            max,
+            true,
+            offset,
+            count,
+            now_ms,
+            suppress_reply,
+            out,
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebyscore",
+            "ZREVRANGEBYSCORE",
+            || {
+                vec![
+                    b"ZREVRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    max_arg.to_vec(),
+                    min_arg.to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset_arg.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
     /// (BlackThrush) Borrowed READ fast path for `ZREVRANGEBYLEX key max min LIMIT
     /// offset count`. Reverse mirror of execute_plain_zrangebylex_limit_borrowed:
     /// wire order max then min, and store.zrangebylex_limited runs rev=true with the
@@ -20977,6 +21069,179 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of
+    /// [`Self::execute_plain_zrangebyscore_limit_borrowed`] — `ZRANGEBYSCORE key min
+    /// max LIMIT offset count`, member array streamed with borrowed members via
+    /// `zrangebyscore_members_limit_borrow_scan` (no clone; preserves the deep-offset
+    /// treap jump + lazy skip/take). Same inverted/wrong-type guard, gate, preamble,
+    /// metrics; owned form retained.
+    pub fn execute_plain_zrangebyscore_limit_borrowed_into(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        offset_arg: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGEBYSCORE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let offset_raw = parse_i64_arg(offset_arg).ok()?;
+        if offset_raw < 0 {
+            return None;
+        }
+        let offset = usize::try_from(offset_raw).ok()?;
+        let count_raw = parse_i64_arg(count_arg).ok()?;
+        if count_raw < 0 {
+            return None;
+        }
+        let count = usize::try_from(count_raw).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrangebyscore",
+            b"ZRANGEBYSCORE".len()
+                + key.len()
+                + min_arg.len()
+                + max_arg.len()
+                + b"LIMIT".len()
+                + offset_arg.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg = self.execute_plain_zbyscore_limit_core_into(
+            key,
+            min,
+            max,
+            false,
+            offset,
+            count,
+            now_ms,
+            suppress_reply,
+            out,
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangebyscore",
+            "ZRANGEBYSCORE",
+            || {
+                vec![
+                    b"ZRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset_arg.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
+    /// (frankenredis-zrange-into) Shared streaming core for the borrowed member-only
+    /// ZRANGEBYSCORE/ZREVRANGEBYSCORE **LIMIT** replies: same inverted/wrong-type
+    /// guard as the owned LIMIT forms, then streams the `*N` member array into `out`
+    /// via `zrangebyscore_members_limit_borrow_scan`. Returns the error code string
+    /// (for error-stat accounting) if the reply was an error, else `None`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared LIMIT core carries key/bounds/rev/offset/count/now plus suppress+out"
+    )]
+    fn execute_plain_zbyscore_limit_core_into(
+        &mut self,
+        key: &[u8],
+        min: fr_store::ScoreBound,
+        max: fr_store::ScoreBound,
+        rev: bool,
+        offset: usize,
+        count: usize,
+        now_ms: u64,
+        suppress_reply: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<String> {
+        let mut error_msg = None;
+        match fr_command::zscore_inverted_wrongtype_guard(
+            &mut self.server.store,
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
+            Ok(true) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(0, false, out);
+                }
+            }
+            Ok(false) => {
+                let scan = self.server.store.zrangebyscore_members_limit_borrow_scan(
+                    key,
+                    min,
+                    max,
+                    rev,
+                    offset,
+                    count,
+                    now_ms,
+                    |ev| {
+                        if suppress_reply {
+                            return;
+                        }
+                        match ev {
+                            fr_store::SmembersScanEvent::Len(n) => {
+                                fr_protocol::encode_aggregate_header(n, false, out);
+                            }
+                            fr_store::SmembersScanEvent::Member(m) => {
+                                encode_bulk_string_slice(Some(m), false, out);
+                            }
+                        }
+                    },
+                );
+                if let Err(err) = scan {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        reply.encode_into(out);
+                    }
+                    if let RespFrame::Error(msg) = reply {
+                        error_msg = Some(msg);
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = err.to_resp();
+                if !suppress_reply {
+                    reply.encode_into(out);
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        error_msg
     }
 
     /// (frankenredis-zbyscorefast) Borrowed READ fast path for `ZREVRANGEBYSCORE key
@@ -43564,6 +43829,79 @@ mod tests {
         assert!(
             direct
                 .execute_plain_zrange_bylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new())
+                .is_none()
+        );
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+    }
+
+    // (frankenredis-zrange-into) ZRANGEBYSCORE / ZREVRANGEBYSCORE ... LIMIT offset
+    // count member-only borrow-scan `_into` must match the generic replies across
+    // offset/count windows (incl count 0, offset past end), sub-range, and
+    // wrong-type; negative offset/count defers.
+    #[test]
+    fn plain_byscore_limit_member_borrowed_into_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d", b"5", b"e"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+        let enc = |g: &mut Runtime, argv: &[&[u8]], ts: u64| -> Vec<u8> {
+            let mut v = Vec::new();
+            g.execute_frame(command(argv), ts).encode_into(&mut v);
+            v
+        };
+
+        // ZRANGEBYSCORE key min max LIMIT offset count.
+        for (ts, (key, min, max, off, cnt)) in (2..).zip([
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"1".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"2".as_slice(), b"10".as_slice()),
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"0".as_slice()), // count 0
+            (b"z".as_slice(), b"2".as_slice(), b"4".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"10".as_slice(), b"5".as_slice()), // offset past end
+            (b"str".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"5".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrangebyscore_limit_borrowed_into(key, min, max, off, cnt, ts, &mut out)
+                .expect("ZRANGEBYSCORE LIMIT _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZRANGEBYSCORE", key, min, max, b"LIMIT", off, cnt], ts),
+                "ZRANGEBYSCORE LIMIT key={key:?} {min:?}..{max:?} off={off:?} cnt={cnt:?}"
+            );
+        }
+
+        // ZREVRANGEBYSCORE key max min LIMIT offset count.
+        for (ts, (key, max, min, off, cnt)) in (40..).zip([
+            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"1".as_slice(), b"3".as_slice()),
+            (b"z".as_slice(), b"4".as_slice(), b"2".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"0".as_slice()),
+            (b"str".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"5".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrevrangebyscore_limit_borrowed_into(key, max, min, off, cnt, ts, &mut out)
+                .expect("ZREVRANGEBYSCORE LIMIT _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZREVRANGEBYSCORE", key, max, min, b"LIMIT", off, cnt], ts),
+                "ZREVRANGEBYSCORE LIMIT key={key:?} {max:?}..{min:?} off={off:?} cnt={cnt:?}"
+            );
+        }
+
+        // Negative offset/count defers.
+        assert!(
+            direct
+                .execute_plain_zrangebyscore_limit_borrowed_into(b"z", b"-inf", b"+inf", b"-1", b"5", 90, &mut Vec::new())
                 .is_none()
         );
         assert_eq!(
