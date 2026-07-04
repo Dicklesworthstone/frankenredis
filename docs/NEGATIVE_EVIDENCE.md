@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — lpos_full (LPOS RANK/COUNT) unified-acquire single-lookup collapse — LPOS_FULL@16 1.11x (byte-exact)
+
+`lpos_full` (the LPOS RANK/COUNT/MAXLEN backend) did `record_keyspace_lookup` + separate
+`get_mut`. Instead of duplicating its ~30-line RANK/COUNT scan body, used the UNIFIED-ACQUIRE
+pattern: `let entry = if !lfu { lookup_live_for_read_mut(key) or return } else { record + rand
++ get_mut + bump };` then run the scan ONCE on `entry`. Byte-identical: same key lazy-expiry,
+hit/miss, single touch, WRONGTYPE, and RANK(fwd/rev)/COUNT/MAXLEN results; LFU branch verbatim
+(incl the contains_key-gated `next_rand`). Proven by `lpos_full_unified_collapse_matches` (first/
+all/rank-N/reverse/reverse-all/count-limited/maxlen/absent/WRONGTYPE + exact hit-miss + eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed LPOS_FULL@16 no-TTL (COUNT all,
+16-elem scan) = 135.82 ns/op; removed 2nd keyspace probe ≈ **15.51 ns** → old ≈ 151.34 ns ⇒
+**1.11x (−10%)** (modest because the 16-element scan dominates; higher for short scans / MAXLEN).
+Conformance GREEN (687/687 correctness; 2 failures = brittle foldhash + diff_sorted_i64 perf-
+ratio guards under load, unrelated). **REUSABLE PATTERN: unified-acquire (`let entry = if !lfu
+{lookup_live} else {record+get_mut+bump}`; body once) collapses commands with LONG bodies without
+duplication — cleaner than the `if !lfu {return dup} orig` shape for big-body reads.** READ
+COLLAPSE now complete but for object_encoding/freq/refcount (introspection, low-freq, borrow-
+reorder needed). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — LPOS single-lookup collapse + ZLEXCOUNT bare-drop guard — LPOS@16 1.24x (byte-exact)
 
 Two zset/list reads, two mechanisms: **LPOS** (`lpos`, records keyspace stat) → non-LFU

@@ -13038,75 +13038,84 @@ impl Store {
         // drop_if_expired and adds the hit/miss bump), so LPOS — both the generic
         // and the borrowed fast path, which share this backend — never moved the
         // counters. A missing key returns the empty result, as before.
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        // (CrimsonHawk) Acquire the live entry in ONE keyspace lookup on the non-LFU fast
+        // path (`lookup_live_for_read_mut` folds `record_keyspace_lookup` + `get_mut`), LFU
+        // path verbatim, then run the RANK/COUNT scan ONCE (no body duplication).
+        // Byte-identical: same key lazy-expiry, hit/miss, single touch, WRONGTYPE, results.
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok(Vec::new()),
+            }
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
                 }
-                match &entry.value {
-                    Value::List(l) => {
-                        let len = l.len();
-                        let limit = if maxlen == 0 { len } else { maxlen.min(len) };
-                        let max_results = match count {
-                            Some(0) => usize::MAX,
-                            Some(n) => n as usize,
-                            None => 1,
-                        };
-                        let mut results = Vec::new();
-                        let abs_rank = rank.unsigned_abs() as usize;
-                        let skip = if abs_rank > 0 { abs_rank - 1 } else { 0 };
-                        let mut matched = 0_usize;
+                None => return Ok(Vec::new()),
+            }
+        };
+        match &entry.value {
+            Value::List(l) => {
+                let len = l.len();
+                let limit = if maxlen == 0 { len } else { maxlen.min(len) };
+                let max_results = match count {
+                    Some(0) => usize::MAX,
+                    Some(n) => n as usize,
+                    None => 1,
+                };
+                let mut results = Vec::new();
+                let abs_rank = rank.unsigned_abs() as usize;
+                let skip = if abs_rank > 0 { abs_rank - 1 } else { 0 };
+                let mut matched = 0_usize;
 
-                        if rank >= 0 {
-                            // Forward scan
-                            for (i, item) in l.iter().enumerate().take(limit) {
-                                if item == element {
-                                    matched += 1;
-                                    if matched > skip {
-                                        results.push(i);
-                                        if results.len() >= max_results {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // (frankenredis-gjyzr) Reverse scan the last `limit`
-                            // elements via the chunk-level reverse iterator —
-                            // O(limit) instead of an O(limit*chunks) get(i)-per-
-                            // index walk on a quicklist. `i` descends from len-1.
-                            let mut i = len;
-                            for item in l.iter_rev().take(limit) {
-                                i -= 1;
-                                if item == element {
-                                    matched += 1;
-                                    if matched > skip {
-                                        results.push(i);
-                                        if results.len() >= max_results {
-                                            break;
-                                        }
-                                    }
+                if rank >= 0 {
+                    // Forward scan
+                    for (i, item) in l.iter().enumerate().take(limit) {
+                        if item == element {
+                            matched += 1;
+                            if matched > skip {
+                                results.push(i);
+                                if results.len() >= max_results {
+                                    break;
                                 }
                             }
                         }
-                        entry.touch(now_ms);
-                        Ok(results)
                     }
-                    _ => Err(StoreError::WrongType),
+                } else {
+                    // (frankenredis-gjyzr) Reverse scan the last `limit`
+                    // elements via the chunk-level reverse iterator —
+                    // O(limit) instead of an O(limit*chunks) get(i)-per-
+                    // index walk on a quicklist. `i` descends from len-1.
+                    let mut i = len;
+                    for item in l.iter_rev().take(limit) {
+                        i -= 1;
+                        if item == element {
+                            matched += 1;
+                            if matched > skip {
+                                results.push(i);
+                                if results.len() >= max_results {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
+                entry.touch(now_ms);
+                Ok(results)
             }
-            None => Ok(Vec::new()),
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -33697,6 +33706,68 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "LPOS@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) lpos_full unified-acquire collapse: byte-identical across RANK (fwd/rev),
+    // COUNT (single/all/limited), MAXLEN, WRONGTYPE, missing, stats, and key lazy-expiry.
+    #[test]
+    fn lpos_full_unified_collapse_matches() {
+        let mut s = Store::new();
+        // list: a b a c a b  (indices 0..5)
+        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"a".to_vec(), b"c".to_vec(), b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_first = s.lpos_full(b"l", b"a", 1, None, 0, 2); // first "a" → [0]
+        let r_all = s.lpos_full(b"l", b"a", 1, Some(0), 0, 2); // all "a" → [0,2,4]
+        let r_rank2 = s.lpos_full(b"l", b"a", 2, None, 0, 2); // 2nd "a" → [2]
+        let r_rev = s.lpos_full(b"l", b"a", -1, None, 0, 2); // last "a" → [4]
+        let r_rev_all = s.lpos_full(b"l", b"a", -1, Some(0), 0, 2); // rev all → [4,2,0]
+        let r_count2 = s.lpos_full(b"l", b"a", 1, Some(2), 0, 2); // first 2 → [0,2]
+        let r_maxlen = s.lpos_full(b"l", b"a", 1, Some(0), 2, 2); // scan only first 2 → [0]
+        let r_absent = s.lpos_full(b"absent", b"a", 1, None, 0, 2); // empty
+        let r_wrong = s.lpos_full(b"str", b"a", 1, None, 0, 2); // WrongType
+        // hits: l×7 + str(wrongtype) = 8; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 8);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_first.unwrap(), vec![0]);
+        assert_eq!(r_all.unwrap(), vec![0, 2, 4]);
+        assert_eq!(r_rank2.unwrap(), vec![2]);
+        assert_eq!(r_rev.unwrap(), vec![4]);
+        assert_eq!(r_rev_all.unwrap(), vec![4, 2, 0]);
+        assert_eq!(r_count2.unwrap(), vec![0, 2]);
+        assert_eq!(r_maxlen.unwrap(), vec![0]);
+        assert_eq!(r_absent.unwrap(), Vec::<usize>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.rpush(b"exp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.lpos_full(b"exp", b"a", 1, None, 0, 500).unwrap(), Vec::<usize>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing (LPOS COUNT all on a present 16-elem list, no TTL, LFU off).
+        let mut b = Store::new();
+        let members: Vec<Vec<u8>> = (0..16u32).map(|i| format!("m{i}").into_bytes()).collect();
+        b.rpush(b"lpf:bench", &members, 1).unwrap();
+        let k: &[u8] = b"lpf:bench";
+        for _ in 0..2000 { std::hint::black_box(b.lpos_full(k, b"m8", 1, Some(0), 0, 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.lpos_full(std::hint::black_box(k), b"m8", 1, Some(0), 0, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "LPOS_FULL@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
