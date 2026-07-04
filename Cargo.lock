@@ -365,6 +365,7 @@ dependencies = [
 name = "fr-command"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "foldhash",
  "fr-protocol",
  "fr-sentinel",

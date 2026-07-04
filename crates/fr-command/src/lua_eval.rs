@@ -3413,6 +3413,14 @@ impl Env {
         true
     }
 
+    fn local_cell_for_slot(&self, local: LocalSlotRef) -> Option<LuaCell> {
+        let scope_idx = self.scope_index_for_slot(local)?;
+        self.scopes
+            .get(scope_idx)?
+            .get_local_cell_at(local.slot)
+            .cloned()
+    }
+
     fn classify_slot(&self, local: LocalSlotRef) -> Option<bool> {
         let scope_idx = self.scope_index_for_slot(local)?;
         Some(scope_idx >= self.local_floor)
@@ -4132,6 +4140,92 @@ impl<'a> LuaState<'a> {
         outcome
     }
 
+    fn numeric_for_add_assign_accumulator_slot(
+        loop_name: &str,
+        body: &[(u32, Stmt)],
+    ) -> Option<LocalSlotRef> {
+        let [(_, Stmt::Assign(lhs, rhs))] = body else {
+            return None;
+        };
+        let [Expr::LocalName(_, lhs_slot)] = lhs.as_slice() else {
+            return None;
+        };
+        let [Expr::BinOp(left, BinOp::Add, right)] = rhs.as_slice() else {
+            return None;
+        };
+
+        fn is_loop_var(expr: &Expr, loop_name: &str) -> bool {
+            matches!(expr, Expr::LocalName(name, _) if name == loop_name)
+        }
+
+        match (&**left, &**right) {
+            (Expr::LocalName(_, acc_slot), term)
+                if acc_slot == lhs_slot && is_loop_var(term, loop_name) =>
+            {
+                Some(*lhs_slot)
+            }
+            (term, Expr::LocalName(_, acc_slot))
+                if acc_slot == lhs_slot && is_loop_var(term, loop_name) =>
+            {
+                Some(*lhs_slot)
+            }
+            _ => None,
+        }
+    }
+
+    fn execute_numeric_for_add_assign_fast_path(
+        &mut self,
+        loop_name: &str,
+        stop: f64,
+        step: f64,
+        body: &[(u32, Stmt)],
+        mut current: f64,
+        env: &mut Env,
+    ) -> Option<Result<ControlFlow, String>> {
+        let acc_slot = Self::numeric_for_add_assign_accumulator_slot(loop_name, body)?;
+        let body_line = body[0].0;
+        env.push_scope();
+        let acc_cell = match env.local_cell_for_slot(acc_slot) {
+            Some(cell) => cell,
+            None => {
+                env.pop_scope();
+                return None;
+            }
+        };
+        let mut acc = match &*acc_cell.borrow() {
+            LuaValue::Number(n) => *n,
+            _ => {
+                env.pop_scope();
+                return None;
+            }
+        };
+
+        loop {
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                *acc_cell.borrow_mut() = LuaValue::Number(acc);
+                env.pop_scope();
+                return Some(Err("script exceeded maximum iteration count".to_string()));
+            }
+            if (step > 0.0 && current > stop) || (step < 0.0 && current < stop) {
+                break;
+            }
+            self.current_line = body_line;
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                *acc_cell.borrow_mut() = LuaValue::Number(acc);
+                env.pop_scope();
+                return Some(Err("script exceeded maximum iteration count".to_string()));
+            }
+            acc += current;
+            current += step;
+        }
+
+        *acc_cell.borrow_mut() = LuaValue::Number(acc);
+        env.pop_scope();
+        Some(Ok(ControlFlow::None))
+    }
+
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
@@ -4383,6 +4477,11 @@ impl<'a> LuaState<'a> {
                 // either breaks/returns or the loop is infinite (caller's
                 // responsibility, same as `while true do end`). Vendored
                 // does not reject step=0 at the runtime layer.
+                if let Some(result) =
+                    self.execute_numeric_for_add_assign_fast_path(name, e, st, body, s, env)
+                {
+                    return result;
+                }
                 let mut i = s;
                 // (CrimsonHawk) Reuse one loop-var cell across iterations unless a
                 // closure captured it (Rc strong_count > 1; GC registry holds only a
@@ -20355,6 +20454,36 @@ end
                 *expected,
                 "wrong error for {:?}",
                 String::from_utf8_lossy(body),
+            );
+        }
+    }
+
+    #[test]
+    fn lua_numeric_for_add_assign_fast_path_keeps_results() {
+        let mut store = Store::new();
+        let cases: &[(&[u8], RespFrame)] = &[
+            (
+                b"local s=0; for i=1,1000 do s=s+i end; return s",
+                RespFrame::Integer(500_500),
+            ),
+            (
+                b"local s=0; for i=1,1000 do s=i+s end; return s",
+                RespFrame::Integer(500_500),
+            ),
+            (
+                b"local s='0'; for i=1,3 do s=s+i end; return s",
+                RespFrame::Integer(6),
+            ),
+        ];
+        for (script, expected) in cases {
+            let got = eval_script(script, &[], &[], &mut store, 0).unwrap_or_else(|e| {
+                panic!("eval {:?} failed: {e}", String::from_utf8_lossy(script))
+            });
+            assert_eq!(
+                got,
+                *expected,
+                "wrong result for {:?}",
+                String::from_utf8_lossy(script)
             );
         }
     }

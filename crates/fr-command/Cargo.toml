@@ -18,3 +18,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion = "0.5"
+
+[[bench]]
+name = "lua_eval"
+harness = false

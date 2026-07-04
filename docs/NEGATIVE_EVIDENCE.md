@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for `s=s+i` accumulator fast path — 17.56x vs ORIG (bounded tree-walker loop)
+
+The remaining compute-heavy EVAL residual has a narrow but common interpreter shape: `local s=0; for
+i=1,N do s=s+i end; return s`. ORIG walks the full AST for every iteration (`LocalName` lookup,
+`BinOp::Add`, `Assign`, loop var cell setup), even though the parsed body is a single local accumulator
+assignment whose RHS is exactly accumulator + loop-var (or loop-var + accumulator). The landed lever
+detects that one-statement numeric-for body, reads the accumulator `LuaCell` once, runs the numeric loop
+in Rust scalars, then writes the cell once. It keeps the generic path for non-number accumulators,
+multi-statement bodies, table/global writes, closures, yields, metamethod-shaped work, and every other
+Lua statement form.
+
+BYTE-TRANSPARENT: `lua_numeric_for_add_assign_fast_path_keeps_results` covers `s=s+i`, `s=i+s`, and a
+string accumulator fallback. Focused gates GREEN via rch with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`: `cargo check -p fr-command --all-targets`
+and `cargo test -p fr-command lua_numeric_for_add_assign_fast_path_keeps_results -- --nocapture`.
+
+MEASURED (SHORT per-crate rch Criterion, identical `fr-command` bench harness added to ORIG scratch,
+accepted Cargo equivalent `cargo bench --profile release -p fr-command --bench lua_eval --
+numeric_for_sum_1000 --sample-size 10 --measurement-time 1`): ORIG `origin/main` median **136.25 us**
+(`hz2`) vs candidate median **7.7586 us** (`ovh-a`) = **17.56x vs ORIG**. This is cross-worker but the
+delta is order-of-magnitude and the benchmark body is pure interpreter CPU; the RCH CLI exposed no
+worker-pin flag in `rch exec --help`, so this is recorded as measured routing/landing evidence with the
+worker caveat rather than pretending same-worker proof.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX range bounds halve their alloc (borrowed `actual` arg) — 1.76x bound-construction (byte-transparent)
 
 Third pass on the owned-key vein. The remaining `ScoreMember::actual(...to_vec())` sites are the 8
