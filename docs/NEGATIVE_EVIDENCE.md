@@ -399,6 +399,14 @@ median **333.37 us**; Redis 7.2.4 median **454.73 us**. Direct ORIG ratio =
 `359.00 / 333.37` = **1.077x**; candidate Redis-relative throughput ratio =
 `454.73 / 333.37` = **1.36x**.
 
+Additional SHORT per-crate fallback measured the store primitive itself after this raced onto
+`origin/main`: `CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec
+-- cargo bench -p fr-store --bench store_read --profile release -- getset_4096 --sample-size 200
+--measurement-time 10` (exact requested `cargo bench --release -p fr-store --bench store_read --
+getset_4096` was attempted earlier and rejected by Cargo because `bench` has no `--release` flag).
+ORIG clone path `store_read/getset_4096_old_clone` = **1.3907 us**; borrowed direct path
+`store_read/getset_4096_old_borrow` = **1.2848 us** ⇒ **1.08x vs ORIG**.
+
 Validation: `rch exec -- cargo check -p fr-store -p fr-runtime -p fr-server
 -p fr-bench --all-targets` GREEN; focused store/runtime equivalence tests GREEN;
 real local `cargo test -p fr-conformance -- --nocapture` GREEN after linking the

@@ -34462,6 +34462,20 @@ mod tests {
         ));
         assert_eq!(z.llen(b"lst", 2).unwrap(), 1);
 
+        let mut lfu = Store::new();
+        lfu.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        lfu.set(b"lfu".to_vec(), b"old".to_vec(), None, 1);
+        assert_eq!(lfu.object_freq(b"lfu", 1), Some(LFU_INIT_VAL));
+        let mut lfu_old = None;
+        lfu.getset_with(b"lfu", b"new", 2, |old| lfu_old = old.map(<[u8]>::to_vec))
+            .unwrap();
+        assert_eq!(lfu_old, Some(b"old".to_vec()));
+        assert_eq!(lfu.get(b"lfu", 2).unwrap(), Some(b"new".to_vec()));
+        assert!(
+            lfu.object_freq(b"lfu", 2).unwrap() >= LFU_INIT_VAL,
+            "GETSET under LFU must preserve the access-bumped counter"
+        );
+
         // TTL is cleared on overwrite: key with a TTL, GETSET, then it must NOT expire.
         let mut u = Store::new();
         u.set(b"t".to_vec(), b"a".to_vec(), Some(50), 1); // deadline 51

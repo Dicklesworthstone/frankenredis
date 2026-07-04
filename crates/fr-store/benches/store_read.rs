@@ -144,6 +144,52 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("touch_no_ttl", |b| {
         b.iter(|| std::hint::black_box(store.touch_key(std::hint::black_box(b"target:key"), 2_000)))
     });
+    // GETSET returning a large old string: owned path clones the 4 KiB old value before
+    // reply encoding; borrowed path streams the same old bytes through a callback and
+    // only materializes the new value being stored.
+    let getset_old_value = vec![b'x'; 4096];
+    let getset_new_value = vec![b'y'; 4096];
+    g.bench_function("getset_4096_old_clone", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.set(b"gs".to_vec(), getset_old_value.clone(), None, 1_000);
+                s
+            },
+            |mut s| {
+                let old = s
+                    .getset(
+                        std::hint::black_box(b"gs".to_vec()),
+                        std::hint::black_box(getset_new_value.as_slice()),
+                        2_000,
+                    )
+                    .unwrap();
+                std::hint::black_box(old.as_ref().map_or(0, Vec::len))
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("getset_4096_old_borrow", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.set(b"gs".to_vec(), getset_old_value.clone(), None, 1_000);
+                s
+            },
+            |mut s| {
+                let mut old_len = 0usize;
+                s.getset_with(
+                    std::hint::black_box(b"gs"),
+                    std::hint::black_box(getset_new_value.as_slice()),
+                    2_000,
+                    |old| old_len = old.map_or(0, <[u8]>::len),
+                )
+                .unwrap();
+                std::hint::black_box(old_len)
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
     // HGET on a hash field with NO per-field TTLs (the common case): the candidate elides
     // the 2-Vec composite alloc + BTree probe in hash_field_is_expired.
     g.bench_function("hget_no_fieldttl", |b| {
