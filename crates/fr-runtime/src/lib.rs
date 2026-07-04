@@ -20284,6 +20284,222 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-zrange-into) Streaming `_into` twin of
+    /// [`Self::execute_plain_zrangebyscore_core`] for the plain (no WITHSCORES)
+    /// member-only reply: same inverted/wrong-type guard, then streams the `*N`
+    /// member array straight into `out` via `zrangebyscore_members_borrow_scan`
+    /// (borrowed members, no `Vec<(Vec<u8>, f64)>` clone). A member-only array is
+    /// byte-identical in RESP2/RESP3, so no `resp3` param. Returns the error code
+    /// string (for error-stat accounting) if the reply was an error, else `None`.
+    fn execute_plain_zrangebyscore_core_into(
+        &mut self,
+        key: &[u8],
+        min: fr_store::ScoreBound,
+        max: fr_store::ScoreBound,
+        rev: bool,
+        now_ms: u64,
+        suppress_reply: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<String> {
+        let mut error_msg = None;
+        match fr_command::zscore_inverted_wrongtype_guard(
+            &mut self.server.store,
+            key,
+            min,
+            max,
+            now_ms,
+        ) {
+            Ok(true) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(0, false, out);
+                }
+            }
+            Ok(false) => {
+                let scan = self.server.store.zrangebyscore_members_borrow_scan(
+                    key,
+                    min,
+                    max,
+                    rev,
+                    now_ms,
+                    |ev| {
+                        if suppress_reply {
+                            return;
+                        }
+                        match ev {
+                            fr_store::SmembersScanEvent::Len(n) => {
+                                fr_protocol::encode_aggregate_header(n, false, out);
+                            }
+                            fr_store::SmembersScanEvent::Member(m) => {
+                                encode_bulk_string_slice(Some(m), false, out);
+                            }
+                        }
+                    },
+                );
+                if let Err(err) = scan {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        reply.encode_into(out);
+                    }
+                    if let RespFrame::Error(msg) = reply {
+                        error_msg = Some(msg);
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = err.to_resp();
+                if !suppress_reply {
+                    reply.encode_into(out);
+                }
+                if let RespFrame::Error(msg) = reply {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+        error_msg
+    }
+
+    /// (frankenredis-zrange-into) Account an error reply produced by a streaming
+    /// `_into` fast path from its error-code string (mirrors
+    /// [`Self::account_plain_borrowed_error_reply`] which needs a `RespFrame`).
+    fn account_plain_borrowed_error_msg(&mut self, error_msg: Option<String>) {
+        if let Some(msg) = error_msg {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrangebyscore_borrowed`]
+    /// — plain `ZRANGEBYSCORE key min max` (no WITHSCORES/LIMIT), member array
+    /// streamed with borrowed members. Same gate/preamble/metrics; the owned form
+    /// stays for the cold generic-args caller.
+    pub fn execute_plain_zrangebyscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGEBYSCORE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let (min, max) = match (
+            fr_command::parse_score_bound(min_arg),
+            fr_command::parse_score_bound(max_arg),
+        ) {
+            (Ok(mn), Ok(mx)) => (mn, mx),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrangebyscore",
+            b"ZRANGEBYSCORE".len() + key.len() + min_arg.len() + max_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg =
+            self.execute_plain_zrangebyscore_core_into(key, min, max, false, now_ms, suppress_reply, out);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangebyscore",
+            "ZRANGEBYSCORE",
+            || {
+                vec![
+                    b"ZRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrevrangebyscore_borrowed`]
+    /// — plain `ZREVRANGEBYSCORE key max min` (descending, no WITHSCORES/LIMIT).
+    pub fn execute_plain_zrevrangebyscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        max_arg: &[u8],
+        min_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYSCORE".len(),
+            key,
+            max_arg,
+            min_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let (max, min) = match (
+            fr_command::parse_score_bound(max_arg),
+            fr_command::parse_score_bound(min_arg),
+        ) {
+            (Ok(mx), Ok(mn)) => (mx, mn),
+            _ => return None,
+        };
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrangebyscore",
+            b"ZREVRANGEBYSCORE".len() + key.len() + max_arg.len() + min_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg =
+            self.execute_plain_zrangebyscore_core_into(key, min, max, true, now_ms, suppress_reply, out);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrangebyscore",
+            "ZREVRANGEBYSCORE",
+            || {
+                vec![
+                    b"ZREVRANGEBYSCORE".to_vec(),
+                    key.to_vec(),
+                    max_arg.to_vec(),
+                    min_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
     fn can_execute_plain_zbyscore_borrowed(
         &mut self,
         name_len: usize,
@@ -42806,6 +43022,93 @@ mod tests {
                 generic.server.store.stat_total_error_replies
             );
         }
+    }
+
+    // (frankenredis-zrange-into) The plain (no WITHSCORES) ZRANGEBYSCORE and
+    // ZREVRANGEBYSCORE member-only borrow-scan `_into` must emit wire bytes
+    // byte-identical to the generic replies across full / sub-range / EXCLUSIVE
+    // bounds / single-point-dup / empty / inverted / wrong-type, and defer on a
+    // non-float bound. Member-only arrays are identical in RESP2/RESP3.
+    #[test]
+    fn plain_byscore_member_borrowed_into_matches_generic() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"c", b"3.5", b"d", b"5", b"e",
+                ]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+        let enc = |g: &mut Runtime, argv: &[&[u8]], ts: u64| -> Vec<u8> {
+            let mut v = Vec::new();
+            g.execute_frame(command(argv), ts).encode_into(&mut v);
+            v
+        };
+
+        // ZRANGEBYSCORE key min max (ascending).
+        for (ts, (key, min, max)) in (2..).zip([
+            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()),
+            (b"z".as_slice(), b"2".as_slice(), b"3.5".as_slice()),
+            (b"z".as_slice(), b"(2".as_slice(), b"5".as_slice()),
+            (b"z".as_slice(), b"1".as_slice(), b"(3.5".as_slice()),
+            (b"z".as_slice(), b"10".as_slice(), b"20".as_slice()), // empty
+            (b"z".as_slice(), b"5".as_slice(), b"1".as_slice()),   // inverted
+            (b"nokey".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()),
+            (b"str".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrangebyscore_borrowed_into(key, min, max, ts, &mut out)
+                .expect("ZRANGEBYSCORE _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZRANGEBYSCORE", key, min, max], ts),
+                "ZRANGEBYSCORE key={key:?} min={min:?} max={max:?}"
+            );
+        }
+
+        // ZREVRANGEBYSCORE key max min (descending).
+        for (ts, (key, max, min)) in (40..).zip([
+            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()),
+            (b"z".as_slice(), b"3.5".as_slice(), b"2".as_slice()),
+            (b"z".as_slice(), b"(5".as_slice(), b"(1".as_slice()),
+            (b"z".as_slice(), b"20".as_slice(), b"10".as_slice()), // empty
+            (b"z".as_slice(), b"1".as_slice(), b"5".as_slice()),   // inverted
+            (b"str".as_slice(), b"+inf".as_slice(), b"-inf".as_slice()),
+        ]) {
+            let mut out = Vec::new();
+            direct
+                .execute_plain_zrevrangebyscore_borrowed_into(key, max, min, ts, &mut out)
+                .expect("ZREVRANGEBYSCORE _into");
+            assert_eq!(
+                out,
+                enc(&mut generic, &[b"ZREVRANGEBYSCORE", key, max, min], ts),
+                "ZREVRANGEBYSCORE key={key:?} max={max:?} min={min:?}"
+            );
+        }
+
+        // Non-float bound defers (None).
+        assert!(
+            direct
+                .execute_plain_zrangebyscore_borrowed_into(b"z", b"bad", b"+inf", 90, &mut Vec::new())
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_zrevrangebyscore_borrowed_into(b"z", b"bad", b"-inf", 91, &mut Vec::new())
+                .is_none()
+        );
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
     }
 
     #[test]

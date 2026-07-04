@@ -178,7 +178,7 @@ fn bench_get(c: &mut Criterion) {
 // (member, score) with the member borrowed (zero per-member alloc). Both sinks do
 // identical work (sum member lengths + scores) so the delta is purely the clone.
 fn bench_zrange_withscores(c: &mut Criterion) {
-    use fr_store::ZRangeWithScoresScanEvent;
+    use fr_store::{SmembersScanEvent, ZRangeWithScoresScanEvent};
     const N: usize = 1_000;
     const MEMBER_LEN: usize = 32;
     let mut store = Store::new();
@@ -317,6 +317,45 @@ fn bench_zrange_withscores(c: &mut Criterion) {
                     |ev| {
                         if let ZRangeWithScoresScanEvent::Pair(m, s) = ev {
                             acc += m.len() + (s as usize & 1);
+                        }
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
+    // Plain (member-only) ZRANGEBYSCORE: what the reply builds today (clone members,
+    // drop scores) vs the member-only borrow scan.
+    g.bench_function("byscore_members_clone_full_range", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zrangebyscore_withscores_limited(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    false,
+                    0,
+                    None,
+                    2_000,
+                )
+                .unwrap();
+            let members: Vec<Vec<u8>> = pairs.into_iter().map(|(m, _)| m).collect();
+            std::hint::black_box(members.iter().map(Vec::len).sum::<usize>())
+        })
+    });
+    g.bench_function("byscore_members_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrangebyscore_members_borrow_scan(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    false,
+                    2_000,
+                    |ev| {
+                        if let SmembersScanEvent::Member(m) = ev {
+                            acc += m.len();
                         }
                     },
                 )

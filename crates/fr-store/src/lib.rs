@@ -16143,6 +16143,70 @@ impl Store {
         }
     }
 
+    /// (frankenredis-zrange-into) Member-only borrow-scan for the plain (no
+    /// WITHSCORES) `ZRANGEBYSCORE` / `ZREVRANGEBYSCORE` reply: a drop-in for the
+    /// member-mapped `zrangebyscore_withscores_limited(key, min, max, rev, 0, None,
+    /// now_ms)` used by `execute_plain_zrangebyscore_core`. IDENTICAL bookkeeping
+    /// (same `record_keyspace_lookup`, `score_bound_value(min) > score_bound_value(max)`
+    /// empty guard, LFU, `touch`) and membership via the shared
+    /// `score_bound_range_{asc,desc}_refs`, streaming `Len(count)` then each borrowed
+    /// `Member(&[u8])` (score dropped) with no per-member `Vec<u8>` clone. `rev`
+    /// selects descending order. `Len(0)` for missing/inverted; `Err(WrongType)` for
+    /// a non-zset value.
+    pub fn zrangebyscore_members_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        if score_bound_value(min) > score_bound_value(max) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let refs = if rev {
+                            zs.score_bound_range_desc_refs(min, max)
+                        } else {
+                            zs.score_bound_range_asc_refs(min, max)
+                        };
+                        sink(SmembersScanEvent::Len(refs.len()));
+                        for (member, _score) in refs {
+                            sink(SmembersScanEvent::Member(member));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(
         &mut self,

@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 BlackThrush: KEEP — plain ZRANGEBYSCORE / ZREVRANGEBYSCORE (member-only) borrow members — 13.54x store-level
+
+The plain (no WITHSCORES) score-range forms built their member-only `*N` reply by
+cloning every member+score via `zrangebyscore_withscores_limited` and then
+DROPPING the score — pure waste. New `Store::zrangebyscore_members_borrow_scan`
+(reuses the shipped `SortedSet::score_bound_range_{asc,desc}_refs`, `rev` param)
+streams borrowed members (`SmembersScanEvent`); a streaming
+`execute_plain_zrangebyscore_core_into` + two `_into` executors keep the exact
+inverted/wrong-type guard, gate, preamble, metrics and error accounting. Two
+fr-server dispatch sites (dedicated ZRANGEBYSCORE + ZREVRANGEBYSCORE) →
+FastEncodedReply. Member-only arrays are byte-identical in RESP2/RESP3.
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; remote). 1000-member zset,
+32-byte members, whole set (`-inf`/`+inf`):
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/byscore_members_clone_full_range` (limited → map members) | 33.144 µs | baseline |
+| `zrange_withscores/byscore_members_borrow_full_range` (streamed borrow scan) | 2.448 µs | **13.54x faster** |
+
+Biggest ratio in the family — the clone path allocs N members + N scores then
+throws the scores away, while the borrow scan touches only borrowed member
+slices. Conformance GREEN: byte-exact `plain_byscore_member_borrowed_into_matches_generic`
+across full (`-inf +inf`), sub-range, EXCLUSIVE bounds, empty, inverted,
+wrong-type, and non-float-defer for BOTH ZRANGEBYSCORE and ZREVRANGEBYSCORE +
+commands/error stat parity. Rollback: revert the two dispatch sites to the owned
+`execute_plain_z{rev,}rangebyscore_borrowed`.
+
 ## 2026-07-04 BlackThrush: KEEP — ZREVRANGEBYSCORE ... WITHSCORES reply borrows members (descending score range)
 
 Descending twin of the ZRANGEBYSCORE WITHSCORES borrow-scan. The `_into`

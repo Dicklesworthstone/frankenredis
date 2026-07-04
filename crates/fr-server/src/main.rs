@@ -8799,12 +8799,18 @@ fn process_buffered_frames(
                     b"*4\r\n$13\r\n",
                     b"ZRANGEBYSCORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
+                    if runtime
+                        .execute_plain_zrangebyscore_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -8893,12 +8899,18 @@ fn process_buffered_frames(
                     b"*4\r\n$16\r\n",
                     b"ZREVRANGEBYSCORE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_zrevrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
+                    if runtime
+                        .execute_plain_zrevrangebyscore_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
