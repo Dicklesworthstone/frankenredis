@@ -19038,6 +19038,33 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. XREAD is a pure read
+        // (reads the range directly from the entry; no side-map, no touch/LFU-bump, no PEL),
+        // so a direct fold. Byte-identical: key lazy-expiry, hit/miss, count==0 early-return,
+        // WRONGTYPE, missing→empty, range results. LFU path verbatim.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Stream(entries) => {
+                        if matches!(count, Some(0)) {
+                            return Ok(Vec::new());
+                        }
+                        let mut out = Vec::new();
+                        for (id, fields) in entries.range((Excluded(start_exclusive), Unbounded)) {
+                            out.push((*id, fields.to_pairs()));
+                            if let Some(limit) = count
+                                && out.len() >= limit
+                            {
+                                break;
+                            }
+                        }
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(Vec::new()),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
@@ -34127,6 +34154,62 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "XINFO STREAM no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) XREAD direct single-lookup collapse: byte-identical after-ID range,
+    // COUNT limit, count=0→empty, WRONGTYPE, missing→empty, stats, key lazy-expiry.
+    #[test]
+    fn xread_collapse_matches() {
+        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> { v.iter().map(|(id, _)| (id.0, id.1)).collect() };
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_after1 = s.xread(b"st", (1, 0), None, 2); // after (1,0) → (2,0),(3,0)
+        let r_count = s.xread(b"st", (0, 0), Some(2), 2); // first 2 → (1,0),(2,0)
+        let r_zero = s.xread(b"st", (0, 0), Some(0), 2); // count 0 → empty
+        let r_absent = s.xread(b"absent", (0, 0), None, 2); // empty (miss)
+        let r_wrong = s.xread(b"str", (0, 0), None, 2); // WrongType
+        // hits: after1, count, zero, wrong = 4; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 4);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(ids(&r_after1.unwrap()), vec![(2, 0), (3, 0)]);
+        assert_eq!(ids(&r_count.unwrap()), vec![(1, 0), (2, 0)]);
+        assert_eq!(r_zero.unwrap(), Vec::new());
+        assert_eq!(r_absent.unwrap(), Vec::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.xread(b"exp", (0, 0), None, 500).unwrap(), Vec::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: the COMMON XREAD polling case — read AFTER the last id → 0 new entries
+        // (a consumer polling a stream with nothing new). No to_pairs clones dominate here.
+        let mut b = Store::new();
+        for i in 1..=16u64 { b.xadd(b"xr:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        let k: &[u8] = b"xr:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xread(k, (16, 0), None, 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.xread(std::hint::black_box(k), (16, 0), None, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XREAD poll (0 new) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

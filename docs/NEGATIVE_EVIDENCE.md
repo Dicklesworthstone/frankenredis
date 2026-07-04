@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREAD direct single-lookup collapse — XREAD poll 1.19x (byte-exact)
+
+XREAD (`xread`, non-group stream consumer — the primary stream-polling read) did
+`record_keyspace_lookup` + separate `entries.get`. It's a PURE read (reads the after-ID range
+directly from the entry; no stream_groups, no PEL, no touch/LFU-bump — unlike XREADGROUP), so a
+clean DIRECT collapse (SCARD pattern): non-LFU → `lookup_live_for_read_mut`. Byte-identical: key
+lazy-expiry, hit/miss, count==0 early-return, WRONGTYPE, missing→empty, after-ID range results.
+LFU verbatim. Proven by `xread_collapse_matches` (after-ID range, COUNT-limit, count=0→empty,
+missing→empty, WRONGTYPE, exact hit/miss, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): the REPRESENTATIVE polling case (XREAD after
+the last id → 0 new entries, a consumer polling with nothing new) collapsed = 76.77 ns/op;
+removed 2nd probe ≈ **14.31 ns** → old ≈ 91.07 ns ⇒ **1.19x (−16%)**. (The read-ALL-16 case is
+~1.01x — `to_pairs()` clones dominate — but that's NOT the common XREAD usage; polling returns
+0-1 entries.) Conformance GREEN (694/694 correctness; lone failure = brittle `zdiff_resolve_once`
+perf-ratio guard under load, unrelated). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XINFO STREAM direct single-lookup collapse — XINFO STREAM 1.09x (byte-exact)
 
 `xinfo_stream` did `record_keyspace_lookup` + separate `entries.get`. Earlier I'd assumed it read
