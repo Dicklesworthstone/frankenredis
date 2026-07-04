@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANGE/ZREVRANGE WITHSCORES borrow-scan bare-drop guard — ZRANGE-WITHSCORES@16 1.23x (byte-exact)
+
+Final stragglers of the `_borrow_scan` sub-vein: the RANK-based `zrange_withscores_borrow_scan`
+and `zrevrange_withscores_borrow_scan` (ZRANGE/ZREVRANGE ... WITHSCORES). Like ZRANGEBYLEX these
+record NO keyspace stat — bare `drop_if_expired` then `get_mut` — so the fix is the bare-drop
+guard `if expires_count != 0 { drop }` (NOT lookup_live, which would over-count). Found by
+re-grepping ALL `*_borrow_scan` fns for a bare unguarded drop (the members variants use
+record_keyspace_lookup+lookup_live; these withscores variants slipped through as bare-drop).
+Byte-identical: drop's no-TTL fast-exit `contains_key` is overhead, `get_mut` re-probes; expired
+needs TTL ⇒ count>0. Proven by `zrange_withscores_borrow_scan_guard_matches` (asc/desc range with
+scores, oob-empty, WRONGTYPE, absent, **stats UNCHANGED**, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZRANGE-WITHSCORES@16 (0..5, 6 members)
+no-TTL = 47.99 ns/op; elided drop's `contains_key` ≈ **11.06 ns** → old ≈ 59.05 ns ⇒ **1.23x
+(−19%)** — strong because WITHSCORES streams via `iter_asc().skip().take()` directly (no
+`_refs` Vec build like byscore/bylex), so the small baseline makes the elided probe a bigger
+fraction. Conformance GREEN (697/697 correctness; 3 failures = brittle diff/intersect/zinter
+perf-ratio guards under a heavily-loaded worker, unrelated). **`_borrow_scan` SUB-VEIN NOW FULLY
+EXHAUSTED (verified by full re-grep): every zset range-read reply path — members + withscores +
+byscore + bylex, rank + score + lex, fwd + rev + limit — is single-probe.** Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX borrow-scan bare-drop guard — ZRANGEBYLEX@16 1.05x (byte-exact)
 
 Completed the `_borrow_scan` double-probe sub-vein with the ZRANGEBYLEX variants

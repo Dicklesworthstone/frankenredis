@@ -17573,7 +17573,13 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: the rank-based
+        // ZRANGE WITHSCORES borrow-scan records NO keyspace stat (bare drop), so drop's no-TTL
+        // fast-exit `contains_key` is pure overhead when nothing is volatile; `get_mut` below
+        // re-probes. Byte-identical (an expired key needs a TTL ⇒ count>0 ⇒ drop runs).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -17762,7 +17768,10 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see zrange_withscores_borrow_scan.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -34729,6 +34738,73 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZRANGEBYLEX@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZRANGE/ZREVRANGE WITHSCORES borrow-scan bare-drop guard: byte-identical
+    // rank range with scores (asc/desc), empty-range, WRONGTYPE, missing, NO keyspace stat,
+    // eviction via the expires_count>0 branch.
+    #[test]
+    fn zrange_withscores_borrow_scan_guard_matches() {
+        use crate::ZRangeWithScoresScanEvent;
+        fn ws(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+            let mut o = Vec::new();
+            s.zrange_withscores_borrow_scan(k, a, b, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            Ok(o)
+        }
+        fn wsrev(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+            let mut o = Vec::new();
+            s.zrevrange_withscores_borrow_scan(k, a, b, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            Ok(o)
+        }
+        let mut s = Store::new();
+        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_all = ws(&mut s, b"z", 0, -1, 2);
+        let r_sub = ws(&mut s, b"z", 0, 1, 2);
+        let r_rev = wsrev(&mut s, b"z", 0, -1, 2);
+        let r_oob = ws(&mut s, b"z", 5, 10, 2);
+        let r_absent = ws(&mut s, b"absent", 0, -1, 2);
+        let r_wrong = ws(&mut s, b"str", 0, -1, 2);
+        // ZRANGE WITHSCORES (rank) records NO keyspace stat (bare drop) → hits/misses UNCHANGED.
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+        assert_eq!(r_all.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0), (b"c".to_vec(), 3.0)]);
+        assert_eq!(r_sub.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]);
+        assert_eq!(r_rev.unwrap(), vec![(b"c".to_vec(), 3.0), (b"b".to_vec(), 2.0), (b"a".to_vec(), 1.0)]);
+        assert_eq!(r_oob.unwrap(), Vec::<(Vec<u8>, f64)>::new());
+        assert_eq!(r_absent.unwrap(), Vec::<(Vec<u8>, f64)>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(ws(&mut t, b"exp", 0, -1, 500).unwrap(), Vec::<(Vec<u8>, f64)>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing ZRANGE WITHSCORES@16 (0..5, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"zws:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"zws:bench";
+        for _ in 0..2000 { b.zrange_withscores_borrow_scan(k, 0, 5, 2, |_| {}).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zrange_withscores_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZRANGE-WITHSCORES@16 (0..5) no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
