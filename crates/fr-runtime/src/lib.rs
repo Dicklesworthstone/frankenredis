@@ -27022,6 +27022,193 @@ impl Runtime {
         Some(())
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` fast path for MULTI-key (2..=8) non-blocking `XREAD [COUNT n]
+    /// STREAMS k1..km i1..im` — RESP2 only. Streams each key's entries' fields BORROWED into a per-key
+    /// temp chunk, then assembles `[[key, entries], …]` (only keys WITH results; none ⇒ nil `*-1`),
+    /// eliminating the per-field `to_pairs()` clone. Replicates the generic's TWO-PHASE lookup
+    /// exactly: a RESOLUTION pass (`xlast_id` for every key, in order, resolving `$` and surfacing
+    /// WRONGTYPE BEFORE any key is served — matching upstream's error-before-serve + hit ordering)
+    /// then a SERVE pass (`xread_borrow_scan` per key) = 2 keyspace hits per key.
+    pub fn execute_plain_xread_multi_borrowed_into(
+        &mut self,
+        keys: &[&[u8]],
+        ids: &[&[u8]],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if resp3 {
+            return None;
+        }
+        if self.policy.gate.max_bulk_len < b"XREAD".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+            || ids.iter().any(|i| i.len() > self.policy.gate.max_bulk_len)
+            || count_arg.is_some_and(|c| c.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        // Pre-validate EVERY id (no side effects) so any declined form defers the whole command.
+        for &id_arg in ids {
+            if id_arg != b"$"
+                && (id_arg == b"-"
+                    || id_arg == b"+"
+                    || id_arg.first() == Some(&b'(')
+                    || fr_command::parse_stream_range_bound(id_arg, true).is_err())
+            {
+                return None;
+            }
+        }
+        let count = match count_arg {
+            None => None,
+            Some(c) => {
+                let n = parse_i64_arg(c).ok()?;
+                if n > 0 {
+                    Some(usize::try_from(n).unwrap_or(usize::MAX))
+                } else {
+                    None
+                }
+            }
+        };
+        let mut argv_len_sum = b"XREAD".len() + b"STREAMS".len();
+        if let Some(c) = count_arg {
+            argv_len_sum += b"COUNT".len() + c.len();
+        }
+        for &k in keys {
+            argv_len_sum += k.len();
+        }
+        for &i in ids {
+            argv_len_sum += i.len();
+        }
+        let packet_id = self.plain_read_borrowed_preamble("xread", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+
+        let mut error_reply: Option<RespFrame> = None;
+
+        // Phase 1 — resolution: xlast_id for every key (hit 1 each), resolve `$`, surface WRONGTYPE
+        // before serving any key (matching upstream's error-before-serve + hit ordering).
+        let mut cursors: Vec<fr_store::StreamId> = Vec::with_capacity(keys.len());
+        for (i, &key) in keys.iter().enumerate() {
+            match self.server.store.xlast_id(key, now_ms) {
+                Ok(resolved_last) => {
+                    let cursor = if ids[i] == b"$" {
+                        resolved_last.unwrap_or((u64::MAX, u64::MAX))
+                    } else {
+                        fr_command::parse_stream_range_bound(ids[i], true).unwrap_or((0, 0))
+                    };
+                    cursors.push(cursor);
+                }
+                Err(err) => {
+                    error_reply = Some(CommandError::Store(err).to_resp());
+                    break;
+                }
+            }
+        }
+
+        // Phase 2 — serve: xread_borrow_scan per key (hit 2 each) into a per-key temp chunk; keep only
+        // keys WITH results.
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        if error_reply.is_none() {
+            for (i, &key) in keys.iter().enumerate() {
+                let mut chunk: Vec<u8> = Vec::new();
+                let mut has_records = false;
+                let result =
+                    self.server
+                        .store
+                        .xread_borrow_scan(key, cursors[i], count, now_ms, |ev| match ev {
+                            fr_store::XrangeReplyEvent::RecordCount(n) => {
+                                if n > 0 {
+                                    has_records = true;
+                                    chunk.extend_from_slice(b"*2\r\n");
+                                    fr_protocol::encode_bulk_string_slice(
+                                        Some(key),
+                                        false,
+                                        &mut chunk,
+                                    );
+                                    fr_protocol::encode_aggregate_header(n, false, &mut chunk);
+                                }
+                            }
+                            fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
+                                fr_protocol::encode_aggregate_header(2, false, &mut chunk);
+                                let id_bytes = fr_command::format_stream_id(id);
+                                fr_protocol::encode_bulk_string_slice(
+                                    Some(&id_bytes),
+                                    false,
+                                    &mut chunk,
+                                );
+                                fr_protocol::encode_aggregate_header(pairs * 2, false, &mut chunk);
+                            }
+                            fr_store::XrangeReplyEvent::Field(f) => {
+                                fr_protocol::encode_bulk_string_slice(Some(f), false, &mut chunk);
+                            }
+                        });
+                match result {
+                    Ok(()) => {
+                        if has_records {
+                            chunks.push(chunk);
+                        }
+                    }
+                    Err(err) => {
+                        // xlast_id already validated each key as stream/missing, so this is
+                        // unreachable in practice; handle defensively to keep WRONGTYPE semantics.
+                        error_reply = Some(CommandError::Store(err).to_resp());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !suppress_reply {
+            if let Some(reply) = &error_reply {
+                reply.encode_into(out);
+            } else if chunks.is_empty() {
+                out.extend_from_slice(b"*-1\r\n");
+            } else {
+                fr_protocol::encode_aggregate_header(chunks.len(), false, out);
+                for chunk in &chunks {
+                    out.extend_from_slice(chunk);
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "xread",
+            "XREAD",
+            || Self::xread_multi_argv(count_arg, keys, ids),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    fn xread_multi_argv(count_arg: Option<&[u8]>, keys: &[&[u8]], ids: &[&[u8]]) -> Vec<Vec<u8>> {
+        let mut argv = vec![b"XREAD".to_vec()];
+        if let Some(c) = count_arg {
+            argv.push(b"COUNT".to_vec());
+            argv.push(c.to_vec());
+        }
+        argv.push(b"STREAMS".to_vec());
+        for &k in keys {
+            argv.push(k.to_vec());
+        }
+        for &i in ids {
+            argv.push(i.to_vec());
+        }
+        argv
+    }
+
     pub fn execute_plain_geohash_borrowed(
         &mut self,
         key: &[u8],

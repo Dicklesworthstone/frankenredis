@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREAD MULTI-key (2..=8) `_into` WIRED LIVE — reuses 12.14x borrow (byte+stats exact vs redis 7.2.4)
+
+Extended the single-key XREAD `_into` to 2..=8 streams (RESP2 non-blocking). Reuses the shipped
+`Store::xread_borrow_scan` (12.14x per key) — no new store code. Added a variable-arity byte-prefix
+parser (`XREAD [COUNT n] STREAMS k1..km i1..im`, array len 2m+2 / 2m+4, tail split into parallel
+keys/ids, COUNT distinguished by token 1; single/BLOCK/>8/odd → generic) + `execute_plain_xread_multi_
+borrowed_into`.
+
+Two multi-key cruxes solved: (1) the generic runs a RESOLUTION pass (`xlast_id` for EVERY key, in
+order — resolving `$` and surfacing WRONGTYPE BEFORE any key is served) THEN a SERVE pass (`xread` per
+key) = 2 keyspace hits/key; the fast path replicates both passes separately (interleaving would leak
+partial results + wrong hit counts on a mid-list WRONGTYPE). (2) the outer reply contains only keys
+WITH results (`[[k,ents],…]`; none ⇒ nil `*-1`) — so each key is served into a per-key temp chunk
+(fields borrowed into it, not cloned), then the non-empty chunks are counted and concatenated. Ids
+pre-validated (all `$`/clean-numeric or the whole command defers to generic).
+
+BYTE + STATS EXACT — live SERVER DIFFERENTIAL vs redis 7.2.4 over 8 multi-key variants (2–3 keys,
+COUNT, partial-empty, all-empty→nil, missing, WRONGTYPE, `$`, key ordering): the reply bytes AND the
+`keyspace_hits`/`keyspace_misses` counters ALL matched (the stats check confirms the 2-phase, 2-hit/key
+accounting + error-before-serve timing). Local symlink build clean; fr-server 217/218 (lone fail the
+PRE-EXISTING `mset_packet_dispatcher`).
+
+MEASURED: per-key field-clone elimination is the shipped `xread_borrow_scan` store A/B = **12.14x**
+(clone 60993 ns vs borrow 5025 ns over a 400-entry stream × 2 fields); multi-key applies it to every
+served stream (minus one bulk memcpy per key to assemble the outer array). STREAM read-clone vein now
+covers XRANGE / XREVRANGE / XREAD (single + multi). NEXT: XREADGROUP (PEL). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREAD single-key `_into` WIRED LIVE (NEW fast path) — 12.14x store A/B (byte-exact vs redis 7.2.4)
 
 Third stream read `_into` (after XRANGE/XREVRANGE). Unlike those, XREAD had NO fast path — this is a

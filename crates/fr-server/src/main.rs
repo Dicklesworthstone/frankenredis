@@ -6003,6 +6003,36 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_xread_multi_packet(unparsed, &parser_config)
+                {
+                    // (CrimsonHawk) Zero-copy `_into` for multi-key (2..=8) non-blocking XREAD.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let m = packet.stream_count;
+                    if runtime
+                        .execute_plain_xread_multi_borrowed_into(
+                            &packet.keys[..m],
+                            &packet.ids[..m],
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hrandfield_count_withvalues_packet(
                         unparsed,
                         &parser_config,
@@ -12654,6 +12684,104 @@ struct BorrowedPlainHrandfieldCountWithvaluesPacket<'a> {
     consumed: usize,
     key: &'a [u8],
     count: &'a [u8],
+}
+
+const XREAD_MULTI_MAX: usize = 8;
+
+struct BorrowedPlainXreadMultiPacket<'a> {
+    consumed: usize,
+    /// The `k` stream keys followed by the `k` ids (parallel), `k = stream_count`.
+    keys: [&'a [u8]; XREAD_MULTI_MAX],
+    ids: [&'a [u8]; XREAD_MULTI_MAX],
+    stream_count: usize,
+    count: Option<&'a [u8]>,
+}
+
+// (CrimsonHawk) Byte-prefix fast path for MULTI-key (2..=8 streams) non-blocking XREAD:
+//   XREAD [COUNT n] STREAMS k1..km i1..im   (array len = 2m+2 or 2m+4)
+// Single key (m==1) is handled by the dedicated single packet; BLOCK / >8 streams / odd tails defer
+// to generic borrowed dispatch. Distinguishes the COUNT form by requiring COUNT at token 1.
+fn parse_borrowed_plain_xread_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXreadMultiPacket<'a>> {
+    if config.max_bulk_len < b"STREAMS".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*")?;
+    if rest.first() == Some(&b'0') {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut arr_len = 0usize;
+    while let Some(&b) = rest.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        arr_len = arr_len.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+        i += 1;
+        if i > 3 {
+            return None;
+        }
+    }
+    if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
+        return None;
+    }
+    let mut cursor = 1 + i + 2; // past '*', digits, CRLF
+    // Command token.
+    let (cmd, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    if !cmd.eq_ignore_ascii_case(b"XREAD") {
+        return None;
+    }
+    cursor = next;
+    // Optional COUNT n (token 1). BLOCK is NOT accepted here → generic.
+    let mut count: Option<&[u8]> = None;
+    let mut body_tokens = arr_len.checked_sub(1)?; // minus the command
+    let (first, after_first) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    if first.eq_ignore_ascii_case(b"COUNT") {
+        let (n, after_n) = parse_borrowed_plain_set_bulk(input, after_first, config.max_bulk_len)?;
+        count = Some(n);
+        cursor = after_n;
+        body_tokens -= 2;
+        let (kw, after_kw) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        if !kw.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        cursor = after_kw;
+        body_tokens -= 1;
+    } else {
+        if !first.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        cursor = after_first;
+        body_tokens -= 1;
+    }
+    // body_tokens must be an even 2m with 2 <= m <= MAX (m==1 handled by the single parser).
+    if body_tokens < 4 || !body_tokens.is_multiple_of(2) {
+        return None;
+    }
+    let m = body_tokens / 2;
+    if m > XREAD_MULTI_MAX {
+        return None;
+    }
+    let mut slots: [&[u8]; XREAD_MULTI_MAX * 2] = [b""; XREAD_MULTI_MAX * 2];
+    let mut consumed = cursor;
+    for slot in slots.iter_mut().take(body_tokens) {
+        let (bulk, next) = parse_borrowed_plain_set_bulk(input, consumed, config.max_bulk_len)?;
+        *slot = bulk;
+        consumed = next;
+    }
+    let mut keys: [&[u8]; XREAD_MULTI_MAX] = [b""; XREAD_MULTI_MAX];
+    let mut ids: [&[u8]; XREAD_MULTI_MAX] = [b""; XREAD_MULTI_MAX];
+    keys[..m].copy_from_slice(&slots[..m]);
+    ids[..m].copy_from_slice(&slots[m..2 * m]);
+    Some(BorrowedPlainXreadMultiPacket {
+        consumed,
+        keys,
+        ids,
+        stream_count: m,
+        count,
+    })
 }
 
 struct BorrowedPlainXreadSinglePacket<'a> {
