@@ -27212,6 +27212,115 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` fast path for `SRANDMEMBER key count` — streams the sampled
+    /// members straight into `out` (`*N` array + one bulk string per member, BORROWED) via
+    /// `srandmember_count_borrow_scan`, eliminating the per-member clone alloc that the RespFrame
+    /// path (`execute_plain_rand_member_count_borrowed`) incurs. SAME count-parse (reject i64::MIN
+    /// → decline so the generic path owns the exact error), gate, session bookkeeping, keyspace
+    /// accounting (srandmember_count records its own lookup), RNG draw, and metrics. SRANDMEMBER is
+    /// a plain ARRAY in BOTH RESP2 and RESP3 (may contain duplicates) — so the header is
+    /// `encode_aggregate_header(n, false, ..)` (`*N`), NOT the SMEMBERS set (`~N`); mirrors HKEYS/
+    /// HVALS (`execute_plain_hcoll_borrowed_into`).
+    pub fn execute_plain_srandmember_count_borrowed_into(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let count = parse_i64_arg(count_arg).ok()?;
+        if count == i64::MIN {
+            return None;
+        }
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"SRANDMEMBER".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("srandmember");
+        self.session.last_argv_len_sum = b"SRANDMEMBER".len() + key.len() + count_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .srandmember_count_borrow_scan(key, count, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_rand_member_borrowed_metrics(
+            PlainRandMemberCmd::Srandmember,
+            key,
+            Some(count_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[allow(clippy::too_many_arguments)] // Count-bearing rand-member metrics mirrors range helpers.
     fn record_plain_rand_member_borrowed_metrics(
         &mut self,

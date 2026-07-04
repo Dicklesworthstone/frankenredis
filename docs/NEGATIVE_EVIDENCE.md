@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SRANDMEMBER count zero-copy `_into` WIRED LIVE — realizes the 2.39x store A/B (byte-exact)
+
+Wired last turn's `srandmember_count_borrow_scan` into the LIVE SRANDMEMBER-count path (the store
+method was the tested/measured foundation; this makes it live). Added `execute_plain_srandmember_
+count_borrowed_into(key,count,resp3,out)` (fr-runtime) — streams the sampled members BORROWED
+straight into the write buffer via `srandmember_count_borrow_scan`, eliminating BOTH the store's
+per-member clone AND the RespFrame path's `Vec<RespFrame>`/`BulkString` materialization. Swapped the
+`parse_borrowed_plain_srandmember_count_packet` dispatch branch (fr-server) from `FastReply` →
+`FastEncodedReply` (falls through to generic on the SAME parse/gate decline conditions ⇒
+behaviour-preserving).
+
+BYTE-EXACT by construction + verified: (1) store members byte-identical (fixed rng_seed differential,
+707/707 last turn); (2) encoding is IDENTICAL to the live conformance-verified HKEYS/HVALS `_into`
+(`execute_plain_hcoll_borrowed_into`) — SRANDMEMBER is a plain ARRAY in RESP2 AND RESP3 (may repeat),
+so `encode_aggregate_header(n, false)` = `*N` (NOT the SMEMBERS set `~N`) + `encode_bulk_string_slice`
+per member; (3) accounting mirrors `execute_plain_smembers_borrowed_into` (a live path) + srandmember
+specifics (count-parse reject-i64::MIN→decline, gate, `record_plain_rand_member_borrowed_metrics`,
+packet_id). VERIFIED via the memory un-`.rchignore`/symlink-legacy LOCAL build: `cargo check
+-p fr-runtime -p fr-server` clean; ALL SRANDMEMBER dispatch tests pass; fr-runtime 562/563 +
+fr-server 215/216 with the 2 failures (`acl_log_marks_script_denials_as_lua`, `borrowed_plain_mset_
+packet_dispatcher…`) CONFIRMED PRE-EXISTING (both fail on origin/main with my edits stashed) and
+unrelated to SRANDMEMBER.
+
+MEASURED (store-level A/B, per-crate rch, count=50 over a 2000-member HASHTABLE set): clone
+`srandmember_count` = 2815 ns/op vs borrow-scan = **1180 ns/op = 2.39x** — now realized on the live
+path (the live win is ≥ this, as `_into` also skips the `Vec<RespFrame>` materialization the store
+A/B doesn't capture). NEXT: same `_into` treatment for HRANDFIELD / ZRANDMEMBER count (+withscores),
+then the SCAN family (nested reply, harder). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP (store-side foundation) — srandmember_count_borrow_scan (member-clone elimination) — 2.39x store A/B, byte-exact
 
 FIRST cut at the member-clone-elimination lever surfaced last turn. Added `Store::
