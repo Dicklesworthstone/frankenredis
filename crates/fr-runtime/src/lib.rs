@@ -26726,6 +26726,102 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrange_borrowed`]
+    /// for the hot plain `ZRANGE key start stop` (no WITHSCORES): streams the `*N`
+    /// member-only array straight into `out` via [`Store::zrange_borrow_scan`]
+    /// instead of building an owned `RespFrame::Array` from `Store::zrange` (which
+    /// clones every member into a `Vec<u8>` and allocates N `RespFrame`s). The
+    /// member clone is the dominant cost — a store-level probe measured 2.6-4.6x on
+    /// the member-copy work, with no large-offset regression (the borrow walk's
+    /// linear skip beats the adaptive treap-seek + clone even at start=N/2). A
+    /// plain member array is byte-identical in RESP2/RESP3, so no `resp3` param is
+    /// needed (as with the LRANGE `_into`). Same gate / metrics / wrong-type
+    /// handling as `execute_plain_zrange_borrowed`; the old owned form stays for the
+    /// cold generic-args caller. Returns `None` (fall back) on any disabling state.
+    pub fn execute_plain_zrange_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrange_borrowed(key, start_arg, stop_arg, now_ms) {
+            return None;
+        }
+        let start_idx = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop_idx = fr_command::parse_i64_arg(stop_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrange");
+        self.session.last_argv_len_sum =
+            b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self
+            .server
+            .store
+            .zrange_borrow_scan(key, start_idx, stop_idx, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_zrange_borrowed_metrics(
+            key, start_arg, stop_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     /// Direct-encoding twin for the hot rank form
     /// `ZRANGE key start stop WITHSCORES`. It preserves rank-only validation and
     /// store semantics while avoiding one score `String` / score `RespFrame` per
@@ -41747,6 +41843,102 @@ mod tests {
         assert_eq!(
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
+        );
+    }
+
+    // (frankenredis-zrange-into) The zero-copy `_into` ZRANGE must emit bytes
+    // byte-identical to the generic ZRANGE reply (RESP2), across normal ranges,
+    // negative indices, inverted/empty ranges, missing key, and wrong-type; must
+    // defer (None) on a bad integer arg; and must keep the SAME keyspace/command
+    // stats as the generic path.
+    #[test]
+    fn plain_zrange_borrowed_into_matches_generic_bytes() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d",
+                ]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+
+        let encode_generic = |g: &mut Runtime, start: &[u8], stop: &[u8], ts: u64| -> Vec<u8> {
+            let reply = g.execute_frame(command(&[b"ZRANGE", b"z", start, stop]), ts);
+            let mut bytes = Vec::new();
+            reply.encode_into(&mut bytes);
+            bytes
+        };
+
+        for (start, stop, ts) in [
+            (b"0".as_slice(), b"-1".as_slice(), 2),
+            (b"0".as_slice(), b"1".as_slice(), 3),
+            (b"-2".as_slice(), b"-1".as_slice(), 4),
+            (b"1".as_slice(), b"2".as_slice(), 5),
+            (b"10".as_slice(), b"5".as_slice(), 6), // inverted -> empty array
+        ] {
+            let mut out = Vec::new();
+            fast.execute_plain_zrange_borrowed_into(b"z", start, stop, ts, &mut out)
+                .expect("plain ZRANGE should take borrowed _into fast path");
+            let want = encode_generic(&mut generic, start, stop, ts);
+            assert_eq!(out, want, "byte mismatch for ZRANGE z {start:?} {stop:?}");
+        }
+
+        // Missing key -> empty array bytes.
+        let mut out = Vec::new();
+        fast.execute_plain_zrange_borrowed_into(b"nokey", b"0", b"9", 7, &mut out)
+            .expect("missing-key ZRANGE _into");
+        let miss_reply = generic.execute_frame(command(&[b"ZRANGE", b"nokey", b"0", b"9"]), 7);
+        let mut miss_bytes = Vec::new();
+        miss_reply.encode_into(&mut miss_bytes);
+        assert_eq!(out, miss_bytes);
+        assert_eq!(out, b"*0\r\n");
+
+        // Wrong-type -> WRONGTYPE error bytes.
+        let mut out = Vec::new();
+        fast.execute_plain_zrange_borrowed_into(b"str", b"0", b"1", 8, &mut out)
+            .expect("wrong-type ZRANGE _into");
+        let wt_reply = generic.execute_frame(command(&[b"ZRANGE", b"str", b"0", b"1"]), 8);
+        let mut wt_bytes = Vec::new();
+        wt_reply.encode_into(&mut wt_bytes);
+        assert_eq!(out, wt_bytes);
+        assert!(out.starts_with(b"-WRONGTYPE"));
+
+        // Bad integer arg -> defer to generic (None), buffer untouched.
+        let mut out = Vec::new();
+        assert!(
+            fast.execute_plain_zrange_borrowed_into(b"z", b"x", b"1", 9, &mut out)
+                .is_none(),
+            "bad integer args stay on generic dispatch"
+        );
+        assert!(out.is_empty());
+        // NB: don't run the bad-int case through `generic` here — `fast` deferred
+        // (None) without counting the command, so counting it on `generic` would
+        // desync the stat totals. In production the None defer falls back to the
+        // generic dispatch, which is where the command is actually counted.
+
+        // Stat parity with the generic path across the whole sequence.
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
         );
     }
 

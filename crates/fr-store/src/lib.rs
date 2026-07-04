@@ -15650,6 +15650,74 @@ impl Store {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrow-scan variant of [`Store::zrange`] (plain,
+    /// no WITHSCORES) for the zero-copy reply fast path: IDENTICAL bookkeeping to
+    /// `zrange` — keyspace hit/miss, unconditional-on-found LFU bump, `touch` ONLY
+    /// on a non-empty range, and the same `normalize_index` range math — but drives
+    /// a single `SmembersScanEvent` sink (`Len(count)` then one borrowed
+    /// `Member(&[u8])` per member in ascending rank order) so the runtime encodes
+    /// the `*N` array straight into the output buffer with no
+    /// `Vec<Vec<u8>>`/`Vec<RespFrame>` materialization. The member CLONE is the
+    /// dominant ZRANGE cost (measured 2.6-4.6x on the member-copy work); this walks
+    /// the ordered set by borrow via `iter_asc().skip(s).take(count)`. The linear
+    /// skip stays cheaper than the adaptive treap-seek + clone even at mid-offset
+    /// (probe: 2.62x at start=N/2), so there is no large-offset regression vs the
+    /// owned path. `Len(0)` for a missing / out-of-range / empty result;
+    /// `Err(WrongType)` for a non-zset value (after the LFU bump, matching `zrange`).
+    pub fn zrange_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            sink(SmembersScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        sink(SmembersScanEvent::Len(count));
+                        for (m, _score) in zs.iter_asc().skip(s_idx).take(count) {
+                            sink(SmembersScanEvent::Member(m));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     /// Return elements sorted descending by score, by index range.
     pub fn zrevrange(
         &mut self,
@@ -43150,6 +43218,61 @@ mod tests {
     // (frankenredis-387i6) Concrete before/after timing for the LREM bounded
     // early-stop lever. `cargo test -- --ignored --nocapture lrem_bench`.
     #[test]
+    // (frankenredis-zrange-probe) Quantify the member-CLONE cost of the plain
+    // ZRANGE reply: `store.zrange` collects `Vec<Vec<u8>>` (clones every member),
+    // vs a borrowing `iter_asc()` walk that touches the same bytes with zero
+    // per-member allocation. This is a MEASUREMENT probe to decide whether a
+    // zero-copy zrange_borrow_scan is worth the fr-store work — NOT a shipped
+    // fast path. Run: `cargo test -p fr-store -- --ignored --nocapture
+    // zrange_probe_clone_vs_borrow`.
+    #[test]
+    #[ignore]
+    fn zrange_probe_clone_vs_borrow() {
+        use std::time::Instant;
+        const N: usize = 10_000;
+        const MEMBER_LEN: usize = 32;
+        const ITERS: usize = 20_000;
+
+        let mut store = Store::new();
+        for i in 0..N {
+            let mut m = vec![b'm'; MEMBER_LEN];
+            m[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            store.zadd(b"z", &[(i as f64, m)], 0).unwrap();
+        }
+
+        for &start_idx in &[0usize, N / 2] {
+            let count = N - start_idx;
+
+            // CLONE path: what plain ZRANGE does today (owned Vec<Vec<u8>>).
+            let mut sink = 0usize;
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                let members = store.zrange(b"z", start_idx as i64, -1, 0).unwrap();
+                sink += members.iter().map(|m| m.len()).sum::<usize>();
+            }
+            let clone_us = t.elapsed().as_secs_f64() * 1e6;
+
+            // BORROW path: iter_asc().skip(start).take(count), zero per-member alloc.
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                if let Some(entry) = store.entries.get(b"z".as_slice()) {
+                    if let Value::SortedSet(zs) = &entry.value {
+                        for (m, _s) in zs.iter_asc().skip(start_idx).take(count) {
+                            sink += m.len();
+                        }
+                    }
+                }
+            }
+            let borrow_us = t.elapsed().as_secs_f64() * 1e6;
+
+            eprintln!(
+                "ZRANGE start={start_idx} count={count} x{ITERS}: CLONE(Vec<Vec<u8>>)={clone_us:.0}us  \
+                 BORROW(iter_asc walk)={borrow_us:.0}us  speedup={:.2}x  (sink={sink})",
+                clone_us / borrow_us
+            );
+        }
+    }
+
     // (frankenredis-hmgetinto) Concrete before/after timing of the value-copy work
     // HMGET does per reply: owned `hmget` clones every hit value into a fresh
     // `Vec<u8>` inside a `Vec<Option<Vec<u8>>>`; borrowed `hmget_for_each` streams
