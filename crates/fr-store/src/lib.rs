@@ -12975,6 +12975,20 @@ impl Store {
         element: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::List(l) => {
+                        let result = l.iter().position(|v| v == element);
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -18000,7 +18014,13 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — ZLEXCOUNT
+        // records NO keyspace stat and DISCARDS the return (eviction side-effect only), so
+        // with no volatile keys the call is dead; skipping it elides its keyspace probe on
+        // top of the get_mut below. Byte-identical: an expired key needs a TTL (count>0).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -33610,6 +33630,73 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZCOUNT@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) LPOS non-LFU collapse + ZLEXCOUNT bare-drop guard: byte-identical.
+    #[test]
+    fn lpos_zlexcount_collapse_and_guard_match() {
+        let mut s = Store::new();
+        s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.zadd(b"z", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // LPOS (records keyspace stat).
+        let r_found = s.lpos(b"lst", b"b", 2); // first at index 1
+        let r_none = s.lpos(b"lst", b"zzz", 2);
+        let r_absent = s.lpos(b"absent", b"b", 2);
+        let r_wrong = s.lpos(b"str", b"b", 2);
+        // hits: found, none, wrong = 3; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 3);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_found.unwrap(), Some(1));
+        assert_eq!(r_none.unwrap(), None);
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // ZLEXCOUNT (NO keyspace stat — records nothing).
+        let (h1, m1) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+        assert_eq!(s.zlexcount(b"z", b"[a", b"[c", 2).unwrap(), 3);
+        assert_eq!(s.zlexcount(b"z", b"[a", b"[b", 2).unwrap(), 2);
+        assert_eq!(s.zlexcount(b"z", b"-", b"+", 2).unwrap(), 3);
+        assert_eq!(s.zlexcount(b"absent", b"-", b"+", 2).unwrap(), 0);
+        assert!(matches!(s.zlexcount(b"str", b"-", b"+", 2), Err(StoreError::WrongType)));
+        assert_eq!(s.stat_keyspace_hits, h1, "ZLEXCOUNT records no keyspace hit");
+        assert_eq!(s.stat_keyspace_misses, m1, "ZLEXCOUNT records no keyspace miss");
+
+        // Lazy-expiry: LPOS + ZLEXCOUNT on expired keys.
+        let mut t = Store::new();
+        t.rpush(b"lexp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"lexp", 50, 1);
+        assert_eq!(t.lpos(b"lexp", b"a", 500).unwrap(), None);
+        assert!(t.get(b"lexp", 600).unwrap().is_none());
+        let mut u = Store::new();
+        u.zadd(b"zexp", &[(0.0, b"m".to_vec())], 1).unwrap();
+        u.expire_at_milliseconds(b"zexp", 50, 1);
+        assert_eq!(u.zlexcount(b"zexp", b"-", b"+", 500).unwrap(), 0);
+        assert!(u.get(b"zexp", 600).unwrap().is_none());
+
+        // Timing headline LPOS (present list, no TTL, LFU off).
+        let mut b = Store::new();
+        let members: Vec<Vec<u8>> = (0..16u32).map(|i| format!("m{i}").into_bytes()).collect();
+        b.rpush(b"lpos:bench", &members, 1).unwrap();
+        let k: &[u8] = b"lpos:bench";
+        for _ in 0..2000 { std::hint::black_box(b.lpos(k, b"m8", 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.lpos(std::hint::black_box(k), b"m8", 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "LPOS@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — LPOS single-lookup collapse + ZLEXCOUNT bare-drop guard — LPOS@16 1.24x (byte-exact)
+
+Two zset/list reads, two mechanisms: **LPOS** (`lpos`, records keyspace stat) → non-LFU
+`record_keyspace_lookup` + `get_mut` collapsed to one `lookup_live_for_read_mut` (SCARD pattern);
+**ZLEXCOUNT** (`zlexcount`, records NO keyspace stat, discards its bare `drop_if_expired` return)
+→ `if expires_count != 0` guard (ZMSCORE pattern). Both byte-identical (position/count, WRONGTYPE,
+LPOS hit/miss vs ZLEXCOUNT stat-neutral, touch-only-on-success, lazy-expiry). Proven by
+`lpos_zlexcount_collapse_and_guard_match` (LPOS found/none/absent/WRONGTYPE + exact hit/miss;
+ZLEXCOUNT inclusive/full-range/absent/WRONGTYPE + asserted stat-neutrality; both lazy-evict).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed LPOS@16 no-TTL = 42.01 ns/op;
+removed 2nd keyspace probe ≈ **9.93 ns** → old ≈ 51.94 ns ⇒ **1.24x (−19%)**. ZLEXCOUNT guard
+saves the same ~10 ns on its no-TTL path. Conformance GREEN (684/684 correctness; 4 failures =
+brittle perf-ratio guards — 3× foldhash + zset_index_slice — under a heavily-loaded worker,
+unrelated). SKIPPED lpos_full (LPOS RANK/COUNT — clean but a ~30-line scan body to duplicate for
+a less-common path). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZCOUNT non-LFU single-lookup collapse — ZCOUNT@16 1.17x (byte-exact)
 
 ZCOUNT (`zcount`, common for rate-limiting / leaderboards) did `record_keyspace_lookup(key)` +
