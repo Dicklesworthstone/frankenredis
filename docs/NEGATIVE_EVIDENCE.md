@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — GETRANGE (`getrange_with`) non-LFU single-lookup collapse — GETRANGE@32 1.39x (byte-exact)
+
+`getrange_with` (the live GETRANGE `_into` borrow path — writes the bulk reply straight into the
+output buffer) still did `record_keyspace_lookup(key)` + separate `entries.get_mut(key)`. It's a
+pure read (no RNG, no write), so the clean SCARD-style collapse applies: non-LFU branch →
+`lookup_live_for_read_mut`, then resolve bounds + hand the borrowed slice to the closure.
+Byte-identical: same key lazy-expiry, hit/miss, unconditional `touch` (incl WRONGTYPE), and the
+resolved-slice / empty-reply (miss / out-of-range) behavior. LFU path verbatim. Proven by
+`getrange_with_collapse_matches_full_path` (full/sub/negative/out-of-range bounds, missing→empty,
+WRONGTYPE, exact hit/miss deltas, key eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed GETRANGE@32 no-TTL = 25.46 ns/op;
+removed 2nd keyspace probe ≈ **10.04 ns** → old ≈ 35.50 ns ⇒ **1.39x (−28%)**. Conformance GREEN
+(683/683 correctness; 2 failures = brittle `foldhash_*_beats_siphash_ab` perf-ratio guards under
+load, unrelated). SURVEY of remaining uncollapsed reads: SRANDMEMBER/-count BLOCKED (their
+sampling `next_rand()` must advance only on HIT → borrow/RNG-order conflict, like zincrby); GETEX
+event-sensitive (skip); GETSET has record+contains_key+get_mut/insert (write, deferred). Landed
+via clean origin/main worktree. (Test-fix note: my lazy-expiry assertion first used now=2 vs a
+deadline-51 key — key wasn't due yet; fixed to now=500. Code was byte-identical throughout.)
+
 ## 2026-07-04 CrimsonHawk: KEEP — GETDEL triple→double keyspace-probe collapse — removed ~14 ns probe (~1.3x-class, byte-exact)
 
 GETDEL did THREE keyspace probes: `record_keyspace_lookup` (drop_if_expired) + `entries.get`

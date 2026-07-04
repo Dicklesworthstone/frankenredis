@@ -8183,6 +8183,24 @@ impl Store {
         now_ms: u64,
         f: impl FnOnce(&[u8]) -> R,
     ) -> Result<R, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical:
+        // same key lazy-expiry, hit/miss, unconditional `touch` (incl WRONGTYPE), and the
+        // resolved-slice/empty-reply behavior. LFU path left verbatim.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    let Some(v) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    match Self::resolve_getrange_bounds(v.len(), start, end) {
+                        Some((s, e_idx)) => Ok(f(&v[s..=e_idx])),
+                        None => Ok(f(&[])),
+                    }
+                }
+                None => Ok(f(&[])),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(f(&[]));
         }
@@ -33376,6 +33394,63 @@ mod tests {
         let probe = t2.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!("GETDEL collapse: removed 1 of 3 keyspace probes ≈ {probe:.2} ns/probe");
+    }
+
+    // (CrimsonHawk) getrange_with non-LFU single-lookup collapse: byte-identical resolved
+    // slice for positive/negative/out-of-range bounds, empty for missing/miss, WRONGTYPE,
+    // keyspace hit/miss, and key lazy-expiry.
+    #[test]
+    fn getrange_with_collapse_matches_full_path() {
+        let get = |s: &mut Store, k: &[u8], a: i64, b: i64| -> Result<Vec<u8>, StoreError> {
+            s.getrange_with(k, a, b, 2, <[u8]>::to_vec)
+        };
+        let mut s = Store::new();
+        s.set(b"str".to_vec(), b"Hello World".to_vec(), None, 1);
+        s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap();
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_full = get(&mut s, b"str", 0, -1);
+        let r_sub = get(&mut s, b"str", 0, 4);
+        let r_neg = get(&mut s, b"str", -5, -1);
+        let r_oob = get(&mut s, b"str", 100, 200);
+        let r_absent = get(&mut s, b"absent", 0, -1);
+        let r_wrong = get(&mut s, b"lst", 0, -1);
+        // hits: str×4 + lst(wrongtype) = 5; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 5);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_full.unwrap(), b"Hello World".to_vec());
+        assert_eq!(r_sub.unwrap(), b"Hello".to_vec());
+        assert_eq!(r_neg.unwrap(), b"World".to_vec());
+        assert_eq!(r_oob.unwrap(), Vec::<u8>::new());
+        assert_eq!(r_absent.unwrap(), Vec::<u8>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry: at now=500 the key (deadline 1+50=51) is due → empty + evicted.
+        let mut t = Store::new();
+        t.set(b"exp".to_vec(), b"data".to_vec(), Some(50), 1);
+        assert_eq!(t.getrange_with(b"exp", 0, -1, 500, <[u8]>::to_vec).unwrap(), Vec::<u8>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing headline (present string, no TTL, LFU off).
+        let mut b = Store::new();
+        b.set(b"gr:bench:key".to_vec(), vec![b'x'; 32], None, 2);
+        let k: &[u8] = b"gr:bench:key";
+        for _ in 0..2000 { std::hint::black_box(b.getrange_with(k, 0, 31, 2, |v| v.len())).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.getrange_with(std::hint::black_box(k), 0, 31, 2, |v| v.len())).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "GETRANGE@32 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
     }
 
     #[test]
