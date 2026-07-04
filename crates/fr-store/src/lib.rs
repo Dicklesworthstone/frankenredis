@@ -7832,7 +7832,15 @@ impl Store {
             // hit/miss accounting + the value. Byte-identical to the LFU path below for a
             // non-LFU read (no RNG, same drops/stats/touch/non-string→None behaviour).
             if !lfu_tracking_enabled {
-                if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                // (CrimsonHawk) Short-circuit the per-key expiry PEEK when the store holds
+                // no TTL-bearing keys at all (`expires_count == 0`): `expiry_ms` otherwise
+                // foldhash-hashes every key + probes the deadline map on each MGET element,
+                // pure waste when nothing can expire. Byte-identical — with no expiry the
+                // key never evicts, so `should_evict` is already false. Mirrors GET's
+                // no-TTL fast path; the hoist matters per-element on multi-key MGET.
+                if self.expires_count != 0
+                    && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+                {
                     self.drop_if_expired(key, now_ms);
                     self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     results.push(None);
@@ -32132,6 +32140,25 @@ mod tests {
         assert_eq!(
             result,
             vec![Some(b"1".to_vec()), None, Some(b"3".to_vec()),]
+        );
+    }
+
+    // (CrimsonHawk) The MGET non-LFU per-key expiry peek is now guarded by
+    // `expires_count != 0`. This exercises the NON-zero branch: with a TTL-bearing key
+    // present (expires_count > 0), an EXPIRED key must still be dropped and reported
+    // nil, and a live TTL key returned — byte-identical to the unguarded behavior.
+    #[test]
+    fn mget_guard_still_drops_expired_when_expires_count_nonzero() {
+        let mut store = Store::new();
+        store.set(b"live".to_vec(), b"L".to_vec(), None, 100); // no TTL
+        store.set(b"soon".to_vec(), b"S".to_vec(), Some(1_000), 100); // TTL, not yet due
+        store.set(b"dead".to_vec(), b"D".to_vec(), Some(50), 100); // TTL, will be past
+        assert!(store.expires_count >= 2);
+        // now_ms = 500: "dead" (deadline 50) is expired, "soon" (deadline 1000) lives.
+        let got = store.mget(&[b"live", b"dead", b"soon", b"absent"], 500);
+        assert_eq!(
+            got,
+            vec![Some(b"L".to_vec()), None, Some(b"S".to_vec()), None]
         );
     }
 

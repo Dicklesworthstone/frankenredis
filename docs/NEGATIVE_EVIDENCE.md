@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — MGET non-LFU per-key expiry-peek gated by `expires_count != 0` — isolated −62 ns = 8.1% of the MGET@8 no-TTL path (byte-exact)
+
+Extends the just-shipped per-element expiry-guard vein (see the HMGET entry below) to MGET.
+`Store::mget`'s non-LFU fast path already collapsed the double keyspace lookup, but still
+ran `evaluate_expiry(now, self.expiry_ms(key))` PER key — and `expiry_ms` foldhash-hashes
+the key + probes the deadline map every time, pure waste when the store holds no TTL-bearing
+keys at all. LEVER: short-circuit with `self.expires_count != 0 &&` before the peek (the
+guard GET already uses). Byte-identical: with no expiry a key never evicts, so `should_evict`
+is already false; the non-zero branch is unchanged (proven by
+`mget_guard_still_drops_expired_when_expires_count_nonzero` — expired TTL key still nil'd,
+live TTL key still returned — plus `mget_returns_values_or_none`).
+
+MEASURED (per-crate, `cargo test -p fr-store --release` via rch; intra-run isolated A/B):
+full MGET@8 (no TTL, LFU off) ≈ 771 ns/op; per-key expiry peek in isolation = **62.86 ns**
+(8×; ~7.9 ns/key = foldhash(key)+probe) vs guarded = **0.57 ns** → **saved 62.29 ns = 8.08%
+of the full path** (**1.088x**). Common cache-without-TTL config; strictly neutral (one extra
+`!= 0` compare/key) when some key has a TTL. Conformance GREEN (7/7 mget tests). The
+per-element expiry-guard vein now covers HMGET + MGET; next: multi-key loops in SCAN/KEYS
+iteration + other `for k in keys { evaluate_expiry(.., expiry_ms(k)) }` sites.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HMGET per-field expiry-loop guard HOISTED — isolated −56 ns = 7.0% of the HMGET@16 no-field-TTL path (byte-exact)
 
 `Store::hmget` + `Store::hmget_for_each` (the borrowed `_into` HMGET path) ran the
