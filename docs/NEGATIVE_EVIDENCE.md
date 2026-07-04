@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZCOUNT non-LFU single-lookup collapse — ZCOUNT@16 1.17x (byte-exact)
+
+ZCOUNT (`zcount`, common for rate-limiting / leaderboards) did `record_keyspace_lookup(key)` +
+separate `entries.get_mut(key)`. Pure read, no unconditional RNG → the SCARD-style collapse
+applies. The tricky part: the inverted-bounds (min>max) early-return sits BETWEEN
+record_keyspace_lookup and get_mut in the slow path — it returns 0 after recording the hit,
+BEFORE the type check (so an inverted range on a WRONG-TYPE key returns 0, not WrongType, a redis
+quirk). Preserved by putting the inverted check inside the hit branch, before the type match, in
+the collapsed non-LFU path (`lookup_live_for_read_mut`). Byte-identical: key lazy-expiry, hit/miss,
+inverted→0-incl-wrong-type, WRONGTYPE (valid range), touch-only-on-count. LFU verbatim. Proven by
+`zcount_collapse_matches_full_path` (inclusive/exclusive counts, inverted→0, inverted-on-wrong-
+type→0, WRONGTYPE, missing→0, exact hit/miss deltas, key eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZCOUNT@16 no-TTL = 61.17 ns/op;
+removed 2nd keyspace probe ≈ **10.26 ns** → old ≈ 71.43 ns ⇒ **1.17x (−14%)**. Conformance GREEN
+(686/686 correctness; lone failure = brittle `zdiff_resolve_once…reports_ab_ratio` perf-ratio
+guard under load, unrelated). NOTE zlexcount (bare unguarded drop + double-probe) + LPOS remain
+as similar-but-lower-freq candidates. Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — GETSET triple→double keyspace-probe collapse — removed ~15.5 ns probe (~1.2x-class, byte-exact)
 
 GETSET (`getset`) did THREE keyspace probes: `record_keyspace_lookup` (drop_if_expired) +

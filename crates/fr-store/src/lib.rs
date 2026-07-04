@@ -16935,6 +16935,28 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. The inverted-bounds
+        // early-return is kept INSIDE the hit branch (before the type check), byte-for-byte
+        // matching the slow path's order: an inverted range on a present key returns 0 after
+        // recording the hit, without touching or checking the value type. LFU path verbatim.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    if score_bound_value(min) > score_bound_value(max) {
+                        return Ok(0);
+                    }
+                    match &mut entry.value {
+                        Value::SortedSet(zs) => {
+                            let result = zs.score_bound_count_adaptive(min, max);
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -33533,6 +33555,63 @@ mod tests {
             "GETSET overwrite no-TTL collapsed: full={full:.2} ns (incl key.to_vec alloc) | \
              removed 1 keyspace probe ≈ {probe:.2} ns",
 
+        );
+    }
+
+    // (CrimsonHawk) ZCOUNT non-LFU collapse: byte-identical count, inverted-bounds→0 (incl the
+    // redis quirk that inverted-range on a WRONG-TYPE key returns 0, NOT WrongType), missing→0,
+    // WRONGTYPE (valid range), keyspace hit/miss, key lazy-expiry.
+    #[test]
+    fn zcount_collapse_matches_full_path() {
+        use crate::ScoreBound::Inclusive;
+        let mut s = Store::new();
+        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec()), (4.0, b"d".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_range = s.zcount(b"z", Inclusive(1.0), Inclusive(3.0), 2); // a,b,c = 3
+        let r_inv = s.zcount(b"z", Inclusive(5.0), Inclusive(1.0), 2); // inverted → 0
+        let r_absent = s.zcount(b"absent", Inclusive(0.0), Inclusive(9.0), 2); // 0
+        let r_wrong = s.zcount(b"str", Inclusive(0.0), Inclusive(9.0), 2); // valid range → WrongType
+        let r_wrong_inv = s.zcount(b"str", Inclusive(9.0), Inclusive(0.0), 2); // inverted on string → 0 (quirk)
+        // hits: z(range), z(inv), str(wrongtype), str(inv-quirk) = 4; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 4);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_range.unwrap(), 3);
+        assert_eq!(r_inv.unwrap(), 0);
+        assert_eq!(r_absent.unwrap(), 0);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+        assert_eq!(r_wrong_inv.unwrap(), 0, "inverted range on wrong-type key returns 0, not WrongType");
+
+        // Exclusive bounds.
+        assert_eq!(s.zcount(b"z", crate::ScoreBound::Exclusive(1.0), crate::ScoreBound::Exclusive(4.0), 2).unwrap(), 2); // b,c
+
+        // Lazy-expiry: expired zset key → 0 + evicted.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.zcount(b"exp", Inclusive(0.0), Inclusive(9.0), 500).unwrap(), 0);
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing (present zset, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"zc:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"zc:bench";
+        for _ in 0..2000 { std::hint::black_box(b.zcount(k, Inclusive(0.0), Inclusive(15.0), 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.zcount(std::hint::black_box(k), Inclusive(0.0), Inclusive(15.0), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZCOUNT@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
         );
     }
 
