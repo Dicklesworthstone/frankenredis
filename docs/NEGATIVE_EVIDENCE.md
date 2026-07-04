@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREAD single-key `_into` WIRED LIVE (NEW fast path) — 12.14x store A/B (byte-exact vs redis 7.2.4)
+
+Third stream read `_into` (after XRANGE/XREVRANGE). Unlike those, XREAD had NO fast path — this is a
+NEW one. Scoped to single-key non-blocking, RESP2 (declines RESP3 → generic emits the `%N` map form).
+Added `Store::xread_borrow_scan` (reuses `XrangeReplyEvent`; mirrors `store.xread`: non-LFU/LFU single
+lookup, `count==0` empty, `(Excluded(start), Unbounded)` walk + count limit, NO touch/LFU-bump/PEL —
+simpler than xrange, no touch-hoist), a byte-prefix parser (`*4 XREAD STREAMS key id` / `*6 XREAD COUNT
+n STREAMS key id`; the `*6` COUNT form is distinguished from multi-key `*6` by requiring COUNT at token
+1; multi-key/BLOCK/other → generic), and `execute_plain_xread_single_borrowed_into`.
+
+Two correctness cruxes handled: (1) KEYSPACE ACCOUNTING — the generic looks each key up TWICE
+(`xlast_id` then `xread` = 2 hits, per frankenredis-lnglj); the fast path replicates BOTH (xlast_id also
+resolves `$` and surfaces WRONGTYPE, skipping xread on its error = 1 hit, exactly like the generic's
+`?`). (2) REPLY SHAPE — no records ⇒ nil `*-1`; records ⇒ `*1 *2 <key> <entries>` (RESP2 array-of-pairs;
+entries identical to the verified XRANGE encoding). Id resolved exactly as generic (`$`→last via
+xlast_id; `-`/`+`/`(`/bad → decline; else `parse_stream_range_bound`); non-integer COUNT → decline.
+
+BYTE-EXACT — store-level `xread_borrow_scan_matches_clone` (full / count / count-0 / mid-stream / empty
++ WRONGTYPE + missing vs clone `xread`) PLUS a live SERVER DIFFERENTIAL vs redis 7.2.4: 9 RESP2 XREAD
+variants (results, COUNT, empty→nil, `$`, missing, WRONGTYPE, COUNT 0, mid-stream, partial-count) +
+RESP3 (results, empty) — ALL raw-byte identical. Local symlink-legacy build clean; fr-server 217/218
+(lone fail the PRE-EXISTING `mset_packet_dispatcher`).
+
+MEASURED (store-level A/B, per-crate rch, full read over a 400-entry stream × 2 fields): clone `xread` =
+60993 ns/op vs borrow = **5025 ns/op = 12.14x**. STREAM read-clone vein now covers XRANGE/XREVRANGE/
+XREAD. NEXT: XREAD COUNT+multi-key (declined) / XREADGROUP (PEL-tracking, harder). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREVRANGE zero-copy `_into` WIRED LIVE — 11.95x store A/B (byte-exact)
 
 Reverse mirror of the XRANGE `_into` (shipped hours ago, 11.88x). `execute_plain_xrevrange_borrowed`

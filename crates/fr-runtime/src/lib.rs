@@ -26881,6 +26881,147 @@ impl Runtime {
         Some(())
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` fast path for single-key non-blocking `XREAD [COUNT n] STREAMS
+    /// key id` — streams the entries' fields BORROWED into `out` via `xread_borrow_scan` (12.14x store
+    /// A/B). RESP2 ONLY (declines RESP3 → generic emits the `%N` map form). Replicates the generic's
+    /// TWO-phase keyspace accounting (`xlast_id` then `xread` = 2 hits per key, per frankenredis-lnglj)
+    /// and its reply shape: no records ⇒ nil `*-1`; records ⇒ `*1 *2 <key> <entries>`. The id is
+    /// resolved exactly as the generic (`$` → last id via `xlast_id`; `-`/`+`/`(`/bad → decline to
+    /// generic; else `parse_stream_range_bound`).
+    pub fn execute_plain_xread_single_borrowed_into(
+        &mut self,
+        key: &[u8],
+        id_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if resp3 {
+            return None;
+        }
+        if self.policy.gate.max_bulk_len < b"XREAD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || id_arg.len() > self.policy.gate.max_bulk_len
+            || count_arg.is_some_and(|c| c.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        // Pre-validate the id (no side effects) so every declined form falls to generic byte-exact.
+        let is_dollar = id_arg == b"$";
+        if !is_dollar
+            && (id_arg == b"-"
+                || id_arg == b"+"
+                || id_arg.first() == Some(&b'(')
+                || fr_command::parse_stream_range_bound(id_arg, true).is_err())
+        {
+            return None;
+        }
+        let count = match count_arg {
+            None => None,
+            Some(c) => {
+                let n = parse_i64_arg(c).ok()?;
+                if n > 0 {
+                    Some(usize::try_from(n).unwrap_or(usize::MAX))
+                } else {
+                    None
+                }
+            }
+        };
+        let argv_len_sum = b"XREAD".len()
+            + count_arg.map_or(0, |c| b"COUNT".len() + c.len())
+            + b"STREAMS".len()
+            + key.len()
+            + id_arg.len();
+        let packet_id = self.plain_read_borrowed_preamble("xread", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        // Two-phase lookup (matches the generic: xlast_id then xread = 2 keyspace hits per key).
+        let mut error_reply = None;
+        match self.server.store.xlast_id(key, now_ms) {
+            Ok(resolved_last) => {
+                let cursor = if is_dollar {
+                    resolved_last.unwrap_or((u64::MAX, u64::MAX))
+                } else {
+                    // Validated above; parse cannot fail here.
+                    fr_command::parse_stream_range_bound(id_arg, true).unwrap_or((0, 0))
+                };
+                let result =
+                    self.server
+                        .store
+                        .xread_borrow_scan(key, cursor, count, now_ms, |ev| {
+                            if suppress_reply {
+                                return;
+                            }
+                            match ev {
+                                fr_store::XrangeReplyEvent::RecordCount(n) => {
+                                    if n == 0 {
+                                        out.extend_from_slice(b"*-1\r\n");
+                                    } else {
+                                        out.extend_from_slice(b"*1\r\n*2\r\n");
+                                        fr_protocol::encode_bulk_string_slice(Some(key), false, out);
+                                        fr_protocol::encode_aggregate_header(n, false, out);
+                                    }
+                                }
+                                fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
+                                    fr_protocol::encode_aggregate_header(2, false, out);
+                                    let id_bytes = fr_command::format_stream_id(id);
+                                    fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                                    fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                                }
+                                fr_store::XrangeReplyEvent::Field(f) => {
+                                    fr_protocol::encode_bulk_string_slice(Some(f), false, out);
+                                }
+                            }
+                        });
+                if let Err(err) = result {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        reply.encode_into(out);
+                    }
+                    error_reply = Some(reply);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    reply.encode_into(out);
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "xread",
+            "XREAD",
+            || {
+                let mut argv = vec![b"XREAD".to_vec()];
+                if let Some(c) = count_arg {
+                    argv.push(b"COUNT".to_vec());
+                    argv.push(c.to_vec());
+                }
+                argv.push(b"STREAMS".to_vec());
+                argv.push(key.to_vec());
+                argv.push(id_arg.to_vec());
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
     pub fn execute_plain_geohash_borrowed(
         &mut self,
         key: &[u8],

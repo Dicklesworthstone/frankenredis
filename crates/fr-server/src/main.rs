@@ -5972,6 +5972,37 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_xread_single_packet(unparsed, &parser_config)
+                {
+                    // (CrimsonHawk) Zero-copy `_into` for single-key non-blocking XREAD — stream the
+                    // entries' fields borrowed into the write buffer (12.14x store A/B). RESP2 only;
+                    // RESP3 + every other shape decline to generic (which emits the map form).
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_xread_single_borrowed_into(
+                            packet.key,
+                            packet.id,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hrandfield_count_withvalues_packet(
                         unparsed,
                         &parser_config,
@@ -12623,6 +12654,75 @@ struct BorrowedPlainHrandfieldCountWithvaluesPacket<'a> {
     consumed: usize,
     key: &'a [u8],
     count: &'a [u8],
+}
+
+struct BorrowedPlainXreadSinglePacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    id: &'a [u8],
+    count: Option<&'a [u8]>,
+}
+
+// (CrimsonHawk) Byte-prefix fast path for single-key non-blocking XREAD:
+//   *4  XREAD STREAMS key id
+//   *6  XREAD COUNT n STREAMS key id
+// Multi-key, BLOCK, and every other shape defer to generic borrowed dispatch. The `*6` COUNT form is
+// distinguished from the multi-key `*6` (XREAD STREAMS k1 k2 i1 i2) by requiring COUNT at token 1.
+fn parse_borrowed_plain_xread_single_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXreadSinglePacket<'a>> {
+    if config.max_bulk_len < b"STREAMS".len() {
+        return None;
+    }
+    let after_cmd = |prefix: &[u8]| -> Option<usize> {
+        let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+            rest.get(..5)
+                .filter(|c| c.eq_ignore_ascii_case(b"XREAD"))
+                .map(|_| input.len() - rest.len() + 5)
+        })?;
+        if input.get(cursor..cursor + 2)? != b"\r\n" {
+            return None;
+        }
+        cursor += 2;
+        Some(cursor)
+    };
+    // No-count: *4 XREAD STREAMS key id
+    if let Some(cursor) = after_cmd(b"*4\r\n$5\r\n") {
+        let (streams, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        if !streams.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        let (key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (id, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        return Some(BorrowedPlainXreadSinglePacket {
+            consumed,
+            key,
+            id,
+            count: None,
+        });
+    }
+    // Count: *6 XREAD COUNT n STREAMS key id
+    if let Some(cursor) = after_cmd(b"*6\r\n$5\r\n") {
+        let (kw, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        if !kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let (count, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (streams, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        if !streams.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        let (key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (id, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        return Some(BorrowedPlainXreadSinglePacket {
+            consumed,
+            key,
+            id,
+            count: Some(count),
+        });
+    }
+    None
 }
 
 fn parse_borrowed_plain_hrandfield_count_withvalues_packet<'a>(
