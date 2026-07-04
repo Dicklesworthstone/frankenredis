@@ -27,6 +27,37 @@ removing one cold-DUMP allocation/copy was proven byte-equivalent locally, but
 not retained because the fleet could not produce a same-worker candidate/control
 bench pair during this cycle. Do not ship that production lever without paired
 same-worker evidence.
+## 2026-07-04 BlackThrush: KEEP — ZRANGEBYSCORE ... WITHSCORES reply borrows members (score-range, exclusive bounds byte-exact)
+
+The most common score-range query. Its borrowed `_into`
+(`execute_plain_zrangebyscore_withscores_borrowed_into`) already skipped generic
+dispatch but still called the CLONING `zrangebyscore_withscores_limited`
+(`Vec<(Vec<u8>, f64)>`). New `SortedSet::score_bound_range_asc_refs` returns the
+matching `(member, score)` pairs with the member BORROWED — mirroring
+`score_bound_range_limited`'s per-encoding logic EXACTLY (Packed:
+`iter().filter(score_in_range)`; Full: `ordered.range(score_bounds(min,max))`) so
+membership / order / exclusive-bound semantics are byte-identical. New
+`Store::zrangebyscore_withscores_borrow_scan` (faithful drop-in for
+`...limited(min,max,false,0,None)`) drives the `ZRangeWithScoresScanEvent` sink;
+the executor keeps the inverted/wrong-type guard and now streams the reply. No
+fr-server change (the `_into` was already dispatched).
+
+Per-crate bench (`CARGO_TARGET_DIR=.rch-targets rch exec -- cargo bench -p
+fr-store --bench store_read -- zrange_withscores`; remote `hz2`). 1000-member
+zset, 32-byte members, whole set (`-inf`/`+inf`):
+
+| bench row | median time | borrow/clone |
+| --- | ---: | ---: |
+| `zrange_withscores/byscore_clone_full_range` (owned `Vec<(Vec<u8>,f64)>`) | 33.250 µs | baseline |
+| `zrange_withscores/byscore_borrow_full_range` (streamed borrow scan) | 3.665 µs | **9.07x faster** |
+| `.../clone_full_range` (fwd rank control) | 30.435 µs → borrow 3.188 µs | 9.55x |
+| `.../rev_clone_full_range` (rev rank control) | 30.327 µs → borrow 3.669 µs | 8.27x |
+
+Conformance GREEN: byte-exact
+`plain_zrangebyscore_withscores_borrowed_into_matches_generic_wire_resp2_and_resp3`
+across full (`-inf +inf`), sub-range, EXCLUSIVE bounds (`(2`, `(3.5`, `(1`/`(5`),
+single-point dup scores, empty, inverted, wrong-type, RESP2+RESP3; commands/error
+stat parity. Rollback: revert the executor to `zrangebyscore_withscores_limited`.
 
 ## 2026-07-04 BlackThrush: KEEP — ZREVRANGE ... WITHSCORES gets a borrowed `_into` fast path (was fully generic); +SURFACE generic keyspace-hit over-count
 

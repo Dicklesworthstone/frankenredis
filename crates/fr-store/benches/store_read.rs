@@ -242,6 +242,48 @@ fn bench_zrange_withscores(c: &mut Criterion) {
             std::hint::black_box(acc)
         })
     });
+    // ZRANGEBYSCORE -inf +inf WITHSCORES (whole set by score): clone vs borrow.
+    let smin = fr_store::ScoreBound::Inclusive(f64::NEG_INFINITY);
+    let smax = fr_store::ScoreBound::Inclusive(f64::INFINITY);
+    g.bench_function("byscore_clone_full_range", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zrangebyscore_withscores_limited(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    false,
+                    0,
+                    None,
+                    2_000,
+                )
+                .unwrap();
+            let mut acc = 0usize;
+            for (m, s) in &pairs {
+                acc += m.len() + (*s as usize & 1);
+            }
+            std::hint::black_box(acc)
+        })
+    });
+    g.bench_function("byscore_borrow_full_range", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zrangebyscore_withscores_borrow_scan(
+                    std::hint::black_box(b"z"),
+                    smin,
+                    smax,
+                    2_000,
+                    |ev| {
+                        if let ZRangeWithScoresScanEvent::Pair(m, s) = ev {
+                            acc += m.len() + (s as usize & 1);
+                        }
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
     g.finish();
 }
 
