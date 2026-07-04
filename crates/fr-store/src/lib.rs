@@ -1430,9 +1430,8 @@ impl FullSortedSet {
 
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
         let score = self.get_score(member)?;
-        let target = ScoreMember::actual(score, member.to_vec());
-        // Ascending rank == number of members strictly less than `target`.
-        Some(self.ensure_rank_tree().rank_of(&target))
+        // Ascending rank == number of members strictly less than `(score, member)`.
+        Some(self.ensure_rank_tree().rank_of_borrowed(score, member))
     }
 
     fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
@@ -1440,8 +1439,7 @@ impl FullSortedSet {
         // For an existing member in a totally-ordered set, the descending rank
         // is len - 1 - (ascending rank): no separate index needed.
         let len = self.dict.len();
-        let target = ScoreMember::actual(score, member.to_vec());
-        let asc = self.ensure_rank_tree().rank_of(&target);
+        let asc = self.ensure_rank_tree().rank_of_borrowed(score, member);
         Some(len - 1 - asc)
     }
 
@@ -1451,15 +1449,13 @@ impl FullSortedSet {
     /// then a *second* `get_score`/`zmscore` (a redundant member lookup + keyspace probe).
     fn rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
         let score = self.get_score(member)?;
-        let target = ScoreMember::actual(score, member.to_vec());
-        Some((self.ensure_rank_tree().rank_of(&target), score))
+        Some((self.ensure_rank_tree().rank_of_borrowed(score, member), score))
     }
 
     fn rev_rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
         let score = self.get_score(member)?;
         let len = self.dict.len();
-        let target = ScoreMember::actual(score, member.to_vec());
-        let asc = self.ensure_rank_tree().rank_of(&target);
+        let asc = self.ensure_rank_tree().rank_of_borrowed(score, member);
         Some((len - 1 - asc, score))
     }
 
@@ -3030,6 +3026,41 @@ impl ZRankTreap {
         let mut acc: usize = 0;
         while n != ZRANK_TREAP_NIL {
             match key.cmp(&self.nodes[n].key) {
+                std::cmp::Ordering::Less => n = self.nodes[n].left,
+                std::cmp::Ordering::Greater => {
+                    acc += 1 + self.size(self.nodes[n].left) as usize;
+                    n = self.nodes[n].right;
+                }
+                std::cmp::Ordering::Equal => {
+                    acc += self.size(self.nodes[n].left) as usize;
+                    break;
+                }
+            }
+        }
+        acc
+    }
+
+    /// (CrimsonHawk) Borrowed twin of [`ZRankTreap::rank_of`] — computes the ascending rank of
+    /// `(score, member)` WITHOUT allocating a `ScoreMember` (the owned `member.to_vec()` +
+    /// `Arc<[u8]>` the callers built solely to key this descent). Byte-identical ordering:
+    /// `canonicalize_zero_score().total_cmp()` then the member comparison, exactly matching
+    /// `ScoreMember::actual(score, member).cmp(node.key)` — the query member is `Actual`, every treap
+    /// node key is `Actual` (a real member), and `Arc<[u8]>`/`MemberPart` order lexicographically
+    /// (`Min < Actual < Max`). Saves one heap alloc + free per ZRANK/ZREVRANK[ WITHSCORE].
+    fn rank_of_borrowed(&self, score: f64, member: &[u8]) -> usize {
+        let key_score = canonicalize_zero_score(score);
+        let mut n = self.root;
+        let mut acc: usize = 0;
+        while n != ZRANK_TREAP_NIL {
+            let node_key = &self.nodes[n].key;
+            let ord = key_score
+                .total_cmp(&canonicalize_zero_score(node_key.score))
+                .then_with(|| match &node_key.member {
+                    MemberPart::Actual(node_member) => member.cmp(node_member.as_ref()),
+                    MemberPart::Min => std::cmp::Ordering::Greater,
+                    MemberPart::Max => std::cmp::Ordering::Less,
+                });
+            match ord {
                 std::cmp::Ordering::Less => n = self.nodes[n].left,
                 std::cmp::Ordering::Greater => {
                     acc += 1 + self.size(self.nodes[n].left) as usize;
@@ -41177,6 +41208,55 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) rank_of_borrowed gives BYTE-IDENTICAL ranks to the clone-target path
+    // (ScoreMember::actual(score, member.to_vec()) + rank_of) across distinct + tied scores, and
+    // measures the per-ZRANK heap-alloc elimination A/B.
+    #[test]
+    fn zrank_of_borrowed_matches_clone_and_reports_ab() {
+        let n = 3000u64; // > SORTED_SET_COMPACT_FULL_MAX_ENTRIES ⇒ Tree order + rank treap
+        // ties every 500 members so the member-tiebreak comparison is exercised
+        let input: Vec<(Vec<u8>, f64)> = (0..n)
+            .map(|i| (format!("m{i:05}").into_bytes(), (i % 500) as f64))
+            .collect();
+        let mut zs = crate::FullSortedSet::from_unique_pairs(input);
+        let pairs: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.to_vec(), *s)).collect();
+        assert_eq!(pairs.len(), n as usize);
+        // rank(member) / rev_rank(member) equal the true sorted position (via rank_of_borrowed).
+        for (pos, (m, _)) in pairs.iter().enumerate() {
+            assert_eq!(zs.rank(m), Some(pos), "rank at {pos}");
+            assert_eq!(zs.rev_rank(m), Some(pairs.len() - 1 - pos), "rev_rank at {pos}");
+        }
+        let tree = zs.ensure_rank_tree();
+        // Direct equivalence: rank_of(clone-target) == rank_of_borrowed for every member.
+        for (m, s) in &pairs {
+            let cloned = tree.rank_of(&crate::ScoreMember::actual(*s, m.clone()));
+            let borrowed = tree.rank_of_borrowed(*s, m);
+            assert_eq!(cloned, borrowed, "rank_of vs borrowed diverged");
+        }
+        // Timing A/B: the delta is purely the per-call member.to_vec() + Arc alloc.
+        let reps = 3000u64;
+        let mut sink = 0usize;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            for (m, s) in &pairs {
+                sink ^= tree.rank_of(&crate::ScoreMember::actual(*s, m.clone()));
+            }
+        }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / (reps * pairs.len() as u64) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            for (m, s) in &pairs {
+                sink ^= tree.rank_of_borrowed(*s, m);
+            }
+        }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / (reps * pairs.len() as u64) as f64;
+        std::hint::black_box(sink);
+        println!(
+            "ZRANK rank_of @{n} (tied scores): clone-target={clone_ns:.1} ns | borrowed={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
     }
 
     #[test]

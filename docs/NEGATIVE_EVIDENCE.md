@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANK rank-treap descent goes alloc-free (rank_of_borrowed) — 1.38x store A/B (byte-transparent)
+
+Dug into the ZSET treap-rank cluster (Bucket B of the residual-gap map) for a BOUNDED lever inside the
+structural gap. Found one: `FullSortedSet::{rank,rev_rank,rank_with_score,rev_rank_with_score}` each built
+a throwaway `ScoreMember::actual(score, member.to_vec())` — a DOUBLE heap alloc per ZRANK (a `Vec<u8>`
+copy of the member, then `Arc<[u8]>::from(Vec)` = a second alloc + copy) — solely to key the
+`ZRankTreap::rank_of` descent, which redis's skiplist doesn't do. Added `ZRankTreap::rank_of_borrowed(
+score, &[u8])`: the SAME order-statistic descent but comparing `(score, member)` borrowed —
+`canonicalize_zero_score().total_cmp()` then the member cmp, matching `ScoreMember::cmp` EXACTLY (query
+member is `Actual`, every node key is `Actual`, `Arc<[u8]>`/`MemberPart` order lexicographically
+`Min<Actual<Max`). Wired all 4 rank methods to it; zero alloc on the rank path now.
+
+BYTE-TRANSPARENT: rank order is unchanged. `zrank_of_borrowed_matches_clone_and_reports_ab` builds a
+3000-member zset with TIED scores (every 500, exercising the member tiebreak), asserts `rank`/`rev_rank`
+equal the true sorted position AND `rank_of(clone-target) == rank_of_borrowed` for every member; the
+existing rank fuzz-vs-oracle suite (10 rank + 37 zset tests) stays GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, `rank_of` over a 3000-member treap w/ tied scores): clone-target
+(`ScoreMember::actual(s, member.to_vec())` + `rank_of`) = 76.8 ns/op vs borrowed = **55.6 ns/op = 1.38x**
+— the 21 ns delta is the eliminated Vec+Arc double-alloc per ZRANK. Applies to ZRANK / ZREVRANK /
+ZRANK…WITHSCORE / ZREVRANK…WITHSCORE. (The residual vs redis is still the treap-vs-skiplist descent
+constant, structural — but this shaves the per-call alloc off the top of every rank.)
+
 ## 2026-07-04 CrimsonHawk: RESIDUAL-GAP MAP — extended sweep (30 cmds) categorizes ALL sub-parity losses into 2 STRUCTURAL root-causes (dispatch-chain + ZSET treap-rank)
 
 Ran `scripts/extended2_headtohead_ch.py` (30 wider cmds, fr vs redis-7.2.4, pipe=200) to catch anything
