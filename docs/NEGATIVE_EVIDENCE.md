@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HRANDFIELD/ZRANDMEMBER (+COUNT) bare-drop guard — HRANDFIELD@16 1.11x (byte-exact)
+
+Continued the bare-drop-guard vein into the random-sample family: `hrandfield`, `hrandfield_count`,
+`zrandmember`, `zrandmember_count` (live via fr-command CommandId::{Hrandfield,Zrandmember} +
+fr-runtime; no borrowed variant supersedes them). Each did a bare `drop_if_expired` then `get_mut`;
+guarded with `if expires_count != 0 { drop }`. The two HRANDFIELD fns ALSO had a bare
+`drop_expired_hash_fields` — guarded with `if !hash_field_expires.is_empty()` (no-op when no field
+TTLs). NOTE srandmember/srandmember_count use `record_keyspace_lookup` (not a bare drop) and hit a
+known RNG-borrow issue on the lookup_live collapse — left alone. The bare-drop GUARD is safe here
+(unlike the collapse) because it only wraps the existing drop; the RNG (`next_rand`) is untouched.
+Byte-identical: both drops are no-ops in the guarded cases; get_mut re-probes; expired needs TTL.
+Proven by `hz_randmember_bare_drop_guard_matches` (single-elem deterministic sample, ±count sizing,
+WRONGTYPE, missing→None/empty, **stats UNCHANGED**, eviction via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed HRANDFIELD@16 no-TTL = 91.49 ns/op;
+elided drop's `contains_key` ≈ **10.00 ns** → old ≈ 101.49 ns ⇒ **1.11x (−10%)** (conservative —
+the empty hash-field drop is also elided but not in this delta). Conformance GREEN (702/702, fully
+clean run). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — LPOP/RPOP (+COUNT) bare-drop guard — LPOP small-queue 1.15x (byte-exact)
 
 New target class (via re-grep of ALL bare `drop_if_expired(key,now)` sites for HOT LIVE cmds):

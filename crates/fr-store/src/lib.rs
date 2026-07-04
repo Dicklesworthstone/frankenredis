@@ -12232,8 +12232,15 @@ impl Store {
     }
 
     pub fn hrandfield(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        self.drop_expired_hash_fields(key, now_ms);
+        // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is
+        // volatile, and the hash-field drop when no field TTLs exist anywhere. Byte-identical
+        // (both are no-ops in those cases; the get_mut below re-probes the key).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12274,8 +12281,13 @@ impl Store {
         count: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        self.drop_expired_hash_fields(key, now_ms);
+        // (CrimsonHawk) Guard the bare expiry probes — see hrandfield.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
         // Pre-generate some random values if we need many (for negative count).
         // For positive count, we'll need many for the shuffle.
         // Actually, it's easier to just pick the random values we need inside the match if we can.
@@ -18467,7 +18479,10 @@ impl Store {
     }
 
     pub fn zrandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -18520,7 +18535,10 @@ impl Store {
         count: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -34878,6 +34896,61 @@ mod tests {
         println!(
             "LPOP pop-all no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) HRANDFIELD/ZRANDMEMBER (+COUNT) bare-drop guard: byte-identical sample
+    // (single-elem deterministic), count sizing, WRONGTYPE, missing, NO keyspace stat, eviction.
+    #[test]
+    fn hz_randmember_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.hset(b"h", b"f".to_vec(), b"v".to_vec(), 1).unwrap();
+        s.zadd(b"z", &[(1.0, b"m".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"x".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        assert_eq!(s.hrandfield(b"h", 2).unwrap(), Some(b"f".to_vec()));
+        assert_eq!(s.hrandfield_count(b"h", 1, 2).unwrap(), vec![(b"f".to_vec(), b"v".to_vec())]);
+        assert_eq!(s.hrandfield_count(b"h", -3, 2).unwrap().len(), 3); // negative → repeats
+        assert_eq!(s.zrandmember(b"z", 2).unwrap(), Some(b"m".to_vec()));
+        assert_eq!(s.zrandmember_count(b"z", 1, 2).unwrap(), vec![(b"m".to_vec(), 1.0)]);
+        assert_eq!(s.zrandmember_count(b"z", -3, 2).unwrap().len(), 3);
+        assert_eq!(s.hrandfield(b"absent", 2).unwrap(), None);
+        assert_eq!(s.zrandmember(b"absent", 2).unwrap(), None);
+        assert!(s.hrandfield_count(b"absent", 5, 2).unwrap().is_empty());
+        assert!(matches!(s.hrandfield(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.zrandmember(b"str", 2), Err(StoreError::WrongType)));
+        // These record NO keyspace stat (bare drop) → hits/misses UNCHANGED.
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.zrandmember(b"exp", 500).unwrap(), None, "expired → None");
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: HRANDFIELD is a non-mutating sample (loops cleanly).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.hset(b"hr:bench", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        let k: &[u8] = b"hr:bench";
+        for _ in 0..2000 { std::hint::black_box(b.hrandfield(k, 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.hrandfield(std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "HRANDFIELD@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x (+ elided empty hash-field drop)",
             full + probe, (full + probe) / full
         );
     }
