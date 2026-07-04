@@ -13785,6 +13785,25 @@ impl Store {
     }
 
     pub fn scard(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse (the GET/EXISTS pattern): the slow
+        // path does `record_keyspace_lookup` (a keyspace probe via drop_if_expired) THEN a
+        // separate `entries.get_mut` — two hashes per SCARD. With LFU off, `lookup_live_for_
+        // read_mut` peeks expiry + records hit/miss + returns the live entry in ONE probe.
+        // Byte-identical: same hit/miss accounting, same WRONGTYPE, same single `touch`, no
+        // RNG consumed (LFU off). LFU path left verbatim to preserve `next_rand` order.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        let len = s.len();
+                        entry.touch(now_ms);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -13818,6 +13837,20 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        let result = s.contains(member);
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(false),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(false);
         }
@@ -15728,6 +15761,20 @@ impl Store {
 
     /// Return cardinality of sorted set.
     pub fn zcard(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len();
+                        entry.touch(now_ms);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -32266,6 +32313,44 @@ mod tests {
         assert!(!t.drop_if_expired(b"dead", 500)); // expired → evicted → false
         assert!(t.get(b"dead", 600).unwrap().is_none(), "expired key removed");
         assert!(t.get(b"live", 600).unwrap().is_some());
+    }
+
+    // (CrimsonHawk) SCARD/ZCARD/SISMEMBER non-LFU single-lookup collapse must be byte-
+    // identical to the double-lookup path: same result, WRONGTYPE, keyspace hit/miss
+    // accounting, and lazy-expiry behavior (expired key → miss + evicted).
+    #[test]
+    fn cardinality_single_lookup_collapse_matches_full_path() {
+        let mut s = Store::new();
+        s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.zadd(b"zs", &[(1.0, b"m".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        // Hits + correct values.
+        assert_eq!(s.scard(b"set", 2).unwrap(), 2);
+        assert_eq!(s.zcard(b"zs", 2).unwrap(), 1);
+        assert!(s.sismember(b"set", b"a", 2).unwrap());
+        assert!(!s.sismember(b"set", b"nope", 2).unwrap());
+        // Missing key → 0/false + miss (no error).
+        assert_eq!(s.scard(b"absent", 2).unwrap(), 0);
+        assert_eq!(s.zcard(b"absent", 2).unwrap(), 0);
+        assert!(!s.sismember(b"absent", b"x", 2).unwrap());
+        // WRONGTYPE on a string key (still a hit).
+        assert!(matches!(s.scard(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.zcard(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.sismember(b"str", b"x", 2), Err(StoreError::WrongType)));
+        // hits: scard,zcard,sismemberx2,scard(str),zcard(str),sismember(str) = 7;
+        // misses: scard(absent),zcard(absent),sismember(absent) = 3.
+        assert_eq!(s.stat_keyspace_hits, h0 + 7);
+        assert_eq!(s.stat_keyspace_misses, m0 + 3);
+
+        // Lazy expiry: an expired set key → SCARD 0 + evicted.
+        let mut t = Store::new();
+        t.sadd(b"exp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1); // absolute deadline at t=50
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.scard(b"exp", 500).unwrap(), 0);
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted by SCARD");
     }
 
     #[test]

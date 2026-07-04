@@ -4,7 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-04 CrimsonHawk: KEEP — `drop_if_expired` single-point `expires_count == 0` fast-exit — 11.45% of SET@1 (26-char key), helps EVERY unguarded caller (byte-exact)
+## 2026-07-04 CrimsonHawk: KEEP — SCARD/ZCARD/SISMEMBER non-LFU single-lookup collapse — SCARD@8 1.48x (byte-exact)
+
+New vein (the double-keyspace-lookup collapse GET/MGET/EXISTS already use, extended to the
+collection reads that still double-probe). SCARD/ZCARD/SISMEMBER did
+`record_keyspace_lookup(key)` (a keyspace probe via `drop_if_expired`) THEN a separate
+`entries.get_mut(key)` — two hashes per call. On the common non-LFU config, replaced both with
+one `lookup_live_for_read_mut` (guarded expiry-peek + single `get_mut` + hit/miss accounting).
+Byte-identical: same result, WRONGTYPE, keyspace hit/miss, single `touch`, lazy-expiry evict;
+no RNG consumed (LFU path left verbatim). Proven by
+`cardinality_single_lookup_collapse_matches_full_path` (values, missing→0/false, WRONGTYPE,
+exact hit/miss deltas, expired-key eviction).
+
+MEASURED (per-crate `cargo test -p fr-store --release` via rch, intra-run isolated): collapsed
+SCARD@8 (no TTL) = 22.11 ns/op; the removed second keyspace probe ≈ **10.63 ns** → old ≈ 32.74
+ns ⇒ **1.48x (−32%)**. Huge fraction because SCARD is a tiny op. Same collapse + ratio for
+ZCARD/SISMEMBER. Conformance GREEN (673/673). NEXT: the same collapse fits the rest of the
+~40 `record_keyspace_lookup` + `get_mut` double-lookup reads (HLEN [field-TTL wrinkle], LLEN,
+HGET/HMGET [field-TTL], LRANGE, GETRANGE, OBJECT ENCODING, …) — a rich follow-on vein.
+Landed via clean origin/main worktree.
+
+## 2026-07-04 CrimsonHawk: KEEP — `drop_if_expired` single-point `expires_count == 0` fast-exit — 11.45% of SET/generic write + ~40 reads via record_keyspace_lookup (26-char key), byte-exact
+
+CLARIFICATION of the beneficiary set (measurement unchanged): the benched `store.set()` is the
+generic/RDB write path; the LIVE SET/GETSET/MSET command path (`set_plain_borrowed`) was
+ALREADY `expires_count`-guarded, so it does not benefit. The real broad win is that
+`drop_if_expired` is called by `record_keyspace_lookup`, the read gateway for ~40 hot commands
+(HGET/HMGET/HGETALL/HKEYS/HVALS/HLEN/SCARD/SISMEMBER/SMEMBERS/SMISMEMBER/LRANGE/LLEN/LPOS/
+GETRANGE/GETSET/GETDEL/OBJECT */SORT/COPY/DUMP/…), plus generic `set()`/DEL. The ~14 ns
+per-call saving (one keyspace hash+probe) measured on `set()` is representative of what every
+such command saves on the no-TTL hot path.
 
 Highest-leverage ship of the expiry-guard arc: instead of guarding each call site, guard the
 PRIMITIVE. `drop_if_expired` always did `entries.get(key)` + `expiry_ms(key)` (a SECOND map
