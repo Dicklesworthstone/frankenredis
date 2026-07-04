@@ -22545,8 +22545,15 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, Vec<u8>)>), StoreError> {
-        self.drop_if_expired(key, now_ms);
-        self.drop_expired_hash_fields(key, now_ms);
+        // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is volatile
+        // and the hash-field drop when no field TTLs exist. Byte-identical (both no-ops then; the
+        // lookup below re-probes). (HSCAN.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -22641,7 +22648,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut below re-probes. (SSCAN.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -22736,7 +22746,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut below re-probes. (ZSCAN.)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -35278,6 +35291,62 @@ mod tests {
             "RPOPLPUSH self-rotate@16 no-TTL guarded: full={full:.2} ns | elided 2 drops ≈ {:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             2.0 * probe, full + 2.0 * probe, (full + 2.0 * probe) / full
+        );
+    }
+
+    // (CrimsonHawk) HSCAN/SSCAN/ZSCAN bare-drop guard: byte-identical full-scan results,
+    // WRONGTYPE, missing→(0,[]), eviction via expires_count>0.
+    #[test]
+    fn xscan_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 1).unwrap();
+        s.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 1).unwrap();
+        s.sadd(b"se", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.zadd(b"z", &[(1.0, b"m1".to_vec()), (2.0, b"m2".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+
+        let (hc, mut hf) = s.hscan(b"h", 0, None, 100, 2).unwrap();
+        hf.sort();
+        assert_eq!(hc, 0);
+        assert_eq!(hf, vec![(b"f1".to_vec(), b"v1".to_vec()), (b"f2".to_vec(), b"v2".to_vec())]);
+        let (sc, mut sf) = s.sscan(b"se", 0, None, 100, 2).unwrap();
+        sf.sort();
+        assert_eq!((sc, sf), (0, vec![b"a".to_vec(), b"b".to_vec()]));
+        let (zc, mut zf) = s.zscan(b"z", 0, None, 100, 2).unwrap();
+        zf.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!((zc, zf), (0, vec![(b"m1".to_vec(), 1.0), (b"m2".to_vec(), 2.0)]));
+        assert_eq!(s.hscan(b"absent", 0, None, 100, 2).unwrap(), (0, Vec::new()));
+        assert_eq!(s.sscan(b"absent", 0, None, 100, 2).unwrap(), (0, Vec::new()));
+        assert!(matches!(s.hscan(b"str", 0, None, 100, 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.zscan(b"str", 0, None, 100, 2), Err(StoreError::WrongType)));
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.sadd(b"exp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.sscan(b"exp", 0, None, 100, 500).unwrap(), (0, Vec::new()), "expired → empty");
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: SSCAN a 16-member set (non-mutating; returns all in one call).
+        let mut b = Store::new();
+        b.sadd(b"ss:bench", &(0..16u32).map(|i| format!("m{i}").into_bytes()).collect::<Vec<_>>(), 1).unwrap();
+        let k: &[u8] = b"ss:bench";
+        for _ in 0..2000 { std::hint::black_box(b.sscan(k, 0, None, 100, 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.sscan(std::hint::black_box(k), 0, None, 100, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "SSCAN@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
         );
     }
 

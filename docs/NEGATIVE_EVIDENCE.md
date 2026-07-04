@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP (marginal) — HSCAN/SSCAN/ZSCAN bare-drop guard — SSCAN@16 1.03x (byte-exact)
+
+Completed the bare-drop-guard vein into the last untested bare-drop READS: `hscan` (+ hash-field
+drop), `sscan`, `zscan`. Guarded with `if expires_count != 0 { drop }` (and HSCAN's field drop with
+`!hash_field_expires.is_empty()`). Universal byte-identity. Proven by `xscan_bare_drop_guard_matches`
+(full-scan results for all three, WRONGTYPE, missing→(0,[]), eviction via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): SSCAN@16 no-TTL = 367.96 ns/op; elided drop's
+`contains_key` ≈ **10.16 ns** → old ≈ 378.11 ns ⇒ **1.03x (−2.7%)** — MARGINAL, at the ~0-gain
+floor. **Memory correctly flagged SCAN as low-ratio: the 368 ns is CLONE-DOMINATED (SSCAN builds a
+Vec of 16 cloned members), so the probe is a tiny fraction and this trends to ~0 on larger
+collections (SCAN's real use).** Kept because it's a real deterministic byte-exact removal on 3
+commands and it finishes the vein, but flagged marginal. **REAL SCAN LEVER (next, bigger): member-
+CLONE elimination — SSCAN/HSCAN/ZSCAN clone every result member into the reply Vec; a borrow-scan
+_into variant (like smembers_borrow_scan / zrange_borrow_scan) would stream borrowed members and
+save the ~350 ns clone cost — but SCAN's cursor semantics + fr-runtime _into dispatch make it a
+larger change than a probe guard.** Conformance GREEN (707/707, fully clean run). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — RPOPLPUSH/LMOVE/SMOVE/RENAME/RENAMENX bare-drop guard — RPOPLPUSH 1.13x (byte-exact)
 
 Multi-key MOVE ops, each with 2 unguarded bare drops (source + destination), like COPY:
