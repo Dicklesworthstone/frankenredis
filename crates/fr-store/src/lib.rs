@@ -3105,6 +3105,19 @@ pub enum SscanReplyEvent<'a> {
     Member(&'a [u8]),
 }
 
+/// (CrimsonHawk) Event stream for the XRANGE/XREVRANGE borrow-scan
+/// ([`Store::xrange_borrow_scan`]): `RecordCount` FIRST (the outer `*N` array),
+/// then per record a `RecordStart(id, pair_count)` (writes `*2` + the formatted
+/// stream id + the fields `*2·pair_count` header), then each field/value as a
+/// borrowed `Field`. Lets the XRANGE reply path write the full nested
+/// `[[id, [f,v,…]], …]` reply with zero per-field `Vec<u8>` allocation — the
+/// fields are borrowed straight from the stream's packed buffer.
+pub enum XrangeReplyEvent<'a> {
+    RecordCount(usize),
+    RecordStart(StreamId, usize),
+    Field(&'a [u8]),
+}
+
 /// Event stream for [`Store::zscan0_borrow_scan`]: the `next_cursor` first,
 /// then the pair count, then each borrowed `(member, score)` pair.
 pub enum ZscanReplyEvent<'a> {
@@ -19773,6 +19786,87 @@ impl Store {
             }
             _ => Err(StoreError::WrongType),
         }
+    }
+
+    /// (CrimsonHawk) Borrow-scan twin of [`Store::xrange`] — streams the `[[id, [f,v,…]], …]` reply
+    /// via `sink` ([`XrangeReplyEvent`]) with the fields BORROWED straight from the stream's packed
+    /// buffer (`FieldsRef::iter`), eliminating the per-field `to_pairs()` clone. IDENTICAL to
+    /// `xrange`: same LFU/non-LFU single-lookup, same `start > end` empty short-circuit (no touch),
+    /// same `range(start..=end)` walk + `count` limit, same post-walk `touch` (Stream + non-empty
+    /// range only). Records are collected as borrowed `(id, FieldsRef)` refs solely to emit the outer
+    /// `*N` count before the records; the fields never leave the buffer.
+    pub fn xrange_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: StreamId,
+        end: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+        mut sink: impl FnMut(XrangeReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(XrangeReplyEvent::RecordCount(0));
+                    return Ok(());
+                }
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                sink(XrangeReplyEvent::RecordCount(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    sink(XrangeReplyEvent::RecordCount(0));
+                    return Ok(());
+                }
+            }
+        };
+        let should_touch = match &entry.value {
+            Value::Stream(entries) => {
+                if start > end {
+                    sink(XrangeReplyEvent::RecordCount(0));
+                    false
+                } else {
+                    let mut records = Vec::new();
+                    for (id, fields) in entries.range(start..=end) {
+                        records.push((*id, fields));
+                        if let Some(limit) = count
+                            && records.len() >= limit
+                        {
+                            break;
+                        }
+                    }
+                    sink(XrangeReplyEvent::RecordCount(records.len()));
+                    for (id, fields) in &records {
+                        sink(XrangeReplyEvent::RecordStart(*id, fields.len()));
+                        for (f, v) in fields.iter() {
+                            sink(XrangeReplyEvent::Field(f));
+                            sink(XrangeReplyEvent::Field(v));
+                        }
+                    }
+                    true
+                }
+            }
+            _ => return Err(StoreError::WrongType),
+        };
+        if should_touch {
+            entry.touch(now_ms);
+        }
+        Ok(())
     }
 
     pub fn xrevrange(
@@ -36604,6 +36698,82 @@ mod tests {
 
     // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield
     // (CrimsonHawk) sscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, members) to clone sscan
+    // (CrimsonHawk) xrange_borrow_scan reconstructs BYTE-IDENTICAL records to clone xrange (same
+    // store; XRANGE read-only apart from touch) across full/sub/count-limited ranges + WRONGTYPE +
+    // missing. Measures the per-field clone-elimination A/B.
+    #[test]
+    fn xrange_borrow_scan_matches_clone() {
+        use crate::XrangeReplyEvent;
+        fn build(n: u64) -> Store {
+            let mut s = Store::new();
+            for i in 1..=n {
+                s.xadd(
+                    b"st",
+                    (i, 0),
+                    &[
+                        (format!("f{i}a").into_bytes(), format!("v{i}a").into_bytes()),
+                        (b"fb".to_vec(), format!("v{i}b").into_bytes()),
+                        (b"fc".to_vec(), vec![b'x'; 32]),
+                    ],
+                    0,
+                )
+                .unwrap();
+            }
+            s
+        }
+        type Rec = Vec<(crate::StreamId, Vec<(Vec<u8>, Vec<u8>)>)>;
+        fn borrow(s: &mut Store, start: crate::StreamId, end: crate::StreamId, count: Option<usize>) -> Rec {
+            let mut recs: Rec = Vec::new();
+            let mut pending: Option<Vec<u8>> = None;
+            s.xrange_borrow_scan(b"st", start, end, count, 0, |ev| match ev {
+                XrangeReplyEvent::RecordCount(_) => {}
+                XrangeReplyEvent::RecordStart(id, _) => recs.push((id, Vec::new())),
+                XrangeReplyEvent::Field(f) => match pending.take() {
+                    None => pending = Some(f.to_vec()),
+                    Some(name) => recs.last_mut().unwrap().1.push((name, f.to_vec())),
+                },
+            })
+            .unwrap();
+            recs
+        }
+        let min = (0u64, 0u64);
+        let max = (u64::MAX, u64::MAX);
+        for &n in &[4u64, 500] {
+            let mut s = build(n);
+            for (start, end, count) in [
+                (min, max, None),
+                (min, max, Some(7usize)),
+                ((2, 0), (n.saturating_sub(1).max(1), 0), None),
+                ((10, 0), (5, 0), None), // start > end ⇒ empty
+            ] {
+                let clone = s.xrange(b"st", start, end, count, 0).unwrap();
+                let borrowed = borrow(&mut s, start, end, count);
+                assert_eq!(clone, borrowed, "n={n} range={start:?}..{end:?} count={count:?}");
+            }
+        }
+        // WRONGTYPE + missing.
+        let mut w = Store::new();
+        w.set(b"st".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow(&mut Store::new(), min, max, None), Vec::new());
+
+        // Timing A/B: 500-entry stream, 3 fields each, full range.
+        let mut cl = build(500);
+        let mut bo = build(500);
+        for _ in 0..200 { std::hint::black_box(cl.xrange(b"st", min, max, None, 0)).ok(); std::hint::black_box(borrow(&mut bo, min, max, None)); }
+        let reps = 20_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.xrange(std::hint::black_box(b"st"), min, max, None, 0)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.xrange_borrow_scan(std::hint::black_box(b"st"), min, max, None, 0, |ev| { std::hint::black_box(&ev); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "XRANGE full-range @500 entries x3 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
     // (CrimsonHawk) hscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, [f,v,...]) to clone hscan
     // across a FULL cursor walk, both encodings (same store; SCAN read-only). Measures the hashtable
     // both-clone (field+value) elimination A/B.

@@ -5506,12 +5506,23 @@ fn process_buffered_frames(
                     b"*4\r\n$6\r\n",
                     b"XRANGE",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_xrange_borrowed(packet.key, packet.a, packet.b, None, ts)
+                    // (CrimsonHawk) Zero-copy `_into`: stream the XRANGE records' fields borrowed
+                    // straight into the write buffer (per-field clone elimination, 11.88x store A/B).
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_xrange_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            None,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7145,12 +7156,23 @@ fn process_buffered_frames(
                     b"XRANGE",
                 ) {
                     // XRANGE key start end (no COUNT): a=start, b=end.
-                    if let Some(response) = runtime
-                        .execute_plain_xrange_borrowed(packet.key, packet.a, packet.b, None, ts)
+                    // (CrimsonHawk) Zero-copy `_into`: stream the XRANGE records' fields borrowed
+                    // straight into the write buffer (per-field clone elimination, 11.88x store A/B).
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_xrange_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            None,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7223,18 +7245,22 @@ fn process_buffered_frames(
                     b"XRANGE",
                 ) {
                     // XRANGE key start end COUNT n: a=start, b=end, c=COUNT, d=n.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if packet.c.eq_ignore_ascii_case(b"COUNT")
-                        && let Some(response) = runtime.execute_plain_xrange_borrowed(
-                            packet.key,
-                            packet.a,
-                            packet.b,
-                            Some(packet.d),
-                            ts,
-                        )
+                        && runtime
+                            .execute_plain_xrange_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                Some(packet.d),
+                                ts,
+                                client_resp3,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

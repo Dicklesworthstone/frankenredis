@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XRANGE zero-copy `_into` WIRED LIVE — 11.88x store A/B (byte-exact)
+
+New member-clone class: STREAM reads. `execute_plain_xrange_borrowed` had a fast path but built a
+RespFrame by CLONING every field of every entry (`fields.to_pairs()` = `iter().map(to_vec)`). The stream
+fields are already a borrowed view (`FieldsRef` from `entries.range`, with `iter()`→`(&[u8],&[u8])` +
+`len()`), so nothing needs cloning. Added `Store::xrange_borrow_scan` + `XrangeReplyEvent{RecordCount,
+RecordStart(StreamId,pair_count), Field}` — mirrors `xrange` EXACTLY (LFU/non-LFU single-lookup,
+`start>end` empty short-circuit with NO touch, `range(start..=end)` + `count` limit, post-walk touch
+only for Stream+non-empty) but streams borrowed fields; records are collected as `(id, FieldsRef)` refs
+ONLY to emit the outer `*N` before them (fields never leave the packed buffer). Solved the nested
+count-first ordering (`[[id,[f,v,…]],…]`) via the RecordCount→RecordStart→Field event sequence.
+`execute_plain_xrange_borrowed_into` encodes it (outer `*N`; per record `*2` + `format_stream_id` bulk +
+fields `*2m`; plain array in RESP2+RESP3) and reuses the same gate/bound-parse/count/preamble/metrics/
+error-accounting. Swapped all 3 fr-server XRANGE dispatch sites (no-COUNT ×2 + COUNT) FastReply →
+FastEncodedReply.
+
+BYTE-EXACT: `xrange_borrow_scan_matches_clone` reconstructs records from the sink and asserts equality to
+clone `xrange` across full / sub / count-limited / `start>end` ranges × {4, 500} entries + WRONGTYPE +
+missing (same store; XRANGE read-only apart from touch). Nested reply byte-identical to the RespFrame
+path by construction. VERIFIED local symlink-legacy build: compiles clean; fr-server 217/218 (lone fail
+the PRE-EXISTING `mset_packet_dispatcher`; all stream/xread tests GREEN).
+
+MEASURED (store-level A/B, per-crate rch, XRANGE full range over a 500-entry stream × 3 fields): clone
+`xrange` = 65831 ns/op vs borrow = **5541 ns/op = 11.88x** (biggest of the member-clone arc — streams
+clone every field of every entry, ~3000 `Vec` allocs → 0). NEXT: XREVRANGE (reverse mirror, same pattern
+— `execute_plain_xrevrange_borrowed` still clones) + XREAD (multi-stream). Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SSCAN/HSCAN borrow `_into` EXTENDED past cursor-0 to the WHOLE iteration (byte-exact)
 
 The SSCAN0/HSCAN0 borrow `_into` fast paths (1.80x / 2.20x, shipped earlier today) only fired for
