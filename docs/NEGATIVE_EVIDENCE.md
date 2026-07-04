@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: NEGATIVE (measured, don't re-chase) — data-driven head-to-head sweep confirms only losses are STRUCTURAL; SMISMEMBER large-N argv-alloc = ~0-gain (reverted)
+
+Ran the data-driven `scripts/broad_command_headtohead.py` sweep (fr vs redis-7.2.4, pipe=200) to find
+CURRENT gaps after this session's ~16 ships. Result: nearly everything is fr-faster or parity
+(bitcount 2.14x, sunionstore 5.84x, lpos 2.72x, srandmember 1.23x, sinterstore 2.04x, ...). Only TWO
+sub-0.9x losses, BOTH structural:
+- **smismember 0.82-0.85x** (the sweep's shape = 100 members). ROOT-CAUSED: NOT the argv alloc and NOT
+  the hasher. (1) Tried a large-N (>32) borrowed fast path (Vec<&[u8]> of borrowed pointers, avoiding
+  the generic per-member value-clone/argv) — MEASURED ~0-gain (0.82→0.84, within noise) → REVERTED.
+  The argv alloc is only ~2% because `store.smismember` is already a single set lookup +
+  `members.iter().map(|m| s.contains(m))`; the 100 `s.contains` set-membership lookups dominate. (2)
+  The Set/Hash/ZSet hashers are ALREADY `foldhash::quality::RandomState` (fast, not SipHash) — so the
+  hasher is not the lever. The residual is the SET-REPRESENTATION lookup path (large string sets use
+  the RAM-optimized packed `CompactStrSet` "drop-in for IndexSet<member>") — a deliberate RAM-vs-speed
+  tradeoff = the p8dd2 structural RAM lever's cost, NOT a clean per-crate win.
+- **zcount 0.77x** — constant-factor / dispatch-chain-bound (already improved 0.25x→0.77x via the warm-
+  threshold fix bdcc79a02; residual is the treap rank-count constant vs redis's skiplist rank).
+
+CONCLUSION: the data confirms last turn's close-out — no clean, measurable, universal per-crate LAND
+remains; the two residual command losses are structural (set-representation RAM tradeoff / count
+constant-factor). DON'T re-attempt SMISMEMBER via argv/hasher — measured dead. Next real levers stay
+structural (command-hash dispatch ohsk5 / ChunkedList 99fwc / keyspace-RAM & set-representation p8dd2).
+Docs-only.
+
 ## 2026-07-04 CrimsonHawk: SURFACE (frontier close-out) — clean per-crate clone/borrow/sidemap/RESP3 vein COMPLETE; remaining levers are structural; dispatch-order data captured
 
 Definitive close-out after ~16 borrow/`_into` ships this session. Confirmed from every angle there is no
