@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX range bounds halve their alloc (borrowed `actual` arg) — 1.76x bound-construction (byte-transparent)
+
+Third pass on the owned-key vein. The remaining `ScoreMember::actual(...to_vec())` sites are the 8
+ZRANGEBYLEX/ZREVRANGEBYLEX(±LIMIT) `lower`/`upper` bounds, which feed `BTreeMap.range(lower..=upper)` —
+so the OWNED `ScoreMember` can't be fully elided (no borrowed-bound range API). BUT the construction was
+doing TWO allocs: `min[1..].to_vec()` (a `Vec<u8>`) → `.into()` → `Arc<[u8]>::from(Vec)` (a second alloc
++ copy). Passing the bound slice BORROWED — `ScoreMember::actual(s, &min[1..])` — makes `actual` build
+the `Arc<[u8]>` directly from `&[u8]` in ONE alloc. Same `ScoreMember`. 1-token change × 8 sites, zero
+dispatch. Halves the bound alloc for BOTH Compact and Tree lex ranges.
+
+BYTE-TRANSPARENT: `score_member_actual_borrowed_arg_halves_alloc` asserts `actual(s, &slice) ==
+actual(s, slice.to_vec())`; the existing zset (37) + lex (11) + zrange + scan/zscan fuzz-vs-oracle suites
+(which drive ZRANGEBYLEX end-to-end) stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, `ScoreMember::actual` of a lex-member key): old `to_vec()+Arc`
+(Vec then Arc, 2 allocs) = 40.1 ns/op vs borrowed `&[u8]->Arc` (1 alloc) = **22.9 ns/op = 1.76x**. For a
+SMALL lex range the 2 bound constructions are a real fraction of the op; for large ranges the scan
+dominates. Alloc-elim VEIN TALLY this arc: rank_of 1.38x + compact_position 1.84x + lex-bound 1.76x
+(3 commits, ~14 ZSET query/bound sites), all byte-transparent. General lesson: `Type::from(x.to_vec())`
+into an `Arc<[u8]>`/`Box<[u8]>` field is a double-alloc — pass `&x` so `From<&[u8]>` allocs once.
+
 ## 2026-07-04 CrimsonHawk: KEEP (marginal) — borrowed `ScoreMember` bounds for warm lex/rank lookups — ZLEXCOUNT 1.04x vs ORIG (byte-transparent)
 
 Dug the remaining ZSET treap-rank constant bucket after the landed ZRANK `rank_of_borrowed` keep.
