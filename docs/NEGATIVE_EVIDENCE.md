@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — RESTORE zset listpack decodes borrowed spans into PackedZSet — 1.31x vs original fr-store path (rch per-crate bench)
+
+`RDB_TYPE_ZSET_LISTPACK` RESTORE still used `decode_listpack_strings`, allocating one
+`Vec<u8>` for every member and score before cloning compact members again into the final
+`PackedZSet` buffer. Hash/set listpack RESTORE already used borrowed spans. LEVER: decode
+zset listpack entries with `decode_value_spans`, parse scores from borrowed bytes, reject
+duplicate members from borrowed refs, and build packed zsets directly from `&[u8]` members
+(`PackedZSet::from_unique_pairs_borrowed`). The full-zset fallback still materializes owned
+pairs only when compact limits are exceeded.
+
+MEASURED (per-crate `fr-store` Criterion bench via rch, `AGENT_NAME=CrimsonHawk`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-crimsonhawk-20260704-restore-zset-lp`):
+added `restore_zset_listpack/restore_96_members` to `crates/fr-store/benches/store_read.rs`.
+The requested literal `cargo bench --release` form is invalid for Cargo (`unexpected
+argument '--release'`), so the optimized bench profile was run as `cargo bench -p fr-store
+--bench store_read -- restore_zset_listpack --noplot`. Original/control on rch worker
+`ovh-a`: 14.825 us, repeated 14.907 us (+1.0%, stable). Candidate medians: `hz1` 11.401 us
+and `hz2` 8.8781 us. `rch exec` exposes no worker pin and moved candidate reruns away from
+`ovh-a`, so this is not a same-worker candidate/control gate. Ratio vs original using the
+slower candidate run: **14.907 / 11.401 = 1.31x**; best observed candidate: **1.68x**.
+Correctness GREEN: `cargo test -p fr-store restore_rejects_duplicate_zset_listpack_members`,
+`restore_rejects_zset_listpack_nan_score`, and `dump_restore_accepts_upstream_compact_encodings`
+all passed via rch; `cargo check -p fr-store --all-targets` passed via rch. Clippy gate is
+blocked by existing `clippy::too_many_arguments` on
+`zrangebyscore_members_limit_borrow_scan` (`crates/fr-store/src/lib.rs:16463`), outside this
+RESTORE diff.
+
 ## 2026-07-04 CrimsonHawk: KEEP — MGET non-LFU per-key expiry-peek gated by `expires_count != 0` — isolated −62 ns = 8.1% of the MGET@8 no-TTL path (byte-exact)
 
 Extends the just-shipped per-element expiry-guard vein (see the HMGET entry below) to MGET.

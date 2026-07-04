@@ -1612,6 +1612,30 @@ impl SortedSet {
         }
     }
 
+    fn from_unique_borrowed_pairs_with_limits(
+        pairs: Vec<(&[u8], f64)>,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries
+            && pairs
+                .iter()
+                .all(|(member, _)| member.len() <= max_listpack_value)
+        {
+            Self {
+                inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs_borrowed(pairs)),
+            }
+        } else {
+            let owned_pairs = pairs
+                .into_iter()
+                .map(|(member, score)| (member.to_vec(), score))
+                .collect();
+            Self {
+                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(owned_pairs)),
+            }
+        }
+    }
+
     fn remove(&mut self, member: &[u8]) -> bool {
         match &mut self.inner {
             SortedSetInner::Packed(p) => p.remove(member),
@@ -24113,7 +24137,7 @@ impl Store {
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let zs = zset_from_flat_entries(decode_listpack_strings(&listpack)?)?;
+                let zs = zset_from_listpack_spans(&listpack)?;
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -25534,6 +25558,7 @@ fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
+#[cfg(test)]
 fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     fr_persist::listpack::decode_listpack(data)
         .map(|entries| {
@@ -25640,6 +25665,45 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
         }
     }
     Ok(SortedSet::from_unique_pairs_with_limits(
+        pairs,
+        SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+        SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+    ))
+}
+
+fn zset_from_listpack_spans(listpack: &[u8]) -> Result<SortedSet, StoreError> {
+    let spans = fr_persist::listpack::decode_value_spans(listpack)
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    if !spans.len().is_multiple_of(2) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(spans.len() / 2);
+    for pair in spans.chunks_exact(2) {
+        let member = pair[0].as_bytes(listpack);
+        let score = std::str::from_utf8(pair[1].as_bytes(listpack))
+            .ok()
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .ok_or(StoreError::InvalidDumpPayload)?;
+        if score.is_nan() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        pairs.push((member, score));
+    }
+
+    {
+        let mut seen = HashSet::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        for (member, _) in &pairs {
+            if !seen.insert(*member) {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+        }
+    }
+
+    Ok(SortedSet::from_unique_borrowed_pairs_with_limits(
         pairs,
         SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
         SORTED_SET_PACKED_DEFAULT_MAX_VALUE,

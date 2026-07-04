@@ -466,5 +466,51 @@ fn bench_zrange_withscores(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_get, bench_zrange_withscores);
+fn bench_restore_zset_listpack(c: &mut Criterion) {
+    const N: usize = 96;
+    let mut source = Store::new();
+    for i in 0..N {
+        let member = format!("member:{i:03}:restore-zset-lp").into_bytes();
+        let score = if i % 3 == 0 {
+            i as f64
+        } else {
+            (i as f64 * 1.5) + 0.25
+        };
+        source.zadd(b"z", &[(score, member)], 1_000).unwrap();
+    }
+    let payload = source.dump_key(b"z", 2_000).expect("zset dump payload");
+    assert_eq!(
+        payload.first().copied(),
+        Some(17),
+        "bench payload must stay RDB_TYPE_ZSET_LISTPACK"
+    );
+
+    let mut g = c.benchmark_group("restore_zset_listpack");
+    g.bench_function("restore_96_members", |b| {
+        b.iter_batched(
+            Store::new,
+            |mut store| {
+                store
+                    .restore_key(
+                        std::hint::black_box(b"z"),
+                        0,
+                        std::hint::black_box(&payload),
+                        false,
+                        3_000,
+                    )
+                    .unwrap();
+                std::hint::black_box(store.zcard(b"z", 3_000).unwrap())
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_get,
+    bench_zrange_withscores,
+    bench_restore_zset_listpack
+);
 criterion_main!(benches);

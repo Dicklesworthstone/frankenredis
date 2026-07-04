@@ -3888,6 +3888,30 @@ impl PackedZSet {
         zset
     }
 
+    /// Borrowed-input twin of [`Self::from_unique_pairs`] for RESTORE/RDB listpack
+    /// decode. The packed representation owns one contiguous buffer either way,
+    /// so borrowed inputs let the caller skip transient per-member `Vec<u8>`
+    /// allocations and copy each member directly into the final packed buffer.
+    #[must_use]
+    pub fn from_unique_pairs_borrowed(mut pairs: Vec<(&[u8], f64)>) -> Self {
+        pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        let cap = pairs
+            .iter()
+            .map(|(member, _)| member.len().saturating_add(10))
+            .sum();
+        let mut zset = Self {
+            buf: Vec::with_capacity(cap),
+            len: 0,
+        };
+        for (member, score) in pairs {
+            write_varint(&mut zset.buf, member.len());
+            zset.buf.extend_from_slice(member);
+            zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
+            zset.len += 1;
+        }
+        zset
+    }
+
     #[must_use]
     pub fn from_single(member: Vec<u8>, score: f64) -> Self {
         let mut zset = Self {
