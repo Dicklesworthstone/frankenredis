@@ -22451,6 +22451,122 @@ impl Runtime {
         }
         Some(())
     }
+    /// Zero-copy `_into` fast path for `ZSCAN key 0`: borrow member bytes from
+    /// the zset scan window and encode scores directly into the output buffer.
+    pub fn execute_plain_zscan0_borrowed_into(
+        &mut self,
+        key: &[u8],
+        cursor_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"ZSCAN".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if cursor_arg != b"0" {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zscan",
+            b"ZSCAN".len() + key.len() + cursor_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let mut error_reply: Option<RespFrame> = None;
+        match self.server.store.key_type(key, now_ms) {
+            None => {
+                if !suppress_reply {
+                    let empty = Self::empty_scan0_reply();
+                    if resp3 {
+                        empty.encode_into_resp3(out);
+                    } else {
+                        empty.encode_into(out);
+                    }
+                }
+            }
+            Some("zset") => {
+                let result =
+                    self.server
+                        .store
+                        .zscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
+                            if suppress_reply {
+                                return;
+                            }
+                            match ev {
+                                fr_store::ZscanReplyEvent::Cursor(nc) => {
+                                    out.extend_from_slice(b"*2\r\n");
+                                    let cs = nc.to_string();
+                                    fr_protocol::encode_bulk_string_slice(
+                                        Some(cs.as_bytes()),
+                                        false,
+                                        out,
+                                    );
+                                }
+                                fr_store::ZscanReplyEvent::Len(n) => {
+                                    fr_protocol::encode_aggregate_header(n * 2, false, out);
+                                }
+                                fr_store::ZscanReplyEvent::Pair(member, score) => {
+                                    fr_protocol::encode_bulk_string_slice(Some(member), false, out);
+                                    let score = fr_store::redis_score_to_string(score);
+                                    fr_protocol::encode_bulk_string_slice(
+                                        Some(score.as_bytes()),
+                                        false,
+                                        out,
+                                    );
+                                }
+                            }
+                        });
+                if let Err(err) = result {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                }
+            }
+            Some(_) => {
+                let reply = CommandError::Store(fr_store::StoreError::WrongType).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zscan",
+            "ZSCAN",
+            || vec![b"ZSCAN".to_vec(), key.to_vec(), cursor_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
     pub fn execute_plain_hscan0_borrowed(
         &mut self,
         key: &[u8],
@@ -44168,6 +44284,67 @@ mod tests {
                     b"h",
                     b"4611686018427387904",
                     11,
+                    resp3,
+                    &mut Vec::new(),
+                )
+                .is_none()
+            );
+
+            assert_eq!(
+                fast.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                fast.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+    }
+
+    #[test]
+    fn plain_zscan0_borrowed_into_matches_generic() {
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if resp3 {
+                fast.session.resp_protocol_version = 3;
+                generic.session.resp_protocol_version = 3;
+            }
+            for rt in [&mut fast, &mut generic] {
+                for i in 0..1000u32 {
+                    rt.server
+                        .store
+                        .zadd(b"z", &[(f64::from(i), format!("m{i:04}").into_bytes())], 1)
+                        .unwrap();
+                }
+                rt.server.store.set(b"str".to_vec(), b"x".to_vec(), None, 1);
+            }
+
+            for (ts, key) in (2u64..).zip([b"z".as_slice(), b"nokey".as_slice(), b"str".as_slice()]) {
+                let mut fast_bytes = Vec::new();
+                fast.execute_plain_zscan0_borrowed_into(key, b"0", ts, resp3, &mut fast_bytes)
+                    .expect("well-formed ZSCAN key 0 should take fast path");
+                let generic_reply = generic.execute_frame(command(&[b"ZSCAN", key, b"0"]), ts);
+                assert_eq!(
+                    fast_bytes,
+                    frame_wire_bytes(&generic_reply, resp3),
+                    "resp3={resp3} key={key:?}"
+                );
+            }
+
+            assert!(
+                fast.execute_plain_zscan0_borrowed_into(
+                    b"z",
+                    b"1",
+                    10,
                     resp3,
                     &mut Vec::new(),
                 )

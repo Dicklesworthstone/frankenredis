@@ -31,6 +31,39 @@ the WITHSCORES form. **MEMBER-CLONE-ELIM ARC (mine): SSCAN 1.80x, HSCAN 2.20x, Z
 2.60x + 5 earlier random-sample. ZSCAN + ZRANDMEMBER single unborrowable (treap sorted-index owns).**
 Landed via clean origin/main worktree.
 
+## 2026-07-04 CrimsonHawk: KEEP — narrow ZSCAN key 0 first-batch member-borrow `_into` WIRED LIVE — 1.25x store A/B (byte-exact)
+
+Scoped counterexample to the broad ZSCAN dead-end note above: deep/non-zero
+ZSCAN still falls back to the existing owned `zscan` path because sorted-index
+resume can require owned treap materialization, but the live parser shape
+`ZSCAN key 0` can borrow the first score-ordered batch from `iter_asc()` and
+still record the deletion-safe resume cache for the returned cursor.
+
+Third SCAN-family `_into` after SSCAN0/HSCAN0. Added `Store::zscan0_borrow_scan` +
+`ZscanReplyEvent{Cursor,Len,Pair}` for the live `ZSCAN key 0` parser shape:
+cursor `0` emits borrowed score-ordered `(member, score)` pairs, preserves the
+deletion-safe ZSCAN resume cache for the returned cursor, and non-zero cursors
+fall back to the existing `zscan` implementation. `Runtime::execute_plain_zscan0_borrowed_into`
+writes the nested `[cursor, [member, score, ...]]` reply directly into the
+connection buffer; `fr-server` routes canonical `*3 ZSCAN key 0` through
+`FastEncodedReply`. Member bytes are borrowed; score string formatting remains
+the unavoidable Redis wire representation work.
+
+BYTE-EXACT: `zscan0_borrow_scan_matches_clone` compares full cursor walks
+against clone `zscan` across {16 listpack, 1000 full zset} x {no-pattern,
+`m00*`} plus WRONGTYPE/missing. `plain_zscan0_borrowed_into_matches_generic`
+compares RESP2 and RESP3 wire bytes against generic `execute_frame(ZSCAN key 0)`
+for zset/missing/wrong-type and verifies cursor!=0 defers.
+
+MEASURED (SHORT per-crate rch bench, release profile, worker `hz2`):
+`cargo bench --release -p fr-store --bench store_read -- zscan0 --sample-size 20
+--measurement-time 2` was attempted first and rejected by this Cargo as an
+unsupported `--release` flag. Accepted equivalent:
+`cargo bench --profile release -p fr-store --bench store_read -- zscan0 --sample-size 20
+--measurement-time 2`. ORIG clone path `zscan0/count10_clone_pairs` median
+**289.49 ns**; borrowed path `zscan0/count10_borrow_pairs` median **232.41 ns**
+=> **1.25x vs ORIG**.
+
 ## 2026-07-04 CrimsonHawk: KEEP — HSCAN key 0 zero-copy `_into` WIRED LIVE — 2.20x store A/B (byte-exact)
 
 Second SCAN-family `_into` (after SSCAN0). Added `Store::hscan0_borrow_scan` (REUSES `SscanReplyEvent`:

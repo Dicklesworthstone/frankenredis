@@ -611,11 +611,54 @@ fn bench_hrandfield_withvalues(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_zscan0_borrow(c: &mut Criterion) {
+    use fr_store::ZscanReplyEvent;
+
+    const N: usize = 2_000;
+    let mut store = Store::new();
+    for i in 0..N {
+        store
+            .zadd(b"z", &[(i as f64, format!("m{i:04}").into_bytes())], 1_000)
+            .unwrap();
+    }
+
+    let mut g = c.benchmark_group("zscan0");
+    g.bench_function("count10_clone_pairs", |b| {
+        b.iter(|| {
+            let pairs = store
+                .zscan(std::hint::black_box(b"z"), 0, None, 10, 2_000)
+                .unwrap();
+            std::hint::black_box(
+                pairs
+                    .1
+                    .iter()
+                    .map(|(member, score)| member.len() + (*score as usize & 1))
+                    .sum::<usize>(),
+            )
+        })
+    });
+    g.bench_function("count10_borrow_pairs", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            store
+                .zscan0_borrow_scan(std::hint::black_box(b"z"), 0, None, 10, 2_000, |ev| {
+                    if let ZscanReplyEvent::Pair(member, score) = ev {
+                        acc += member.len() + (score as usize & 1);
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(acc)
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
     bench_zrange_withscores,
     bench_restore_zset_listpack,
-    bench_hrandfield_withvalues
+    bench_hrandfield_withvalues,
+    bench_zscan0_borrow
 );
 criterion_main!(benches);

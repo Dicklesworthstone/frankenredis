@@ -8392,12 +8392,19 @@ fn process_buffered_frames(
                     b"*3\r\n$5\r\n",
                     b"ZSCAN",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_zscan0_borrowed(packet.key, packet.arg, ts)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zscan0_borrowed_into(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

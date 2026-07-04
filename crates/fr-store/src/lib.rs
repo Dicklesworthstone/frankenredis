@@ -3105,6 +3105,14 @@ pub enum SscanReplyEvent<'a> {
     Member(&'a [u8]),
 }
 
+/// Event stream for [`Store::zscan0_borrow_scan`]: the `next_cursor` first,
+/// then the pair count, then each borrowed `(member, score)` pair.
+pub enum ZscanReplyEvent<'a> {
+    Cursor(u64),
+    Len(usize),
+    Pair(&'a [u8], f64),
+}
+
 /// (frankenredis-zrange-into) Event stream driven by
 /// [`Store::zrange_withscores_borrow_scan`] / [`Store::zrevrange_withscores_borrow_scan`]:
 /// the pair count (emitted once, first) followed by each `(member, score)` with
@@ -23630,6 +23638,126 @@ impl Store {
         }
     }
 
+    /// Borrow-scan twin for the live `ZSCAN key 0` fast path. Cursor `0` emits
+    /// score-ordered `(member, score)` pairs with borrowed member bytes and still
+    /// records the deletion-safe resume cache for the returned cursor. Non-zero
+    /// cursors fall back to `zscan`, keeping the existing deep-resume behavior.
+    pub fn zscan0_borrow_scan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+        mut sink: impl FnMut(ZscanReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if cursor != 0 {
+            let (next, pairs) = self.zscan(key, cursor, pattern, count, now_ms)?;
+            sink(ZscanReplyEvent::Cursor(next));
+            sink(ZscanReplyEvent::Len(pairs.len()));
+            for (member, score) in &pairs {
+                sink(ZscanReplyEvent::Pair(member, *score));
+            }
+            return Ok(());
+        }
+
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let zset_max_listpack_entries = self.zset_max_listpack_entries;
+        let zset_max_listpack_value = self.zset_max_listpack_value;
+        let mut zscan_pushback: Option<ZScanResume> = None;
+
+        let outcome = match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let fits_listpack = zs.len() <= zset_max_listpack_entries
+                            && zs.keys().all(|k| k.len() <= zset_max_listpack_value);
+                        if fits_listpack {
+                            let refs: Vec<(&[u8], f64)> = zs
+                                .iter_asc()
+                                .filter(|(member, _)| scan_pattern_matches(pattern, member))
+                                .map(|(member, score)| (member, score))
+                                .collect();
+                            sink(ZscanReplyEvent::Cursor(0));
+                            sink(ZscanReplyEvent::Len(refs.len()));
+                            for (member, score) in refs {
+                                sink(ZscanReplyEvent::Pair(member, score));
+                            }
+                            return Ok(());
+                        }
+
+                        let total = zs.len();
+                        if total == 0 {
+                            sink(ZscanReplyEvent::Cursor(0));
+                            sink(ZscanReplyEvent::Len(0));
+                            return Ok(());
+                        }
+
+                        let batch_size = count.max(1);
+                        let window: Vec<(&[u8], f64)> =
+                            zs.iter_asc().take(batch_size).collect();
+                        let examined = window.len();
+                        let last_examined = window.last().map(|(m, s)| (m.to_vec(), *s));
+                        let result: Vec<(&[u8], f64)> = match pattern {
+                            Some(pat) if pat != b"*" => window
+                                .into_iter()
+                                .filter(|(member, _)| glob_match(pat, member))
+                                .collect(),
+                            _ => window,
+                        };
+                        let next = if examined >= total {
+                            0
+                        } else {
+                            examined as u64
+                        };
+                        if next != 0
+                            && let Some((last_member, last_score)) = last_examined
+                        {
+                            zscan_pushback = Some(ZScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                last_member,
+                                last_score,
+                            });
+                        }
+                        sink(ZscanReplyEvent::Cursor(next));
+                        sink(ZscanReplyEvent::Len(result.len()));
+                        for (member, score) in result {
+                            sink(ZscanReplyEvent::Pair(member, score));
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(ZscanReplyEvent::Cursor(0));
+                sink(ZscanReplyEvent::Len(0));
+                Ok(())
+            }
+        };
+        if let Some(pb) = zscan_pushback {
+            self.zscan_cache.push(pb);
+            if self.zscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.zscan_cache.remove(0);
+            }
+        }
+        outcome
+    }
+
     /// ZSCAN: cursor-based iteration over sorted set members.
     #[allow(clippy::type_complexity)]
     pub fn zscan(
@@ -36537,6 +36665,49 @@ mod tests {
             "HSCAN cursor-0 batch(10) @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
             clone_ns / borrow_ns
         );
+    }
+
+    #[test]
+    fn zscan0_borrow_scan_matches_clone() {
+        use crate::ZscanReplyEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.zadd(b"z", &[(f64::from(i), format!("m{i:04}").into_bytes())], 1).unwrap();
+            }
+            s
+        }
+        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<(Vec<u8>, f64)>) {
+            let mut cur = 0u64;
+            let mut out = Vec::new();
+            s.zscan0_borrow_scan(b"z", cursor, pattern, count, 2, |ev| match ev {
+                ZscanReplyEvent::Cursor(c) => cur = c,
+                ZscanReplyEvent::Len(_) => {}
+                ZscanReplyEvent::Pair(member, score) => out.push((member.to_vec(), score)),
+            })
+            .unwrap();
+            (cur, out)
+        }
+        for &n in &[16u32, 1000] {
+            for pat in [None, Some(b"m00*".as_slice())] {
+                let mut clone_store = build(n);
+                let mut borrow_store = build(n);
+                let mut cursor = 0u64;
+                let mut guard = 0;
+                loop {
+                    let (nc, pairs) = clone_store.zscan(b"z", cursor, pat, 10, 2).unwrap();
+                    let (bc, bpairs) = borrow(&mut borrow_store, cursor, pat, 10);
+                    assert_eq!((nc, &pairs), (bc, &bpairs), "n={n} pat={pat:?} cursor={cursor}");
+                    cursor = nc;
+                    guard += 1;
+                    if cursor == 0 || guard > 5000 { break; }
+                }
+            }
+        }
+        let mut z = Store::new();
+        z.set(b"z".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(z.zscan0_borrow_scan(b"z", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
     }
 
     // across a FULL cursor walk, both encodings — SCAN is read-only (no bump/touch under non-LFU),
