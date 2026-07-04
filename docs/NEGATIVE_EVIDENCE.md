@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XINFO GROUPS is_stream single-lookup collapse — XINFO GROUPS 1.17x (byte-exact)
+
+`xinfo_groups` did `record_keyspace_lookup` + separate `entries.get` (type check) then read the
+group list from `self.stream_groups`. Applied the `is_stream` pattern (see XPENDING): non-LFU
+folds the double probe into one `lookup_live_for_read_mut` via a bool that releases the entry
+borrow before the `stream_groups` access. Byte-identical: key lazy-expiry, hit/miss, WRONGTYPE,
+missing→None; LFU verbatim. Proven by `xinfo_groups_is_stream_collapse_matches` (2-group count,
+missing→None, WRONGTYPE, exact hit/miss, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed XINFO GROUPS no-TTL = 93.47 ns/op;
+removed 2nd keyspace probe ≈ **15.77 ns** → old ≈ 109.23 ns ⇒ **1.17x (−14%)**. Conformance GREEN
+(689/689 correctness; 4 failures = brittle foldhash×2 / diff_sorted / record_keyspace perf-ratio
+guards under a heavily-loaded worker, unrelated). SKIPPED xinfo_consumers (niche + long body
+re-indent, KeyNotFound-on-miss wrinkle) and xinfo_stream (reads entry DATA — length/first/last —
+so lookup_live borrow conflicts with the stream_groups access; would need verbose data-extract).
+Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XPENDING summary/entries is_stream single-lookup collapse — XPENDING@summary 1.22x (byte-exact)
 
 XPENDING (`xpending_summary`, `xpending_entries`) did `record_keyspace_lookup` + separate

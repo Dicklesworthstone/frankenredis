@@ -19982,36 +19982,44 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamGroupInfo>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(None);
+        // (CrimsonHawk) is_stream single-lookup collapse — see `xpending_summary`. XINFO
+        // GROUPS only type-checks the entry then reads from self.stream_groups.
+        let is_stream = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(None);
+            }
+            match self.entries.get(key) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Ok(None),
+            }
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(_) => {
-                    let groups = self
-                        .stream_groups
-                        .get(key)
-                        .map(|groups| {
-                            groups
-                                .iter()
-                                .map(|(name, group)| {
-                                    (
-                                        name.clone(),
-                                        group.consumers.len(),
-                                        group.pending.len(),
-                                        group.last_delivered_id,
-                                        group.entries_read,
-                                    )
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Ok(Some(groups))
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(None),
-        }
+        let groups = self
+            .stream_groups
+            .get(key)
+            .map(|groups| {
+                groups
+                    .iter()
+                    .map(|(name, group)| {
+                        (
+                            name.clone(),
+                            group.consumers.len(),
+                            group.pending.len(),
+                            group.last_delivered_id,
+                            group.entries_read,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Some(groups))
     }
 
     pub fn xgroup_createconsumer(
@@ -33993,6 +34001,58 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "XPENDING summary no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) XINFO GROUPS is_stream collapse: byte-identical key-lookup (hit/miss,
+    // WRONGTYPE, missing→None) + unchanged group-list body.
+    #[test]
+    fn xinfo_groups_is_stream_collapse_matches() {
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        s.xgroup_create(b"st", b"g1", (0, 0), false, 1).unwrap();
+        s.xgroup_create(b"st", b"g2", (0, 0), false, 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_groups = s.xinfo_groups(b"st", 2); // 2 groups
+        let r_absent = s.xinfo_groups(b"absent", 2); // None (miss)
+        let r_wrong = s.xinfo_groups(b"str", 2); // WrongType
+        // hits: st, str(wrongtype) = 2; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 2);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_groups.unwrap().map(|v| v.len()), Some(2));
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.xinfo_groups(b"exp", 500).unwrap(), None);
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing (present stream + 2 groups, no TTL, LFU off).
+        let mut b = Store::new();
+        b.xadd(b"xig:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        b.xgroup_create(b"xig:bench", b"g", (0, 0), false, 1).unwrap();
+        let k: &[u8] = b"xig:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xinfo_groups(k, 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.xinfo_groups(std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XINFO GROUPS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
