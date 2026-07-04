@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE (frontier close-out) — clean per-crate clone/borrow/sidemap/RESP3 vein COMPLETE; remaining levers are structural; dispatch-order data captured
+
+Definitive close-out after ~16 borrow/`_into` ships this session. Confirmed from every angle there is no
+clean, MEASURABLE, universal, per-crate LAND left:
+- **Clone/borrow `_into`**: DONE across strings/hash/set/zset/list/stream reads (GET/GETRANGE/HGET/HMGET/
+  HGETALL/HKEYS/HVALS/HSCAN/HRANDFIELD, SMEMBERS/SSCAN/SRANDMEMBER/SINTER, ZRANGE-family/ZSCAN/ZRANDMEMBER,
+  LRANGE/LINDEX, XRANGE/XREVRANGE/XREAD single+multi/XREADGROUP-history). Writes extract owned (no borrow).
+- **Empty-sidemap-fast-exit**: hash (HGET/HDEL/HMGET) guarded; XADD stream side-maps already avoid the
+  per-op `key.to_vec()` (get_mut-first). Exhausted.
+- **RESP3**: zero `if resp3 { return None }` declines remain (XREAD extended); the lone dispatch `!= 3`
+  gate is subscription-mode correctness.
+
+DISPATCH-CHAIN DATA (captured for the structural lever): `process_buffered_frames` is a LINEAR
+`if parse_A {} else if parse_B {}` chain with hot commands manually front-loaded. Execute-call line
+positions: GET 2731, HSET 3078, INCR 3542, ZADD 3636, LLEN 4004, DEL 4193, EXISTS 4216, HGET 4435,
+DECR 5767, HMGET 7508, HGETALL 9699. A command matched at position K pays K failed `strip_prefix`
+checks (mostly cheap byte-1 arity-mismatch fails, but a hot late command like HGET/HMGET/HGETALL pays a
+real ~20-40ns tail). REORDERING is NOT a clean win — mutually-exclusive parsers make it byte-identical,
+but it is ZERO-SUM across workloads (moving one command up pushes others down) and workload-tuned, so it
+would improve a cherry-picked bench while regressing others. The RIGHT fix is **O(1) command-hash /
+first-level (arity-byte, cmdlen-byte) switch dispatch** (the ohsk5 structural lever) — universal, not
+frequency-tuned. NOTE: my 3 new stream parsers (~5975) are all AFTER the front-loaded hot commands, so
+they did NOT regress GET/SET/HSET/INCR (verified).
+
+REMAINING LEVERS ARE ALL STRUCTURAL / multi-session (per alien_cs_graveyard review + memory frontier):
+(1) command-hash dispatch (ohsk5, crowded) — highest universal value; (2) ChunkedList packed nodes
+(99fwc, RPUSH/LPUSH 0.77-0.83x); (3) keyspace/hashtable RAM (p8dd2, ~2x); (4) large-value GET/SET
+fr-server-IO zero-copy (not per-crate-benchable). Graveyard technique matches for these: Adaptive Radix
+Tree (ordered_keys/keyspace), Learned Indexes (keyspace RAM). No clean single-turn per-crate win
+remained this turn. Docs-only close-out.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XREADGROUP history `_into` WIRED LIVE (executed last turn's recipe) — 3.17x store A/B (byte+stats exact vs redis 7.2.4)
 
 Executed the recipe surfaced last turn. Single-key `XREADGROUP GROUP g c [COUNT n] STREAMS key
