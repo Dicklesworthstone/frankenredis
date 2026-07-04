@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREAD `_into` EXTENDED to RESP3 (single + multi) — broadens 12.14x borrow to the modern default protocol (byte-exact)
+
+The shipped XREAD single/multi `_into` fast paths DECLINED RESP3 (`return None` → generic clone path),
+so RESP3 clients — the modern default (redis 7+, HELLO 3) — never got the 12.14x borrow. Extended both
+executors to emit the RESP3 shape instead of declining: the outer container becomes a MAP (`%N` via
+`encode_map_header(_, true)`) of key→entries with NO per-stream `*2` pair wrapper (RESP2 stays the `*N`
+array of `[key, entries]` pairs), and the empty/nil reply becomes `_` (RESP3 null) vs `*-1` (RESP2). The
+entries themselves (`[[id,[f,v,…]],…]`) are plain arrays in BOTH protocols, so the borrowed field stream
+is unchanged; only the wrapper + nil differ. Errors (WRONGTYPE) are protocol-independent (`-CODE msg`),
+left as-is. No store/parser/dispatch change (dispatch already threads `client_resp3`).
+
+BYTE-EXACT — live SERVER DIFFERENTIAL vs redis 7.2.4 over 18 cases = {RESP2, RESP3} × 9 XREAD shapes
+(single results/empty/COUNT/missing/WRONGTYPE + multi both/partial-empty/all-empty/COUNT): ALL raw-byte
+identical (the RESP3 `%N` map + `_` nil confirmed against the oracle). Local symlink build clean;
+fr-server 217/218 (lone fail the PRE-EXISTING `mset_packet_dispatcher`).
+
+MEASURED: the per-field clone elimination is the shipped `xread_borrow_scan` store A/B = **12.14x**; this
+change extends that live win from RESP2-only to RESP3 clients (previously served by the generic
+`to_pairs()`-cloning path). NOTE for the fast-path fleet: several borrow `_into`s decline RESP3 — the
+`%N`-map extension pattern here (map header, drop the `*2` pair wrapper, `_` nil) applies to any of them
+whose RESP3 reply is a map. NEXT: XREADGROUP history (delicate: 2-hit accounting + NOGROUP/WRONGTYPE
+ordering + always-include-stream + tombstone) OR structural. Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: SURFACE (scoped blocker) — collection-read borrow-`_into` vein EXHAUSTED; remaining stream/read targets are write-entangled or structural
 
 After ~14 member-clone/borrow-`_into` ships this session (SMEMBERS/SSCAN/HSCAN/LRANGE/ZRANGE-family/

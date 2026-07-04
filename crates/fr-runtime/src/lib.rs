@@ -26897,9 +26897,6 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if resp3 {
-            return None;
-        }
         if self.policy.gate.max_bulk_len < b"XREAD".len()
             || key.len() > self.policy.gate.max_bulk_len
             || id_arg.len() > self.policy.gate.max_bulk_len
@@ -26959,8 +26956,15 @@ impl Runtime {
                             match ev {
                                 fr_store::XrangeReplyEvent::RecordCount(n) => {
                                     if n == 0 {
-                                        out.extend_from_slice(b"*-1\r\n");
+                                        // Empty XREAD ⇒ nil (`Array(None)`): `*-1` in RESP2, `_` in RESP3.
+                                        out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
+                                    } else if resp3 {
+                                        // RESP3 map: `%1` + key + entries (no `*2` pair wrapper).
+                                        fr_protocol::encode_map_header(1, true, out);
+                                        fr_protocol::encode_bulk_string_slice(Some(key), false, out);
+                                        fr_protocol::encode_aggregate_header(n, false, out);
                                     } else {
+                                        // RESP2 array-of-pairs: `*1` + `*2` + key + entries.
                                         out.extend_from_slice(b"*1\r\n*2\r\n");
                                         fr_protocol::encode_bulk_string_slice(Some(key), false, out);
                                         fr_protocol::encode_aggregate_header(n, false, out);
@@ -27038,9 +27042,6 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if resp3 {
-            return None;
-        }
         if self.policy.gate.max_bulk_len < b"XREAD".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
             || ids.iter().any(|i| i.len() > self.policy.gate.max_bulk_len)
@@ -27123,7 +27124,11 @@ impl Runtime {
                             fr_store::XrangeReplyEvent::RecordCount(n) => {
                                 if n > 0 {
                                     has_records = true;
-                                    chunk.extend_from_slice(b"*2\r\n");
+                                    // RESP2 wraps each stream as an `[key, entries]` *2 pair; the RESP3
+                                    // map emits key then entries directly (no pair wrapper).
+                                    if !resp3 {
+                                        chunk.extend_from_slice(b"*2\r\n");
+                                    }
                                     fr_protocol::encode_bulk_string_slice(
                                         Some(key),
                                         false,
@@ -27166,9 +27171,15 @@ impl Runtime {
             if let Some(reply) = &error_reply {
                 reply.encode_into(out);
             } else if chunks.is_empty() {
-                out.extend_from_slice(b"*-1\r\n");
+                // All requested streams empty ⇒ nil: `*-1` in RESP2, `_` in RESP3.
+                out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
             } else {
-                fr_protocol::encode_aggregate_header(chunks.len(), false, out);
+                // RESP2 array of `[key, entries]` pairs; RESP3 map (`%N`) of key→entries.
+                if resp3 {
+                    fr_protocol::encode_map_header(chunks.len(), true, out);
+                } else {
+                    fr_protocol::encode_aggregate_header(chunks.len(), false, out);
+                }
                 for chunk in &chunks {
                     out.extend_from_slice(chunk);
                 }
