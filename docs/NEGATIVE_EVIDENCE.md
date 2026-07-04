@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HSCAN key 0 zero-copy `_into` WIRED LIVE — 2.20x store A/B (byte-exact)
+
+Second SCAN-family `_into` (after SSCAN0). Added `Store::hscan0_borrow_scan` (REUSES `SscanReplyEvent`:
+sinks `Cursor` first, then `Len` = 2·pairs, then each field/value as a `Member`) — mirrors `hscan`
+EXACTLY (expiry guards, LFU bump, NO touch, listpack full-shot short-circuit, hashtable positional
+`get_index(pos)` batch + `next_cursor`) but on the hashtable encoding collects `Vec<(&[u8], &[u8])>`
+refs (`get_index` yields borrowed `(&[u8], &[u8])`) — eliminating BOTH per-pair clones (bigger win than
+SSCAN, which had one member). `execute_plain_hscan0_borrowed_into` mirrors
+`execute_plain_sscan0_borrowed_into` except `key_type == "hash"`; swapped the fr-server HSCAN-0 dispatch
+`FastReply`→`FastEncodedReply`. Encoding byte-identical to `scan0_reply_from_items(nc, [f,v,...])`
+(inner array = 2N bulk strings), plain array RESP2+RESP3.
+
+BYTE-EXACT: `hscan0_borrow_scan_matches_clone` iterates the FULL cursor walk comparing `(next_cursor,
+flattened [f,v,...])` to clone `hscan` across {16 listpack, 1000 hashtable} × {no-pattern, `f00*`} +
+WRONGTYPE/missing on the SAME store (SCAN read-only). VERIFIED via local symlink-legacy build: compiles
+clean; fr-server 217/218, lone failure the same PRE-EXISTING `mset_packet_dispatcher`, unrelated.
+
+MEASURED (store-level A/B, per-crate rch, HSCAN cursor-0 batch(10) over a 2000-field HASHTABLE hash):
+clone `hscan` = 549.4 ns/op vs borrow = **250.2 ns/op = 2.20x** — now live (field+value both borrowed).
+NEXT: ZSCAN0 (member borrowed + score formatted per-element — same pattern, `SscanReplyEvent` reuse).
+Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SSCAN key 0 zero-copy `_into` WIRED LIVE — 1.80x store A/B (byte-exact)
 
 Executed last turn's scoped-blocker plan: the SSCAN-hashtable member-clone `_into`, the truly

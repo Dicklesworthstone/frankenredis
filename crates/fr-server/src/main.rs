@@ -8325,12 +8325,23 @@ fn process_buffered_frames(
                     b"*3\r\n$5\r\n",
                     b"HSCAN",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_hscan0_borrowed(packet.key, packet.arg, ts)
+                    // (CrimsonHawk) Zero-copy `_into` fast path: stream the HSCAN batch field+value
+                    // pairs borrowed into the write buffer (both-clone elimination). Same gate +
+                    // cursor-0 decline conditions as the RespFrame path ⇒ generic fallthrough
+                    // preserves behaviour.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hscan0_borrowed_into(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

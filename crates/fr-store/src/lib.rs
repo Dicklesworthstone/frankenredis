@@ -23204,6 +23204,111 @@ impl Store {
         }
     }
 
+    /// (CrimsonHawk) Borrow-scan twin of [`Store::hscan`] — streams `(next_cursor, [f,v,f,v,...])`
+    /// via `sink` (reusing [`SscanReplyEvent`]: `Cursor`, then `Len` = 2·pairs, then each field/value
+    /// as a `Member`) with the field+value BORROWED on the HASHTABLE encoding (`get_index` yields
+    /// `(&[u8], &[u8])`), eliminating BOTH per-pair clones. IDENTICAL to `hscan`: same expiry guards,
+    /// LFU bump, NO touch, listpack full-shot short-circuit (cursor→0), and hashtable positional
+    /// `get_index(pos)` batch + `next_cursor`. The listpack full-shot decodes owned (decode-bound,
+    /// no borrow win there) but is byte-identical.
+    pub fn hscan0_borrow_scan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+        mut sink: impl FnMut(SscanReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.hash_field_expires.is_empty() {
+            self.drop_expired_hash_fields(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let max_listpack_entries = self.hash_max_listpack_entries;
+        let max_listpack_value = self.hash_max_listpack_value;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::Hash(h) => {
+                        let fits_listpack = h.len() <= max_listpack_entries
+                            && h.iter().all(|(k, v)| {
+                                k.len() <= max_listpack_value && v.len() <= max_listpack_value
+                            });
+                        if fits_listpack {
+                            let pairs: Vec<(Vec<u8>, Vec<u8>)> = h
+                                .iter()
+                                .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                .collect();
+                            sink(SscanReplyEvent::Cursor(0));
+                            sink(SscanReplyEvent::Len(pairs.len() * 2));
+                            for (f, v) in &pairs {
+                                sink(SscanReplyEvent::Member(f));
+                                sink(SscanReplyEvent::Member(v));
+                            }
+                            return Ok(());
+                        }
+                        let start = cursor as usize;
+                        let batch_size = count.max(1);
+                        let total_fields = h.len();
+                        if start >= total_fields {
+                            sink(SscanReplyEvent::Cursor(0));
+                            sink(SscanReplyEvent::Len(0));
+                            return Ok(());
+                        }
+                        let mut refs: Vec<(&[u8], &[u8])> = Vec::new();
+                        let mut pos = start;
+                        let mut processed = 0;
+                        while pos < total_fields {
+                            let Some((field, value)) = h.get_index(pos) else {
+                                break;
+                            };
+                            pos += 1;
+                            processed += 1;
+                            if !scan_pattern_matches(pattern, field) {
+                                if processed >= batch_size {
+                                    break;
+                                }
+                                continue;
+                            }
+                            refs.push((field, value));
+                            if processed >= batch_size {
+                                break;
+                            }
+                        }
+                        let next = if pos >= total_fields { 0 } else { pos as u64 };
+                        sink(SscanReplyEvent::Cursor(next));
+                        sink(SscanReplyEvent::Len(refs.len() * 2));
+                        for (f, v) in &refs {
+                            sink(SscanReplyEvent::Member(f));
+                            sink(SscanReplyEvent::Member(v));
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SscanReplyEvent::Cursor(0));
+                sink(SscanReplyEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     /// SSCAN: cursor-based iteration over set members.
     pub fn sscan(
         &mut self,
@@ -36193,6 +36298,69 @@ mod tests {
 
     // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield
     // (CrimsonHawk) sscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, members) to clone sscan
+    // (CrimsonHawk) hscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, [f,v,...]) to clone hscan
+    // across a FULL cursor walk, both encodings (same store; SCAN read-only). Measures the hashtable
+    // both-clone (field+value) elimination A/B.
+    #[test]
+    fn hscan0_borrow_scan_matches_clone() {
+        use crate::SscanReplyEvent;
+        fn build(n: u32) -> Store {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i:04}").into_bytes(), 1).unwrap();
+            }
+            s
+        }
+        // borrow returns (next_cursor, flat [f,v,f,v,...]) to compare against clone hscan flattened.
+        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<Vec<u8>>) {
+            let mut cur = 0u64;
+            let mut out = Vec::new();
+            s.hscan0_borrow_scan(b"h", cursor, pattern, count, 2, |ev| match ev {
+                SscanReplyEvent::Cursor(c) => cur = c,
+                SscanReplyEvent::Len(_) => {}
+                SscanReplyEvent::Member(m) => out.push(m.to_vec()),
+            })
+            .unwrap();
+            (cur, out)
+        }
+        for &n in &[16u32, 1000] {
+            for pat in [None, Some(b"f00*".as_slice())] {
+                let mut s = build(n);
+                let mut cursor = 0u64;
+                let mut guard = 0;
+                loop {
+                    let (nc, pairs) = s.hscan(b"h", cursor, pat, 10, 2).unwrap();
+                    let flat: Vec<Vec<u8>> = pairs.into_iter().flat_map(|(f, v)| [f, v]).collect();
+                    let (bc, bflat) = borrow(&mut s, cursor, pat, 10);
+                    assert_eq!((nc, &flat), (bc, &bflat), "n={n} pat={pat:?} cursor={cursor}");
+                    cursor = nc;
+                    guard += 1;
+                    if cursor == 0 || guard > 5000 { break; }
+                }
+            }
+        }
+        let mut z = Store::new();
+        z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(z.hscan0_borrow_scan(b"h", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
+
+        // Timing A/B: hashtable hash, cursor-0 batch (count 10) — clones BOTH field+value.
+        let mut cl = build(2000);
+        let mut bo = build(2000);
+        for _ in 0..2000 { std::hint::black_box(cl.hscan(b"h", 0, None, 10, 2)).ok(); std::hint::black_box(borrow(&mut bo, 0, None, 10)); }
+        let reps = 1_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(cl.hscan(std::hint::black_box(b"h"), 0, None, 10, 2)).ok(); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.hscan0_borrow_scan(std::hint::black_box(b"h"), 0, None, 10, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "HSCAN cursor-0 batch(10) @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
+    }
+
     // across a FULL cursor walk, both encodings — SCAN is read-only (no bump/touch under non-LFU),
     // so both can run on the SAME store. Measures the hashtable batch clone-elimination A/B.
     #[test]
