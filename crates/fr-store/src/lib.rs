@@ -17371,7 +17371,11 @@ impl Store {
         // to the get_mut-else-None arm. Mirrors `Store::spop`'s
         // `if !self.drop_if_expired { return Ok(None); }` guard. RNG state is
         // unchanged: `next_rand()` is only reached when the key exists.
-        if !self.drop_if_expired(key, now_ms) {
+        // (CrimsonHawk) `expires_count != 0 &&` short-circuit: when nothing is volatile the
+        // key can't be expired, so skip the drop probe entirely — the `get_mut`-else-None
+        // below serves the missing case identically (byq16's early-return was already
+        // byte-identical to it). Net: 2 probes → 1 on the common present/no-TTL pop.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -17416,7 +17420,8 @@ impl Store {
         // (frankenredis-byq16) See `zpopmin`: skip the redundant second keyspace
         // lookup on the missing/expired-key path (byte-identical to the
         // get_mut-else-None arm; RNG untouched since the key is absent).
-        if !self.drop_if_expired(key, now_ms) {
+        // (CrimsonHawk) `expires_count != 0 &&` short-circuit — see zpopmin.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -17459,7 +17464,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut-else below re-probes.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -17507,7 +17515,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see zpopmin_count.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -35013,6 +35024,77 @@ mod tests {
         std::hint::black_box((acc, n));
         println!(
             "HSET(borrowed) update no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZPOPMIN/ZPOPMAX (+COUNT) bare-drop / byq16-composed guard: byte-identical
+    // pop min/max, count drain, key-removed-when-empty, WRONGTYPE, missing→None/empty,
+    // NO keyspace stat, eviction via expires_count>0.
+    #[test]
+    fn zpop_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"x".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+        let d0 = s.dirty;
+
+        // Run all ZPOP ops first (they record NO keyspace stat), assert stats BEFORE any
+        // verification get() (which WOULD record), then verify results.
+        let r_min = s.zpopmin(b"z", 2);
+        let r_max = s.zpopmax(b"z", 2);
+        let r_drain = s.zpopmin_count(b"z", 5, 2); // drains, key removed
+        let r_gone = s.zpopmin(b"z", 2);
+        let r_absent = s.zpopmax(b"absent", 2);
+        let r_absent_cnt = s.zpopmax_count(b"absent", 3, 2);
+        let r_wrong1 = s.zpopmin(b"str", 2);
+        let r_wrong2 = s.zpopmax_count(b"str", 2, 2);
+        // ZPOP records NO keyspace stat (bare drop) → hits/misses UNCHANGED.
+        assert_eq!(s.stat_keyspace_hits, h0);
+        assert_eq!(s.stat_keyspace_misses, m0);
+        assert_eq!(r_min.unwrap(), Some((b"a".to_vec(), 1.0)));
+        assert_eq!(r_max.unwrap(), Some((b"c".to_vec(), 3.0)));
+        assert_eq!(r_drain.unwrap(), vec![(b"b".to_vec(), 2.0)]);
+        assert_eq!(r_gone.unwrap(), None);
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(r_absent_cnt.unwrap().is_empty());
+        assert!(matches!(r_wrong1, Err(StoreError::WrongType)));
+        assert!(matches!(r_wrong2, Err(StoreError::WrongType)));
+        assert!(s.dirty > d0);
+        assert!(s.get(b"z", 2).unwrap().is_none(), "emptied zset key removed");
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.zpopmin(b"exp", 500).unwrap(), None, "expired zset → None");
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: representative small zset — refill 16 + pop all 16 (byq16-composed path).
+        let rounds = 60_000u64;
+        let batch: Vec<(f64, Vec<u8>)> = (0..16u32).map(|i| (f64::from(i), format!("m{i}").into_bytes())).collect();
+        let mut b = Store::new();
+        let k: &[u8] = b"zp:bench";
+        for _ in 0..2000 { b.zadd(k, &batch, 1).ok(); for _ in 0..16 { b.zpopmin(k, 2).ok(); } }
+        let t0 = std::time::Instant::now();
+        for _ in 0..rounds {
+            b.zadd(std::hint::black_box(k), &batch, 1).ok();
+            for _ in 0..16 { std::hint::black_box(b.zpopmin(std::hint::black_box(k), 2)).ok(); }
+        }
+        let full = t0.elapsed().as_nanos() as f64 / (rounds * 16) as f64;
+        let mut c = Store::new();
+        c.zadd(b"probe", &[(1.0, b"m".to_vec())], 1).unwrap();
+        let pk: &[u8] = b"probe";
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(c.entries.contains_key(std::hint::black_box(pk))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZPOPMIN small-zset no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

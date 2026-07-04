@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZPOPMIN/ZPOPMAX (+COUNT) bare-drop guard — ZPOPMIN small-zset 1.07x (byte-exact)
+
+The zset pop family (hot for priority-queue / job-queue workloads): `zpopmin_count`/`zpopmax_count`
+had plain bare drops → guarded with `if expires_count != 0 { drop }` (get_mut-else re-probes).
+`zpopmin`/`zpopmax` (non-count, the common form) already used the byq16 optimization
+(`if !drop { return None }` — drop's return load-bearing for the missing-path early-return); COMPOSED
+the guard as `if expires_count != 0 && !drop { return None }`. **The `&&` short-circuit is
+byte-identical AND net-faster: when nothing is volatile the key can't be expired, so skip the drop
+probe and let the existing get_mut-else-None serve the missing case (byq16's early-return was
+already byte-identical to it) — 2 probes → 1 on the common present/no-TTL pop.** Proven by
+`zpop_bare_drop_guard_matches` (pop min/max, count drain, key-removed-when-empty, WRONGTYPE,
+missing→None/empty, the no-stat behavior, eviction via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZPOPMIN small-zset (refill 16 + pop
+16) no-TTL = 137.63 ns/op; elided drop's `contains_key` ≈ **9.31 ns** → old ≈ 146.94 ns ⇒ **1.07x
+(−6%)** (the zadd-refill contamination + treap pop inflate the baseline; pure zpopmin ≈ 1.10x).
+Conformance GREEN (704/704, fully clean run). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — hset_borrowed + xadd bare-drop guard — HSET(borrowed) 1.22x (byte-exact)
 
 Two HOT writes with unguarded bare drops (the guard was applied to ~13 other writes earlier but
