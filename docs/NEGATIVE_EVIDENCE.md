@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XINFO STREAM direct single-lookup collapse — XINFO STREAM 1.09x (byte-exact)
+
+`xinfo_stream` did `record_keyspace_lookup` + separate `entries.get`. Earlier I'd assumed it read
+`stream_groups` (borrow conflict) — WRONG: it reads the stream bounds (len + first/last entry)
+DIRECTLY from the entry and returns, no side-map access, no touch/LFU-bump. So it's a clean DIRECT
+collapse (SCARD pattern): non-LFU → `lookup_live_for_read_mut`. Byte-identical: key lazy-expiry,
+hit/miss, WRONGTYPE, missing→None; LFU verbatim. Proven by `xinfo_stream_collapse_matches`
+(len + first/last IDs, missing→None, WRONGTYPE, exact hit/miss, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed XINFO STREAM no-TTL = 111.76 ns/op;
+removed 2nd keyspace probe ≈ **10.03 ns** → old ≈ 121.79 ns ⇒ **1.09x (−8%)** (modest — the
+first/last-entry `to_pairs()` clones dominate the baseline). Conformance GREEN (693/693
+correctness; lone failure = brittle `diff_sorted_i64_adaptive` perf-ratio guard under load,
+unrelated). **KEYSPACE-PROBE COLLAPSE/GUARD SURFACE NOW COMPREHENSIVELY COVERED across reads +
+writes (27 wins this arc).** Only genuinely-remaining: xinfo_consumers (niche+verbose re-indent),
+OBJECT introspection (~0-value), XREAD/XREADGROUP (complex PEL writes), LFU-path redundant
+contains_key (15+ edits, LFU-only). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XINFO GROUPS is_stream single-lookup collapse — XINFO GROUPS 1.17x (byte-exact)
 
 `xinfo_groups` did `record_keyspace_lookup` + separate `entries.get` (type check) then read the

@@ -19731,6 +19731,27 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamInfoBounds>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Reads stream bounds
+        // directly from the entry (no side-map), no touch/LFU-bump → clean direct fold.
+        // Byte-identical: key lazy-expiry, hit/miss, WRONGTYPE, missing→None. LFU verbatim.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Stream(entries) => {
+                        let len = entries.len();
+                        let first = entries
+                            .first_key_value()
+                            .map(|(id, fields)| (*id, fields.to_pairs()));
+                        let last = entries
+                            .last_key_value()
+                            .map(|(id, fields)| (*id, fields.to_pairs()));
+                        Ok(Some((len, first, last)))
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -34053,6 +34074,59 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "XINFO GROUPS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) XINFO STREAM direct collapse: byte-identical bounds (len/first/last),
+    // WRONGTYPE, missing→None, keyspace hit/miss, key lazy-expiry.
+    #[test]
+    fn xinfo_stream_collapse_matches() {
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_bounds = s.xinfo_stream(b"st", 2);
+        let r_absent = s.xinfo_stream(b"absent", 2);
+        let r_wrong = s.xinfo_stream(b"str", 2);
+        // hits: st, str(wrongtype) = 2; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 2);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        let (len, first, last) = r_bounds.unwrap().unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(first.map(|(id, _)| id), Some((1, 0)));
+        assert_eq!(last.map(|(id, _)| id), Some((3, 0)));
+        assert_eq!(r_absent.unwrap(), None);
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.xinfo_stream(b"exp", 500).unwrap(), None);
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing (present stream, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 1..=16u64 { b.xadd(b"xis:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        let k: &[u8] = b"xis:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xinfo_stream(k, 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.xinfo_stream(std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XINFO STREAM no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
