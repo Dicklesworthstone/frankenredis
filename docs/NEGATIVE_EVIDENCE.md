@@ -4,6 +4,21 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: NEGATIVE (verified) — SMISMEMBER set-lookup path is already h2-optimized; residual is fundamental packed-layout cost, not a bounded lever
+
+Follow-up to the sweep negative below: VERIFIED (not assumed) the SMISMEMBER `s.contains` root-cause is
+not addressable per-crate. `CompactStrSet.contains` → `CompactFieldMap.contains_key`, and
+`CompactFieldMap` ALREADY carries the **SwissTable h2 trick** — a per-slot 1-byte hash tag (top byte of
+the field hash) compared BEFORE the `order`→arena decode + `memcmp`, so a tag mismatch skips the arena
+touch entirely (packed_set.rs `tags: Vec<u8>` + `lookup()`). Combined with the foldhash hasher (already
+fast, not SipHash), the packed-set lookup is at the floor for that representation. Since the reverted
+large-N fast path caught the 100-member SMISMEMBER EARLY in the dispatch chain yet still measured
+~0-gain, the command is genuinely `store.smismember`-compute-bound (100 h2 lookups + a 100-flag reply) —
+the residual 0.84x vs redis is the fundamental packed-layout arena-decode cost (RAM-vs-speed tradeoff,
+p8dd2), NOT a clean bounded lever. The Vec<bool> intermediate is a single ~100-byte alloc (measured
+negligible). PERF FRONTIER VERIFIED COMPLETE for clean per-crate levers; the only remaining perf work is
+structural (command-hash dispatch ohsk5 / ChunkedList 99fwc / keyspace-&-set-representation RAM p8dd2).
+
 ## 2026-07-04 CrimsonHawk: NEGATIVE (measured, don't re-chase) — data-driven head-to-head sweep confirms only losses are STRUCTURAL; SMISMEMBER large-N argv-alloc = ~0-gain (reverted)
 
 Ran the data-driven `scripts/broad_command_headtohead.py` sweep (fr vs redis-7.2.4, pipe=200) to find
