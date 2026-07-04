@@ -32,6 +32,13 @@ fn bench_get(c: &mut Criterion) {
         let pairs: &[&[u8]] = &[b"f0", b"v0", b"f1", b"v1", b"f2", b"v2"];
         store.hset_borrowed_many(b"hh", pairs, 1_000).unwrap();
     }
+    // Stream group with consumers, for the XINFO CONSUMERS single-lookup collapse.
+    store
+        .xadd(b"xic", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1_000)
+        .unwrap();
+    store.xgroup_create(b"xic", b"g", (0, 0), false, 1_000).unwrap();
+    store.xgroup_createconsumer(b"xic", b"g", b"c1", 1_001).unwrap();
+    store.xgroup_createconsumer(b"xic", b"g", b"c2", 1_002).unwrap();
 
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
@@ -142,6 +149,15 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("hget_no_fieldttl", |b| {
         b.iter(|| {
             std::hint::black_box(store.hget(std::hint::black_box(b"hh"), std::hint::black_box(b"f0"), 2_000))
+        })
+    });
+    g.bench_function("xinfo_consumers_no_ttl", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.xinfo_consumers(
+                std::hint::black_box(b"xic"),
+                std::hint::black_box(b"g"),
+                2_000,
+            ))
         })
     });
     // HDEL of 50 fields on a hashtable with NO field TTLs (the common case): the candidate

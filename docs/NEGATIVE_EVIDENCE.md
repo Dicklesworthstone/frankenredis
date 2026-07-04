@@ -21,6 +21,26 @@ removed 2nd probe ≈ **14.31 ns** → old ≈ 91.07 ns ⇒ **1.19x (−16%)**. 
 0-1 entries.) Conformance GREEN (694/694 correctness; lone failure = brittle `zdiff_resolve_once`
 perf-ratio guard under load, unrelated). Landed via clean origin/main worktree.
 
+## 2026-07-04 CrimsonHawk: KEEP — XINFO CONSUMERS is_stream single-lookup collapse — XINFO CONSUMERS 1.10x vs ORIG path (byte-exact)
+
+`xinfo_consumers` still did `record_keyspace_lookup` + separate `entries.get` to type-check the
+stream before reading the actual consumer state from `stream_groups`. Applied the XINFO GROUPS /
+XPENDING side-map pattern: non-LFU uses one `lookup_live_for_read_mut`, records the same hit/miss,
+releases the entry borrow, then reads `stream_groups`; LFU stays verbatim. Byte-identical for
+consumer rows/order, group-missing `None`, missing/expired stream `KeyNotFound`, WRONGTYPE, and
+lazy expiry. Proven by `xinfo_consumers_is_stream_collapse_matches`.
+
+MEASURED (per-crate via `rch exec`, local fallback when workers unavailable): conservative
+post-rebase RCH run on `hz2` collapsed XINFO CONSUMERS no-TTL = 97.60 ns/op; removed 2nd keyspace
+probe = 9.67 ns; ORIG path estimate = 107.27 ns ⇒ **1.10x**. Earlier local fallback measured
+80.80 ns + 12.29 ns probe ⇒ 1.15x; keeping the lower same-turn ratio. Required `cargo bench
+--release -p fr-store --bench store_read -- xinfo_consumers_no_ttl` reached worker `vmi1153651`
+but Cargo rejects `--release` for `bench`; release-equivalent fallback `cargo bench --profile
+release -p fr-store --bench store_read -- xinfo_consumers_no_ttl` passed, Criterion 82.05-85.12
+ns. Conformance GREEN locally with the legacy oracle symlink (RCH remote conformance excludes
+`legacy_redis_code`): `cargo test -p fr-conformance -- --nocapture` all `ok` (main 194 tests +
+smoke 99 + bins/doctests). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — XINFO STREAM direct single-lookup collapse — XINFO STREAM 1.09x (byte-exact)
 
 `xinfo_stream` did `record_keyspace_lookup` + separate `entries.get`. Earlier I'd assumed it read

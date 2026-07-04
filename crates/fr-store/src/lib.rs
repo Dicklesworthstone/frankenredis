@@ -20118,71 +20118,81 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamConsumerInfoEx>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Err(StoreError::KeyNotFound);
+        // XINFO CONSUMERS only type-checks the entry, then reads the consumer
+        // state from `stream_groups`. On non-LFU reads, fold the stat-counting
+        // lookup and type-check into one live lookup, release the entry borrow,
+        // then read groups.
+        let is_stream = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Err(StoreError::KeyNotFound),
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Err(StoreError::KeyNotFound);
+            }
+            match self.entries.get(key) {
+                Some(entry) => matches!(&entry.value, Value::Stream(_)),
+                None => return Err(StoreError::KeyNotFound),
+            }
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(_) => {
-                    let Some(groups) = self.stream_groups.get(key) else {
-                        return Ok(None);
-                    };
-                    let Some(group_state) = groups.get(group) else {
-                        return Ok(None);
-                    };
-                    debug_assert_eq!(
-                        group_state.consumers.len(),
-                        group_state.consumer_states.len(),
-                        "stream consumer state drift"
-                    );
-                    let mut result: Vec<StreamConsumerInfoEx> =
-                        Vec::with_capacity(group_state.consumer_states.len());
-                    for (consumer_name, consumer_state) in &group_state.consumer_states {
-                        let pending_count = consumer_state.pending_count;
-                        // (frankenredis-p4dpj) Idle = ms since seen_time;
-                        // for legacy compatibility (consumers restored
-                        // from RDB with seen_time = 0) fall back to
-                        // the last_delivered_ms across pending entries.
-                        let metadata = consumer_state.metadata;
-                        let idle_ms = if metadata.seen_time_ms > 0 {
-                            now_ms.saturating_sub(metadata.seen_time_ms)
-                        } else {
-                            let last_delivery = group_state
-                                .pending
-                                .values()
-                                .filter(|pe| pe.consumer == *consumer_name)
-                                .map(|pe| pe.last_delivered_ms)
-                                .max()
-                                .unwrap_or(0);
-                            if last_delivery > 0 {
-                                now_ms.saturating_sub(last_delivery)
-                            } else {
-                                0
-                            }
-                        };
-                        // (frankenredis-p4dpj) inactive = ms since
-                        // active_time when set; -1 sentinel otherwise
-                        // (matching upstream consumer->active_time =
-                        // -1 default until first XREADGROUP/XCLAIM).
-                        let inactive_ms_or_neg_one: i64 = match metadata.active_time_ms {
-                            Some(at) if at > 0 => {
-                                i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
-                            }
-                            _ => -1,
-                        };
-                        result.push((
-                            consumer_name.clone(),
-                            pending_count,
-                            idle_ms,
-                            inactive_ms_or_neg_one,
-                        ));
-                    }
-                    Ok(Some(result))
+        let Some(groups) = self.stream_groups.get(key) else {
+            return Ok(None);
+        };
+        let Some(group_state) = groups.get(group) else {
+            return Ok(None);
+        };
+        debug_assert_eq!(
+            group_state.consumers.len(),
+            group_state.consumer_states.len(),
+            "stream consumer state drift"
+        );
+        let mut result: Vec<StreamConsumerInfoEx> =
+            Vec::with_capacity(group_state.consumer_states.len());
+        for (consumer_name, consumer_state) in &group_state.consumer_states {
+            let pending_count = consumer_state.pending_count;
+            // (frankenredis-p4dpj) Idle = ms since seen_time;
+            // for legacy compatibility (consumers restored
+            // from RDB with seen_time = 0) fall back to
+            // the last_delivered_ms across pending entries.
+            let metadata = consumer_state.metadata;
+            let idle_ms = if metadata.seen_time_ms > 0 {
+                now_ms.saturating_sub(metadata.seen_time_ms)
+            } else {
+                let last_delivery = group_state
+                    .pending
+                    .values()
+                    .filter(|pe| pe.consumer == *consumer_name)
+                    .map(|pe| pe.last_delivered_ms)
+                    .max()
+                    .unwrap_or(0);
+                if last_delivery > 0 {
+                    now_ms.saturating_sub(last_delivery)
+                } else {
+                    0
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Err(StoreError::KeyNotFound),
+            };
+            // (frankenredis-p4dpj) inactive = ms since
+            // active_time when set; -1 sentinel otherwise
+            // (matching upstream consumer->active_time =
+            // -1 default until first XREADGROUP/XCLAIM).
+            let inactive_ms_or_neg_one: i64 = match metadata.active_time_ms {
+                Some(at) if at > 0 => {
+                    i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
+                }
+                _ => -1,
+            };
+            result.push((
+                consumer_name.clone(),
+                pending_count,
+                idle_ms,
+                inactive_ms_or_neg_one,
+            ));
         }
+        Ok(Some(result))
     }
 
     pub fn xgroup_delconsumer(
@@ -34210,6 +34220,75 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "XREAD poll (0 new) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) XINFO CONSUMERS is_stream collapse: byte-identical missing
+    // KeyNotFound, WRONGTYPE, group-missing None, consumer rows, keyspace hit/miss, expiry.
+    #[test]
+    fn xinfo_consumers_is_stream_collapse_matches() {
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        s.xgroup_create(b"st", b"g", (0, 0), false, 1).unwrap();
+        s.xgroup_createconsumer(b"st", b"g", b"c2", 2).unwrap();
+        s.xgroup_createconsumer(b"st", b"g", b"c1", 3).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_consumers = s.xinfo_consumers(b"st", b"g", 10);
+        let r_no_group = s.xinfo_consumers(b"st", b"missing", 10);
+        let r_absent = s.xinfo_consumers(b"absent", b"g", 10);
+        let r_wrong = s.xinfo_consumers(b"str", b"g", 10);
+        // hits: st consumers + st missing-group + str(wrongtype) = 3; miss: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 3);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        let consumers = r_consumers.unwrap().unwrap();
+        assert_eq!(
+            consumers
+                .into_iter()
+                .map(|(name, _pending, _idle, _inactive)| name)
+                .collect::<Vec<_>>(),
+            vec![b"c1".to_vec(), b"c2".to_vec()]
+        );
+        assert_eq!(r_no_group.unwrap(), None);
+        assert_eq!(r_absent, Err(StoreError::KeyNotFound));
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry turns an expired stream into the same KeyNotFound surface as a miss.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(
+            t.xinfo_consumers(b"exp", b"g", 500),
+            Err(StoreError::KeyNotFound)
+        );
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing (present stream + group + 2 consumers, no TTL, LFU off).
+        let mut b = Store::new();
+        b.xadd(b"xic:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        b.xgroup_create(b"xic:bench", b"g", (0, 0), false, 1).unwrap();
+        b.xgroup_createconsumer(b"xic:bench", b"g", b"c1", 2).unwrap();
+        b.xgroup_createconsumer(b"xic:bench", b"g", b"c2", 3).unwrap();
+        let k: &[u8] = b"xic:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xinfo_consumers(k, b"g", 10)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(b.xinfo_consumers(std::hint::black_box(k), b"g", 10)).ok();
+        }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XINFO CONSUMERS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
