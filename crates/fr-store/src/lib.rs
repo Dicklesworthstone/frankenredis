@@ -3118,6 +3118,17 @@ pub enum XrangeReplyEvent<'a> {
     Field(&'a [u8]),
 }
 
+/// (CrimsonHawk) Event stream for the XREADGROUP history (explicit-id) borrow-scan
+/// ([`Store::xreadgroup_history_borrow_scan`]): like [`XrangeReplyEvent`] but with a
+/// `RecordStartNil` variant for PEL tombstones — a pending entry whose underlying stream entry was
+/// `XDEL`'d renders as `[id, nil]` (a nil value array), not `[id, []]`.
+pub enum XreadgroupHistEvent<'a> {
+    RecordCount(usize),
+    RecordStart(StreamId, usize),
+    RecordStartNil(StreamId),
+    Field(&'a [u8]),
+}
+
 /// Event stream for [`Store::zscan0_borrow_scan`]: the `next_cursor` first,
 /// then the pair count, then each borrowed `(member, score)` pair.
 pub enum ZscanReplyEvent<'a> {
@@ -20467,6 +20478,109 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", logical, db);
         } else {
             self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", key, 0);
+        }
+    }
+
+    /// (CrimsonHawk) No-stat eligibility gate for the XREADGROUP-history borrow `_into` fast path:
+    /// true iff `key` is a live Stream with NO TTL, group `group` exists, and consumer `consumer`
+    /// already exists in it. The no-TTL clause is load-bearing — it sidesteps the expiry hazard where
+    /// a no-drop peek would let an expired key through only for `record_keyspace_lookup` to drop it
+    /// mid-serve (→ NOGROUP divergence). Every `false` case defers to the generic path byte+stats-exact
+    /// (this method records nothing and mutates nothing).
+    pub fn xreadgroup_history_eligible(&self, key: &[u8], group: &[u8], consumer: &[u8]) -> bool {
+        if self.expiry_deadlines.contains_key(key) {
+            return false;
+        }
+        let Some(entry) = self.entries.get(key) else {
+            return false;
+        };
+        if !matches!(&entry.value, Value::Stream(_)) {
+            return false;
+        }
+        let Some(groups) = self.stream_groups.get(key) else {
+            return false;
+        };
+        let Some(group_state) = groups.get(group) else {
+            return false;
+        };
+        group_state.consumers.contains(consumer)
+    }
+
+    /// (CrimsonHawk) Borrow-scan for XREADGROUP history (explicit id). PRECONDITION:
+    /// [`Store::xreadgroup_history_eligible`] returned true (stream + group + consumer exist, no TTL),
+    /// so this always serves. Mirrors the [`Store::xreadgroup`] history path side-for-side —
+    /// `invalidate_stream_pel_summary`, `record_keyspace_lookup` (hit; no drop, no-TTL), consumer
+    /// `insert_consumer` (no-op, gated existing) + `touch_consumer_active` (HOISTED before the borrowed
+    /// read: mut-then-immut, output-invariant), then the `pending.range((Excluded(start),Unbounded))`
+    /// walk filtered by consumer with each entry's fields BORROWED from the packed buffer (or a
+    /// `RecordStartNil` tombstone when the underlying stream entry was `XDEL`'d). `RecordCount` first.
+    pub fn xreadgroup_history_borrow_scan(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        start_id: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+        mut sink: impl FnMut(XreadgroupHistEvent<'_>),
+    ) {
+        self.invalidate_stream_pel_summary(key, group);
+        let _ = self.record_keyspace_lookup(key, now_ms);
+        if let Some(groups) = self.stream_groups.get_mut(key)
+            && let Some(group_state) = groups.get_mut(group)
+        {
+            group_state.insert_consumer(consumer.to_vec());
+            group_state.touch_consumer_active(consumer, now_ms);
+        }
+        let limit = count.unwrap_or(usize::MAX);
+        let entries = match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => entries,
+                _ => {
+                    sink(XreadgroupHistEvent::RecordCount(0));
+                    return;
+                }
+            },
+            None => {
+                sink(XreadgroupHistEvent::RecordCount(0));
+                return;
+            }
+        };
+        let Some(group_state) = self
+            .stream_groups
+            .get(key)
+            .and_then(|groups| groups.get(group))
+        else {
+            sink(XreadgroupHistEvent::RecordCount(0));
+            return;
+        };
+        let mut records: Vec<(StreamId, Option<_>)> = Vec::new();
+        if limit > 0 {
+            for (id, pending_entry) in group_state
+                .pending
+                .range((Excluded(start_id), Unbounded))
+            {
+                if pending_entry.consumer.as_slice() != consumer {
+                    continue;
+                }
+                records.push((*id, entries.get(*id)));
+                if records.len() >= limit {
+                    break;
+                }
+            }
+        }
+        sink(XreadgroupHistEvent::RecordCount(records.len()));
+        for (id, fields) in &records {
+            match fields {
+                Some(fields) => {
+                    sink(XreadgroupHistEvent::RecordStart(*id, fields.len()));
+                    for (field, value) in fields.iter() {
+                        sink(XreadgroupHistEvent::Field(field));
+                        sink(XreadgroupHistEvent::Field(value));
+                    }
+                }
+                None => sink(XreadgroupHistEvent::RecordStartNil(*id)),
+            }
         }
     }
 
@@ -45755,6 +45869,76 @@ mod tests {
             store.xread(b"str", (0, 0), None, 0),
             Err(StoreError::WrongType)
         );
+    }
+
+    // (CrimsonHawk) xreadgroup_history_borrow_scan reconstructs BYTE-IDENTICAL records to clone
+    // xreadgroup(Id cursor) — live PEL + tombstones (XDEL'd pending → nil). Measures the per-field
+    // clone-elimination A/B.
+    #[test]
+    fn xreadgroup_history_borrow_scan_matches_clone() {
+        use crate::{StreamGroupReadCursor, XreadgroupHistEvent};
+        type Rec = Vec<(crate::StreamId, Option<Vec<(Vec<u8>, Vec<u8>)>>)>;
+        fn build(n: u64) -> Store {
+            let mut s = Store::new();
+            for i in 1..=n {
+                s.xadd(
+                    b"s",
+                    (1000, i),
+                    &[
+                        (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()),
+                        (b"fb".to_vec(), vec![b'z'; 20]),
+                    ],
+                    0,
+                )
+                .unwrap();
+            }
+            s.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap();
+            s.xreadgroup(b"s", b"g", b"c", group_read_options(StreamGroupReadCursor::NewEntries, false, None), 0)
+                .unwrap();
+            s
+        }
+        fn clone_hist(s: &mut Store) -> Rec {
+            let recs = s
+                .xreadgroup(b"s", b"g", b"c", group_read_options(StreamGroupReadCursor::Id((0, 0)), false, None), 0)
+                .unwrap()
+                .unwrap();
+            recs.into_iter().map(|(id, f)| (id, if f.is_empty() { None } else { Some(f) })).collect()
+        }
+        fn borrow_hist(s: &mut Store) -> Rec {
+            let mut recs: Rec = Vec::new();
+            let mut pending: Option<Vec<u8>> = None;
+            s.xreadgroup_history_borrow_scan(b"s", b"g", b"c", (0, 0), None, 0, |ev| match ev {
+                XreadgroupHistEvent::RecordCount(_) => {}
+                XreadgroupHistEvent::RecordStart(id, _) => recs.push((id, Some(Vec::new()))),
+                XreadgroupHistEvent::RecordStartNil(id) => recs.push((id, None)),
+                XreadgroupHistEvent::Field(f) => match pending.take() {
+                    None => pending = Some(f.to_vec()),
+                    Some(name) => recs.last_mut().unwrap().1.as_mut().unwrap().push((name, f.to_vec())),
+                },
+            });
+            recs
+        }
+        let mut s = build(5);
+        assert_eq!(clone_hist(&mut s), borrow_hist(&mut s), "live history");
+        let mut s2 = build(5);
+        s2.xdel(b"s", &[(1000, 2), (1000, 4)], 0).unwrap();
+        assert_eq!(clone_hist(&mut s2), borrow_hist(&mut s2), "tombstone history");
+
+        // Timing A/B: 400 pending entries x2 fields (borrow side does NOT reconstruct).
+        let mut cl = build(400);
+        let mut bo = build(400);
+        for _ in 0..200 {
+            std::hint::black_box(clone_hist(&mut cl));
+            bo.xreadgroup_history_borrow_scan(b"s", b"g", b"c", (0, 0), None, 0, |ev| { std::hint::black_box(&ev); });
+        }
+        let reps = 20_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(clone_hist(&mut cl)); }
+        let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps { bo.xreadgroup_history_borrow_scan(std::hint::black_box(b"s"), b"g", b"c", (0, 0), None, 0, |ev| { std::hint::black_box(&ev); }); }
+        let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!("XREADGROUP history @400 pending x2 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x", clone_ns / borrow_ns);
     }
 
     #[test]

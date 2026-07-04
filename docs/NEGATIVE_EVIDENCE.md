@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XREADGROUP history `_into` WIRED LIVE (executed last turn's recipe) — 3.17x store A/B (byte+stats exact vs redis 7.2.4)
+
+Executed the recipe surfaced last turn. Single-key `XREADGROUP GROUP g c [COUNT n] STREAMS key
+<explicit-id>` (the re-read-pending HISTORY read) now streams the consumer's PEL entries' fields
+BORROWED into `out` instead of the generic `to_pairs()` clone. Added: `Store::xreadgroup_history_eligible`
+(no-stat gate: live Stream + group + consumer + NO TTL — the no-TTL clause sidesteps the expiry hazard),
+`Store::xreadgroup_history_borrow_scan` (mirrors the `xreadgroup` history path — `invalidate_stream_pel_
+summary`, `record_keyspace_lookup`, consumer touch HOISTED before the borrowed `pending.range` walk,
+`entries.get(id)`→FieldsRef borrow or tombstone; disjoint `entries`×`stream_groups` field borrows), a new
+`XreadgroupHistEvent` with a `RecordStartNil` tombstone variant, a `*7`/`*9` byte-prefix parser (COUNT
+tied to the exact array count so multi-key `*9` is rejected not mis-framed; `>`/NOACK/multi defer), and
+`execute_plain_xreadgroup_history_borrowed_into` (eligibility-gate decline-to-generic; 2-hit accounting
+`exists_no_touch` + borrow-scan; history ALWAYS emits `[key, entries]`; tombstone `[id, nil]`; RESP2
+array-of-pairs / RESP3 `%1` map).
+
+BYTE + STATS EXACT — live SERVER DIFFERENTIAL vs redis 7.2.4 over 16 cases = {RESP2, RESP3} × 8 XREADGROUP
+shapes (history-with-tombstone, COUNT, mid-stream, unknown-consumer→created+empty, NOGROUP, WRONGTYPE,
+missing-key, `>`): the reply bytes AND `keyspace_hits`/`keyspace_misses` ALL matched — the stats check
+confirms the 2-hit accounting + the eligibility gate declining every non-happy-path case (unknown
+consumer / nogroup / wrongtype / missing / `>`) to generic exactly. Store-level `xreadgroup_history_
+borrow_scan_matches_clone` (live + tombstone). Local symlink build clean; fr-server 217/218 (lone fail the
+PRE-EXISTING `mset_packet_dispatcher`) + fr-store tests GREEN.
+
+MEASURED (store-level A/B, per-crate rch, history read over a 400-entry PEL × 2 fields): clone
+`xreadgroup(Id)` = 64979 ns/op vs borrow = **20480 ns/op = 3.17x** (lower than XREAD's 12x — the PEL
+`range` walk + per-id `entries.get` is a larger share of the op — but a solid win on a heavily-used
+consumer-group path). STREAM read-clone vein now covers XRANGE/XREVRANGE/XREAD(single+multi)/XREADGROUP-
+history. The `>` write path stays generic (data-integrity risk not worth a perf win). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: SURFACE — RESP3-decline/hash-sidemap/XADD veins all confirmed dry; XREADGROUP-history de-risked into an executable recipe for next turn
 
 Audited three quick-win sub-veins this turn; all exhausted:

@@ -27220,6 +27220,150 @@ impl Runtime {
         argv
     }
 
+    /// (CrimsonHawk) Zero-copy `_into` fast path for single-key `XREADGROUP GROUP g c [COUNT n]
+    /// STREAMS key <explicit-id>` — the HISTORY (re-read pending) read. Streams the consumer's PEL
+    /// entries' fields BORROWED into `out` (3.17x store A/B). A no-stat eligibility gate
+    /// (`xreadgroup_history_eligible`: stream + group + consumer + NO TTL) DECLINES every error / `>` /
+    /// NOACK / missing case to the generic path byte+stats-exact; only the clean happy path is served.
+    /// 2-hit accounting: `exists_no_touch` (resolution) + `xreadgroup_history_borrow_scan`
+    /// (`record_keyspace_lookup`). History ALWAYS includes the stream (`[key, entries]`, entries maybe
+    /// empty); tombstones (XDEL'd pending) render `[id, nil]`. RESP2 array-of-pairs / RESP3 `%1` map.
+    pub fn execute_plain_xreadgroup_history_borrowed_into(
+        &mut self,
+        group: &[u8],
+        consumer: &[u8],
+        key: &[u8],
+        id_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_bulk_len < b"XREADGROUP".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || group.len() > self.policy.gate.max_bulk_len
+            || consumer.len() > self.policy.gate.max_bulk_len
+            || id_arg.len() > self.policy.gate.max_bulk_len
+            || count_arg.is_some_and(|c| c.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        // Only the explicit-id HISTORY read; `>` (new-entries write path) + specials defer to generic.
+        if id_arg == b">"
+            || id_arg == b"-"
+            || id_arg == b"+"
+            || id_arg == b"$"
+            || id_arg.first() == Some(&b'(')
+        {
+            return None;
+        }
+        let start_id = fr_command::parse_stream_range_bound(id_arg, true).ok()?;
+        let count = match count_arg {
+            None => None,
+            Some(c) => {
+                let n = parse_i64_arg(c).ok()?;
+                if n > 0 {
+                    Some(usize::try_from(n).unwrap_or(usize::MAX))
+                } else {
+                    None
+                }
+            }
+        };
+        // No-stat eligibility: decline everything but the clean happy path (→ generic byte+stats-exact).
+        if !self
+            .server
+            .store
+            .xreadgroup_history_eligible(key, group, consumer)
+        {
+            return None;
+        }
+        let argv_len_sum = b"XREADGROUP".len()
+            + b"GROUP".len()
+            + group.len()
+            + consumer.len()
+            + count_arg.map_or(0, |c| b"COUNT".len() + c.len())
+            + b"STREAMS".len()
+            + key.len()
+            + id_arg.len();
+        let packet_id = self.plain_read_borrowed_preamble("xreadgroup", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        // Resolution-loop lookup (hit 1); the borrow-scan's record_keyspace_lookup is hit 2.
+        let _ = self.server.store.exists_no_touch(key, now_ms);
+        self.server.store.xreadgroup_history_borrow_scan(
+            key,
+            group,
+            consumer,
+            start_id,
+            count,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::XreadgroupHistEvent::RecordCount(n) => {
+                        // History ALWAYS includes the stream (even empty ⇒ `[key, []]`).
+                        if resp3 {
+                            fr_protocol::encode_map_header(1, true, out);
+                        } else {
+                            out.extend_from_slice(b"*1\r\n*2\r\n");
+                        }
+                        fr_protocol::encode_bulk_string_slice(Some(key), false, out);
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::XreadgroupHistEvent::RecordStart(id, pairs) => {
+                        fr_protocol::encode_aggregate_header(2, false, out);
+                        let id_bytes = fr_command::format_stream_id(id);
+                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                        fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                    }
+                    fr_store::XreadgroupHistEvent::RecordStartNil(id) => {
+                        fr_protocol::encode_aggregate_header(2, false, out);
+                        let id_bytes = fr_command::format_stream_id(id);
+                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                        // Tombstone value = nil array: `*-1` (RESP2) / `_` (RESP3).
+                        out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
+                    }
+                    fr_store::XreadgroupHistEvent::Field(f) => {
+                        fr_protocol::encode_bulk_string_slice(Some(f), false, out);
+                    }
+                }
+            },
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "xreadgroup",
+            "XREADGROUP",
+            || {
+                let mut argv = vec![
+                    b"XREADGROUP".to_vec(),
+                    b"GROUP".to_vec(),
+                    group.to_vec(),
+                    consumer.to_vec(),
+                ];
+                if let Some(c) = count_arg {
+                    argv.push(b"COUNT".to_vec());
+                    argv.push(c.to_vec());
+                }
+                argv.push(b"STREAMS".to_vec());
+                argv.push(key.to_vec());
+                argv.push(id_arg.to_vec());
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(())
+    }
+
     pub fn execute_plain_geohash_borrowed(
         &mut self,
         key: &[u8],

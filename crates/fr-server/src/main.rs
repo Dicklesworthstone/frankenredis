@@ -5972,6 +5972,39 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_xreadgroup_history_packet(unparsed, &parser_config)
+                {
+                    // (CrimsonHawk) Zero-copy `_into` for single-key XREADGROUP history (explicit id) —
+                    // stream the consumer's PEL entries' fields borrowed (3.17x store A/B). The
+                    // eligibility gate declines `>`/NOACK/errors to generic.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_xreadgroup_history_borrowed_into(
+                            packet.group,
+                            packet.consumer,
+                            packet.key,
+                            packet.id,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_xread_single_packet(unparsed, &parser_config)
                 {
                     // (CrimsonHawk) Zero-copy `_into` for single-key non-blocking XREAD — stream the
@@ -12684,6 +12717,95 @@ struct BorrowedPlainHrandfieldCountWithvaluesPacket<'a> {
     consumed: usize,
     key: &'a [u8],
     count: &'a [u8],
+}
+
+struct BorrowedPlainXreadgroupHistoryPacket<'a> {
+    consumed: usize,
+    group: &'a [u8],
+    consumer: &'a [u8],
+    key: &'a [u8],
+    id: &'a [u8],
+    count: Option<&'a [u8]>,
+}
+
+// (CrimsonHawk) Byte-prefix fast path for single-key XREADGROUP HISTORY read:
+//   *7  XREADGROUP GROUP g c STREAMS key id
+//   *9  XREADGROUP GROUP g c COUNT n STREAMS key id
+// The COUNT/no-COUNT expectation is tied to the exact array count so a multi-key `*9`
+// (XREADGROUP GROUP g c STREAMS k1 k2 i1 i2) is REJECTED (its token after `c` is STREAMS, not COUNT),
+// not mis-framed. NOACK / BLOCK / multi-key / `>` all defer to generic dispatch.
+fn parse_borrowed_plain_xreadgroup_history_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXreadgroupHistoryPacket<'a>> {
+    if config.max_bulk_len < b"XREADGROUP".len() {
+        return None;
+    }
+    let after_cmd = |prefix: &[u8]| -> Option<usize> {
+        let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+            rest.get(..10)
+                .filter(|c| c.eq_ignore_ascii_case(b"XREADGROUP"))
+                .map(|_| input.len() - rest.len() + 10)
+        })?;
+        if input.get(cursor..cursor + 2)? != b"\r\n" {
+            return None;
+        }
+        cursor += 2;
+        Some(cursor)
+    };
+    let bulk = |cur: usize| parse_borrowed_plain_set_bulk(input, cur, config.max_bulk_len);
+    // *7 — no COUNT.
+    if let Some(cursor) = after_cmd(b"*7\r\n$10\r\n") {
+        let (kw_group, next) = bulk(cursor)?;
+        if !kw_group.eq_ignore_ascii_case(b"GROUP") {
+            return None;
+        }
+        let (group, next) = bulk(next)?;
+        let (consumer, next) = bulk(next)?;
+        let (streams, next) = bulk(next)?;
+        if !streams.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        let (key, next) = bulk(next)?;
+        let (id, consumed) = bulk(next)?;
+        return Some(BorrowedPlainXreadgroupHistoryPacket {
+            consumed,
+            group,
+            consumer,
+            key,
+            id,
+            count: None,
+        });
+    }
+    // *9 — COUNT n (single key only; multi-key *9 has STREAMS here and is rejected).
+    if let Some(cursor) = after_cmd(b"*9\r\n$10\r\n") {
+        let (kw_group, next) = bulk(cursor)?;
+        if !kw_group.eq_ignore_ascii_case(b"GROUP") {
+            return None;
+        }
+        let (group, next) = bulk(next)?;
+        let (consumer, next) = bulk(next)?;
+        let (kw_count, next) = bulk(next)?;
+        if !kw_count.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let (count, next) = bulk(next)?;
+        let (streams, next) = bulk(next)?;
+        if !streams.eq_ignore_ascii_case(b"STREAMS") {
+            return None;
+        }
+        let (key, next) = bulk(next)?;
+        let (id, consumed) = bulk(next)?;
+        return Some(BorrowedPlainXreadgroupHistoryPacket {
+            consumed,
+            group,
+            consumer,
+            key,
+            id,
+            count: Some(count),
+        });
+    }
+    None
 }
 
 const XREAD_MULTI_MAX: usize = 8;
