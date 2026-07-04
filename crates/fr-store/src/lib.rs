@@ -16707,6 +16707,32 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup fast path — see zrangebyscore_members_borrow_scan.
+        if !self.lfu_tracking_enabled() {
+            let entry = match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(ZRangeWithScoresScanEvent::Len(0));
+                    return Ok(());
+                }
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                return Ok(());
+            }
+            return match &entry.value {
+                Value::SortedSet(zs) => {
+                    let refs = zs.score_bound_range_asc_refs(min, max);
+                    sink(ZRangeWithScoresScanEvent::Len(refs.len()));
+                    for (member, score) in refs {
+                        sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                    }
+                    entry.touch(now_ms);
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(ZRangeWithScoresScanEvent::Len(0));
             return Ok(());
@@ -16764,6 +16790,32 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup fast path — see zrangebyscore_members_borrow_scan.
+        if !self.lfu_tracking_enabled() {
+            let entry = match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(ZRangeWithScoresScanEvent::Len(0));
+                    return Ok(());
+                }
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                return Ok(());
+            }
+            return match &entry.value {
+                Value::SortedSet(zs) => {
+                    let refs = zs.score_bound_range_desc_refs(min, max);
+                    sink(ZRangeWithScoresScanEvent::Len(refs.len()));
+                    for (member, score) in refs {
+                        sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                    }
+                    entry.touch(now_ms);
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(ZRangeWithScoresScanEvent::Len(0));
             return Ok(());
@@ -16824,6 +16876,41 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup fast path — fold record_keyspace_lookup +
+        // get_mut into one lookup_live_for_read_mut (the member-borrow arc left this double
+        // probe). The min>max empty-guard stays AFTER the key lookup (preserves the miss stat
+        // on absent keys) and BEFORE the range; a non-LFU get_mut is side-effect-free so the
+        // guard-vs-get_mut order is unobservable. LFU path below runs verbatim (guard before
+        // the bump). Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            let entry = match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            return match &entry.value {
+                Value::SortedSet(zs) => {
+                    let refs = if rev {
+                        zs.score_bound_range_desc_refs(min, max)
+                    } else {
+                        zs.score_bound_range_asc_refs(min, max)
+                    };
+                    sink(SmembersScanEvent::Len(refs.len()));
+                    for (member, _score) in refs {
+                        sink(SmembersScanEvent::Member(member));
+                    }
+                    entry.touch(now_ms);
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -16888,6 +16975,32 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup fast path — see zrangebyscore_members_borrow_scan.
+        if !self.lfu_tracking_enabled() {
+            let entry = match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            return match &entry.value {
+                Value::SortedSet(zs) => {
+                    let refs = zs.score_bound_range_limited_refs(min, max, rev, offset, take);
+                    sink(SmembersScanEvent::Len(refs.len()));
+                    for (member, _score) in refs {
+                        sink(SmembersScanEvent::Member(member));
+                    }
+                    entry.touch(now_ms);
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -34376,6 +34489,89 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZRANGE@16 (0..5) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZRANGEBYSCORE borrow-scan non-LFU fast-path collapse (members asc/desc,
+    // withscores fwd/rev, LIMIT): byte-identical range, min>max empty-guard, WRONGTYPE,
+    // missing→Len(0), keyspace hit/miss, eviction.
+    #[test]
+    fn zrangebyscore_borrow_scan_collapse_matches() {
+        use crate::{ScoreBound, SmembersScanEvent, ZRangeWithScoresScanEvent};
+        let inc = ScoreBound::Inclusive;
+        fn mem(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, rev: bool, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut o = Vec::new();
+            s.zrangebyscore_members_borrow_scan(k, lo, hi, rev, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            Ok(o)
+        }
+        fn lim(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, rev: bool, off: usize, take: usize, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+            let mut o = Vec::new();
+            s.zrangebyscore_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            Ok(o)
+        }
+        fn ws(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+            let mut o = Vec::new();
+            s.zrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            Ok(o)
+        }
+        fn wsrev(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+            let mut o = Vec::new();
+            s.zrevrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            Ok(o)
+        }
+        let mut s = Store::new();
+        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let r_asc = mem(&mut s, b"z", inc(1.0), inc(3.0), false, 2);
+        let r_desc = mem(&mut s, b"z", inc(1.0), inc(3.0), true, 2);
+        let r_band = mem(&mut s, b"z", inc(2.0), inc(2.0), false, 2);
+        let r_empty = mem(&mut s, b"z", inc(3.0), inc(1.0), false, 2); // min>max → empty
+        let r_lim = lim(&mut s, b"z", inc(1.0), inc(3.0), false, 1, 1, 2); // skip 1 take 1 → [b]
+        let r_ws = ws(&mut s, b"z", inc(1.0), inc(2.0), 2);
+        let r_wsrev = wsrev(&mut s, b"z", inc(1.0), inc(2.0), 2);
+        let r_absent = mem(&mut s, b"absent", inc(1.0), inc(3.0), false, 2);
+        let r_wrong = mem(&mut s, b"str", inc(1.0), inc(3.0), false, 2);
+        // hits: z(asc,desc,band,empty,lim,ws,wsrev), str(wrong) = 8; misses: absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 8);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+        assert_eq!(r_asc.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(r_desc.unwrap(), vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(r_band.unwrap(), vec![b"b".to_vec()]);
+        assert_eq!(r_empty.unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(r_lim.unwrap(), vec![b"b".to_vec()]);
+        assert_eq!(r_ws.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]);
+        assert_eq!(r_wsrev.unwrap(), vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 1.0)]);
+        assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(mem(&mut t, b"exp", inc(0.0), inc(9.0), false, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing ZRANGEBYSCORE@16 (band 4..9, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.zadd(b"zbs:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        let k: &[u8] = b"zbs:bench";
+        for _ in 0..2000 { b.zrangebyscore_members_borrow_scan(k, inc(4.0), inc(9.0), false, 2, |_| {}).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zrangebyscore_members_borrow_scan(std::hint::black_box(k), inc(4.0), inc(9.0), false, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZRANGEBYSCORE@16 (4..9) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

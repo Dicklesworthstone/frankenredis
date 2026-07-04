@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYSCORE family borrow-scan double-probe collapse — ZRANGEBYSCORE@16 1.08x (byte-exact)
+
+Continued the `_borrow_scan` double-probe sub-vein into the ZRANGEBYSCORE family (hot: time-series
+/ score-band queries). Collapsed 4 LIVE reply paths — `zrangebyscore_members_borrow_scan`,
+`zrangebyscore_withscores_borrow_scan`, `zrevrangebyscore_withscores_borrow_scan`,
+`zrangebyscore_members_limit_borrow_scan` — each still did `record_keyspace_lookup` + separate
+`get_mut`. Used a **non-LFU fast-path INSERTION** (cleaner than unified-acquire for guard-bearing
+fns): prepend `if !lfu { entry = lookup_live; MIN>MAX-guard; range }` and leave the existing body
+verbatim as the LFU path. **KEY byte-identity subtlety: the `min>max` empty-guard must stay AFTER
+the key lookup (else a missing key + min>max skips the MISS stat) and BEFORE the LFU bump (else an
+LFU min>max would wrongly bump) — the insertion keeps the guard after the acquire on the non-LFU
+path (a non-LFU get_mut is side-effect-free so guard-vs-get_mut order is unobservable) and
+verbatim before the bump on the LFU path.** Proven by `zrangebyscore_borrow_scan_collapse_matches`
+(asc/desc members, single-score band, min>max→empty, LIMIT off/take, withscores fwd/rev, absent,
+WRONGTYPE, exact hit/miss, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed ZRANGEBYSCORE@16 (band 4..9, 6
+members) no-TTL = 130.37 ns/op; removed 2nd keyspace probe ≈ **10.01 ns** → old ≈ 140.38 ns ⇒
+**1.08x (−7%)** (mid-size — the `score_bound_range_*_refs` Vec build dominates; narrow bands, the
+common time-series case, are ~1.2x). Conformance GREEN (697/697 correctness; lone failure =
+brittle `diff_sorted_i64_adaptive` perf-ratio guard under load, unrelated). REMAINING in sub-vein:
+ZRANGEBYLEX borrow-scan variants (different lookup shape — `record=0`, check next). Landed via
+clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGE/ZREVRANGE borrow-scan double-probe collapse — ZRANGE@16 1.25x (byte-exact)
 
 **NEW SUB-VEIN (found by re-grepping `record_keyspace_lookup(key` for fns with NO adjacent
