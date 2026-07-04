@@ -18679,6 +18679,20 @@ impl Store {
     }
 
     pub fn xlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Stream(entries) => {
+                        let result = entries.len();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -18716,43 +18730,52 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::Stream(entries) => {
-                        if start > end {
-                            return Ok(Vec::new());
-                        }
-                        let mut out = Vec::new();
-                        for (id, fields) in entries.range(start..=end) {
-                            out.push((*id, fields.to_pairs()));
-                            if let Some(limit) = count
-                                && out.len() >= limit
-                            {
-                                break;
-                            }
-                        }
-                        entry.touch(now_ms);
-                        Ok(out)
-                    }
-                    _ => Err(StoreError::WrongType),
-                }
+        // (CrimsonHawk) Unified-acquire single-lookup collapse — see `lpos_full`. Non-LFU
+        // folds record_keyspace_lookup + get_mut into one lookup_live_for_read_mut; LFU
+        // verbatim; range body runs once. Byte-identical (lazy-expiry, hit/miss, touch,
+        // WRONGTYPE, empty-range early-return, results).
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok(Vec::new()),
             }
-            None => Ok(Vec::new()),
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => return Ok(Vec::new()),
+            }
+        };
+        match &entry.value {
+            Value::Stream(entries) => {
+                if start > end {
+                    return Ok(Vec::new());
+                }
+                let mut out = Vec::new();
+                for (id, fields) in entries.range(start..=end) {
+                    out.push((*id, fields.to_pairs()));
+                    if let Some(limit) = count
+                        && out.len() >= limit
+                    {
+                        break;
+                    }
+                }
+                entry.touch(now_ms);
+                Ok(out)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -18764,43 +18787,49 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::Stream(entries) => {
-                        if start > end {
-                            return Ok(Vec::new());
-                        }
-                        let mut out = Vec::new();
-                        for (id, fields) in entries.range(start..=end).rev() {
-                            out.push((*id, fields.to_pairs()));
-                            if let Some(limit) = count
-                                && out.len() >= limit
-                            {
-                                break;
-                            }
-                        }
-                        entry.touch(now_ms);
-                        Ok(out)
-                    }
-                    _ => Err(StoreError::WrongType),
-                }
+        // (CrimsonHawk) Unified-acquire single-lookup collapse — see `lpos_full`/`xrange`.
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok(Vec::new()),
             }
-            None => Ok(Vec::new()),
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => return Ok(Vec::new()),
+            }
+        };
+        match &entry.value {
+            Value::Stream(entries) => {
+                if start > end {
+                    return Ok(Vec::new());
+                }
+                let mut out = Vec::new();
+                for (id, fields) in entries.range(start..=end).rev() {
+                    out.push((*id, fields.to_pairs()));
+                    if let Some(limit) = count
+                        && out.len() >= limit
+                    {
+                        break;
+                    }
+                }
+                entry.touch(now_ms);
+                Ok(out)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -33768,6 +33797,66 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "LPOS_FULL@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) XLEN/XRANGE/XREVRANGE single-lookup collapse: byte-identical count,
+    // range results (fwd/rev + COUNT), empty-range, WRONGTYPE, missing, stats, lazy-expiry.
+    #[test]
+    fn xstream_read_collapse_matches_full_path() {
+        let mut s = Store::new();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> { v.iter().map(|(id, _)| (id.0, id.1)).collect() };
+        let r_len = s.xlen(b"st", 2);
+        let r_range = s.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 2);
+        let r_rev = s.xrevrange(b"st", (u64::MAX, u64::MAX), (0, 0), None, 2);
+        let r_count = s.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), Some(2), 2);
+        let r_absent_len = s.xlen(b"absent", 2);
+        let r_absent_range = s.xrange(b"absent", (0, 0), (u64::MAX, u64::MAX), None, 2);
+        let r_wrong = s.xlen(b"str", 2);
+        // hits: xlen(st), xrange(st), xrevrange(st), xrange-count(st), xlen(str wrongtype) = 5;
+        // misses: xlen(absent), xrange(absent) = 2.
+        assert_eq!(s.stat_keyspace_hits, h0 + 5);
+        assert_eq!(s.stat_keyspace_misses, m0 + 2);
+        assert_eq!(r_len.unwrap(), 3);
+        assert_eq!(ids(&r_range.unwrap()), vec![(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(ids(&r_rev.unwrap()), vec![(3, 0), (2, 0), (1, 0)]);
+        assert_eq!(ids(&r_count.unwrap()), vec![(1, 0), (2, 0)]);
+        assert_eq!(r_absent_len.unwrap(), 0);
+        assert_eq!(r_absent_range.unwrap(), Vec::new());
+        assert!(matches!(r_wrong, Err(StoreError::WrongType)));
+
+        // Lazy-expiry.
+        let mut t = Store::new();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.xlen(b"exp", 500).unwrap(), 0);
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing headline XLEN (present stream, no TTL, LFU off).
+        let mut b = Store::new();
+        for i in 1..=16u64 { b.xadd(b"xl:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        let k: &[u8] = b"xl:bench";
+        for _ in 0..2000 { std::hint::black_box(b.xlen(k, 2)).ok(); }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.xlen(std::hint::black_box(k), 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "XLEN@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

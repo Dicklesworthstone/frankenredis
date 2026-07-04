@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — XLEN/XRANGE/XREVRANGE stream-read single-lookup collapse — XLEN@16 1.41x (byte-exact)
+
+Extended the collapse to the STREAM reads (real workloads: event sourcing / queues). XLEN =
+plain SCARD-pattern (`if !lfu { lookup_live_for_read_mut }`); XRANGE/XREVRANGE = unified-acquire
+(`let entry = if !lfu {lookup_live} else {record+get_mut+bump}`; range body once) to avoid
+duplicating the range extraction. All did `record_keyspace_lookup` + separate `get_mut`.
+Byte-identical: key lazy-expiry, hit/miss, single touch, WRONGTYPE, empty-range early-return,
+fwd/rev + COUNT results; LFU verbatim. Proven by `xstream_read_collapse_matches_full_path` (len,
+fwd/rev range, COUNT-limited, missing→0/empty, WRONGTYPE, exact hit/miss deltas, eviction).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed XLEN@16 no-TTL = 38.01 ns/op;
+removed 2nd keyspace probe ≈ **15.43 ns** → old ≈ 53.44 ns ⇒ **1.41x (−29%)** (XLEN is a small
+op so the probe dominates; XRANGE/XREVRANGE lower, scan-bound). Conformance GREEN (687/687
+correctness; 3 failures = brittle zadd_insert/diff_sorted/intersect perf-ratio guards under
+loaded worker, unrelated). Deliberately did NOT do OBJECT ENCODING/FREQ/REFCOUNT (introspection,
+~0-value on real workloads; object_freq is LFU-context-only anyway). Landed via clean origin/main
+worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — lpos_full (LPOS RANK/COUNT) unified-acquire single-lookup collapse — LPOS_FULL@16 1.11x (byte-exact)
 
 `lpos_full` (the LPOS RANK/COUNT/MAXLEN backend) did `record_keyspace_lookup` + separate
