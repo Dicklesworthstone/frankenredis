@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for square accumulator fast path — EVAL compute 18.06x vs ORIG (byte-transparent)
+
+Follow-on dig in the same Redis 7.2.4 scripting gap: after the bounded numeric-for `s=s+i`
+specialization, the next nearby residual was `local s=0; for i=1,1000 do s=s+i*i end; return s`,
+which still paid the generic AST `Mul` + `Add` + local assignment path on every loop iteration. Extended
+the same one-statement local-slot fast path to recognize only `acc = acc + i*i` and `acc = i*i + acc`
+when both multiplicands resolve to the numeric-for loop variable. The accumulator must already be a
+number; string coercion, non-number accumulators, and all other body shapes still fall back to the
+generic evaluator.
+
+MEASURED (SHORT per-crate Criterion, same RCH worker `vmi1149989`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`; accepted equivalent to the requested release
+bench was `cargo bench --profile release -p fr-command --bench lua_eval -- numeric_for_sum_squares_1000
+--sample-size 10 --measurement-time 1`): ORIG detached worktree at `3a13357f7` plus the bench row only
+measured `lua_eval/numeric_for_sum_squares_1000` at **162.38 us** `[157.55, 164.67]`; candidate measured
+**8.9893 us** `[8.8163, 9.1801]` = **18.06x vs ORIG**.
+
+BYTE-TRANSPARENT: the fast path updates the same accumulator local cell, preserves the numeric-for scope
+and max-iteration checks, and falls back unless the loop body is exactly the recognized numeric
+accumulator shape. Regression coverage verifies `s=s+i`, commuted `i+s`, `s=s+i*i`, commuted `i*i+s`,
+and numeric-string accumulator fallback. Gates: `git diff --check` GREEN; `cargo check -p fr-command
+--all-targets` GREEN on RCH `hz2`; `cargo test -p fr-command
+lua_numeric_for_add_assign_fast_path_keeps_results -- --nocapture` GREEN on RCH `hz2`; `cargo test -p
+fr-conformance --lib --bins --tests -- --nocapture` GREEN on RCH `ovh-a` (194 lib tests, binary/unit
+tests, 99 smoke tests passed). RCH remote builds used `FR_ALLOW_STUB_COMMANDS=1` because the worker sync
+does not include the legacy Redis command-doc directory; this is degraded for remote build/bench only,
+not production.
+
 ## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for accumulator fast path — EVAL compute 21.8x vs ORIG (byte-transparent)
 
 Dug the biggest remaining Redis-relative scripting gap in this ledger: EVAL compute loops. This is not

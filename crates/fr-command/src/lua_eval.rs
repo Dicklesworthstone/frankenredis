@@ -3017,6 +3017,21 @@ enum ControlFlow {
     Break,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumericForAddend {
+    LoopVar,
+    LoopVarSquare,
+}
+
+impl NumericForAddend {
+    fn value(self, current: f64) -> f64 {
+        match self {
+            Self::LoopVar => current,
+            Self::LoopVarSquare => current * current,
+        }
+    }
+}
+
 enum CoroutineRun {
     Complete(Vec<LuaValue>),
     Yield {
@@ -4143,7 +4158,7 @@ impl<'a> LuaState<'a> {
     fn numeric_for_add_assign_accumulator_slot(
         loop_name: &str,
         body: &[(u32, Stmt)],
-    ) -> Option<LocalSlotRef> {
+    ) -> Option<(LocalSlotRef, NumericForAddend)> {
         let [(_, Stmt::Assign(lhs, rhs))] = body else {
             return None;
         };
@@ -4158,16 +4173,26 @@ impl<'a> LuaState<'a> {
             matches!(expr, Expr::LocalName(name, _) if name == loop_name)
         }
 
-        match (&**left, &**right) {
-            (Expr::LocalName(_, acc_slot), term)
-                if acc_slot == lhs_slot && is_loop_var(term, loop_name) =>
-            {
-                Some(*lhs_slot)
+        fn addend_kind(expr: &Expr, loop_name: &str) -> Option<NumericForAddend> {
+            if is_loop_var(expr, loop_name) {
+                return Some(NumericForAddend::LoopVar);
             }
-            (term, Expr::LocalName(_, acc_slot))
-                if acc_slot == lhs_slot && is_loop_var(term, loop_name) =>
-            {
-                Some(*lhs_slot)
+            let Expr::BinOp(left, BinOp::Mul, right) = expr else {
+                return None;
+            };
+            if is_loop_var(left, loop_name) && is_loop_var(right, loop_name) {
+                Some(NumericForAddend::LoopVarSquare)
+            } else {
+                None
+            }
+        }
+
+        match (&**left, &**right) {
+            (Expr::LocalName(_, acc_slot), term) if acc_slot == lhs_slot => {
+                addend_kind(term, loop_name).map(|kind| (*lhs_slot, kind))
+            }
+            (term, Expr::LocalName(_, acc_slot)) if acc_slot == lhs_slot => {
+                addend_kind(term, loop_name).map(|kind| (*lhs_slot, kind))
             }
             _ => None,
         }
@@ -4182,7 +4207,7 @@ impl<'a> LuaState<'a> {
         mut current: f64,
         env: &mut Env,
     ) -> Option<Result<ControlFlow, String>> {
-        let acc_slot = Self::numeric_for_add_assign_accumulator_slot(loop_name, body)?;
+        let (acc_slot, addend) = Self::numeric_for_add_assign_accumulator_slot(loop_name, body)?;
         let body_line = body[0].0;
         env.push_scope();
         let acc_cell = match env.local_cell_for_slot(acc_slot) {
@@ -4217,7 +4242,7 @@ impl<'a> LuaState<'a> {
                 env.pop_scope();
                 return Some(Err("script exceeded maximum iteration count".to_string()));
             }
-            acc += current;
+            acc += addend.value(current);
             current += step;
         }
 
@@ -20471,8 +20496,20 @@ end
                 RespFrame::Integer(500_500),
             ),
             (
+                b"local s=0; for i=1,1000 do s=s+i*i end; return s",
+                RespFrame::Integer(333_833_500),
+            ),
+            (
+                b"local s=0; for i=1,1000 do s=i*i+s end; return s",
+                RespFrame::Integer(333_833_500),
+            ),
+            (
                 b"local s='0'; for i=1,3 do s=s+i end; return s",
                 RespFrame::Integer(6),
+            ),
+            (
+                b"local s='0'; for i=1,3 do s=s+i*i end; return s",
+                RespFrame::Integer(14),
             ),
         ];
         for (script, expected) in cases {
