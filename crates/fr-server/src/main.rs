@@ -7447,35 +7447,61 @@ fn process_buffered_frames(
                     b"*5\r\n$6\r\n",
                     b"ZRANGE",
                 ) {
-                    // ZRANGE key min max BYSCORE|BYLEX: a=min, b=max, c=option
-                    // token. Only the no-REV/LIMIT/WITHSCORES BYSCORE/BYLEX forms.
-                    let fast = if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
-                        runtime.execute_plain_zrange_byscore_borrowed(
-                            packet.key, packet.a, packet.b, ts,
-                        )
-                    } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
-                        runtime
-                            .execute_plain_zrange_bylex_borrowed(packet.key, packet.a, packet.b, ts)
-                    } else if packet.c.eq_ignore_ascii_case(b"REV") {
-                        runtime
-                            .execute_plain_zrange_rev_borrowed(packet.key, packet.a, packet.b, ts)
+                    // ZRANGE key min max BYSCORE|BYLEX|REV: a=min, b=max, c=option
+                    // token. Only the no-LIMIT/WITHSCORES forms. REV takes the
+                    // zero-copy `_into` member-borrow path (FastEncodedReply);
+                    // BYSCORE/BYLEX stay on the owned FastReply path.
+                    if packet.c.eq_ignore_ascii_case(b"REV") {
+                        if runtime
+                            .execute_plain_zrange_rev_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                packet.b,
+                                ts,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
+                        {
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
                     } else {
-                        None
-                    };
-                    if let Some(response) = fast {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
+                        let fast = if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
+                            runtime.execute_plain_zrange_byscore_borrowed(
+                                packet.key, packet.a, packet.b, ts,
+                            )
+                        } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
+                            runtime.execute_plain_zrange_bylex_borrowed(
+                                packet.key, packet.a, packet.b, ts,
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(response) = fast {
+                            Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: packet.consumed,
+                                response,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
                     }
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrange_packet(unparsed, &parser_config)
@@ -8627,12 +8653,18 @@ fn process_buffered_frames(
                     b"*4\r\n$9\r\n",
                     b"ZREVRANGE",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_zrevrange_borrowed(packet.key, packet.a, packet.b, ts)
+                    if runtime
+                        .execute_plain_zrevrange_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

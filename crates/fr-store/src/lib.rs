@@ -15718,6 +15718,68 @@ impl Store {
         }
     }
 
+    /// (frankenredis-zrange-into) Borrow-scan variant of [`Store::zrevrange`] — the
+    /// descending twin of [`Store::zrange_borrow_scan`]. IDENTICAL bookkeeping to
+    /// `zrevrange` (keyspace hit/miss, unconditional-on-found LFU bump, `touch` ONLY
+    /// on a non-empty range, same `normalize_index` math) but streams borrowed
+    /// members in DESCENDING rank order via `iter_desc().skip(s).take(count)` into a
+    /// `SmembersScanEvent` sink, so the runtime encodes the `*N` array with no
+    /// member `Vec<u8>` / `Vec<RespFrame>` materialization. `Len(0)` for a missing /
+    /// out-of-range / empty result; `Err(WrongType)` for a non-zset value.
+    pub fn zrevrange_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            sink(SmembersScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        sink(SmembersScanEvent::Len(count));
+                        for (m, _score) in zs.iter_desc().skip(s_idx).take(count) {
+                            sink(SmembersScanEvent::Member(m));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     /// Return elements sorted descending by score, by index range.
     pub fn zrevrange(
         &mut self,

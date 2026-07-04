@@ -20076,6 +20076,95 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrange_rev_borrowed`]
+    /// for the hot `ZRANGE key start stop REV` / `ZREVRANGE key start stop`
+    /// (descending, no WITHSCORES): streams the `*N` member-only array straight into
+    /// `out` via [`Store::zrevrange_borrow_scan`] instead of building an owned
+    /// `RespFrame::Array` from `Store::zrevrange` (which clones every member). The
+    /// descending twin of [`Self::execute_plain_zrange_borrowed_into`] — same member
+    /// clone that a probe measured at 2.6-4.6x, byte-identical RESP2/RESP3 member
+    /// array (no `resp3` param). Preserves the owned form's exact gate
+    /// (`can_execute_plain_zbyscore_borrowed`), preamble, `record_plain_zremrange_
+    /// borrowed_metrics("zrange", …, argv incl REV)`, and error accounting. The old
+    /// owned form stays for the cold generic-args caller. `None` (fall back) on any
+    /// disabling state.
+    pub fn execute_plain_zrange_rev_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let start = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrange",
+            b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"REV".len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .zrevrange_borrow_scan(key, start, stop, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(st);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrange",
+            "ZRANGE",
+            || {
+                vec![
+                    b"ZRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                    b"REV".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
     // (frankenredis-zbyscorefast) Shared guard→walk→emit core for the no-option
     // ZRANGEBYSCORE / ZREVRANGEBYSCORE forms. Mirrors fr-command exactly: the
     // inverted/wrongtype guard (empty array on inverted bounds, WRONGTYPE on a
@@ -20416,6 +20505,91 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    /// (frankenredis-zrange-into) `_into` form of [`Self::execute_plain_zrevrange_borrowed`]
+    /// for the dedicated `ZREVRANGE key start stop` command (no WITHSCORES): streams
+    /// the `*N` descending member array straight into `out` via
+    /// [`Store::zrevrange_borrow_scan`] instead of cloning every member through
+    /// `Store::zrevrange`. Same as [`Self::execute_plain_zrange_rev_borrowed_into`]
+    /// but with the `zrevrange`/`ZREVRANGE` command name + argv (no `REV` token) and
+    /// `ZREVRANGE`-length gate, matching the owned form byte-for-byte. Old owned form
+    /// kept for the cold generic-args caller. `None` (fall back) on any disabling
+    /// state.
+    pub fn execute_plain_zrevrange_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGE".len(),
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+        ) {
+            return None;
+        }
+        let start = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zrevrange",
+            b"ZREVRANGE".len() + key.len() + start_arg.len() + stop_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .zrevrange_borrow_scan(key, start, stop, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(st);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                reply.encode_into(out);
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrevrange",
+            "ZREVRANGE",
+            || {
+                vec![
+                    b"ZREVRANGE".to_vec(),
+                    key.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
     }
 
     fn can_execute_plain_key_arg1_write_borrowed(
@@ -41939,6 +42113,120 @@ mod tests {
         assert_eq!(
             fast.session.last_command_name,
             generic.session.last_command_name
+        );
+    }
+
+    // (frankenredis-zrange-into) The descending `_into` forms must be faithful
+    // zero-copy replacements for the OWNED fast paths they supersede: byte-identical
+    // reply AND identical side-effect stats (keyspace hits/misses, commands, errors)
+    // to `execute_plain_zrevrange_borrowed` / `execute_plain_zrange_rev_borrowed`,
+    // across normal / negative / inverted-empty ranges, missing key, and wrong-type.
+    // The reply bytes are separately checked against the generic command for shape.
+    // (Stats are compared against the OWNED fast path, not the generic dispatch:
+    // the borrowed rank-REV fast paths already differ from generic ZRANGE..REV in
+    // keyspace-hit accounting — a pre-existing property this migration preserves.)
+    #[test]
+    fn plain_zrevrange_borrowed_into_matches_owned_fast_path() {
+        let mut into_rt = Runtime::default_strict();
+        let mut owned_rt = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut into_rt, &mut owned_rt, &mut generic] {
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d",
+                ]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+        }
+
+        let encode_frame = |reply: RespFrame| -> Vec<u8> {
+            let mut bytes = Vec::new();
+            reply.encode_into(&mut bytes);
+            bytes
+        };
+
+        let mut ts = 2u64;
+        for (start, stop) in [
+            (b"0".as_slice(), b"-1".as_slice()),
+            (b"0".as_slice(), b"1".as_slice()),
+            (b"-2".as_slice(), b"-1".as_slice()),
+            (b"1".as_slice(), b"2".as_slice()),
+            (b"10".as_slice(), b"5".as_slice()), // inverted -> empty
+        ] {
+            // Dedicated ZREVRANGE: _into vs owned fast path vs generic (bytes).
+            let mut out = Vec::new();
+            into_rt
+                .execute_plain_zrevrange_borrowed_into(b"z", start, stop, ts, &mut out)
+                .expect("ZREVRANGE _into fast path");
+            let owned = owned_rt
+                .execute_plain_zrevrange_borrowed(b"z", start, stop, ts)
+                .expect("ZREVRANGE owned fast path");
+            assert_eq!(out, encode_frame(owned.clone()), "ZREVRANGE _into != owned");
+            assert_eq!(
+                out,
+                encode_frame(generic.execute_frame(command(&[b"ZREVRANGE", b"z", start, stop]), ts)),
+                "ZREVRANGE _into != generic bytes"
+            );
+            ts += 1;
+
+            // ZRANGE ... REV: _into vs owned fast path vs generic (bytes).
+            let mut out2 = Vec::new();
+            into_rt
+                .execute_plain_zrange_rev_borrowed_into(b"z", start, stop, ts, &mut out2)
+                .expect("ZRANGE REV _into fast path");
+            let owned2 = owned_rt
+                .execute_plain_zrange_rev_borrowed(b"z", start, stop, ts)
+                .expect("ZRANGE REV owned fast path");
+            assert_eq!(out2, encode_frame(owned2.clone()), "ZRANGE REV _into != owned");
+            assert_eq!(
+                out2,
+                encode_frame(generic.execute_frame(command(&[b"ZRANGE", b"z", start, stop, b"REV"]), ts)),
+                "ZRANGE REV _into != generic bytes"
+            );
+            ts += 1;
+        }
+
+        // Missing key -> empty array (both paths).
+        let mut out = Vec::new();
+        into_rt
+            .execute_plain_zrevrange_borrowed_into(b"nokey", b"0", b"9", ts, &mut out)
+            .expect("missing-key ZREVRANGE _into");
+        let owned = owned_rt
+            .execute_plain_zrevrange_borrowed(b"nokey", b"0", b"9", ts)
+            .expect("missing-key ZREVRANGE owned");
+        assert_eq!(out, b"*0\r\n");
+        assert_eq!(out, encode_frame(owned));
+        ts += 1;
+
+        // Wrong-type -> WRONGTYPE error (both paths).
+        let mut out = Vec::new();
+        into_rt
+            .execute_plain_zrevrange_borrowed_into(b"str", b"0", b"1", ts, &mut out)
+            .expect("wrong-type ZREVRANGE _into");
+        let owned = owned_rt
+            .execute_plain_zrevrange_borrowed(b"str", b"0", b"1", ts)
+            .expect("wrong-type ZREVRANGE owned");
+        assert!(out.starts_with(b"-WRONGTYPE"));
+        assert_eq!(out, encode_frame(owned));
+
+        // Faithful-replacement stat parity: _into path == owned fast path.
+        assert_eq!(
+            into_rt.server.store.stat_keyspace_hits,
+            owned_rt.server.store.stat_keyspace_hits,
+            "keyspace_hits _into != owned"
+        );
+        assert_eq!(
+            into_rt.server.store.stat_keyspace_misses,
+            owned_rt.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            into_rt.server.store.stat_total_commands_processed,
+            owned_rt.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            into_rt.server.store.stat_total_error_replies,
+            owned_rt.server.store.stat_total_error_replies
         );
     }
 
