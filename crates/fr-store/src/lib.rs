@@ -20109,7 +20109,13 @@ impl Store {
         elements: &[T],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
+        // Return discarded (eviction side-effect only); the contains_key/get_mut below
+        // re-probe. Byte-identical: no volatile key ⇒ nothing evicts. Elides the drop's
+        // keyspace probe on the no-TTL PFADD path.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         if !self.entries.contains_key(key)
             && let Some((data, register_updates)) =
@@ -33139,6 +33145,54 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZADD update-existing no-TTL get_mut-first: full={full:.2} ns | dropped contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) PFADD bare-drop guard: byte-identical add/estimate behavior + the
+    // expires_count>0 branch still evicting an expired HLL before the add.
+    #[test]
+    fn pfadd_drop_guard_matches_and_evicts_expired() {
+        // No-TTL: create + add.
+        let mut s = Store::new();
+        assert_eq!(s.expires_count, 0);
+        assert!(s.pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap()); // new → changed
+        assert!(!s.pfadd(b"hll", &[b"a".to_vec()], 1).unwrap()); // dup → no change
+        assert!(s.pfadd(b"hll", &[b"d".to_vec()], 1).unwrap()); // new elem → changed
+        let n = s.pfcount(&[b"hll"], 1).unwrap();
+        assert!((3..=5).contains(&n), "≈4 distinct, got {n}");
+
+        // WRONGTYPE on a non-HLL string.
+        s.set(b"str".to_vec(), b"notanhll".to_vec(), None, 1);
+        assert!(s.pfadd(b"str", &[b"x".to_vec()], 1).is_err());
+
+        // expires_count>0 branch: an expired HLL is evicted, then PFADD makes a fresh one.
+        let mut t = Store::new();
+        t.pfadd(b"exp", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1); // due by t=500
+        assert!(t.expires_count >= 1);
+        assert!(t.pfadd(b"exp", &[b"only".to_vec()], 500).unwrap()); // fresh HLL
+        assert_eq!(t.pfcount(&[&b"exp"[..]], 500).unwrap(), 1, "only the post-expiry element counts");
+
+        // Timing: PFADD an already-present element on an existing HLL (no TTL, no change).
+        let mut b = Store::new();
+        for i in 0..16u32 { b.pfadd(b"benchhll:key", &[format!("e{i}").into_bytes()], 1).unwrap(); }
+        let k: &[u8] = b"benchhll:key";
+        let e = &[b"e3".to_vec()];
+        for _ in 0..2000 { b.pfadd(std::hint::black_box(k), e, 2).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.pfadd(std::hint::black_box(k), e, 2).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "PFADD present-elem no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

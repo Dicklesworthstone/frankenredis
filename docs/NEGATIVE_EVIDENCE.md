@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — PFADD bare-drop `expires_count` guard — PFADD present-elem 1.29x (byte-exact)
+
+`pfadd_impl` (HLL PFADD) called a BARE unguarded `drop_if_expired(key, now_ms)` (return
+discarded — eviction side-effect only) then its own `contains_key`/get-or-insert. The drop's
+keyspace probe (= `contains_key` via the bd358b400 fast-exit) was pure waste on the no-TTL path.
+Wrapped in `if expires_count != 0 { drop }` (the lpush/rpush/sadd/zadd pattern). Byte-identical:
+an expired key requires a TTL (expires_count>0 → full drop path runs); nothing evicts otherwise.
+Proven by `pfadd_drop_guard_matches_and_evicts_expired` (create/dup/new-elem estimate, WRONGTYPE,
+and the expires_count>0 branch: an expired HLL is evicted before the add → fresh HLL, PFCOUNT
+reflects only the post-expiry element). **CORRECTS a stale memory note that said "pfadd =
+no-bare-drop, skip" — it DID have an unguarded bare drop.**
+
+MEASURED (per-crate via rch, intra-run isolated): PFADD of an already-present element on an
+existing HLL, no TTL = 34.97 ns/op; elided drop probe ≈ **10.23 ns** → old ≈ 45.20 ns ⇒
+**1.29x (−22%)** (present-element PFADD is common in HLL dedup workloads). Conformance GREEN
+(680/680 correctness; 2 failures = brittle `foldhash_{hash_field,keyspace}_lookup_beats_siphash_ab`
+perf-ratio guards under loaded worker ovh-a, unrelated). NOTE the get_mut-first collapse of
+pfadd's `contains_key`+get-or-insert was NOT done (the new-HLL path is conditional on
+`hll_encode_sparse_create` succeeding — non-trivial); likewise zincrby_with_options/
+zadd_with_options get_mut-first deferred (next_rand-borrow conflict + intricate NX/XX/GT/LT/bulk
+logic = high risk for ~9ns). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZADD (`zadd_plain_owned`) get_mut-FIRST write collapse — ZADD update-existing 1.21x (byte-exact)
 
 The deferred ZADD double-hash (flagged earlier as risky) — LANDED safely on edition 2024.
