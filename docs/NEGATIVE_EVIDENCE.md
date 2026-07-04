@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — LPOP/RPOP (+COUNT) bare-drop guard — LPOP small-queue 1.15x (byte-exact)
+
+New target class (via re-grep of ALL bare `drop_if_expired(key,now)` sites for HOT LIVE cmds):
+the LIST pop family `lpop`/`rpop`/`lpop_count`/`rpop_count` — hot queue ops, live via
+fr-runtime `PlainKeyedPopCmd::{Lpop,Rpop}` (verified, not a cold owned-variant like store.hset).
+Each did a bare `drop_if_expired` then `get_mut`; guarded with `if expires_count != 0 { drop }`
+(the pattern already shipped for ~13 write cmds). Byte-identical: drop's no-TTL fast-exit
+`contains_key` is overhead, `get_mut` re-probes; expired needs TTL ⇒ count>0. Proven by
+`lrpop_bare_drop_guard_matches` (pop order, dirty, key-removed-when-empty, WRONGTYPE, missing→None,
+eviction via count>0).
+
+MEASURED (per-crate via rch, intra-run isolated): representative SMALL-queue LPOP (refill 64 +
+pop 64, single chunk) no-TTL = 69.43 ns/op; elided drop's `contains_key` ≈ **10.07 ns** → old ≈
+79.50 ns ⇒ **1.15x (−13%)**. **BENCH NOTE: the naive 1M-element pop-all bench read 1.03x because
+huge-list pop_front is dominated by O(chunks) front-chunk-removal + intra-chunk shift (381 ns/op)
+— NOT representative of real queues; measure a small steady-state queue (the common LPOP usage).**
+Conformance GREEN (701/701, fully clean run). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGE/ZREVRANGE WITHSCORES borrow-scan bare-drop guard — ZRANGE-WITHSCORES@16 1.23x (byte-exact)
 
 Final stragglers of the `_borrow_scan` sub-vein: the RANK-based `zrange_withscores_borrow_scan`

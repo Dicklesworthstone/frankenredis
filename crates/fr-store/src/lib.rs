@@ -12497,7 +12497,13 @@ impl Store {
     }
 
     pub fn lpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: LPOP records
+        // no keyspace stat and the `get_mut` below re-probes, so drop's no-TTL fast-exit
+        // `contains_key` is pure overhead when nothing is volatile. Byte-identical (an expired
+        // key needs a TTL ⇒ count>0 ⇒ drop runs).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12543,7 +12549,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12590,7 +12599,10 @@ impl Store {
     }
 
     pub fn rpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -12636,7 +12648,10 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -34805,6 +34820,63 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZRANGE-WITHSCORES@16 (0..5) no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) LPOP/RPOP (+COUNT) bare-drop guard: byte-identical pop order, dirty,
+    // key-removed-when-empty, WRONGTYPE, missing→None, eviction via expires_count>0.
+    #[test]
+    fn lrpop_bare_drop_guard_matches() {
+        let mut s = Store::new();
+        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let d0 = s.dirty;
+        assert_eq!(s.lpop(b"l", 2).unwrap(), Some(b"a".to_vec()));
+        assert_eq!(s.rpop(b"l", 2).unwrap(), Some(b"d".to_vec()));
+        assert_eq!(s.lpop_count(b"l", 5, 2).unwrap(), Some(vec![b"b".to_vec(), b"c".to_vec()])); // drains
+        assert!(s.dirty > d0);
+        assert!(s.get(b"l", 2).unwrap().is_none(), "emptied list key removed");
+        assert_eq!(s.lpop(b"l", 2).unwrap(), None); // gone
+        assert_eq!(s.rpop(b"absent", 2).unwrap(), None);
+        assert!(matches!(s.lpop(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.rpop_count(b"str", 2, 2), Err(StoreError::WrongType)));
+
+        // Eviction via the expires_count>0 branch.
+        let mut t = Store::new();
+        t.rpush(b"exp", &[b"x".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.lpop(b"exp", 500).unwrap(), None, "expired list → None");
+        assert!(t.get(b"exp", 600).unwrap().is_none());
+
+        // Timing: representative SMALL-queue LPOP — refill a 64-elem list then pop all 64
+        // (single chunk, no O(chunks) front-chunk-removal cost that dominates huge lists).
+        // The refill rpush is ~1/64 of the timed work. reps = rounds*64.
+        let rounds = 40_000u64;
+        let batch: Vec<Vec<u8>> = (0..64).map(|_| b"v".to_vec()).collect();
+        let mut b = Store::new();
+        let k: &[u8] = b"lp:bench";
+        for _ in 0..2000 { b.rpush(k, &batch, 1).ok(); for _ in 0..64 { b.lpop(k, 2).ok(); } }
+        let t0 = std::time::Instant::now();
+        for _ in 0..rounds {
+            b.rpush(std::hint::black_box(k), &batch, 1).ok();
+            for _ in 0..64 { std::hint::black_box(b.lpop(std::hint::black_box(k), 2)).ok(); }
+        }
+        let full = t0.elapsed().as_nanos() as f64 / (rounds * 64) as f64;
+        // Elided probe: the drop's no-TTL contains_key.
+        let mut c = Store::new();
+        c.rpush(b"probe", &[b"v".to_vec()], 1).unwrap();
+        let pk: &[u8] = b"probe";
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(c.entries.contains_key(std::hint::black_box(pk))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "LPOP pop-all no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );
