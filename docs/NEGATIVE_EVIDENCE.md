@@ -31,6 +31,28 @@ blocked by existing `clippy::too_many_arguments` on
 `zrangebyscore_members_limit_borrow_scan` (`crates/fr-store/src/lib.rs:16463`), outside this
 RESTORE diff.
 
+## 2026-07-04 CrimsonHawk: KEEP — shared read helper `lookup_live_for_read_mut` expiry-peek gated by `expires_count != 0` — isolated −0.9 ns = 3.5% of EXISTS@1 no-TTL, across 8 callers (byte-exact)
+
+Third ship in the per-element expiry-guard vein (HMGET, MGET below). The non-LFU
+single-lookup read helper `lookup_live_for_read_mut` — shared by **8 callers**
+(EXISTS, TYPE/value_type, STRLEN, GETRANGE, GETBIT, BITFIELD GET, PTTL, get_sort_weight) —
+ran `evaluate_expiry(now, self.expiry_ms(key))` on every read, and `expiry_ms`
+foldhash-hashes the key + probes the deadline map, pure waste when no key has a TTL. Gated
+with `self.expires_count != 0 &&` (GET's no-TTL fast path). Byte-identical incl stats — with
+no expiry a key never evicts, so `should_evict` is already false; the non-zero branch (drop
++ miss) is unchanged (proven by `read_helper_guard_still_evicts_expired_when_expires_count_nonzero`,
+asserting hit/miss stat deltas + actual removal).
+
+MEASURED (per-crate `cargo test -p fr-store --release` via rch, intra-run isolated A/B):
+full EXISTS@1 (no TTL, LFU off) ≈ 25.89 ns/op; the per-call expiry peek in isolation =
+**0.92 ns** (foldhash small key + empty-map probe) vs guarded = **0.00 ns** → **saved 0.92 ns
+= 3.54% of EXISTS (1.037x)**. Modest per-call, but multiplies across the 8 read commands
+routed through the helper (and each of THEIR per-element/multi-key forms). Conformance GREEN
+(full fr-store lib suite: only pre-existing flaky A/B-ratio timing tests failed under load —
+foldhash-membership / zdiff / zadd ratio asserts, none of which call this string-read helper;
+my read-helper + mget + hmget tests all pass). Landed via a clean origin/main worktree to
+avoid a concurrent peer's uncommitted zset-listpack WIP in the shared tree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — MGET non-LFU per-key expiry-peek gated by `expires_count != 0` — isolated −62 ns = 8.1% of the MGET@8 no-TTL path (byte-exact)
 
 Extends the just-shipped per-element expiry-guard vein (see the HMGET entry below) to MGET.

@@ -6458,7 +6458,13 @@ impl Store {
     /// slow path for a non-LFU read (no RNG consumed, same drops / hit-miss accounting).
     fn lookup_live_for_read_mut(&mut self, key: &[u8], now_ms: u64) -> Option<&mut Entry> {
         debug_assert!(!self.lfu_tracking_enabled());
-        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+        // (CrimsonHawk) Gate the expiry PEEK on `expires_count != 0`: `expiry_ms`
+        // foldhash-hashes the key + probes the deadline map on EVERY read through this
+        // shared helper (9 callers: EXISTS, TYPE, STRLEN, … single-lookup fast paths),
+        // pure waste when the store holds no TTL-bearing keys. Byte-identical — with no
+        // expiry the key never evicts, so `should_evict` is already false and the stats
+        // path is unchanged. Mirrors GET's no-TTL fast path.
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
             self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
             return None;
@@ -29814,6 +29820,25 @@ mod tests {
         // with a single tiny entry. fr now matches: base 656 + first
         // listpack node 4072 = 4728.
         assert_eq!(store.memory_usage_for_key(b"xs", 0), Some(4_728));
+    }
+
+    // (CrimsonHawk) `lookup_live_for_read_mut`'s expiry peek is now gated on
+    // `expires_count != 0`. Exercise the NON-zero branch through EXISTS: with a
+    // TTL-bearing key present, an EXPIRED key must still be evicted + report absent,
+    // a live TTL key present — byte-identical to the unguarded helper (stats too).
+    #[test]
+    fn read_helper_guard_still_evicts_expired_when_expires_count_nonzero() {
+        let mut store = Store::new();
+        store.set(b"live".to_vec(), b"L".to_vec(), None, 100); // no TTL
+        store.set(b"dead".to_vec(), b"D".to_vec(), Some(50), 100); // TTL in the past by t=500
+        assert!(store.expires_count >= 1);
+        let (h0, m0) = (store.stat_keyspace_hits, store.stat_keyspace_misses);
+        assert!(store.exists(b"live", 500)); // hit
+        assert!(!store.exists(b"dead", 500)); // expired → evicted → miss
+        assert!(!store.exists(b"absent", 500)); // miss
+        assert_eq!(store.stat_keyspace_hits, h0 + 1);
+        assert_eq!(store.stat_keyspace_misses, m0 + 2);
+        assert!(store.get(b"dead", 600).unwrap().is_none()); // actually removed
     }
 
     #[test]
