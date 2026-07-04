@@ -15306,7 +15306,31 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
 
-        if !self.entries.contains_key(key) {
+        // (CrimsonHawk) get_mut-FIRST: the existing-key path now takes ONE keyspace probe
+        // (was `contains_key` + `get_mut` = two hashes; SADD/LPUSH already use this shape).
+        // The new-key build moves to the `else` arm — `get_mut` returned `None` there, so
+        // (edition 2024 if-let temporary scoping) the `entries` borrow is released and
+        // `internal_entries_insert` is free. Both arms may consume `members` (only one runs).
+        // Byte-identical: same new/existing/WRONGTYPE/empty-members behavior + counters.
+        let (added, changed, touched) = if let Some(entry) = self.entries.get_mut(key) {
+            let Value::SortedSet(zs) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for (score, member) in members {
+                let result =
+                    zs.insert_with_limits_result(member, score, zset_max_entries, zset_max_value);
+                added += result.added_count();
+                changed += result.changed_count();
+            }
+            let touched = added > 0 || changed > 0;
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+            }
+            (added, changed, touched)
+        } else {
             let mut iter = members.into_iter();
             let Some((score, member)) = iter.next() else {
                 return Ok(0);
@@ -15358,29 +15382,6 @@ impl Store {
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(1);
-        }
-
-        let (added, changed, touched) = {
-            let Some(entry) = self.entries.get_mut(key) else {
-                return Ok(0);
-            };
-            let Value::SortedSet(zs) = &mut entry.value else {
-                return Err(StoreError::WrongType);
-            };
-            let mut added = 0_usize;
-            let mut changed = 0_usize;
-            for (score, member) in members {
-                let result =
-                    zs.insert_with_limits_result(member, score, zset_max_entries, zset_max_value);
-                added += result.added_count();
-                changed += result.changed_count();
-            }
-            let touched = added > 0 || changed > 0;
-            if touched {
-                entry.touch_write(now_ms, lfu_tracking_enabled);
-                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
-            }
-            (added, changed, touched)
         };
         if touched {
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -33081,6 +33082,63 @@ mod tests {
         std::hint::black_box(acc);
         println!(
             "ZREMRANGEBYRANK no-op no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) ZADD (zadd_plain_owned) get_mut-first collapse: byte-identical across
+    // new-key create (single + multi member), existing-key update, WRONGTYPE, empty-members,
+    // and the returned add-count / resulting scores.
+    #[test]
+    fn zadd_plain_owned_get_mut_first_matches() {
+        // New key, single member.
+        let mut s = Store::new();
+        assert_eq!(s.zadd_plain_owned(b"z1", vec![(1.0, b"a".to_vec())], 1).unwrap(), 1);
+        assert_eq!(s.zscore(b"z1", b"a", 1).unwrap(), Some(1.0));
+        // New key, multi member (with a dup → dedup keeps last).
+        let mut s2 = Store::new();
+        assert_eq!(s2.zadd_plain_owned(b"z2", vec![(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (9.0, b"a".to_vec())], 1).unwrap(), 2);
+        assert_eq!(s2.zscore(b"z2", b"a", 1).unwrap(), Some(9.0));
+        assert_eq!(s2.zscore(b"z2", b"b", 1).unwrap(), Some(2.0));
+        // Existing key: add new + update existing.
+        assert_eq!(s2.zadd_plain_owned(b"z2", vec![(5.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap(), 1); // c new; b updated (not counted)
+        assert_eq!(s2.zscore(b"z2", b"b", 1).unwrap(), Some(5.0));
+        assert_eq!(s2.zscore(b"z2", b"c", 1).unwrap(), Some(3.0));
+        assert_eq!(s2.zcard(b"z2", 1).unwrap(), 3);
+        // Empty members: 0, on both new and existing key.
+        let mut s3 = Store::new();
+        assert_eq!(s3.zadd_plain_owned(b"new", vec![], 1).unwrap(), 0);
+        assert!(s3.zscore(b"new", b"x", 1).unwrap().is_none());
+        s3.zadd_plain_owned(b"exist", vec![(1.0, b"m".to_vec())], 1).unwrap();
+        assert_eq!(s3.zadd_plain_owned(b"exist", vec![], 1).unwrap(), 0);
+        // WRONGTYPE on existing string key.
+        s3.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        assert!(matches!(s3.zadd_plain_owned(b"str", vec![(1.0, b"a".to_vec())], 1), Err(StoreError::WrongType)));
+        // Lazy-expiry: expired zset key → fresh set.
+        let mut t = Store::new();
+        t.zadd_plain_owned(b"exp", vec![(9.0, b"old".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert_eq!(t.zadd_plain_owned(b"exp", vec![(1.0, b"new".to_vec())], 500).unwrap(), 1);
+        assert!(t.zscore(b"exp", b"old", 500).unwrap().is_none());
+
+        // Timing: ZADD update-existing (no TTL, LFU off) — the path that drops contains_key.
+        let mut b = Store::new();
+        b.zadd_plain_owned(b"benchz:key", vec![(1.0, b"m".to_vec())], 1).unwrap();
+        let k: &[u8] = b"benchz:key";
+        for _ in 0..2000 { b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "ZADD update-existing no-TTL get_mut-first: full={full:.2} ns | dropped contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe, (full + probe) / full
         );

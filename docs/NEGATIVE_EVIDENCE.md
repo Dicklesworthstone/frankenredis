@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — ZADD (`zadd_plain_owned`) get_mut-FIRST write collapse — ZADD update-existing 1.21x (byte-exact)
+
+The deferred ZADD double-hash (flagged earlier as risky) — LANDED safely on edition 2024.
+`zadd_plain_owned` (the live flagless ZADD fast path) did `if !contains_key(key) { build+insert }
+else { get_mut modify }` — the existing-key path cost TWO key hashes (contains_key + get_mut),
+unlike SADD/LPUSH which are get_mut-first. Restructured to `let (a,c,t) = if let Some(entry) =
+self.entries.get_mut(key) { <modify> } else { <build+insert; return> };` — ONE hash on the
+existing-key path; the new-key build moves to the `else` arm where get_mut returned None so
+(edition-2024 if-let temporary scoping) the `entries` borrow is released and
+`internal_entries_insert` is free. `members` is consumed in whichever arm runs. Byte-identical:
+same new(single/multi-member+dedup)/existing/WRONGTYPE/empty-members behavior, add-count, scores,
+touch_write/encoding/digest/dirty bookkeeping. Proven by `zadd_plain_owned_get_mut_first_matches`
+(all those cases + lazy-expiry) plus the full existing ZADD suite.
+
+MEASURED (per-crate via rch, intra-run isolated): ZADD update-existing (single member, no TTL,
+LFU off) = 43.79 ns/op; dropped `contains_key` ≈ **9.31 ns** → old ≈ 53.10 ns ⇒ **1.21x (−18%)**.
+Conformance GREEN (680/680 correctness; lone failure = brittle
+`zadd_insert_move_matches_clone_and_reports_ab_ratio` perf-ratio guard — got 0.71x under loaded
+worker ovh-a, PASSES 0.93x in isolation, its matches-clone CORRECTNESS assert passes both times;
+benchmarks the clone-vs-move insert strategy this diff never touches). **Note: plain `zadd`'s
+existing-key path delegates to `zadd_with_options` which still has its own contains_key+get_mut;
+the LIVE flagless path is `zadd_plain_owned` (this fix).** Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — ZREMRANGEBYRANK/BYSCORE/BYLEX bare-drop `expires_count` guard — ZREMRANGEBYRANK no-op 1.44x (byte-exact)
 
 Continues the write bare-drop-guard vein. All three range-remove writes called a BARE unguarded
