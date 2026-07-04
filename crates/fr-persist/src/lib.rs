@@ -1339,7 +1339,7 @@ const fn build_crc64_redis_slice() -> [[u64; 256]; 16] {
     tables
 }
 
-const CRC64_REDIS_SLICE: [[u64; 256]; 16] = build_crc64_redis_slice();
+static CRC64_REDIS_SLICE: [[u64; 256]; 16] = build_crc64_redis_slice();
 
 /// Redis CRC-64 (Jones reflected polynomial), slice-by-16. Folds 16 input bytes
 /// per iteration through `CRC64_REDIS_SLICE` (two word loads), with a byte-wise

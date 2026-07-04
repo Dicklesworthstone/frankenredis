@@ -25,10 +25,7 @@ fn glob_reference(pattern: &[u8], string: &[u8]) -> bool {
             star_pi = pi;
             star_si = si;
             pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == b'?' {
-            pi += 1;
-            si += 1;
-        } else if pi < pattern.len() && pattern[pi] == string[si] {
+        } else if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == string[si]) {
             pi += 1;
             si += 1;
         } else if star_pi != usize::MAX {

@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: SURFACE — cold compact-zset DUMP is now 1.138x Redis 7.2.4; no unmeasured production lever retained
+
+Added a focused per-crate `fr-bench` Criterion row for cold first-pass `DUMP`
+of compact zsets: 64 keys, 64 members/key, prefilled with `ZADD`, measured with
+one `DUMP` packet, then `FLUSHALL` each iteration so the zset dump payload cache
+cannot turn the row into repeated-DUMP.
+
+Per-crate RCH bench: `cargo bench --profile release -p fr-bench --bench
+keyed_write_vs_redis -- dump_zset_vs_redis --noplot`, Redis 7.2.4 oracle,
+release `fr-server` binary from `origin/main` 267076416, same worker
+`vmi1227854`.
+
+| row | Redis 7.2.4 median | FrankenRedis median | Redis thrpt | FR thrpt | FR/Redis |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DUMP_zset_64m | 332.74 us | 292.46 us | 192.34 Kelem/s | 218.84 Kelem/s | 1.138x |
+
+Interpretation: this `frankenredis-amsm9` residual is no longer a below-Redis
+gap for the cold compact-zset DUMP shape; current FrankenRedis is faster than
+Redis 7.2.4 on the newly landed row. A candidate in-place listpack finish
+removing one cold-DUMP allocation/copy was proven byte-equivalent locally, but
+not retained because the fleet could not produce a same-worker candidate/control
+bench pair during this cycle. Do not ship that production lever without paired
+same-worker evidence.
+
 ## 2026-07-04 BlackThrush: KEEP — ZREVRANGE ... WITHSCORES gets a borrowed `_into` fast path (was fully generic); +SURFACE generic keyspace-hit over-count
 
 `ZREVRANGE key start stop WITHSCORES` (the canonical descending-leaderboard-with-
@@ -115,7 +139,6 @@ retry generic listpack header-in-place finishing for this gap. Next useful work
 is a lower-noise cold-DUMP profile that separates CRC, score formatting, zset
 iteration, and server command overhead, or a structural retained/serialized
 compact representation; not another final-buffer copy tweak.
-
 ## 2026-07-04 CrimsonHawk: REJECT — small CompactFieldMap linear `contains_key` did not clear the SMISMEMBER gate
 
 Re-applied the `frankenredis-f7iv3` candidate: for `CompactFieldMap::contains_key`

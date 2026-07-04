@@ -33096,7 +33096,8 @@ mod tests {
     // matching keyspace hit/miss stats so metrics stay byte-exact.
     #[test]
     fn hmget_for_each_matches_hmget() {
-        let shapes: &[(&[&[u8]], &[&[u8]])] = &[
+        type HmgetShape<'a> = (&'a [&'a [u8]], &'a [&'a [u8]]);
+        let shapes: &[HmgetShape<'_>] = &[
             // (fields present in the hash, fields to request)
             (&[b"a", b"b", b"c"], &[b"a", b"missing", b"c", b"b"]),
             (&[b"x"], &[b"x", b"x"]), // duplicate requested field
@@ -37011,7 +37012,11 @@ mod tests {
                 let mut lows: Vec<Vec<u8>> = batch.clone();
                 lows.sort();
                 for k in lows.into_iter().take(2) {
-                    assert_eq!(store.del(&[k.clone()], 0), 1, "victim key must exist");
+                    assert_eq!(
+                        store.del(std::slice::from_ref(&k), 0),
+                        1,
+                        "victim key must exist"
+                    );
                     deleted.insert(k);
                 }
             }
@@ -43408,7 +43413,6 @@ mod tests {
 
     // (frankenredis-387i6) Concrete before/after timing for the LREM bounded
     // early-stop lever. `cargo test -- --ignored --nocapture lrem_bench`.
-    #[test]
     // (frankenredis-zrange-probe) Quantify the member-CLONE cost of the plain
     // ZRANGE reply: `store.zrange` collects `Vec<Vec<u8>>` (clones every member),
     // vs a borrowing `iter_asc()` walk that touches the same bytes with zero
@@ -43446,11 +43450,11 @@ mod tests {
             // BORROW path: iter_asc().skip(start).take(count), zero per-member alloc.
             let t = Instant::now();
             for _ in 0..ITERS {
-                if let Some(entry) = store.entries.get(b"z".as_slice()) {
-                    if let Value::SortedSet(zs) = &entry.value {
-                        for (m, _s) in zs.iter_asc().skip(start_idx).take(count) {
-                            sink += m.len();
-                        }
+                if let Some(entry) = store.entries.get(b"z".as_slice())
+                    && let Value::SortedSet(zs) = &entry.value
+                {
+                    for (m, _s) in zs.iter_asc().skip(start_idx).take(count) {
+                        sink += m.len();
                     }
                 }
             }

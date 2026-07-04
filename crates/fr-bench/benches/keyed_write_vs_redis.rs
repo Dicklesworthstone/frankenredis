@@ -36,6 +36,8 @@ const DELETE_COMMANDS: [&str; 2] = ["HDEL", "SREM"];
 const LINSERT_LIST_LEN: usize = 64;
 const SPOP_COUNT_SET_SIZE: usize = 8;
 const SPOP_COUNT_POP: usize = 4;
+const DUMP_ZSET_KEYS: usize = 64;
+const DUMP_ZSET_MEMBERS: usize = 64;
 const GETEX_PERSIST_EXAT: &str = "4102444800";
 const GETEX_ABS_EXAT: &str = "4102444800";
 const GETEX_ABS_PXAT: &str = "4102444800000";
@@ -488,6 +490,33 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
         }
     }
     smismember_group.finish();
+
+    let mut dump_group = c.benchmark_group("dump_zset_vs_redis");
+    dump_group.throughput(Throughput::Elements(DUMP_ZSET_KEYS as u64));
+    let dump_prefill = pipelined_dump_zset_prefill_packet(DUMP_ZSET_KEYS, DUMP_ZSET_MEMBERS);
+    let dump_packet = pipelined_dump_zset_packet(DUMP_ZSET_KEYS);
+    for engine in engines {
+        dump_group.bench_with_input(
+            BenchmarkId::new(format!("DUMP_zset_{DUMP_ZSET_MEMBERS}m"), engine.name),
+            &engine,
+            |b, engine| {
+                let mut client = Client::connect(engine.port);
+                b.iter_custom(|iters| {
+                    client.flushall();
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        client.run_packet(&dump_prefill, DUMP_ZSET_KEYS);
+                        let start = Instant::now();
+                        client.run_resp_packet(&dump_packet, DUMP_ZSET_KEYS);
+                        elapsed += start.elapsed();
+                        client.flushall();
+                    }
+                    elapsed
+                });
+            },
+        );
+    }
+    dump_group.finish();
 }
 
 fn redis_server_bin() -> PathBuf {
@@ -781,6 +810,31 @@ fn pipelined_smismember_packet(arity: usize, count: usize) -> Vec<u8> {
             3 => packet.extend_from_slice(&encode_command(&["SMISMEMBER", "s", "a", &miss, "c"])),
             _ => unreachable!("benchmark arity is fixed"),
         }
+    }
+    packet
+}
+
+fn pipelined_dump_zset_prefill_packet(keys: usize, members: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(keys * (48 + members * 16));
+    for key_index in 0..keys {
+        let key = format!("dz:{key_index:03}");
+        let mut args = Vec::with_capacity(members.saturating_mul(2).saturating_add(2));
+        args.push(b"ZADD".to_vec());
+        args.push(key.into_bytes());
+        for member_index in 0..members {
+            args.push(member_index.to_string().into_bytes());
+            args.push(format!("m{member_index:03}").into_bytes());
+        }
+        packet.extend_from_slice(&encode_command_vecs(&args));
+    }
+    packet
+}
+
+fn pipelined_dump_zset_packet(keys: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(keys * 32);
+    for key_index in 0..keys {
+        let key = format!("dz:{key_index:03}");
+        packet.extend_from_slice(&encode_command(&["DUMP", &key]));
     }
     packet
 }
