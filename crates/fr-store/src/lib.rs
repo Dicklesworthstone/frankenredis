@@ -2056,7 +2056,12 @@ impl SortedSet {
                 .filter_map(|sm| sm.member.as_actual())
                 .filter(|m| lex_in_range(m, min, max));
             return if rev {
-                scanned.rev().skip(offset).take(take).map(|m| (m, s)).collect()
+                scanned
+                    .rev()
+                    .skip(offset)
+                    .take(take)
+                    .map(|m| (m, s))
+                    .collect()
             } else {
                 scanned.skip(offset).take(take).map(|m| (m, s)).collect()
             };
@@ -2320,7 +2325,8 @@ impl SortedSet {
         match &mut self.inner {
             SortedSetInner::Packed(p) => {
                 let len = p.len();
-                p.rank_with_score(member).map(|(rank, s)| (len - 1 - rank, s))
+                p.rank_with_score(member)
+                    .map(|(rank, s)| (len - 1 - rank, s))
             }
             SortedSetInner::Full(f) => f.rev_rank_with_score(member),
         }
@@ -8630,7 +8636,12 @@ impl Store {
     /// (`bitfield_cmd`) has already type-checked the key, so a present key is a
     /// string; a non-string would be handled the same (empty read) but cannot occur.
     #[must_use]
-    pub fn bitfield_get_batch(&mut self, key: &[u8], ops: &[(u64, u8, bool)], now_ms: u64) -> Vec<i64> {
+    pub fn bitfield_get_batch(
+        &mut self,
+        key: &[u8],
+        ops: &[(u64, u8, bool)],
+        now_ms: u64,
+    ) -> Vec<i64> {
         if !self.drop_if_expired(key, now_ms) {
             return ops
                 .iter()
@@ -9120,15 +9131,17 @@ impl Store {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse;
         // TYPE does not touch access time, so the helper's entry suffices.
         if !self.lfu_tracking_enabled() {
-            return self.lookup_live_for_read_mut(key, now_ms).map(|entry| match &entry.value {
-                Value::String(_) => ValueType::String,
-                Value::Integer(_) => ValueType::String,
-                Value::Hash(_) => ValueType::Hash,
-                Value::List(_) => ValueType::List,
-                Value::Set(_) => ValueType::Set,
-                Value::SortedSet(_) => ValueType::ZSet,
-                Value::Stream(_) => ValueType::Stream,
-            });
+            return self
+                .lookup_live_for_read_mut(key, now_ms)
+                .map(|entry| match &entry.value {
+                    Value::String(_) => ValueType::String,
+                    Value::Integer(_) => ValueType::String,
+                    Value::Hash(_) => ValueType::Hash,
+                    Value::List(_) => ValueType::List,
+                    Value::Set(_) => ValueType::Set,
+                    Value::SortedSet(_) => ValueType::ZSet,
+                    Value::Stream(_) => ValueType::Stream,
+                });
         }
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
@@ -11295,27 +11308,27 @@ impl Store {
                 **m = map;
                 added = hadded;
             } else {
-            let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
-                std::collections::HashSet::with_capacity_and_hasher(
-                    count as usize,
-                    foldhash::quality::RandomState::default(),
-                );
-            let unique = pairs.chunks_exact(2).all(|p| seen.insert(p[0]));
-            drop(seen);
-            if unique {
-                let borrowed: Vec<(&[u8], &[u8])> =
-                    pairs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-                **m = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
-                added = count as usize;
-            } else {
-                let mut a = 0_usize;
-                for p in pairs.chunks_exact(2) {
-                    if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
-                        a += 1;
+                let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+                    std::collections::HashSet::with_capacity_and_hasher(
+                        count as usize,
+                        foldhash::quality::RandomState::default(),
+                    );
+                let unique = pairs.chunks_exact(2).all(|p| seen.insert(p[0]));
+                drop(seen);
+                if unique {
+                    let borrowed: Vec<(&[u8], &[u8])> =
+                        pairs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+                    **m = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
+                    added = count as usize;
+                } else {
+                    let mut a = 0_usize;
+                    for p in pairs.chunks_exact(2) {
+                        if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
+                            a += 1;
+                        }
                     }
+                    added = a;
                 }
-                added = a;
-            }
             }
         } else {
             let mut a = 0_usize;
@@ -14502,10 +14515,14 @@ impl Store {
         let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
             return Ok(Vec::new());
         };
-        let Some(smallest) = self.entries.get(keys[min_idx]).and_then(|e| match &e.value {
-            Value::Set(s) => Some(s),
-            _ => None,
-        }) else {
+        let Some(smallest) = self
+            .entries
+            .get(keys[min_idx])
+            .and_then(|e| match &e.value {
+                Value::Set(s) => Some(s),
+                _ => None,
+            })
+        else {
             return Ok(Vec::new());
         };
         let mut out: Vec<Vec<u8>> = match smallest.as_generic() {
@@ -16036,24 +16053,24 @@ impl Store {
                 }
             }
             if permissive || !intra_dup {
-            if added == 0 {
-                return Ok((0, 0));
-            }
-            let zs = SortedSet::from_unique_pairs_with_limits(
-                latest.into_iter().collect(),
-                zset_max_entries,
-                zset_max_value,
-            );
-            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-            self.internal_entries_insert(key.to_vec(), entry);
-            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-            self.dirty = self.dirty.saturating_add((added + changed) as u64);
-            if opts.ch {
-                return Ok((added + changed, changed));
-            }
-            return Ok((added, changed));
+                if added == 0 {
+                    return Ok((0, 0));
+                }
+                let zs = SortedSet::from_unique_pairs_with_limits(
+                    latest.into_iter().collect(),
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+                self.internal_entries_insert(key.to_vec(), entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((added + changed) as u64);
+                if opts.ch {
+                    return Ok((added + changed, changed));
+                }
+                return Ok((added, changed));
             }
         }
         let (added, changed, is_empty, touched) = {
@@ -18768,9 +18785,7 @@ impl Store {
                     // Byte-identical: same members removed, same residual.
                     let run = zs.score_bound_range(min, max, false);
                     let removed_count = run.len();
-                    if let Some(start) = run
-                        .first()
-                        .and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    if let Some(start) = run.first().and_then(|(m, s)| zs.compact_run_start(m, *s))
                     {
                         zs.remove_rank_range(start, removed_count);
                     } else {
@@ -18829,9 +18844,7 @@ impl Store {
                     // Packed keep the per-member remove. Byte-identical membership.
                     let run = zs.lex_range_asc(min, max);
                     let removed_count = run.len();
-                    if let Some(start) = run
-                        .first()
-                        .and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    if let Some(start) = run.first().and_then(|(m, s)| zs.compact_run_start(m, *s))
                     {
                         zs.remove_rank_range(start, removed_count);
                     } else {
@@ -22140,9 +22153,7 @@ impl Store {
         // Value::String yields a Cow::Borrowed so large strings are zero-copy.
         macro_rules! operand {
             ($key:expr) => {
-                self.entries
-                    .get($key)
-                    .and_then(|e| e.value.string_bytes())
+                self.entries.get($key).and_then(|e| e.value.string_bytes())
             };
         }
 
@@ -37669,7 +37680,8 @@ mod tests {
             s.hset(b"h", b"live".to_vec(), b"1".to_vec(), 1).unwrap();
             s.hset(b"h", b"gone".to_vec(), b"2".to_vec(), 1).unwrap();
             // "gone" expires at t=5; request at t=10 must see it dropped.
-            s.hash_field_expires.insert((b"h".to_vec(), b"gone".to_vec()), 5);
+            s.hash_field_expires
+                .insert((b"h".to_vec(), b"gone".to_vec()), 5);
             s
         };
         let req: &[&[u8]] = &[b"live", b"gone", b"absent"];
@@ -37733,8 +37745,10 @@ mod tests {
             let want_miss = c.hmget(b"nokey", request, 1).unwrap();
             let mut d = Store::new();
             let mut got_miss: Vec<Option<Vec<u8>>> = Vec::new();
-            d.hmget_for_each(b"nokey", request, 1, |v| got_miss.push(v.map(<[u8]>::to_vec)))
-                .unwrap();
+            d.hmget_for_each(b"nokey", request, 1, |v| {
+                got_miss.push(v.map(<[u8]>::to_vec))
+            })
+            .unwrap();
             assert_eq!(got_miss, want_miss, "missing-key reply mismatch");
             assert_eq!(c.stat_keyspace_misses, d.stat_keyspace_misses);
 
@@ -37743,7 +37757,10 @@ mod tests {
             // whole-command error with a clean buffer).
             let mut e = Store::new();
             e.set(b"s".to_vec(), b"str".to_vec(), None, 0);
-            assert!(matches!(e.hmget(b"s", request, 1), Err(StoreError::WrongType)));
+            assert!(matches!(
+                e.hmget(b"s", request, 1),
+                Err(StoreError::WrongType)
+            ));
             let mut g = Store::new();
             g.set(b"s".to_vec(), b"str".to_vec(), None, 0);
             let mut emitted = 0usize;
@@ -40467,8 +40484,11 @@ mod tests {
         let t1 = std::time::Instant::now();
         let mut c1 = 0usize;
         for _ in 0..reps {
-            c1 = c1
-                .wrapping_add(store.zinter_members_argv_order_no_stats(&keys, &[], b"SUM").len());
+            c1 = c1.wrapping_add(
+                store
+                    .zinter_members_argv_order_no_stats(&keys, &[], b"SUM")
+                    .len(),
+            );
         }
         let new_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(c1);
@@ -48081,9 +48101,13 @@ mod tests {
         const ITERS: usize = 200_000;
 
         let mut store = Store::new();
-        let field_names: Vec<Vec<u8>> = (0..NFIELDS).map(|i| format!("f{i:03}").into_bytes()).collect();
+        let field_names: Vec<Vec<u8>> = (0..NFIELDS)
+            .map(|i| format!("f{i:03}").into_bytes())
+            .collect();
         for f in &field_names {
-            store.hset(b"h", f.clone(), vec![b'v'; VALUE_LEN], 0).unwrap();
+            store
+                .hset(b"h", f.clone(), vec![b'v'; VALUE_LEN], 0)
+                .unwrap();
         }
         let fields: Vec<&[u8]> = field_names.iter().map(|f| f.as_slice()).collect();
 
