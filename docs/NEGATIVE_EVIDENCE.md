@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: DROP — BITCOUNT popcount 4-accumulator unroll measured 0.578x vs current single-accumulator swar (WORSE) — reverted
+
+Dug the BITCOUNT popcount path (`Store::popcount_bytes`, fr-store/src/lib.rs) as a fresh
+per-crate-benchable lever: the shipped form is single-accumulator word-at-a-time (8B/iter,
+`u64::count_ones`), whose `count += ...` add-chain in principle caps ILP at ~1 word/cycle.
+Hypothesis: a 4-accumulator unroll (32B/iter, disjoint sums, mirroring redis
+`redisPopcount`'s 4×u64 form) would expose more POPCNT throughput. Byte-identical by
+construction (popcount is order-independent; exhaustive len-0..512 sweep asserted equal).
+
+MEASURED (same in-crate A/B harness as `popcount_bytes_swar_matches_naive_and_reports_ab_ratio`,
+32 MiB ×5, `cargo test -p fr-store --release` via rch worker hz1, CARGO_TARGET_DIR=.rch-targets):
+`naive=160.7ms  swar=13.0ms  unrolled4=22.6ms` → **unrolled4/swar = 0.578x (1.73x SLOWER)**;
+swar itself is already 12.32x over naive (~12 GB/s). The 32-byte-chunk sub-slice indexing
+(`chunk[0..8].try_into()`) produces worse codegen than `chunks_exact(8)`'s clean 8-byte
+arrays, and the single-accumulator loop is already POPCNT-throughput (not add-latency) bound
+at this width. Candidate + test additions REVERTED (lib.rs byte-clean vs HEAD). BITCOUNT is
+not even a flagged gap; the swar baseline is near-optimal. Rollback: full (no code change
+retained). Confirms [[project_percrate_bench_frontier_saturated]] — the swar popcount joins
+the saturated set.
+
 ## 2026-07-04 CrimsonHawk: SURFACE — per-crate-benchable perf frontier (fr-store + fr-protocol) verified SATURATED; remaining gaps are all fr-server-IO / multi-day-structural — cannot be landed under the per-crate-bench mandate
 
 Post-context-reset land-or-dig pass. Working tree clean, up to date with origin/main
