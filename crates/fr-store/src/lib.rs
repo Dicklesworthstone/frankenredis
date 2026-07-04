@@ -18025,7 +18025,14 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<Option<f64>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) ZMSCORE records NO keyspace stat and DISCARDS drop_if_expired's
+        // return (it's called only for the eviction side-effect). With no volatile keys
+        // (expires_count==0) nothing can be evicted, so the whole call is dead — guard it,
+        // eliding its keyspace probe. Byte-identical: an expired key requires a TTL, which
+        // keeps expires_count>0 and takes the full drop path unchanged.
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -21253,6 +21260,20 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<bool>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(vec![false; members.len()]),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(vec![false; members.len()]);
         }
@@ -32471,6 +32492,70 @@ mod tests {
              ⇒ old ≈ {:.2} ns = {:.2}x",
             full + probe,
             (full + probe) / full
+        );
+    }
+
+    // (CrimsonHawk) SMISMEMBER single-lookup collapse + ZMSCORE drop-guard must be
+    // byte-identical: correct results, WRONGTYPE, and (with a TTL present) lazy eviction.
+    // ZMSCORE records NO keyspace stat; SMISMEMBER records one hit/miss per call.
+    #[test]
+    fn smismember_zmscore_lookup_opt_matches_full_path() {
+        let mut s = Store::new();
+        s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        assert_eq!(s.smismember(b"set", &[b"a", b"x", b"b"], 2).unwrap(), vec![true, false, true]);
+        assert_eq!(s.smismember(b"absent", &[b"a", b"b"], 2).unwrap(), vec![false, false]);
+        assert!(matches!(s.smismember(b"str", &[b"a"], 2), Err(StoreError::WrongType)));
+        // SMISMEMBER records keyspace stats: hits = set + str(wrongtype) = 2; misses = absent = 1.
+        assert_eq!(s.stat_keyspace_hits, h0 + 2);
+        assert_eq!(s.stat_keyspace_misses, m0 + 1);
+
+        // ZMSCORE: correct scores, WRONGTYPE, missing→all-None; NO keyspace stat change.
+        let (h1, m1) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+        assert_eq!(s.zmscore(b"zs", &[b"b", b"none", b"a"], 2).unwrap(),
+                   vec![Some(2.0), None, Some(1.0)]);
+        assert_eq!(s.zmscore(b"absent", &[b"a"], 2).unwrap(), vec![None]);
+        assert!(matches!(s.zmscore(b"str", &[b"a"], 2), Err(StoreError::WrongType)));
+        assert_eq!(s.stat_keyspace_hits, h1, "ZMSCORE records no keyspace hit");
+        assert_eq!(s.stat_keyspace_misses, m1, "ZMSCORE records no keyspace miss");
+
+        // Lazy expiry (expires_count > 0 branch): expired zset key → all-None + evicted.
+        let mut t = Store::new();
+        t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.zmscore(b"exp", &[b"m"], 500).unwrap(), vec![None]);
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "ZMSCORE evicts expired key");
+        // SMISMEMBER lazy-expiry on a set.
+        let mut u = Store::new();
+        u.sadd(b"sexp", &[b"a".to_vec()], 1).unwrap();
+        u.expire_at_milliseconds(b"sexp", 50, 1);
+        assert_eq!(u.smismember(b"sexp", &[b"a"], 500).unwrap(), vec![false]);
+        assert!(u.get(b"sexp", 600).unwrap().is_none());
+
+        // Timing headline for SMISMEMBER (no-TTL, LFU off).
+        let mut b = Store::new();
+        for i in 0..8u32 { b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1).unwrap(); }
+        let k: &[u8] = b"benchset:key";
+        let q: &[&[u8]] = &[b"m0", b"m3", b"m7", b"nope"];
+        for _ in 0..2000 { std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok(); }
+        let reps = 2_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok(); }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "SMISMEMBER@8/4q no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe, (full + probe) / full
         );
     }
 

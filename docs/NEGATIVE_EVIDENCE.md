@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — SMISMEMBER single-lookup collapse + ZMSCORE drop-guard — SMISMEMBER@8/4q 1.11x (byte-exact)
+
+Two multi-member reads, two mechanisms, same ~10 ns/probe saving:
+- **SMISMEMBER** (records keyspace stat): non-LFU branch collapsed `record_keyspace_lookup` +
+  `entries.get_mut` into one `lookup_live_for_read_mut` (the SCARD/LLEN pattern).
+- **ZMSCORE** (records NO keyspace stat, DISCARDS drop_if_expired's return — called only for
+  the eviction side-effect): guarded the bare `drop_if_expired` with `if expires_count != 0`,
+  eliding its now-dead `contains_key` probe on the no-TTL path.
+Both byte-identical (results, WRONGTYPE, hit/miss accounting [ZMSCORE = none], lazy-expiry
+eviction; LFU path verbatim). Proven by `smismember_zmscore_lookup_opt_matches_full_path`
+(values, WRONGTYPE, ZMSCORE stat-neutrality asserted explicitly, expired-key eviction for both).
+
+MEASURED (per-crate via rch, intra-run isolated): collapsed SMISMEMBER@8/4q no-TTL = 90.08 ns;
+removed 2nd keyspace probe ≈ **9.62 ns** → old ≈ 99.71 ns ⇒ **1.11x (−10%)**. Lower ratio than
+the cardinality reads (SCARD 1.48x) because SMISMEMBER@8 does 4 member `contains` per call =
+bigger op, so the removed probe is a smaller fraction. ZMSCORE saves the same ~10 ns/call.
+Conformance GREEN (674/674 correctness; lone failure = brittle `foldhash_keyspace_lookup_beats_
+siphash_ab` perf-margin timing test under loaded worker, unrelated). Landed via clean
+origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — LLEN/ZSCORE/ZRANK/ZREVRANK non-LFU single-lookup collapse — LLEN@8 1.46x (byte-exact)
 
 Continues the single-lookup-collapse vein (SCARD/ZCARD/SISMEMBER, below) into the list + zset
