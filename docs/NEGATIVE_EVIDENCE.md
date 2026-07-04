@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: NO-SHIP — OBJECT IDLETIME single-lookup collapse is ~1.02x vs ORIG, too small/noisy; reverted
+
+Dug the `OBJECT IDLETIME` borrowed runtime path because the residual-gap map still lists `object_freq`/
+OBJECT-class fixed overhead in the dispatch-chain bucket. The candidate added `Store::object_idletime_live`
+and routed default non-LFU `OBJECT IDLETIME key` through it so the borrowed path used one
+`lookup_live_for_read_mut` probe instead of `exists_no_touch` followed by non-counting
+`object_idletime`.
+
+Behavior proof for the candidate before revert: `cargo check -p fr-store -p fr-runtime --all-targets`
+GREEN via `rch exec` on `ovh-a`; `cargo test -p fr-runtime plain_object_stat_borrowed_matches_generic -- --nocapture`
+GREEN with `FR_ALLOW_STUB_COMMANDS=1`. `git diff --check` was clean. `cargo fmt --check -p fr-store -p
+fr-runtime` still reports broad pre-existing formatting drift in the large runtime/store files, so no
+rustfmt rewrite was applied.
+
+MEASURED (SHORT per-crate Redis bench, `CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`,
+`-p fr-bench --bench exists_vs_redis -- object_idletime_hit --sample-size 10 --measurement-time 1`):
+the requested `rch exec` bench reached worker `hz2` but failed before measurement because RCH rewrote the
+target dir and the worker lacked `release/frankenredis`. Local same-host fallback with `FR_SERVER_BIN`
+pinned was used for a like-for-like ORIG/candidate comparison. ORIG clean `origin/main`:
+redis-7.2.4 median 103.27 us/128, FrankenRedis median 141.59 us/128 = 0.73x Redis. Candidate:
+redis-7.2.4 median 82.740 us/128, FrankenRedis median 139.25 us/128 = 0.59x Redis; FR-only delta
+141.59/139.25 = **1.02x vs ORIG**. That is below the keep bar and Redis-relative noise moved the wrong
+way, so the code was reverted. Conclusion: the extra OBJECT IDLETIME lookup is not a bounded server-level
+win; remaining OBJECT-class loss still routes to the structural command dispatch/preamble bucket.
+
 ## 2026-07-04 CrimsonHawk: KEEP — swept the throwaway-owned-key vein: 6 MORE ZSET query sites go alloc-free — compact_position 1.84x + rank sites 1.38x (byte-transparent)
 
 Followed the vein opened by the ZRANK fix: grepped `ScoreMember::actual(...to_vec()...)` for every hot
