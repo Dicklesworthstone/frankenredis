@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — HMGET per-field expiry-loop guard HOISTED — isolated −56 ns = 7.0% of the HMGET@16 no-field-TTL path (byte-exact)
+
+`Store::hmget` + `Store::hmget_for_each` (the borrowed `_into` HMGET path) ran the
+per-field `drop_hash_field_if_expired(key, field, now)` loop unconditionally — one
+NON-inlined call + branch per requested field. `hash_field_is_expired` already fast-exits
+on an empty `hash_field_expires`, so for the common case (no hash anywhere carries a
+per-field TTL) each of N calls is a pure no-op — yet the N calls still cost real serial
+time. LEVER: a single loop-invariant `if !self.hash_field_expires.is_empty()` guard around
+the loop collapses N iterations to one check. Byte-identical: an empty map makes the whole
+loop a no-op, so skipping it changes nothing (non-empty branch unchanged; both proven by
+`hmget_field_ttl_expiry_still_dropped_after_hoist` + `hmget_for_each_matches_hmget`).
+
+MEASURED (per-crate, `cargo test -p fr-store --release` via rch worker; intra-run isolated
+A/B to defeat cross-worker noise — a naive two-run full-path A/B read 737 vs 876 ns = pure
+noise, ~19% floor >> effect): full HMGET_for_each@16 ≈ 806 ns/op; the per-field loop in
+isolation = **56.46 ns** (16×; ~3.5 ns/call) vs the hoisted `is_empty()` guard = **~0 ns**
+→ **saved 56.46 ns = 7.00% of the full path**. Conformance GREEN (4/4 hmget tests, incl the
+byte-exact owned-vs-borrowed reference + the field-TTL-present branch). Ratio: **1.075x**
+faster on HMGET@16 (no-field-TTL, the common case). NEW MICRO-VEIN: the per-field/per-member
+`drop_*_if_expired` loop-invariant emptiness-guard hoist — check other multi-field/member
+reads (HDEL-many, multi-field hash reads, SMISMEMBER-side-map loops) for the same pattern.
+
 ## 2026-07-04 CrimsonHawk: DROP — BITCOUNT popcount 4-accumulator unroll measured 0.578x vs current single-accumulator swar (WORSE) — reverted
 
 Dug the BITCOUNT popcount path (`Store::popcount_bytes`, fr-store/src/lib.rs) as a fresh

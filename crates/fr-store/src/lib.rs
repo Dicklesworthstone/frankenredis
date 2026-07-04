@@ -11589,8 +11589,12 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(fields.iter().map(|_| None).collect());
         }
-        for field in fields {
-            self.drop_hash_field_if_expired(key, field, now_ms);
+        // (CrimsonHawk) Loop-invariant hoist — see `hmget_for_each`. Byte-identical:
+        // an empty `hash_field_expires` makes the per-field drop loop a no-op.
+        if !self.hash_field_expires.is_empty() {
+            for field in fields {
+                self.drop_hash_field_if_expired(key, field, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -11641,8 +11645,17 @@ impl Store {
             }
             return Ok(());
         }
-        for field in fields {
-            self.drop_hash_field_if_expired(key, field, now_ms);
+        // (CrimsonHawk) Hoist the per-field expiry-map emptiness check OUT of the
+        // loop. When no hash anywhere carries a per-field TTL (the common case),
+        // `drop_hash_field_if_expired` is a no-op per field (`hash_field_is_expired`
+        // fast-exits on the empty map) — but still one call+branch each. One
+        // loop-invariant `is_empty()` guard collapses N field iterations to a single
+        // check. Byte-identical: an empty `hash_field_expires` makes the whole loop
+        // a no-op, so skipping it changes nothing.
+        if !self.hash_field_expires.is_empty() {
+            for field in fields {
+                self.drop_hash_field_if_expired(key, field, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33658,6 +33671,36 @@ mod tests {
         assert_eq!(result, vec![Some(b"1".to_vec()), None]);
         let result = store.hmget(b"nokey", &[b"a"], 0).unwrap();
         assert_eq!(result, vec![None]);
+    }
+
+    // (CrimsonHawk) The per-field `drop_hash_field_if_expired` loop in `hmget` /
+    // `hmget_for_each` is now guarded by a hoisted `hash_field_expires.is_empty()`
+    // check. This exercises the NON-empty branch: a field carrying a TTL that is due
+    // must still be dropped and reported nil by BOTH the owned and borrowed HMGET,
+    // byte-identically to the pre-hoist behavior.
+    #[test]
+    fn hmget_field_ttl_expiry_still_dropped_after_hoist() {
+        let build = || {
+            let mut s = Store::new();
+            s.hset(b"h", b"live".to_vec(), b"1".to_vec(), 1).unwrap();
+            s.hset(b"h", b"gone".to_vec(), b"2".to_vec(), 1).unwrap();
+            // "gone" expires at t=5; request at t=10 must see it dropped.
+            s.hash_field_expires.insert((b"h".to_vec(), b"gone".to_vec()), 5);
+            s
+        };
+        let req: &[&[u8]] = &[b"live", b"gone", b"absent"];
+
+        let mut owned = build();
+        assert!(!owned.hash_field_expires.is_empty());
+        let got = owned.hmget(b"h", req, 10).unwrap();
+        assert_eq!(got, vec![Some(b"1".to_vec()), None, None]);
+
+        let mut borrowed = build();
+        let mut streamed: Vec<Option<Vec<u8>>> = Vec::new();
+        borrowed
+            .hmget_for_each(b"h", req, 10, |v| streamed.push(v.map(<[u8]>::to_vec)))
+            .unwrap();
+        assert_eq!(streamed, vec![Some(b"1".to_vec()), None, None]);
     }
 
     // (frankenredis-hmgetinto) The borrowed `hmget_for_each` must reproduce
