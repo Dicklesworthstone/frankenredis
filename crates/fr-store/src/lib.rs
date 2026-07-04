@@ -12396,6 +12396,20 @@ impl Store {
     }
 
     pub fn llen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::List(l) => {
+                        let len = l.len();
+                        entry.touch(now_ms);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(0),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -15730,6 +15744,20 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result = zs.get_score(member);
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -15828,6 +15856,20 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let rank = zs.rank(member);
+                        entry.touch(now_ms);
+                        Ok(rank)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -15864,6 +15906,20 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
+        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let rank = zs.rev_rank(member);
+                        entry.touch(now_ms);
+                        Ok(rank)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -32351,6 +32407,71 @@ mod tests {
         assert!(t.expires_count >= 1);
         assert_eq!(t.scard(b"exp", 500).unwrap(), 0);
         assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted by SCARD");
+    }
+
+    // (CrimsonHawk) LLEN/ZSCORE/ZRANK/ZREVRANK non-LFU single-lookup collapse: byte-identical
+    // results, WRONGTYPE, keyspace hit/miss, and lazy-expiry to the double-lookup path.
+    #[test]
+    fn list_zset_read_single_lookup_collapse_matches_full_path() {
+        let mut s = Store::new();
+        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
+        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap();
+        s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+        let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
+
+        assert_eq!(s.llen(b"list", 2).unwrap(), 3);
+        assert_eq!(s.zscore(b"zs", b"b", 2).unwrap(), Some(2.0));
+        assert_eq!(s.zscore(b"zs", b"none", 2).unwrap(), None);
+        assert_eq!(s.zrank(b"zs", b"b", 2).unwrap(), Some(1));
+        assert_eq!(s.zrevrank(b"zs", b"a", 2).unwrap(), Some(1));
+        // Missing key → default + miss.
+        assert_eq!(s.llen(b"absent", 2).unwrap(), 0);
+        assert_eq!(s.zscore(b"absent", b"a", 2).unwrap(), None);
+        assert_eq!(s.zrank(b"absent", b"a", 2).unwrap(), None);
+        // WRONGTYPE (still a hit).
+        assert!(matches!(s.llen(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(s.zscore(b"str", b"a", 2), Err(StoreError::WrongType)));
+        // hits: llen,zscore(b),zscore(none),zrank(b),zrevrank(a),llen(str),zscore(str) = 7;
+        // misses: llen(absent),zscore(absent),zrank(absent) = 3.
+        assert_eq!(s.stat_keyspace_hits, h0 + 7);
+        assert_eq!(s.stat_keyspace_misses, m0 + 3);
+
+        // Lazy expiry via LLEN on an expired list key.
+        let mut t = Store::new();
+        t.rpush(b"exp", &[b"a".to_vec()], 1).unwrap();
+        t.expire_at_milliseconds(b"exp", 50, 1);
+        assert!(t.expires_count >= 1);
+        assert_eq!(t.llen(b"exp", 500).unwrap(), 0);
+        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted by LLEN");
+
+        // Timing headline (no-TTL, LFU off).
+        let mut b = Store::new();
+        let members: Vec<Vec<u8>> = (0..8u32).map(|i| format!("m{i}").into_bytes()).collect();
+        b.rpush(b"benchlist:key", &members, 1).unwrap();
+        let k: &[u8] = b"benchlist:key";
+        for _ in 0..2000 {
+            std::hint::black_box(b.llen(std::hint::black_box(k), 2)).ok();
+        }
+        let reps = 3_000_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(b.llen(std::hint::black_box(k), 2)).ok();
+        }
+        let full = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let inner = 20_000_000u64;
+        let mut acc = 0u64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
+        let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
+        std::hint::black_box(acc);
+        println!(
+            "LLEN@8 no-TTL collapsed: full={full:.2} ns/op | removed 2nd probe ≈ {probe:.2} ns \
+             ⇒ old ≈ {:.2} ns = {:.2}x",
+            full + probe,
+            (full + probe) / full
+        );
     }
 
     #[test]

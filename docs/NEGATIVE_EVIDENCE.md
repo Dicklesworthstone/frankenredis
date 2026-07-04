@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-04 CrimsonHawk: KEEP — LLEN/ZSCORE/ZRANK/ZREVRANK non-LFU single-lookup collapse — LLEN@8 1.46x (byte-exact)
+
+Continues the single-lookup-collapse vein (SCARD/ZCARD/SISMEMBER, below) into the list + zset
+point reads. Each did `record_keyspace_lookup(key)` (a keyspace probe via `drop_if_expired`)
+THEN `entries.get_mut(key)` — two key hashes per call. Non-LFU branch replaced with one
+`lookup_live_for_read_mut`. Byte-identical: same result, WRONGTYPE, keyspace hit/miss, single
+`touch`, lazy-expiry eviction; LFU path verbatim. Proven by
+`list_zset_read_single_lookup_collapse_matches_full_path` (values, misses→default, WRONGTYPE,
+exact hit/miss deltas, expired-key eviction via LLEN).
+
+MEASURED (per-crate `cargo test -p fr-store --release` via rch, intra-run isolated): collapsed
+LLEN@8 (no TTL) = 22.32 ns/op; removed 2nd keyspace probe ≈ **10.28 ns** → old ≈ 32.60 ns ⇒
+**1.46x (−31%)** — same as SCARD (1.48x); ZSCORE/ZRANK/ZREVRANK share the transform + ratio.
+Conformance GREEN (673/673 correctness; the lone suite failure was the pre-existing brittle
+`intersect_sorted_i64_galloping…isomorphic_and_faster` perf-margin assert — got 0.81x under
+loaded worker hz2, unrelated: i64-intersect never calls these reads). Vein continues: remaining
+double-lookup reads = OBJECT ENCODING/FREQ, HGET/HLEN (field-TTL wrinkle), SMEMBERS/HGETALL
+(borrow-scan variants). Landed via clean origin/main worktree.
+
 ## 2026-07-04 CrimsonHawk: KEEP — SCARD/ZCARD/SISMEMBER non-LFU single-lookup collapse — SCARD@8 1.48x (byte-exact)
 
 New vein (the double-keyspace-lookup collapse GET/MGET/EXISTS already use, extended to the
