@@ -4,29 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for `s=s+i` accumulator fast path — 17.56x vs ORIG (bounded tree-walker loop)
+## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for accumulator fast path — EVAL compute 21.8x vs ORIG (byte-transparent)
 
-The remaining compute-heavy EVAL residual has a narrow but common interpreter shape: `local s=0; for
-i=1,N do s=s+i end; return s`. ORIG walks the full AST for every iteration (`LocalName` lookup,
-`BinOp::Add`, `Assign`, loop var cell setup), even though the parsed body is a single local accumulator
-assignment whose RHS is exactly accumulator + loop-var (or loop-var + accumulator). The landed lever
-detects that one-statement numeric-for body, reads the accumulator `LuaCell` once, runs the numeric loop
-in Rust scalars, then writes the cell once. It keeps the generic path for non-number accumulators,
-multi-statement bodies, table/global writes, closures, yields, metamethod-shaped work, and every other
-Lua statement form.
+Dug the biggest remaining Redis-relative scripting gap in this ledger: EVAL compute loops. This is not
+the full bytecode VM lever; it is a bounded interpreter specialization for the canonical numeric-for
+accumulator shape `local s=0; for i=... do s=s+i end; return s`. When the resolved body is exactly one
+local-slot assignment `acc = acc + i` or `acc = i + acc` and the accumulator is already a number, the
+runtime pushes the numeric-for lexical scope once, updates the accumulator cell directly, preserves the
+interpreter iteration counter and max-iteration error behavior, and falls back to the generic evaluator
+for string coercion, non-number accumulators, or any other body shape.
 
-BYTE-TRANSPARENT: `lua_numeric_for_add_assign_fast_path_keeps_results` covers `s=s+i`, `s=i+s`, and a
-string accumulator fallback. Focused gates GREEN via rch with
-`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`: `cargo check -p fr-command --all-targets`
-and `cargo test -p fr-command lua_numeric_for_add_assign_fast_path_keeps_results -- --nocapture`.
+MEASURED (SHORT per-crate Criterion, `CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`; literal
+`cargo bench --release` was attempted first and rejected by this Cargo, so the equivalent
+`cargo bench --profile release -p fr-command --bench lua_eval -- numeric_for_sum_1000 --sample-size 20
+--measurement-time 2` was used; RCH had no admissible worker for the bench, so both ORIG and candidate
+used local fallback): ORIG `local s=0; for i=1,1000 do s=s+i end; return s` point estimate **271.54 us**
+`[253.77, 287.89]`; candidate point estimate **12.467 us** `[12.049, 13.023]` = **21.8x vs ORIG**.
+Criterion reported a -94.999% point improvement, p=0.
 
-MEASURED (SHORT per-crate rch Criterion, identical `fr-command` bench harness added to ORIG scratch,
-accepted Cargo equivalent `cargo bench --profile release -p fr-command --bench lua_eval --
-numeric_for_sum_1000 --sample-size 10 --measurement-time 1`): ORIG `origin/main` median **136.25 us**
-(`hz2`) vs candidate median **7.7586 us** (`ovh-a`) = **17.56x vs ORIG**. This is cross-worker but the
-delta is order-of-magnitude and the benchmark body is pure interpreter CPU; the RCH CLI exposed no
-worker-pin flag in `rch exec --help`, so this is recorded as measured routing/landing evidence with the
-worker caveat rather than pretending same-worker proof.
+BYTE-TRANSPARENT: the fast path only handles numeric accumulator plus numeric loop-var addition; all
+other shapes fall back. Regression coverage verifies `s=s+i`, commuted `i+s`, and numeric-string
+accumulator fallback. Gates: `cargo check -p fr-command --all-targets` GREEN; `cargo test -p fr-command
+--test lua_loop_test -- --nocapture` GREEN; `cargo test -p fr-command
+lua_numeric_for_add_assign_fast_path_keeps_results -- --nocapture` GREEN; `cargo test -p fr-conformance
+--lib --bins --tests -- --nocapture` GREEN (local fallback, 194 lib + bin tests + 99 smoke tests passed).
+Focused clippy with `--no-deps` did not reach any new Lua fast-path warnings, but remains blocked by
+pre-existing `fr-command/src/lib.rs` test lint debt (`type_complexity` at 41176 and excessive float
+precision at 56566-56569). `cargo fmt --check -p fr-command` remains blocked by broad pre-existing
+fr-command formatting drift outside this lever; no unrelated rustfmt churn was mixed in.
 
 ## 2026-07-04 CrimsonHawk: KEEP — ZRANGEBYLEX range bounds halve their alloc (borrowed `actual` arg) — 1.76x bound-construction (byte-transparent)
 
