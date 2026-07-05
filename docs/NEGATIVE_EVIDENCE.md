@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — volatile-TTL eviction-candidate select defers the winner clone — 5.47x vs ORIG primitive (byte-transparent)
+
+Consulted the existing negative-evidence ledger first: LRU/LFU eviction selection had already landed the
+running-best clone deferral, but the `volatile-ttl` sibling still used the old `best_key =
+Some(key.clone())` shape. Mapped the graveyard/optimization guidance to the smallest untouched lever:
+cache/eviction hot loops should track a best index/reference and materialize once, keeping Redis
+eviction policy semantics unchanged. `select_ttl_eviction_candidate_from_keys` now tracks `best_idx`
+through the sampled key scan and clones only `keys[i]` after the scan. TTL ordering and lexicographic
+tie-break are identical to ORIG.
+
+BYTE-TRANSPARENT: `ttl_eviction_candidate_defers_clone_and_reports_ab` asserts the new selector picks the
+same key as the old inline clone-each implementation for the worst-case tie sample (100 volatile keys,
+same deadline, descending lexicographic sample so every smaller key is a new best). Focused proof:
+`AGENT_NAME=CrimsonHawk CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod cargo test -p fr-store
+ttl_eviction_candidate_defers_clone_and_reports_ab -- --nocapture` on RCH `hz2`: GREEN; debug timing
+printed 42.960 us ORIG vs 40.435 us NEW = 1.06x.
+
+MEASURED (SHORT per-crate Criterion, same RCH worker `hz2`, release profile, ORIG row is the original
+clone-on-every-new-best selector primitive; NEW row is the production index/defer materialization
+shape): command `AGENT_NAME=CrimsonHawk CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod cargo bench --profile release -p fr-store
+--bench store_read -- ttl_eviction_candidate_clone --sample-size 10 --measurement-time 1`. ORIG
+`ttl_eviction_candidate_clone/orig_clone_each_best` point estimate **1.5674 us** `[1.4711, 1.6886]`;
+NEW `ttl_eviction_candidate_clone/defer_winner_clone` point estimate **286.62 ns** `[286.45, 286.90]` =
+**5.47x vs ORIG**. Build gate: `cargo check -p fr-store --all-targets` via RCH `vmi1149989`: GREEN.
+
 ## 2026-07-05 CrimsonHawk: KEEP — intset SMEMBERS streams members alloc-free (stack buffer, not per-int Vec) — 3.08x/member (byte-transparent)
 
 Dug a DIFFERENT primitive (per-member iterator-materialization alloc, not a running-best clone) in an
