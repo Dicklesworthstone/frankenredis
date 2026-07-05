@@ -4,8 +4,7 @@ use fr_store::Store;
 
 fn bench_lua_eval(c: &mut Criterion) {
     const NUMERIC_FOR_SUM: &[u8] = b"local s=0; for i=1,1000 do s=s+i end; return s";
-    const NUMERIC_FOR_SUM_SQUARES: &[u8] =
-        b"local s=0; for i=1,1000 do s=s+i*i end; return s";
+    const NUMERIC_FOR_SUM_SQUARES: &[u8] = b"local s=0; for i=1,1000 do s=s+i*i end; return s";
 
     let mut group = c.benchmark_group("lua_eval");
     group.bench_function("numeric_for_sum_1000", |b| {

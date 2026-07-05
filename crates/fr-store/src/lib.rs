@@ -859,7 +859,11 @@ impl ScoreMember {
 /// only to key the query). Score first (`canonicalize_zero_score().total_cmp()`), then the member
 /// (`Arc<[u8]>`/`MemberPart` order lexicographically, `Min < Actual < Max`; stored keys are always
 /// `Actual` — the sentinels are handled for totality).
-fn score_member_cmp_to_borrowed(key: &ScoreMember, score: f64, member: &[u8]) -> std::cmp::Ordering {
+fn score_member_cmp_to_borrowed(
+    key: &ScoreMember,
+    score: f64,
+    member: &[u8],
+) -> std::cmp::Ordering {
     canonicalize_zero_score(key.score)
         .total_cmp(&canonicalize_zero_score(score))
         .then_with(|| match &key.member {
@@ -1464,7 +1468,10 @@ impl FullSortedSet {
     /// then a *second* `get_score`/`zmscore` (a redundant member lookup + keyspace probe).
     fn rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
         let score = self.get_score(member)?;
-        Some((self.ensure_rank_tree().rank_of_borrowed(score, member), score))
+        Some((
+            self.ensure_rank_tree().rank_of_borrowed(score, member),
+            score,
+        ))
     }
 
     fn rev_rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
@@ -1742,7 +1749,11 @@ impl SortedSet {
     /// (small ordered pass; a listpack member is decoded owned regardless) and sinks those — no
     /// borrow win there, but byte-identical. NB: this deliberately does NOT touch the rank_tree
     /// `select()`/`into_actual()` path (unborrowable) — `random_members_at_indices` never uses it.
-    pub(crate) fn random_member_at_indices_borrow_scan(&self, indices: &[usize], mut sink: impl FnMut(&[u8])) {
+    pub(crate) fn random_member_at_indices_borrow_scan(
+        &self,
+        indices: &[usize],
+        mut sink: impl FnMut(&[u8]),
+    ) {
         if indices.is_empty() {
             return;
         }
@@ -3539,6 +3550,21 @@ impl SetValue {
         match self {
             SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
             SetValue::Generic(s) => s.get_index(idx).map(Cow::Borrowed),
+        }
+    }
+
+    /// Visit the member at encoding index `idx` without forcing the intset arm
+    /// through an owned `Vec`. The visited bytes are identical to
+    /// `get_index(idx).as_deref()`, but intsets use a stack decimal buffer for
+    /// the duration of the callback.
+    fn with_index_bytes<R>(&self, idx: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        match self {
+            SetValue::Int(v) => v.get(idx).map(|&n| {
+                let mut buf = [0u8; 21];
+                let len = integer_decimal_into(&mut buf, n);
+                f(&buf[..len])
+            }),
+            SetValue::Generic(s) => s.get_index(idx).map(f),
         }
     }
 
@@ -12819,10 +12845,7 @@ impl Store {
                     sink(HrandfieldWithValuesScanEvent::Len(indices.len()));
                     for &idx in &indices {
                         if let Some((field, value)) = m.get_index(idx) {
-                            sink(HrandfieldWithValuesScanEvent::Pair(
-                                field,
-                                value,
-                            ));
+                            sink(HrandfieldWithValuesScanEvent::Pair(field, value));
                         }
                     }
                     Ok(())
@@ -15695,7 +15718,11 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Set(s) => match idx {
-                        Some(i) => sink(s.get_index(i).as_deref()),
+                        Some(i) => {
+                            if s.with_index_bytes(i, |m| sink(Some(m))).is_none() {
+                                sink(None);
+                            }
+                        }
                         None => sink(None),
                     },
                     _ => unreachable!("type checked above"),
@@ -15879,9 +15906,7 @@ impl Store {
                 Value::Set(s) => {
                     sink(SmembersScanEvent::Len(indices.len()));
                     for &idx in &indices {
-                        if let Some(c) = s.get_index(idx) {
-                            sink(SmembersScanEvent::Member(c.as_ref()));
-                        }
+                        s.with_index_bytes(idx, |m| sink(SmembersScanEvent::Member(m)));
                     }
                     Ok(())
                 }
@@ -20637,10 +20662,7 @@ impl Store {
         };
         let mut records: Vec<(StreamId, Option<_>)> = Vec::new();
         if limit > 0 {
-            for (id, pending_entry) in group_state
-                .pending
-                .range((Excluded(start_id), Unbounded))
-            {
+            for (id, pending_entry) in group_state.pending.range((Excluded(start_id), Unbounded)) {
                 if pending_entry.consumer.as_slice() != consumer {
                     continue;
                 }
@@ -21564,9 +21586,7 @@ impl Store {
             // (matching upstream consumer->active_time =
             // -1 default until first XREADGROUP/XCLAIM).
             let inactive_ms_or_neg_one: i64 = match metadata.active_time_ms {
-                Some(at) if at > 0 => {
-                    i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
-                }
+                Some(at) if at > 0 => i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX),
                 _ => -1,
             };
             result.push((
@@ -24077,8 +24097,7 @@ impl Store {
                         }
 
                         let batch_size = count.max(1);
-                        let window: Vec<(&[u8], f64)> =
-                            zs.iter_asc().take(batch_size).collect();
+                        let window: Vec<(&[u8], f64)> = zs.iter_asc().take(batch_size).collect();
                         let examined = window.len();
                         let last_examined = window.last().map(|(m, s)| (m.to_vec(), *s));
                         let result: Vec<(&[u8], f64)> = match pattern {
@@ -24874,22 +24893,24 @@ impl Store {
     }
 
     fn select_ttl_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let mut best_key: Option<Vec<u8>> = None;
+        // (CrimsonHawk) Same clone-deferral as the LRU/LFU selectors: keep the winning sample
+        // index and materialize the final key once. The TTL score and key tie-break are unchanged.
+        let mut best_idx: Option<usize> = None;
         let mut best_ttl = u64::MAX;
-        for key in keys {
+        for (i, key) in keys.iter().enumerate() {
             if !self.entries.contains_key(key.as_slice()) {
                 continue;
             }
             if let Some(expires_at_ms) = self.expiry_ms(key)
                 && (expires_at_ms < best_ttl
                     || (expires_at_ms == best_ttl
-                        && best_key.as_ref().is_none_or(|best| key < best)))
+                        && best_idx.is_none_or(|b| key.as_slice() < keys[b].as_slice())))
             {
                 best_ttl = expires_at_ms;
-                best_key = Some(key.clone());
+                best_idx = Some(i);
             }
         }
-        best_key
+        best_idx.map(|i| keys[i].clone())
     }
 
     fn select_eviction_candidate(&mut self, now_ms: u64, sample_limit: usize) -> Option<Vec<u8>> {
@@ -34601,7 +34622,10 @@ mod tests {
         assert!(t.expires_count >= 1);
         assert!(t.drop_if_expired(b"live", 500)); // live present → true
         assert!(!t.drop_if_expired(b"dead", 500)); // expired → evicted → false
-        assert!(t.get(b"dead", 600).unwrap().is_none(), "expired key removed");
+        assert!(
+            t.get(b"dead", 600).unwrap().is_none(),
+            "expired key removed"
+        );
         assert!(t.get(b"live", 600).unwrap().is_some());
     }
 
@@ -34628,7 +34652,10 @@ mod tests {
         // WRONGTYPE on a string key (still a hit).
         assert!(matches!(s.scard(b"str", 2), Err(StoreError::WrongType)));
         assert!(matches!(s.zcard(b"str", 2), Err(StoreError::WrongType)));
-        assert!(matches!(s.sismember(b"str", b"x", 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.sismember(b"str", b"x", 2),
+            Err(StoreError::WrongType)
+        ));
         // hits: scard,zcard,sismemberx2,scard(str),zcard(str),sismember(str) = 7;
         // misses: scard(absent),zcard(absent),sismember(absent) = 3.
         assert_eq!(s.stat_keyspace_hits, h0 + 7);
@@ -34640,7 +34667,10 @@ mod tests {
         t.expire_at_milliseconds(b"exp", 50, 1); // absolute deadline at t=50
         assert!(t.expires_count >= 1);
         assert_eq!(t.scard(b"exp", 500).unwrap(), 0);
-        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted by SCARD");
+        assert!(
+            t.get(b"exp", 600).unwrap().is_none(),
+            "expired key evicted by SCARD"
+        );
     }
 
     // (CrimsonHawk) LLEN/ZSCORE/ZRANK/ZREVRANK non-LFU single-lookup collapse: byte-identical
@@ -34648,8 +34678,10 @@ mod tests {
     #[test]
     fn list_zset_read_single_lookup_collapse_matches_full_path() {
         let mut s = Store::new();
-        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
-        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap();
+        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1)
+            .unwrap();
+        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -34664,7 +34696,10 @@ mod tests {
         assert_eq!(s.zrank(b"absent", b"a", 2).unwrap(), None);
         // WRONGTYPE (still a hit).
         assert!(matches!(s.llen(b"str", 2), Err(StoreError::WrongType)));
-        assert!(matches!(s.zscore(b"str", b"a", 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.zscore(b"str", b"a", 2),
+            Err(StoreError::WrongType)
+        ));
         // hits: llen,zscore(b),zscore(none),zrank(b),zrevrank(a),llen(str),zscore(str) = 7;
         // misses: llen(absent),zscore(absent),zrank(absent) = 3.
         assert_eq!(s.stat_keyspace_hits, h0 + 7);
@@ -34676,7 +34711,10 @@ mod tests {
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
         assert_eq!(t.llen(b"exp", 500).unwrap(), 0);
-        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted by LLEN");
+        assert!(
+            t.get(b"exp", 600).unwrap().is_none(),
+            "expired key evicted by LLEN"
+        );
 
         // Timing headline (no-TTL, LFU off).
         let mut b = Store::new();
@@ -34715,25 +34753,43 @@ mod tests {
     fn smismember_zmscore_lookup_opt_matches_full_path() {
         let mut s = Store::new();
         s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
-        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap();
+        s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
-        assert_eq!(s.smismember(b"set", &[b"a", b"x", b"b"], 2).unwrap(), vec![true, false, true]);
-        assert_eq!(s.smismember(b"absent", &[b"a", b"b"], 2).unwrap(), vec![false, false]);
-        assert!(matches!(s.smismember(b"str", &[b"a"], 2), Err(StoreError::WrongType)));
+        assert_eq!(
+            s.smismember(b"set", &[b"a", b"x", b"b"], 2).unwrap(),
+            vec![true, false, true]
+        );
+        assert_eq!(
+            s.smismember(b"absent", &[b"a", b"b"], 2).unwrap(),
+            vec![false, false]
+        );
+        assert!(matches!(
+            s.smismember(b"str", &[b"a"], 2),
+            Err(StoreError::WrongType)
+        ));
         // SMISMEMBER records keyspace stats: hits = set + str(wrongtype) = 2; misses = absent = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 2);
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
 
         // ZMSCORE: correct scores, WRONGTYPE, missing→all-None; NO keyspace stat change.
         let (h1, m1) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
-        assert_eq!(s.zmscore(b"zs", &[b"b", b"none", b"a"], 2).unwrap(),
-                   vec![Some(2.0), None, Some(1.0)]);
+        assert_eq!(
+            s.zmscore(b"zs", &[b"b", b"none", b"a"], 2).unwrap(),
+            vec![Some(2.0), None, Some(1.0)]
+        );
         assert_eq!(s.zmscore(b"absent", &[b"a"], 2).unwrap(), vec![None]);
-        assert!(matches!(s.zmscore(b"str", &[b"a"], 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.zmscore(b"str", &[b"a"], 2),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(s.stat_keyspace_hits, h1, "ZMSCORE records no keyspace hit");
-        assert_eq!(s.stat_keyspace_misses, m1, "ZMSCORE records no keyspace miss");
+        assert_eq!(
+            s.stat_keyspace_misses, m1,
+            "ZMSCORE records no keyspace miss"
+        );
 
         // Lazy expiry (expires_count > 0 branch): expired zset key → all-None + evicted.
         let mut t = Store::new();
@@ -34741,7 +34797,10 @@ mod tests {
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
         assert_eq!(t.zmscore(b"exp", &[b"m"], 500).unwrap(), vec![None]);
-        assert!(t.get(b"exp", 600).unwrap().is_none(), "ZMSCORE evicts expired key");
+        assert!(
+            t.get(b"exp", 600).unwrap().is_none(),
+            "ZMSCORE evicts expired key"
+        );
         // SMISMEMBER lazy-expiry on a set.
         let mut u = Store::new();
         u.sadd(b"sexp", &[b"a".to_vec()], 1).unwrap();
@@ -34751,24 +34810,34 @@ mod tests {
 
         // Timing headline for SMISMEMBER (no-TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..8u32 { b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1).unwrap(); }
+        for i in 0..8u32 {
+            b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"benchset:key";
         let q: &[&[u8]] = &[b"m0", b"m3", b"m7", b"nope"];
-        for _ in 0..2000 { std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.smismember(std::hint::black_box(k), q, 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "SMISMEMBER@8/4q no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -34776,7 +34845,11 @@ mod tests {
     // reply stream (Len + members), WRONGTYPE, keyspace hit/miss, lazy-expiry eviction.
     #[test]
     fn smembers_lrange_borrow_scan_collapse_matches_full_path() {
-        fn collect_smembers(s: &mut Store, key: &[u8], now: u64) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+        fn collect_smembers(
+            s: &mut Store,
+            key: &[u8],
+            now: u64,
+        ) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
             use crate::SmembersScanEvent;
             let mut len = 0usize;
             let mut members = Vec::new();
@@ -34786,7 +34859,13 @@ mod tests {
             })?;
             Ok((len, members))
         }
-        fn collect_lrange(s: &mut Store, key: &[u8], a: i64, b: i64, now: u64) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+        fn collect_lrange(
+            s: &mut Store,
+            key: &[u8],
+            a: i64,
+            b: i64,
+            now: u64,
+        ) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
             use crate::SmembersScanEvent;
             let mut len = 0usize;
             let mut items = Vec::new();
@@ -34798,8 +34877,10 @@ mod tests {
         }
 
         let mut s = Store::new();
-        s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap();
-        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
+        s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+            .unwrap();
+        s.rpush(b"list", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -34807,15 +34888,29 @@ mod tests {
         smem.sort();
         assert_eq!(slen, 3);
         assert_eq!(smem, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
-        assert_eq!(collect_lrange(&mut s, b"list", 0, -1, 2).unwrap(),
-                   (3, vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]));
-        assert_eq!(collect_lrange(&mut s, b"list", 1, 1, 2).unwrap(), (1, vec![b"y".to_vec()]));
+        assert_eq!(
+            collect_lrange(&mut s, b"list", 0, -1, 2).unwrap(),
+            (3, vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()])
+        );
+        assert_eq!(
+            collect_lrange(&mut s, b"list", 1, 1, 2).unwrap(),
+            (1, vec![b"y".to_vec()])
+        );
         // Missing key → Len(0), empty; hit stats still recorded on hits.
         assert_eq!(collect_smembers(&mut s, b"absent", 2).unwrap(), (0, vec![]));
-        assert_eq!(collect_lrange(&mut s, b"absent", 0, -1, 2).unwrap(), (0, vec![]));
+        assert_eq!(
+            collect_lrange(&mut s, b"absent", 0, -1, 2).unwrap(),
+            (0, vec![])
+        );
         // WRONGTYPE (still a hit).
-        assert!(matches!(collect_smembers(&mut s, b"str", 2), Err(StoreError::WrongType)));
-        assert!(matches!(collect_lrange(&mut s, b"str", 0, -1, 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            collect_smembers(&mut s, b"str", 2),
+            Err(StoreError::WrongType)
+        ));
+        assert!(matches!(
+            collect_lrange(&mut s, b"str", 0, -1, 2),
+            Err(StoreError::WrongType)
+        ));
         // hits: set,list(0-1),list(1-1),smembers(str),lrange(str) = 5; misses: 2 absents = 2.
         assert_eq!(s.stat_keyspace_hits, h0 + 5);
         assert_eq!(s.stat_keyspace_misses, m0 + 2);
@@ -34826,27 +34921,43 @@ mod tests {
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
         assert_eq!(collect_smembers(&mut t, b"exp", 500).unwrap(), (0, vec![]));
-        assert!(t.get(b"exp", 600).unwrap().is_none(), "SMEMBERS evicts expired key");
+        assert!(
+            t.get(b"exp", 600).unwrap().is_none(),
+            "SMEMBERS evicts expired key"
+        );
 
         // Timing headline for SMEMBERS@8 (no-TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..8u32 { b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1).unwrap(); }
+        for i in 0..8u32 {
+            b.sadd(b"benchset:key", &[format!("m{i}").into_bytes()], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"benchset:key";
-        for _ in 0..2000 { b.smembers_borrow_scan(k, 2, |_| {}).ok(); }
+        for _ in 0..2000 {
+            b.smembers_borrow_scan(k, 2, |_| {}).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.smembers_borrow_scan(std::hint::black_box(k), 2, |e| { std::hint::black_box(&e); }).ok(); }
+        for _ in 0..reps {
+            b.smembers_borrow_scan(std::hint::black_box(k), 2, |e| {
+                std::hint::black_box(&e);
+            })
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "SMEMBERS@8 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -34867,9 +34978,14 @@ mod tests {
         assert_eq!(s.hget(b"h", b"f", 2).unwrap(), Some(b"v".to_vec()));
         assert_eq!(s.hget(b"h", b"absent_field", 2).unwrap(), None);
         assert_eq!(s.hget(b"missing_key", b"f", 2).unwrap(), None);
-        assert!(matches!(s.hget(b"str", b"f", 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.hget(b"str", b"f", 2),
+            Err(StoreError::WrongType)
+        ));
         // hget_with (borrow) parity.
-        let got = s.hget_with(b"h", b"g", 2, |v| v.map(<[u8]>::to_vec)).unwrap();
+        let got = s
+            .hget_with(b"h", b"g", 2, |v| v.map(<[u8]>::to_vec))
+            .unwrap();
         assert_eq!(got, Some(b"w".to_vec()));
         // hits: hget(f),hget(absent_field on present key),hget(str wrongtype),hget_with(g) = 4;
         // misses: hget(missing_key) = 1.
@@ -34882,37 +34998,60 @@ mod tests {
         t.expire_at_milliseconds(b"hexp", 50, 1);
         assert!(t.hash_field_expires.is_empty());
         assert_eq!(t.hget(b"hexp", b"f", 500).unwrap(), None);
-        assert!(t.get(b"hexp", 600).unwrap().is_none(), "HGET evicts expired key");
+        assert!(
+            t.get(b"hexp", 600).unwrap().is_none(),
+            "HGET evicts expired key"
+        );
 
         // FIELD-TTL FALLBACK: a per-field TTL makes the map non-empty → original path,
         // and an expired field must be reaped (invisible) while a live field remains.
         let mut u = Store::new();
         u.hset(b"h2", b"live".to_vec(), b"1".to_vec(), 1).unwrap();
         u.hset(b"h2", b"dead".to_vec(), b"2".to_vec(), 1).unwrap();
-        u.hash_field_expires.insert((b"h2".to_vec(), b"dead".to_vec()), 50); // due by t=500
+        u.hash_field_expires
+            .insert((b"h2".to_vec(), b"dead".to_vec()), 50); // due by t=500
         assert!(!u.hash_field_expires.is_empty());
         assert_eq!(u.hget(b"h2", b"live", 500).unwrap(), Some(b"1".to_vec()));
-        assert_eq!(u.hget(b"h2", b"dead", 500).unwrap(), None, "expired field reaped");
+        assert_eq!(
+            u.hget(b"h2", b"dead", 500).unwrap(),
+            None,
+            "expired field reaped"
+        );
 
         // Timing headline HGET@small-hash (no field TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..8u32 { b.hset(b"benchhash:key", format!("f{i}").into_bytes(), b"val".to_vec(), 1).unwrap(); }
+        for i in 0..8u32 {
+            b.hset(
+                b"benchhash:key",
+                format!("f{i}").into_bytes(),
+                b"val".to_vec(),
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"benchhash:key";
-        for _ in 0..2000 { std::hint::black_box(b.hget(std::hint::black_box(k), b"f3", 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.hget(std::hint::black_box(k), b"f3", 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.hget(std::hint::black_box(k), b"f3", 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.hget(std::hint::black_box(k), b"f3", 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "HGET@8fields no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -34922,10 +35061,18 @@ mod tests {
     #[test]
     fn hash_read_family_collapse_and_field_ttl_fallback() {
         use crate::SmembersScanEvent;
-        fn scan_len_members(s: &mut Store, f: impl FnOnce(&mut Store, &mut dyn FnMut(SmembersScanEvent)) -> Result<(), StoreError>) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
-            let mut len = 0usize; let mut out = Vec::new();
-            let mut sink = |e: SmembersScanEvent| match e { SmembersScanEvent::Len(n) => len = n, SmembersScanEvent::Member(m) => out.push(m.to_vec()) };
-            f(s, &mut sink)?; Ok((len, out))
+        fn scan_len_members(
+            s: &mut Store,
+            f: impl FnOnce(&mut Store, &mut dyn FnMut(SmembersScanEvent)) -> Result<(), StoreError>,
+        ) -> Result<(usize, Vec<Vec<u8>>), StoreError> {
+            let mut len = 0usize;
+            let mut out = Vec::new();
+            let mut sink = |e: SmembersScanEvent| match e {
+                SmembersScanEvent::Len(n) => len = n,
+                SmembersScanEvent::Member(m) => out.push(m.to_vec()),
+            };
+            f(s, &mut sink)?;
+            Ok((len, out))
         }
 
         let mut s = Store::new();
@@ -34941,7 +35088,10 @@ mod tests {
         assert_eq!(s.hstrlen(b"h", b"bb", 2).unwrap(), 2);
         assert_eq!(s.hstrlen(b"h", b"none", 2).unwrap(), 0);
         assert_eq!(s.hlen(b"h", 2).unwrap(), 2);
-        assert!(matches!(s.hexists(b"str", b"a", 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.hexists(b"str", b"a", 2),
+            Err(StoreError::WrongType)
+        ));
         assert!(matches!(s.hlen(b"str", 2), Err(StoreError::WrongType)));
         // hits: hexists(a),hexists(none),hstrlen(bb),hstrlen(none),hlen,hexists(str),hlen(str) = 7;
         // misses: hexists(absent) = 1.
@@ -34949,13 +35099,25 @@ mod tests {
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
 
         // HGETALL borrow-scan: Len + interleaved k,v (insertion order).
-        let (glen, gkv) = scan_len_members(&mut s, |s, sink| s.hgetall_borrow_scan(b"h", 2, |e| sink(e))).unwrap();
+        let (glen, gkv) = scan_len_members(&mut s, |s, sink| {
+            s.hgetall_borrow_scan(b"h", 2, |e| sink(e))
+        })
+        .unwrap();
         assert_eq!(glen, 2);
-        assert_eq!(gkv, vec![b"a".to_vec(), b"1".to_vec(), b"bb".to_vec(), b"22".to_vec()]);
+        assert_eq!(
+            gkv,
+            vec![b"a".to_vec(), b"1".to_vec(), b"bb".to_vec(), b"22".to_vec()]
+        );
         // HKEYS / HVALS.
-        let (klen, keys) = scan_len_members(&mut s, |s, sink| s.hcollection_borrow_scan(b"h", 2, false, |e| sink(e))).unwrap();
+        let (klen, keys) = scan_len_members(&mut s, |s, sink| {
+            s.hcollection_borrow_scan(b"h", 2, false, |e| sink(e))
+        })
+        .unwrap();
         assert_eq!((klen, keys), (2, vec![b"a".to_vec(), b"bb".to_vec()]));
-        let (vlen, vals) = scan_len_members(&mut s, |s, sink| s.hcollection_borrow_scan(b"h", 2, true, |e| sink(e))).unwrap();
+        let (vlen, vals) = scan_len_members(&mut s, |s, sink| {
+            s.hcollection_borrow_scan(b"h", 2, true, |e| sink(e))
+        })
+        .unwrap();
         assert_eq!((vlen, vals), (2, vec![b"1".to_vec(), b"22".to_vec()]));
 
         // Key lazy expiry via HLEN (collapse path).
@@ -34969,31 +35131,50 @@ mod tests {
         let mut u = Store::new();
         u.hset(b"h2", b"live".to_vec(), b"1".to_vec(), 1).unwrap();
         u.hset(b"h2", b"dead".to_vec(), b"2".to_vec(), 1).unwrap();
-        u.hash_field_expires.insert((b"h2".to_vec(), b"dead".to_vec()), 50);
+        u.hash_field_expires
+            .insert((b"h2".to_vec(), b"dead".to_vec()), 50);
         assert!(!u.hash_field_expires.is_empty());
-        assert!(!u.hexists(b"h2", b"dead", 500).unwrap(), "expired field invisible to HEXISTS");
+        assert!(
+            !u.hexists(b"h2", b"dead", 500).unwrap(),
+            "expired field invisible to HEXISTS"
+        );
         assert!(u.hexists(b"h2", b"live", 500).unwrap());
         assert_eq!(u.hlen(b"h2", 600).unwrap(), 1, "HLEN excludes reaped field");
 
         // Timing headline HLEN@8fields (no field TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..8u32 { b.hset(b"benchhash:key", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        for i in 0..8u32 {
+            b.hset(
+                b"benchhash:key",
+                format!("f{i}").into_bytes(),
+                b"v".to_vec(),
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"benchhash:key";
-        for _ in 0..2000 { std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.hlen(std::hint::black_box(k), 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "HLEN@8fields no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35006,10 +35187,16 @@ mod tests {
         // No-TTL path: normal add/increment.
         let mut s = Store::new();
         assert_eq!(s.expires_count, 0);
-        assert_eq!(s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap(), 2);
+        assert_eq!(
+            s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1)
+                .unwrap(),
+            2
+        );
         assert_eq!(s.zadd(b"z", &[(3.0, b"a".to_vec())], 1).unwrap(), 0); // update, not new
         assert_eq!(s.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
-        let inc = s.zincrby_with_options(b"z", b"a".to_vec(), 1.5, ZaddOptions::default(), 1).unwrap();
+        let inc = s
+            .zincrby_with_options(b"z", b"a".to_vec(), 1.5, ZaddOptions::default(), 1)
+            .unwrap();
         assert_eq!(inc, Some(4.5));
 
         // expires_count>0 branch: expired zset key evicted, then ZADD makes a fresh set.
@@ -35019,14 +35206,20 @@ mod tests {
         assert!(t.expires_count >= 1);
         // ZADD at t=500 must not see the expired "old"; fresh set with only "new".
         assert_eq!(t.zadd(b"exp", &[(1.0, b"new".to_vec())], 500).unwrap(), 1);
-        assert_eq!(t.zscore(b"exp", b"old", 500).unwrap(), None, "expired member gone");
+        assert_eq!(
+            t.zscore(b"exp", b"old", 500).unwrap(),
+            None,
+            "expired member gone"
+        );
         assert_eq!(t.zscore(b"exp", b"new", 500).unwrap(), Some(1.0));
 
         // ZINCRBY on an expired key starts fresh from 0.
         let mut u = Store::new();
         u.zadd(b"e2", &[(100.0, b"m".to_vec())], 1).unwrap();
         u.expire_at_milliseconds(b"e2", 50, 1);
-        let r = u.zincrby_with_options(b"e2", b"m".to_vec(), 5.0, ZaddOptions::default(), 500).unwrap();
+        let r = u
+            .zincrby_with_options(b"e2", b"m".to_vec(), 5.0, ZaddOptions::default(), 500)
+            .unwrap();
         assert_eq!(r, Some(5.0), "ZINCRBY on expired key starts from 0");
 
         // Timing headline: ZADD update on existing key (no TTL, LFU off).
@@ -35034,21 +35227,28 @@ mod tests {
         b.zadd(b"benchz:key", &[(1.0, b"m".to_vec())], 1).unwrap();
         let k: &[u8] = b"benchz:key";
         let m = &[(2.0, b"m".to_vec())];
-        for _ in 0..2000 { b.zadd(std::hint::black_box(k), m, 2).ok(); }
+        for _ in 0..2000 {
+            b.zadd(std::hint::black_box(k), m, 2).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zadd(std::hint::black_box(k), m, 2).ok(); }
+        for _ in 0..reps {
+            b.zadd(std::hint::black_box(k), m, 2).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZADD update no-TTL guarded: full={full:.2} ns | elided drop's probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35057,7 +35257,17 @@ mod tests {
     #[test]
     fn zremrangeby_drop_guard_matches_and_evicts_expired() {
         let seed = |s: &mut Store, key: &[u8]| {
-            s.zadd(key, &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec()), (4.0, b"d".to_vec())], 1).unwrap();
+            s.zadd(
+                key,
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                    (4.0, b"d".to_vec()),
+                ],
+                1,
+            )
+            .unwrap();
         };
         // No-TTL path: correct range removals.
         let mut s = Store::new();
@@ -35065,7 +35275,16 @@ mod tests {
         assert_eq!(s.zremrangebyrank(b"zr", 0, 1, 2).unwrap(), 2); // removes a,b
         assert_eq!(s.zcard(b"zr", 2).unwrap(), 2);
         let mut s3 = Store::new();
-        s3.zadd(b"zl", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec())], 1).unwrap();
+        s3.zadd(
+            b"zl",
+            &[
+                (0.0, b"a".to_vec()),
+                (0.0, b"b".to_vec()),
+                (0.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         assert_eq!(s3.zremrangebylex(b"zl", b"[a", b"[b", 2).unwrap(), 2); // a,b
         assert_eq!(s3.zcard(b"zl", 2).unwrap(), 1);
         // Missing key → 0.
@@ -35076,28 +35295,46 @@ mod tests {
         seed(&mut t, b"exp");
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
-        assert_eq!(t.zremrangebyrank(b"exp", 0, -1, 500).unwrap(), 0, "expired key removes nothing");
+        assert_eq!(
+            t.zremrangebyrank(b"exp", 0, -1, 500).unwrap(),
+            0,
+            "expired key removes nothing"
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none(), "expired key evicted");
 
         // Timing headline: ZREMRANGEBYRANK on an out-of-range (no-op) existing key, no TTL.
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"benchzr:key", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(
+                b"benchzr:key",
+                &[(f64::from(i), format!("m{i}").into_bytes())],
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"benchzr:key";
-        for _ in 0..2000 { b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok(); } // empty range → no removal
+        for _ in 0..2000 {
+            b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok();
+        } // empty range → no removal
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok(); }
+        for _ in 0..reps {
+            b.zremrangebyrank(std::hint::black_box(k), 100, 200, 2).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZREMRANGEBYRANK no-op no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35108,15 +35345,35 @@ mod tests {
     fn zadd_plain_owned_get_mut_first_matches() {
         // New key, single member.
         let mut s = Store::new();
-        assert_eq!(s.zadd_plain_owned(b"z1", vec![(1.0, b"a".to_vec())], 1).unwrap(), 1);
+        assert_eq!(
+            s.zadd_plain_owned(b"z1", vec![(1.0, b"a".to_vec())], 1)
+                .unwrap(),
+            1
+        );
         assert_eq!(s.zscore(b"z1", b"a", 1).unwrap(), Some(1.0));
         // New key, multi member (with a dup → dedup keeps last).
         let mut s2 = Store::new();
-        assert_eq!(s2.zadd_plain_owned(b"z2", vec![(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (9.0, b"a".to_vec())], 1).unwrap(), 2);
+        assert_eq!(
+            s2.zadd_plain_owned(
+                b"z2",
+                vec![
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (9.0, b"a".to_vec())
+                ],
+                1
+            )
+            .unwrap(),
+            2
+        );
         assert_eq!(s2.zscore(b"z2", b"a", 1).unwrap(), Some(9.0));
         assert_eq!(s2.zscore(b"z2", b"b", 1).unwrap(), Some(2.0));
         // Existing key: add new + update existing.
-        assert_eq!(s2.zadd_plain_owned(b"z2", vec![(5.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap(), 1); // c new; b updated (not counted)
+        assert_eq!(
+            s2.zadd_plain_owned(b"z2", vec![(5.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1)
+                .unwrap(),
+            1
+        ); // c new; b updated (not counted)
         assert_eq!(s2.zscore(b"z2", b"b", 1).unwrap(), Some(5.0));
         assert_eq!(s2.zscore(b"z2", b"c", 1).unwrap(), Some(3.0));
         assert_eq!(s2.zcard(b"z2", 1).unwrap(), 3);
@@ -35124,37 +35381,56 @@ mod tests {
         let mut s3 = Store::new();
         assert_eq!(s3.zadd_plain_owned(b"new", vec![], 1).unwrap(), 0);
         assert!(s3.zscore(b"new", b"x", 1).unwrap().is_none());
-        s3.zadd_plain_owned(b"exist", vec![(1.0, b"m".to_vec())], 1).unwrap();
+        s3.zadd_plain_owned(b"exist", vec![(1.0, b"m".to_vec())], 1)
+            .unwrap();
         assert_eq!(s3.zadd_plain_owned(b"exist", vec![], 1).unwrap(), 0);
         // WRONGTYPE on existing string key.
         s3.set(b"str".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(s3.zadd_plain_owned(b"str", vec![(1.0, b"a".to_vec())], 1), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s3.zadd_plain_owned(b"str", vec![(1.0, b"a".to_vec())], 1),
+            Err(StoreError::WrongType)
+        ));
         // Lazy-expiry: expired zset key → fresh set.
         let mut t = Store::new();
-        t.zadd_plain_owned(b"exp", vec![(9.0, b"old".to_vec())], 1).unwrap();
+        t.zadd_plain_owned(b"exp", vec![(9.0, b"old".to_vec())], 1)
+            .unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
-        assert_eq!(t.zadd_plain_owned(b"exp", vec![(1.0, b"new".to_vec())], 500).unwrap(), 1);
+        assert_eq!(
+            t.zadd_plain_owned(b"exp", vec![(1.0, b"new".to_vec())], 500)
+                .unwrap(),
+            1
+        );
         assert!(t.zscore(b"exp", b"old", 500).unwrap().is_none());
 
         // Timing: ZADD update-existing (no TTL, LFU off) — the path that drops contains_key.
         let mut b = Store::new();
-        b.zadd_plain_owned(b"benchz:key", vec![(1.0, b"m".to_vec())], 1).unwrap();
+        b.zadd_plain_owned(b"benchz:key", vec![(1.0, b"m".to_vec())], 1)
+            .unwrap();
         let k: &[u8] = b"benchz:key";
-        for _ in 0..2000 { b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2).ok(); }
+        for _ in 0..2000 {
+            b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2)
+                .ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2).ok(); }
+        for _ in 0..reps {
+            b.zadd_plain_owned(std::hint::black_box(k), vec![(2.0, b"m".to_vec())], 2)
+                .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZADD update-existing no-TTL get_mut-first: full={full:.2} ns | dropped contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35165,7 +35441,10 @@ mod tests {
         // No-TTL: create + add.
         let mut s = Store::new();
         assert_eq!(s.expires_count, 0);
-        assert!(s.pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap()); // new → changed
+        assert!(
+            s.pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+                .unwrap()
+        ); // new → changed
         assert!(!s.pfadd(b"hll", &[b"a".to_vec()], 1).unwrap()); // dup → no change
         assert!(s.pfadd(b"hll", &[b"d".to_vec()], 1).unwrap()); // new elem → changed
         let n = s.pfcount(&[b"hll"], 1).unwrap();
@@ -35177,32 +35456,47 @@ mod tests {
 
         // expires_count>0 branch: an expired HLL is evicted, then PFADD makes a fresh one.
         let mut t = Store::new();
-        t.pfadd(b"exp", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1).unwrap();
+        t.pfadd(b"exp", &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()], 1)
+            .unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1); // due by t=500
         assert!(t.expires_count >= 1);
         assert!(t.pfadd(b"exp", &[b"only".to_vec()], 500).unwrap()); // fresh HLL
-        assert_eq!(t.pfcount(&[&b"exp"[..]], 500).unwrap(), 1, "only the post-expiry element counts");
+        assert_eq!(
+            t.pfcount(&[&b"exp"[..]], 500).unwrap(),
+            1,
+            "only the post-expiry element counts"
+        );
 
         // Timing: PFADD an already-present element on an existing HLL (no TTL, no change).
         let mut b = Store::new();
-        for i in 0..16u32 { b.pfadd(b"benchhll:key", &[format!("e{i}").into_bytes()], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.pfadd(b"benchhll:key", &[format!("e{i}").into_bytes()], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"benchhll:key";
         let e = &[b"e3".to_vec()];
-        for _ in 0..2000 { b.pfadd(std::hint::black_box(k), e, 2).ok(); }
+        for _ in 0..2000 {
+            b.pfadd(std::hint::black_box(k), e, 2).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.pfadd(std::hint::black_box(k), e, 2).ok(); }
+        for _ in 0..reps {
+            b.pfadd(std::hint::black_box(k), e, 2).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "PFADD present-elem no-TTL guarded: full={full:.2} ns | elided drop probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35219,15 +35513,25 @@ mod tests {
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
         let req: &[&[u8]] = &[b"a", b"missing", b"b"];
-        assert_eq!(s.hmget(b"h", req, 2).unwrap(), vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]);
+        assert_eq!(
+            s.hmget(b"h", req, 2).unwrap(),
+            vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]
+        );
         // borrowed parity.
         let mut borrowed = Vec::new();
-        s.hmget_for_each(b"h", req, 2, |v| borrowed.push(v.map(<[u8]>::to_vec))).unwrap();
-        assert_eq!(borrowed, vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]);
+        s.hmget_for_each(b"h", req, 2, |v| borrowed.push(v.map(<[u8]>::to_vec)))
+            .unwrap();
+        assert_eq!(
+            borrowed,
+            vec![Some(b"1".to_vec()), None, Some(b"2".to_vec())]
+        );
         // Missing key → all None.
         assert_eq!(s.hmget(b"absent", req, 2).unwrap(), vec![None, None, None]);
         // WRONGTYPE.
-        assert!(matches!(s.hmget(b"str", req, 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.hmget(b"str", req, 2),
+            Err(StoreError::WrongType)
+        ));
         // hits: hmget(h), hmget_for_each(h), hmget(str wrongtype) = 3; misses: hmget(absent) = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 3);
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
@@ -35244,31 +35548,50 @@ mod tests {
         let mut u = Store::new();
         u.hset(b"h2", b"live".to_vec(), b"L".to_vec(), 1).unwrap();
         u.hset(b"h2", b"dead".to_vec(), b"D".to_vec(), 1).unwrap();
-        u.hash_field_expires.insert((b"h2".to_vec(), b"dead".to_vec()), 50);
+        u.hash_field_expires
+            .insert((b"h2".to_vec(), b"dead".to_vec()), 50);
         assert!(!u.hash_field_expires.is_empty());
-        assert_eq!(u.hmget(b"h2", &[b"live", b"dead"], 500).unwrap(), vec![Some(b"L".to_vec()), None]);
+        assert_eq!(
+            u.hmget(b"h2", &[b"live", b"dead"], 500).unwrap(),
+            vec![Some(b"L".to_vec()), None]
+        );
 
         // Timing headline HMGET@8 fields (no field TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..8u32 { b.hset(b"benchhash:key", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        for i in 0..8u32 {
+            b.hset(
+                b"benchhash:key",
+                format!("f{i}").into_bytes(),
+                b"v".to_vec(),
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"benchhash:key";
         let q: Vec<Vec<u8>> = (0..8u32).map(|i| format!("f{i}").into_bytes()).collect();
         let qr: Vec<&[u8]> = q.iter().map(Vec::as_slice).collect();
-        for _ in 0..2000 { std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok();
+        }
         let reps = 1_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.hmget(std::hint::black_box(k), &qr, 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "HMGET@8 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35297,9 +35620,16 @@ mod tests {
         assert_eq!(r_absent.unwrap(), None);
         assert!(matches!(r_lst, Err(StoreError::WrongType)));
         // Removal / non-removal (these reads happen AFTER the stat assertion).
-        assert!(s.get(b"k", 2).unwrap().is_none(), "GETDEL removed the string key");
+        assert!(
+            s.get(b"k", 2).unwrap().is_none(),
+            "GETDEL removed the string key"
+        );
         assert!(s.get(b"n", 2).unwrap().is_none());
-        assert_eq!(s.llen(b"lst", 2).unwrap(), 1, "WRONGTYPE GETDEL must not delete");
+        assert_eq!(
+            s.llen(b"lst", 2).unwrap(),
+            1,
+            "WRONGTYPE GETDEL must not delete"
+        );
 
         // Lazy-expiry: expired key → None + evicted.
         let mut t = Store::new();
@@ -35358,28 +35688,39 @@ mod tests {
         // Lazy-expiry: at now=500 the key (deadline 1+50=51) is due → empty + evicted.
         let mut t = Store::new();
         t.set(b"exp".to_vec(), b"data".to_vec(), Some(50), 1);
-        assert_eq!(t.getrange_with(b"exp", 0, -1, 500, <[u8]>::to_vec).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            t.getrange_with(b"exp", 0, -1, 500, <[u8]>::to_vec).unwrap(),
+            Vec::<u8>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing headline (present string, no TTL, LFU off).
         let mut b = Store::new();
         b.set(b"gr:bench:key".to_vec(), vec![b'x'; 32], None, 2);
         let k: &[u8] = b"gr:bench:key";
-        for _ in 0..2000 { std::hint::black_box(b.getrange_with(k, 0, 31, 2, |v| v.len())).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.getrange_with(k, 0, 31, 2, |v| v.len())).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.getrange_with(std::hint::black_box(k), 0, 31, 2, |v| v.len())).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.getrange_with(std::hint::black_box(k), 0, 31, 2, |v| v.len()))
+                .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "GETRANGE@32 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35407,19 +35748,27 @@ mod tests {
         // Overwrites / non-overwrite (verification reads AFTER stat assertion).
         assert_eq!(s.get(b"k", 2).unwrap(), Some(b"new".to_vec()));
         assert_eq!(s.get(b"fresh", 2).unwrap(), Some(b"v".to_vec()));
-        assert_eq!(s.llen(b"lst", 2).unwrap(), 1, "WRONGTYPE GETSET must not overwrite");
+        assert_eq!(
+            s.llen(b"lst", 2).unwrap(),
+            1,
+            "WRONGTYPE GETSET must not overwrite"
+        );
 
         let mut z = Store::new();
         z.set(b"k".to_vec(), vec![b'x'; 4096], None, 1);
         z.rpush(b"lst", &[b"x".to_vec()], 1).unwrap();
         let mut borrowed_old = None;
-        z.getset_with(b"k", b"new", 2, |old| borrowed_old = old.map(<[u8]>::to_vec))
-            .unwrap();
+        z.getset_with(b"k", b"new", 2, |old| {
+            borrowed_old = old.map(<[u8]>::to_vec)
+        })
+        .unwrap();
         assert_eq!(borrowed_old, Some(vec![b'x'; 4096]));
         assert_eq!(z.get(b"k", 2).unwrap(), Some(b"new".to_vec()));
         let mut missing_old = Some(Vec::new());
-        z.getset_with(b"fresh", b"v", 2, |old| missing_old = old.map(<[u8]>::to_vec))
-            .unwrap();
+        z.getset_with(b"fresh", b"v", 2, |old| {
+            missing_old = old.map(<[u8]>::to_vec)
+        })
+        .unwrap();
         assert_eq!(missing_old, None);
         assert!(matches!(
             z.getset_with(b"lst", b"z", 2, |_| ()),
@@ -35445,35 +35794,51 @@ mod tests {
         let mut u = Store::new();
         u.set(b"t".to_vec(), b"a".to_vec(), Some(50), 1); // deadline 51
         assert!(u.expires_count >= 1);
-        assert_eq!(u.getset(b"t".to_vec(), b"b", 10).unwrap(), Some(b"a".to_vec())); // at t=10, live
+        assert_eq!(
+            u.getset(b"t".to_vec(), b"b", 10).unwrap(),
+            Some(b"a".to_vec())
+        ); // at t=10, live
         assert_eq!(u.expires_count, 0, "GETSET cleared the TTL");
-        assert_eq!(u.get(b"t", 1000).unwrap(), Some(b"b".to_vec()), "no expiry after GETSET");
+        assert_eq!(
+            u.get(b"t", 1000).unwrap(),
+            Some(b"b".to_vec()),
+            "no expiry after GETSET"
+        );
 
         // Lazy-expiry: GETSET on an expired key → old None, new set.
         let mut w = Store::new();
         w.set(b"e".to_vec(), b"gone".to_vec(), Some(50), 1);
-        assert_eq!(w.getset(b"e".to_vec(), b"fresh", 500).unwrap(), None, "expired old → None");
+        assert_eq!(
+            w.getset(b"e".to_vec(), b"fresh", 500).unwrap(),
+            None,
+            "expired old → None"
+        );
         assert_eq!(w.get(b"e", 600).unwrap(), Some(b"fresh".to_vec()));
 
         // Timing: GETSET overwriting a present key (no TTL, LFU off).
         let mut b = Store::new();
         b.set(b"gs:bench:key".to_vec(), b"v".to_vec(), None, 2);
         let k: &[u8] = b"gs:bench:key";
-        for _ in 0..2000 { std::hint::black_box(b.getset(k.to_vec(), b"v", 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.getset(k.to_vec(), b"v", 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.getset(std::hint::black_box(k).to_vec(), b"v", 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.getset(std::hint::black_box(k).to_vec(), b"v", 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "GETSET overwrite no-TTL collapsed: full={full:.2} ns (incl key.to_vec alloc) | \
              removed 1 keyspace probe ≈ {probe:.2} ns",
-
         );
     }
 
@@ -35484,7 +35849,17 @@ mod tests {
     fn zcount_collapse_matches_full_path() {
         use crate::ScoreBound::Inclusive;
         let mut s = Store::new();
-        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec()), (4.0, b"d".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+                (4.0, b"d".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -35500,37 +35875,74 @@ mod tests {
         assert_eq!(r_inv.unwrap(), 0);
         assert_eq!(r_absent.unwrap(), 0);
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
-        assert_eq!(r_wrong_inv.unwrap(), 0, "inverted range on wrong-type key returns 0, not WrongType");
+        assert_eq!(
+            r_wrong_inv.unwrap(),
+            0,
+            "inverted range on wrong-type key returns 0, not WrongType"
+        );
 
         // Exclusive bounds.
-        assert_eq!(s.zcount(b"z", crate::ScoreBound::Exclusive(1.0), crate::ScoreBound::Exclusive(4.0), 2).unwrap(), 2); // b,c
+        assert_eq!(
+            s.zcount(
+                b"z",
+                crate::ScoreBound::Exclusive(1.0),
+                crate::ScoreBound::Exclusive(4.0),
+                2
+            )
+            .unwrap(),
+            2
+        ); // b,c
 
         // Lazy-expiry: expired zset key → 0 + evicted.
         let mut t = Store::new();
         t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
-        assert_eq!(t.zcount(b"exp", Inclusive(0.0), Inclusive(9.0), 500).unwrap(), 0);
+        assert_eq!(
+            t.zcount(b"exp", Inclusive(0.0), Inclusive(9.0), 500)
+                .unwrap(),
+            0
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing (present zset, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"zc:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(
+                b"zc:bench",
+                &[(f64::from(i), format!("m{i}").into_bytes())],
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"zc:bench";
-        for _ in 0..2000 { std::hint::black_box(b.zcount(k, Inclusive(0.0), Inclusive(15.0), 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.zcount(k, Inclusive(0.0), Inclusive(15.0), 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.zcount(std::hint::black_box(k), Inclusive(0.0), Inclusive(15.0), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.zcount(
+                std::hint::black_box(k),
+                Inclusive(0.0),
+                Inclusive(15.0),
+                2,
+            ))
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZCOUNT@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35538,8 +35950,22 @@ mod tests {
     #[test]
     fn lpos_zlexcount_collapse_and_guard_match() {
         let mut s = Store::new();
-        s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"b".to_vec()], 1).unwrap();
-        s.zadd(b"z", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec())], 1).unwrap();
+        s.rpush(
+            b"lst",
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"b".to_vec()],
+            1,
+        )
+        .unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (0.0, b"a".to_vec()),
+                (0.0, b"b".to_vec()),
+                (0.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -35562,9 +35988,18 @@ mod tests {
         assert_eq!(s.zlexcount(b"z", b"[a", b"[b", 2).unwrap(), 2);
         assert_eq!(s.zlexcount(b"z", b"-", b"+", 2).unwrap(), 3);
         assert_eq!(s.zlexcount(b"absent", b"-", b"+", 2).unwrap(), 0);
-        assert!(matches!(s.zlexcount(b"str", b"-", b"+", 2), Err(StoreError::WrongType)));
-        assert_eq!(s.stat_keyspace_hits, h1, "ZLEXCOUNT records no keyspace hit");
-        assert_eq!(s.stat_keyspace_misses, m1, "ZLEXCOUNT records no keyspace miss");
+        assert!(matches!(
+            s.zlexcount(b"str", b"-", b"+", 2),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(
+            s.stat_keyspace_hits, h1,
+            "ZLEXCOUNT records no keyspace hit"
+        );
+        assert_eq!(
+            s.stat_keyspace_misses, m1,
+            "ZLEXCOUNT records no keyspace miss"
+        );
 
         // Lazy-expiry: LPOS + ZLEXCOUNT on expired keys.
         let mut t = Store::new();
@@ -35583,21 +36018,28 @@ mod tests {
         let members: Vec<Vec<u8>> = (0..16u32).map(|i| format!("m{i}").into_bytes()).collect();
         b.rpush(b"lpos:bench", &members, 1).unwrap();
         let k: &[u8] = b"lpos:bench";
-        for _ in 0..2000 { std::hint::black_box(b.lpos(k, b"m8", 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.lpos(k, b"m8", 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.lpos(std::hint::black_box(k), b"m8", 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.lpos(std::hint::black_box(k), b"m8", 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "LPOS@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35607,7 +36049,19 @@ mod tests {
     fn lpos_full_unified_collapse_matches() {
         let mut s = Store::new();
         // list: a b a c a b  (indices 0..5)
-        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"a".to_vec(), b"c".to_vec(), b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+        s.rpush(
+            b"l",
+            &[
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"a".to_vec(),
+                b"c".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -35637,7 +36091,10 @@ mod tests {
         let mut t = Store::new();
         t.rpush(b"exp", &[b"a".to_vec()], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
-        assert_eq!(t.lpos_full(b"exp", b"a", 1, None, 0, 500).unwrap(), Vec::<usize>::new());
+        assert_eq!(
+            t.lpos_full(b"exp", b"a", 1, None, 0, 500).unwrap(),
+            Vec::<usize>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing (LPOS COUNT all on a present 16-elem list, no TTL, LFU off).
@@ -35645,21 +36102,29 @@ mod tests {
         let members: Vec<Vec<u8>> = (0..16u32).map(|i| format!("m{i}").into_bytes()).collect();
         b.rpush(b"lpf:bench", &members, 1).unwrap();
         let k: &[u8] = b"lpf:bench";
-        for _ in 0..2000 { std::hint::black_box(b.lpos_full(k, b"m8", 1, Some(0), 0, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.lpos_full(k, b"m8", 1, Some(0), 0, 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.lpos_full(std::hint::black_box(k), b"m8", 1, Some(0), 0, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.lpos_full(std::hint::black_box(k), b"m8", 1, Some(0), 0, 2))
+                .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "LPOS_FULL@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35668,13 +36133,18 @@ mod tests {
     #[test]
     fn xstream_read_collapse_matches_full_path() {
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
-        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
-        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
-        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> { v.iter().map(|(id, _)| (id.0, id.1)).collect() };
+        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> {
+            v.iter().map(|(id, _)| (id.0, id.1)).collect()
+        };
         let r_len = s.xlen(b"st", 2);
         let r_range = s.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 2);
         let r_rev = s.xrevrange(b"st", (u64::MAX, u64::MAX), (0, 0), None, 2);
@@ -35696,30 +36166,41 @@ mod tests {
 
         // Lazy-expiry.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(t.xlen(b"exp", 500).unwrap(), 0);
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing headline XLEN (present stream, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 1..=16u64 { b.xadd(b"xl:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        for i in 1..=16u64 {
+            b.xadd(b"xl:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"xl:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xlen(k, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xlen(k, 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.xlen(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.xlen(std::hint::black_box(k), 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XLEN@16 no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35749,8 +36230,14 @@ mod tests {
         let mut t = Store::new();
         t.set(b"src".to_vec(), b"v".to_vec(), Some(50), 1); // deadline 51
         assert!(t.expires_count >= 1);
-        assert!(!t.copy(b"src", b"dst", false, 500).unwrap(), "expired source → no copy");
-        assert!(t.get(b"src", 600).unwrap().is_none(), "expired source evicted");
+        assert!(
+            !t.copy(b"src", b"dst", false, 500).unwrap(),
+            "expired source → no copy"
+        );
+        assert!(
+            t.get(b"src", 600).unwrap().is_none(),
+            "expired source evicted"
+        );
 
         // expires_count>0: expired DESTINATION with REPLACE → dst evicted, copy over it.
         let mut u = Store::new();
@@ -35766,10 +36253,15 @@ mod tests {
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t0.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
-        println!("COPY/MOVE guard: elided 2 keyspace probes ≈ {:.2} ns total (2 × {probe:.2} ns)", 2.0 * probe);
+        println!(
+            "COPY/MOVE guard: elided 2 keyspace probes ≈ {:.2} ns total (2 × {probe:.2} ns)",
+            2.0 * probe
+        );
     }
 
     // (CrimsonHawk) XPENDING summary/entries is_stream collapse: byte-identical key-lookup
@@ -35777,7 +36269,8 @@ mod tests {
     #[test]
     fn xpending_is_stream_collapse_matches() {
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         assert!(s.xgroup_create(b"st", b"g1", (0, 0), false, 1).unwrap());
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
@@ -35786,8 +36279,17 @@ mod tests {
         let r_nogroup = s.xpending_summary(b"st", b"nope", 2); // group absent → None
         let r_absent = s.xpending_summary(b"absent", b"g1", 2); // key absent → None (miss)
         let r_wrong = s.xpending_summary(b"str", b"g1", 2); // wrong type → WrongType
-        let r_ent = s.xpending_entries(b"st", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 2, 0);
-        let r_ent_wrong = s.xpending_entries(b"str", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 2, 0);
+        let r_ent =
+            s.xpending_entries(b"st", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 2, 0);
+        let r_ent_wrong = s.xpending_entries(
+            b"str",
+            b"g1",
+            ((0, 0), (u64::MAX, u64::MAX)),
+            10,
+            None,
+            2,
+            0,
+        );
         // hits: summary(st), summary(st-nogroup), summary(str-wrong), entries(st), entries(str-wrong) = 5;
         // misses: summary(absent) = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 5);
@@ -35801,7 +36303,8 @@ mod tests {
 
         // Lazy-expiry: expired stream → summary None + evicted.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(t.xpending_summary(b"exp", b"g", 500).unwrap(), None);
@@ -35809,24 +36312,33 @@ mod tests {
 
         // Timing: xpending_summary on a present stream+group (no TTL, LFU off).
         let mut b = Store::new();
-        b.xadd(b"xp:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
-        b.xgroup_create(b"xp:bench", b"g", (0, 0), false, 1).unwrap();
+        b.xadd(b"xp:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
+        b.xgroup_create(b"xp:bench", b"g", (0, 0), false, 1)
+            .unwrap();
         let k: &[u8] = b"xp:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xpending_summary(k, b"g", 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xpending_summary(k, b"g", 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.xpending_summary(std::hint::black_box(k), b"g", 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.xpending_summary(std::hint::black_box(k), b"g", 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XPENDING summary no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35835,7 +36347,8 @@ mod tests {
     #[test]
     fn xinfo_groups_is_stream_collapse_matches() {
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         s.xgroup_create(b"st", b"g1", (0, 0), false, 1).unwrap();
         s.xgroup_create(b"st", b"g2", (0, 0), false, 1).unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
@@ -35853,7 +36366,8 @@ mod tests {
 
         // Lazy-expiry.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(t.xinfo_groups(b"exp", 500).unwrap(), None);
@@ -35861,24 +36375,33 @@ mod tests {
 
         // Timing (present stream + 2 groups, no TTL, LFU off).
         let mut b = Store::new();
-        b.xadd(b"xig:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
-        b.xgroup_create(b"xig:bench", b"g", (0, 0), false, 1).unwrap();
+        b.xadd(b"xig:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
+        b.xgroup_create(b"xig:bench", b"g", (0, 0), false, 1)
+            .unwrap();
         let k: &[u8] = b"xig:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xinfo_groups(k, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xinfo_groups(k, 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.xinfo_groups(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.xinfo_groups(std::hint::black_box(k), 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XINFO GROUPS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35887,9 +36410,12 @@ mod tests {
     #[test]
     fn xinfo_stream_collapse_matches() {
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
-        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
-        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -35908,30 +36434,41 @@ mod tests {
 
         // Lazy-expiry.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(t.xinfo_stream(b"exp", 500).unwrap(), None);
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing (present stream, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 1..=16u64 { b.xadd(b"xis:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        for i in 1..=16u64 {
+            b.xadd(b"xis:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"xis:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xinfo_stream(k, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xinfo_stream(k, 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.xinfo_stream(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.xinfo_stream(std::hint::black_box(k), 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XINFO STREAM no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35939,11 +36476,16 @@ mod tests {
     // COUNT limit, count=0→empty, WRONGTYPE, missing→empty, stats, key lazy-expiry.
     #[test]
     fn xread_collapse_matches() {
-        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> { v.iter().map(|(id, _)| (id.0, id.1)).collect() };
+        let ids = |v: &[crate::StreamRecord]| -> Vec<(u64, u64)> {
+            v.iter().map(|(id, _)| (id.0, id.1)).collect()
+        };
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1).unwrap();
-        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1).unwrap();
-        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -35963,7 +36505,8 @@ mod tests {
 
         // Lazy-expiry.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(t.xread(b"exp", (0, 0), None, 500).unwrap(), Vec::new());
         assert!(t.get(b"exp", 600).unwrap().is_none());
@@ -35971,23 +36514,33 @@ mod tests {
         // Timing: the COMMON XREAD polling case — read AFTER the last id → 0 new entries
         // (a consumer polling a stream with nothing new). No to_pairs clones dominate here.
         let mut b = Store::new();
-        for i in 1..=16u64 { b.xadd(b"xr:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap(); }
+        for i in 1..=16u64 {
+            b.xadd(b"xr:bench", (i, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"xr:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xread(k, (16, 0), None, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xread(k, (16, 0), None, 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.xread(std::hint::black_box(k), (16, 0), None, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.xread(std::hint::black_box(k), (16, 0), None, 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XREAD poll (0 new) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -35996,7 +36549,8 @@ mod tests {
     #[test]
     fn xinfo_consumers_is_stream_collapse_matches() {
         let mut s = Store::new();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         s.xgroup_create(b"st", b"g", (0, 0), false, 1).unwrap();
         s.xgroup_createconsumer(b"st", b"g", b"c2", 2).unwrap();
         s.xgroup_createconsumer(b"st", b"g", b"c1", 3).unwrap();
@@ -36024,7 +36578,8 @@ mod tests {
 
         // Lazy-expiry turns an expired stream into the same KeyNotFound surface as a miss.
         let mut t = Store::new();
-        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
+        t.xadd(b"exp", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
         t.xgroup_create(b"exp", b"g", (0, 0), false, 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert_eq!(
@@ -36035,12 +36590,18 @@ mod tests {
 
         // Timing (present stream + group + 2 consumers, no TTL, LFU off).
         let mut b = Store::new();
-        b.xadd(b"xic:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1).unwrap();
-        b.xgroup_create(b"xic:bench", b"g", (0, 0), false, 1).unwrap();
-        b.xgroup_createconsumer(b"xic:bench", b"g", b"c1", 2).unwrap();
-        b.xgroup_createconsumer(b"xic:bench", b"g", b"c2", 3).unwrap();
+        b.xadd(b"xic:bench", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+            .unwrap();
+        b.xgroup_create(b"xic:bench", b"g", (0, 0), false, 1)
+            .unwrap();
+        b.xgroup_createconsumer(b"xic:bench", b"g", b"c1", 2)
+            .unwrap();
+        b.xgroup_createconsumer(b"xic:bench", b"g", b"c2", 3)
+            .unwrap();
         let k: &[u8] = b"xic:bench";
-        for _ in 0..2000 { std::hint::black_box(b.xinfo_consumers(k, b"g", 10)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.xinfo_consumers(k, b"g", 10)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
@@ -36050,13 +36611,16 @@ mod tests {
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "XINFO CONSUMERS no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36065,18 +36629,47 @@ mod tests {
     #[test]
     fn zrange_borrow_scan_collapse_matches() {
         use crate::SmembersScanEvent;
-        fn zr(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn zr(
+            s: &mut Store,
+            k: &[u8],
+            a: i64,
+            b: i64,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut out = Vec::new();
-            s.zrange_borrow_scan(k, a, b, now, |e| if let SmembersScanEvent::Member(m) = e { out.push(m.to_vec()) })?;
+            s.zrange_borrow_scan(k, a, b, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    out.push(m.to_vec())
+                }
+            })?;
             Ok(out)
         }
-        fn zrev(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn zrev(
+            s: &mut Store,
+            k: &[u8],
+            a: i64,
+            b: i64,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut out = Vec::new();
-            s.zrevrange_borrow_scan(k, a, b, now, |e| if let SmembersScanEvent::Member(m) = e { out.push(m.to_vec()) })?;
+            s.zrevrange_borrow_scan(k, a, b, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    out.push(m.to_vec())
+                }
+            })?;
             Ok(out)
         }
         let mut s = Store::new();
-        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -36089,9 +36682,15 @@ mod tests {
         // hits: z(all,sub,rev,oob), str(wrong) = 5; misses: absent = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 5);
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
-        assert_eq!(r_all.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(
+            r_all.unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
         assert_eq!(r_sub.unwrap(), vec![b"a".to_vec(), b"b".to_vec()]);
-        assert_eq!(r_rev.unwrap(), vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(
+            r_rev.unwrap(),
+            vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]
+        );
         assert_eq!(r_oob.unwrap(), Vec::<Vec<u8>>::new());
         assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
@@ -36100,28 +36699,48 @@ mod tests {
         let mut t = Store::new();
         t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
-        assert_eq!(zr(&mut t, b"exp", 0, -1, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            zr(&mut t, b"exp", 0, -1, 500).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing ZRANGE@16 (no TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"zr:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(
+                b"zr:bench",
+                &[(f64::from(i), format!("m{i}").into_bytes())],
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"zr:bench";
-        for _ in 0..2000 { b.zrange_borrow_scan(k, 0, 5, 2, |_| {}).ok(); }
+        for _ in 0..2000 {
+            b.zrange_borrow_scan(k, 0, 5, 2, |_| {}).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zrange_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        for _ in 0..reps {
+            b.zrange_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| {
+                std::hint::black_box(&e);
+            })
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZRANGE@16 (0..5) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36132,28 +36751,81 @@ mod tests {
     fn zrangebyscore_borrow_scan_collapse_matches() {
         use crate::{ScoreBound, SmembersScanEvent, ZRangeWithScoresScanEvent};
         let inc = ScoreBound::Inclusive;
-        fn mem(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, rev: bool, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn mem(
+            s: &mut Store,
+            k: &[u8],
+            lo: ScoreBound,
+            hi: ScoreBound,
+            rev: bool,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut o = Vec::new();
-            s.zrangebyscore_members_borrow_scan(k, lo, hi, rev, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            s.zrangebyscore_members_borrow_scan(k, lo, hi, rev, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    o.push(m.to_vec())
+                }
+            })?;
             Ok(o)
         }
-        fn lim(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, rev: bool, off: usize, take: usize, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn lim(
+            s: &mut Store,
+            k: &[u8],
+            lo: ScoreBound,
+            hi: ScoreBound,
+            rev: bool,
+            off: usize,
+            take: usize,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut o = Vec::new();
-            s.zrangebyscore_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            s.zrangebyscore_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    o.push(m.to_vec())
+                }
+            })?;
             Ok(o)
         }
-        fn ws(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        fn ws(
+            s: &mut Store,
+            k: &[u8],
+            lo: ScoreBound,
+            hi: ScoreBound,
+            now: u64,
+        ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
             let mut o = Vec::new();
-            s.zrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            s.zrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| {
+                if let ZRangeWithScoresScanEvent::Pair(m, sc) = e {
+                    o.push((m.to_vec(), sc))
+                }
+            })?;
             Ok(o)
         }
-        fn wsrev(s: &mut Store, k: &[u8], lo: ScoreBound, hi: ScoreBound, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        fn wsrev(
+            s: &mut Store,
+            k: &[u8],
+            lo: ScoreBound,
+            hi: ScoreBound,
+            now: u64,
+        ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
             let mut o = Vec::new();
-            s.zrevrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            s.zrevrangebyscore_withscores_borrow_scan(k, lo, hi, now, |e| {
+                if let ZRangeWithScoresScanEvent::Pair(m, sc) = e {
+                    o.push((m.to_vec(), sc))
+                }
+            })?;
             Ok(o)
         }
         let mut s = Store::new();
-        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -36169,13 +36841,25 @@ mod tests {
         // hits: z(asc,desc,band,empty,lim,ws,wsrev), str(wrong) = 8; misses: absent = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 8);
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
-        assert_eq!(r_asc.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
-        assert_eq!(r_desc.unwrap(), vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(
+            r_asc.unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+        assert_eq!(
+            r_desc.unwrap(),
+            vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]
+        );
         assert_eq!(r_band.unwrap(), vec![b"b".to_vec()]);
         assert_eq!(r_empty.unwrap(), Vec::<Vec<u8>>::new());
         assert_eq!(r_lim.unwrap(), vec![b"b".to_vec()]);
-        assert_eq!(r_ws.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]);
-        assert_eq!(r_wsrev.unwrap(), vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 1.0)]);
+        assert_eq!(
+            r_ws.unwrap(),
+            vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]
+        );
+        assert_eq!(
+            r_wsrev.unwrap(),
+            vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 1.0)]
+        );
         assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
 
@@ -36183,28 +36867,56 @@ mod tests {
         let mut t = Store::new();
         t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
-        assert_eq!(mem(&mut t, b"exp", inc(0.0), inc(9.0), false, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            mem(&mut t, b"exp", inc(0.0), inc(9.0), false, 500).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing ZRANGEBYSCORE@16 (band 4..9, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"zbs:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(
+                b"zbs:bench",
+                &[(f64::from(i), format!("m{i}").into_bytes())],
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"zbs:bench";
-        for _ in 0..2000 { b.zrangebyscore_members_borrow_scan(k, inc(4.0), inc(9.0), false, 2, |_| {}).ok(); }
+        for _ in 0..2000 {
+            b.zrangebyscore_members_borrow_scan(k, inc(4.0), inc(9.0), false, 2, |_| {})
+                .ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zrangebyscore_members_borrow_scan(std::hint::black_box(k), inc(4.0), inc(9.0), false, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        for _ in 0..reps {
+            b.zrangebyscore_members_borrow_scan(
+                std::hint::black_box(k),
+                inc(4.0),
+                inc(9.0),
+                false,
+                2,
+                |e| {
+                    std::hint::black_box(&e);
+                },
+            )
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZRANGEBYSCORE@16 (4..9) no-TTL collapsed: full={full:.2} ns | removed 2nd probe ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36213,19 +36925,53 @@ mod tests {
     #[test]
     fn zrangebylex_borrow_scan_guard_matches() {
         use crate::SmembersScanEvent;
-        fn lex(s: &mut Store, k: &[u8], lo: &[u8], hi: &[u8], rev: bool, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn lex(
+            s: &mut Store,
+            k: &[u8],
+            lo: &[u8],
+            hi: &[u8],
+            rev: bool,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut o = Vec::new();
-            s.zrangebylex_members_borrow_scan(k, lo, hi, rev, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            s.zrangebylex_members_borrow_scan(k, lo, hi, rev, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    o.push(m.to_vec())
+                }
+            })?;
             Ok(o)
         }
-        fn lexlim(s: &mut Store, k: &[u8], lo: &[u8], hi: &[u8], rev: bool, off: usize, take: usize, now: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        fn lexlim(
+            s: &mut Store,
+            k: &[u8],
+            lo: &[u8],
+            hi: &[u8],
+            rev: bool,
+            off: usize,
+            take: usize,
+            now: u64,
+        ) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut o = Vec::new();
-            s.zrangebylex_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| if let SmembersScanEvent::Member(m) = e { o.push(m.to_vec()) })?;
+            s.zrangebylex_members_limit_borrow_scan(k, lo, hi, rev, off, take, now, |e| {
+                if let SmembersScanEvent::Member(m) = e {
+                    o.push(m.to_vec())
+                }
+            })?;
             Ok(o)
         }
         let mut s = Store::new();
         // Equal scores → pure lex ordering.
-        s.zadd(b"z", &[(0.0, b"a".to_vec()), (0.0, b"b".to_vec()), (0.0, b"c".to_vec()), (0.0, b"d".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (0.0, b"a".to_vec()),
+                (0.0, b"b".to_vec()),
+                (0.0, b"c".to_vec()),
+                (0.0, b"d".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -36239,10 +36985,16 @@ mod tests {
         // ZRANGEBYLEX records NO keyspace stat (bare drop) → hits/misses UNCHANGED.
         assert_eq!(s.stat_keyspace_hits, h0);
         assert_eq!(s.stat_keyspace_misses, m0);
-        assert_eq!(r_all.unwrap(), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(
+            r_all.unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        );
         assert_eq!(r_incl.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
         assert_eq!(r_excl.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
-        assert_eq!(r_rev.unwrap(), vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+        assert_eq!(
+            r_rev.unwrap(),
+            vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]
+        );
         assert_eq!(r_lim.unwrap(), vec![b"b".to_vec(), b"c".to_vec()]);
         assert_eq!(r_absent.unwrap(), Vec::<Vec<u8>>::new());
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
@@ -36252,28 +37004,52 @@ mod tests {
         t.zadd(b"exp", &[(0.0, b"m".to_vec())], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
-        assert_eq!(lex(&mut t, b"exp", b"-", b"+", false, 500).unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            lex(&mut t, b"exp", b"-", b"+", false, 500).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing ZRANGEBYLEX@16 (band, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"zbl:bench", &[(0.0, format!("m{i:02}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(b"zbl:bench", &[(0.0, format!("m{i:02}").into_bytes())], 1)
+                .unwrap();
+        }
         let k: &[u8] = b"zbl:bench";
-        for _ in 0..2000 { b.zrangebylex_members_borrow_scan(k, b"[m04", b"[m09", false, 2, |_| {}).ok(); }
+        for _ in 0..2000 {
+            b.zrangebylex_members_borrow_scan(k, b"[m04", b"[m09", false, 2, |_| {})
+                .ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zrangebylex_members_borrow_scan(std::hint::black_box(k), b"[m04", b"[m09", false, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        for _ in 0..reps {
+            b.zrangebylex_members_borrow_scan(
+                std::hint::black_box(k),
+                b"[m04",
+                b"[m09",
+                false,
+                2,
+                |e| {
+                    std::hint::black_box(&e);
+                },
+            )
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZRANGEBYLEX@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36283,18 +37059,47 @@ mod tests {
     #[test]
     fn zrange_withscores_borrow_scan_guard_matches() {
         use crate::ZRangeWithScoresScanEvent;
-        fn ws(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        fn ws(
+            s: &mut Store,
+            k: &[u8],
+            a: i64,
+            b: i64,
+            now: u64,
+        ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
             let mut o = Vec::new();
-            s.zrange_withscores_borrow_scan(k, a, b, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            s.zrange_withscores_borrow_scan(k, a, b, now, |e| {
+                if let ZRangeWithScoresScanEvent::Pair(m, sc) = e {
+                    o.push((m.to_vec(), sc))
+                }
+            })?;
             Ok(o)
         }
-        fn wsrev(s: &mut Store, k: &[u8], a: i64, b: i64, now: u64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        fn wsrev(
+            s: &mut Store,
+            k: &[u8],
+            a: i64,
+            b: i64,
+            now: u64,
+        ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
             let mut o = Vec::new();
-            s.zrevrange_withscores_borrow_scan(k, a, b, now, |e| if let ZRangeWithScoresScanEvent::Pair(m, sc) = e { o.push((m.to_vec(), sc)) })?;
+            s.zrevrange_withscores_borrow_scan(k, a, b, now, |e| {
+                if let ZRangeWithScoresScanEvent::Pair(m, sc) = e {
+                    o.push((m.to_vec(), sc))
+                }
+            })?;
             Ok(o)
         }
         let mut s = Store::new();
-        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
@@ -36307,9 +37112,26 @@ mod tests {
         // ZRANGE WITHSCORES (rank) records NO keyspace stat (bare drop) → hits/misses UNCHANGED.
         assert_eq!(s.stat_keyspace_hits, h0);
         assert_eq!(s.stat_keyspace_misses, m0);
-        assert_eq!(r_all.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0), (b"c".to_vec(), 3.0)]);
-        assert_eq!(r_sub.unwrap(), vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]);
-        assert_eq!(r_rev.unwrap(), vec![(b"c".to_vec(), 3.0), (b"b".to_vec(), 2.0), (b"a".to_vec(), 1.0)]);
+        assert_eq!(
+            r_all.unwrap(),
+            vec![
+                (b"a".to_vec(), 1.0),
+                (b"b".to_vec(), 2.0),
+                (b"c".to_vec(), 3.0)
+            ]
+        );
+        assert_eq!(
+            r_sub.unwrap(),
+            vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]
+        );
+        assert_eq!(
+            r_rev.unwrap(),
+            vec![
+                (b"c".to_vec(), 3.0),
+                (b"b".to_vec(), 2.0),
+                (b"a".to_vec(), 1.0)
+            ]
+        );
         assert_eq!(r_oob.unwrap(), Vec::<(Vec<u8>, f64)>::new());
         assert_eq!(r_absent.unwrap(), Vec::<(Vec<u8>, f64)>::new());
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
@@ -36319,28 +37141,48 @@ mod tests {
         t.zadd(b"exp", &[(1.0, b"m".to_vec())], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
-        assert_eq!(ws(&mut t, b"exp", 0, -1, 500).unwrap(), Vec::<(Vec<u8>, f64)>::new());
+        assert_eq!(
+            ws(&mut t, b"exp", 0, -1, 500).unwrap(),
+            Vec::<(Vec<u8>, f64)>::new()
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing ZRANGE WITHSCORES@16 (0..5, no TTL, LFU off).
         let mut b = Store::new();
-        for i in 0..16u32 { b.zadd(b"zws:bench", &[(f64::from(i), format!("m{i}").into_bytes())], 1).unwrap(); }
+        for i in 0..16u32 {
+            b.zadd(
+                b"zws:bench",
+                &[(f64::from(i), format!("m{i}").into_bytes())],
+                1,
+            )
+            .unwrap();
+        }
         let k: &[u8] = b"zws:bench";
-        for _ in 0..2000 { b.zrange_withscores_borrow_scan(k, 0, 5, 2, |_| {}).ok(); }
+        for _ in 0..2000 {
+            b.zrange_withscores_borrow_scan(k, 0, 5, 2, |_| {}).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { b.zrange_withscores_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| { std::hint::black_box(&e); }).ok(); }
+        for _ in 0..reps {
+            b.zrange_withscores_borrow_scan(std::hint::black_box(k), 0, 5, 2, |e| {
+                std::hint::black_box(&e);
+            })
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZRANGE-WITHSCORES@16 (0..5) no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36349,18 +37191,32 @@ mod tests {
     #[test]
     fn lrpop_bare_drop_guard_matches() {
         let mut s = Store::new();
-        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()], 1).unwrap();
+        s.rpush(
+            b"l",
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let d0 = s.dirty;
         assert_eq!(s.lpop(b"l", 2).unwrap(), Some(b"a".to_vec()));
         assert_eq!(s.rpop(b"l", 2).unwrap(), Some(b"d".to_vec()));
-        assert_eq!(s.lpop_count(b"l", 5, 2).unwrap(), Some(vec![b"b".to_vec(), b"c".to_vec()])); // drains
+        assert_eq!(
+            s.lpop_count(b"l", 5, 2).unwrap(),
+            Some(vec![b"b".to_vec(), b"c".to_vec()])
+        ); // drains
         assert!(s.dirty > d0);
-        assert!(s.get(b"l", 2).unwrap().is_none(), "emptied list key removed");
+        assert!(
+            s.get(b"l", 2).unwrap().is_none(),
+            "emptied list key removed"
+        );
         assert_eq!(s.lpop(b"l", 2).unwrap(), None); // gone
         assert_eq!(s.rpop(b"absent", 2).unwrap(), None);
         assert!(matches!(s.lpop(b"str", 2), Err(StoreError::WrongType)));
-        assert!(matches!(s.rpop_count(b"str", 2, 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.rpop_count(b"str", 2, 2),
+            Err(StoreError::WrongType)
+        ));
 
         // Eviction via the expires_count>0 branch.
         let mut t = Store::new();
@@ -36377,11 +37233,18 @@ mod tests {
         let batch: Vec<Vec<u8>> = (0..64).map(|_| b"v".to_vec()).collect();
         let mut b = Store::new();
         let k: &[u8] = b"lp:bench";
-        for _ in 0..2000 { b.rpush(k, &batch, 1).ok(); for _ in 0..64 { b.lpop(k, 2).ok(); } }
+        for _ in 0..2000 {
+            b.rpush(k, &batch, 1).ok();
+            for _ in 0..64 {
+                b.lpop(k, 2).ok();
+            }
+        }
         let t0 = std::time::Instant::now();
         for _ in 0..rounds {
             b.rpush(std::hint::black_box(k), &batch, 1).ok();
-            for _ in 0..64 { std::hint::black_box(b.lpop(std::hint::black_box(k), 2)).ok(); }
+            for _ in 0..64 {
+                std::hint::black_box(b.lpop(std::hint::black_box(k), 2)).ok();
+            }
         }
         let full = t0.elapsed().as_nanos() as f64 / (rounds * 64) as f64;
         // Elided probe: the drop's no-TTL contains_key.
@@ -36391,13 +37254,16 @@ mod tests {
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(c.entries.contains_key(std::hint::black_box(pk))); }
+        for _ in 0..inner {
+            acc += u64::from(c.entries.contains_key(std::hint::black_box(pk)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "LPOP pop-all no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36412,16 +37278,28 @@ mod tests {
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
         assert_eq!(s.hrandfield(b"h", 2).unwrap(), Some(b"f".to_vec()));
-        assert_eq!(s.hrandfield_count(b"h", 1, 2).unwrap(), vec![(b"f".to_vec(), b"v".to_vec())]);
+        assert_eq!(
+            s.hrandfield_count(b"h", 1, 2).unwrap(),
+            vec![(b"f".to_vec(), b"v".to_vec())]
+        );
         assert_eq!(s.hrandfield_count(b"h", -3, 2).unwrap().len(), 3); // negative → repeats
         assert_eq!(s.zrandmember(b"z", 2).unwrap(), Some(b"m".to_vec()));
-        assert_eq!(s.zrandmember_count(b"z", 1, 2).unwrap(), vec![(b"m".to_vec(), 1.0)]);
+        assert_eq!(
+            s.zrandmember_count(b"z", 1, 2).unwrap(),
+            vec![(b"m".to_vec(), 1.0)]
+        );
         assert_eq!(s.zrandmember_count(b"z", -3, 2).unwrap().len(), 3);
         assert_eq!(s.hrandfield(b"absent", 2).unwrap(), None);
         assert_eq!(s.zrandmember(b"absent", 2).unwrap(), None);
         assert!(s.hrandfield_count(b"absent", 5, 2).unwrap().is_empty());
-        assert!(matches!(s.hrandfield(b"str", 2), Err(StoreError::WrongType)));
-        assert!(matches!(s.zrandmember(b"str", 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.hrandfield(b"str", 2),
+            Err(StoreError::WrongType)
+        ));
+        assert!(matches!(
+            s.zrandmember(b"str", 2),
+            Err(StoreError::WrongType)
+        ));
         // These record NO keyspace stat (bare drop) → hits/misses UNCHANGED.
         assert_eq!(s.stat_keyspace_hits, h0);
         assert_eq!(s.stat_keyspace_misses, m0);
@@ -36436,23 +37314,33 @@ mod tests {
 
         // Timing: HRANDFIELD is a non-mutating sample (loops cleanly).
         let mut b = Store::new();
-        for i in 0..16u32 { b.hset(b"hr:bench", format!("f{i}").into_bytes(), b"v".to_vec(), 1).unwrap(); }
+        for i in 0..16u32 {
+            b.hset(b"hr:bench", format!("f{i}").into_bytes(), b"v".to_vec(), 1)
+                .unwrap();
+        }
         let k: &[u8] = b"hr:bench";
-        for _ in 0..2000 { std::hint::black_box(b.hrandfield(k, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.hrandfield(k, 2)).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.hrandfield(std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.hrandfield(std::hint::black_box(k), 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "HRANDFIELD@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x (+ elided empty hash-field drop)",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36467,11 +37355,19 @@ mod tests {
         assert!(s.hset_borrowed(b"h", b"f", b"v".to_vec(), 2).unwrap()); // new field
         assert!(!s.hset_borrowed(b"h", b"f", b"v2".to_vec(), 2).unwrap()); // update
         assert_eq!(s.hget(b"h", b"f", 2).unwrap(), Some(b"v2".to_vec()));
-        assert!(matches!(s.hset_borrowed(b"str", b"f", b"v".to_vec(), 2), Err(StoreError::WrongType)));
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 2).unwrap();
-        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 2).unwrap();
+        assert!(matches!(
+            s.hset_borrowed(b"str", b"f", b"v".to_vec(), 2),
+            Err(StoreError::WrongType)
+        ));
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 2)
+            .unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 2)
+            .unwrap();
         assert_eq!(s.xlen(b"st", 2).unwrap(), 2);
-        assert!(matches!(s.xadd(b"str", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 2), Err(StoreError::WrongType)));
+        assert!(matches!(
+            s.xadd(b"str", (3, 0), &[(b"f".to_vec(), b"c".to_vec())], 2),
+            Err(StoreError::WrongType)
+        ));
         // hset_borrowed + xadd record NO keyspace stat (bare drop). The reads DO: hget + xlen = 2 hits.
         assert_eq!(s.stat_keyspace_hits, h0 + 2);
         assert_eq!(s.stat_keyspace_misses, m0);
@@ -36481,29 +37377,52 @@ mod tests {
         t.hset_borrowed(b"h", b"f", b"v".to_vec(), 1).unwrap();
         t.expire_at_milliseconds(b"h", 50, 1);
         assert!(t.expires_count >= 1);
-        assert!(t.hset_borrowed(b"h", b"f2", b"w".to_vec(), 500).unwrap(), "expired hash dropped → fresh field is new");
-        assert_eq!(t.hget(b"h", b"f", 500).unwrap(), None, "old field gone after eviction");
+        assert!(
+            t.hset_borrowed(b"h", b"f2", b"w".to_vec(), 500).unwrap(),
+            "expired hash dropped → fresh field is new"
+        );
+        assert_eq!(
+            t.hget(b"h", b"f", 500).unwrap(),
+            None,
+            "old field gone after eviction"
+        );
 
         // Timing: hset_borrowed updating an existing field (rotating value avoids no-op path).
         let mut b = Store::new();
-        b.hset_borrowed(b"hb:bench", b"f", b"v0".to_vec(), 1).unwrap();
+        b.hset_borrowed(b"hb:bench", b"f", b"v0".to_vec(), 1)
+            .unwrap();
         let k: &[u8] = b"hb:bench";
         let reps = 3_000_000u64;
         let mut n = 0u64;
-        for _ in 0..2000 { n += 1; b.hset_borrowed(k, b"f", n.to_le_bytes().to_vec(), 2).ok(); }
+        for _ in 0..2000 {
+            n += 1;
+            b.hset_borrowed(k, b"f", n.to_le_bytes().to_vec(), 2).ok();
+        }
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { n += 1; std::hint::black_box(b.hset_borrowed(std::hint::black_box(k), b"f", n.to_le_bytes().to_vec(), 2)).ok(); }
+        for _ in 0..reps {
+            n += 1;
+            std::hint::black_box(b.hset_borrowed(
+                std::hint::black_box(k),
+                b"f",
+                n.to_le_bytes().to_vec(),
+                2,
+            ))
+            .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box((acc, n));
         println!(
             "HSET(borrowed) update no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36513,7 +37432,16 @@ mod tests {
     #[test]
     fn zpop_bare_drop_guard_matches() {
         let mut s = Store::new();
-        s.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())], 1).unwrap();
+        s.zadd(
+            b"z",
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
+            1,
+        )
+        .unwrap();
         s.set(b"str".to_vec(), b"x".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
         let d0 = s.dirty;
@@ -36540,7 +37468,10 @@ mod tests {
         assert!(matches!(r_wrong1, Err(StoreError::WrongType)));
         assert!(matches!(r_wrong2, Err(StoreError::WrongType)));
         assert!(s.dirty > d0);
-        assert!(s.get(b"z", 2).unwrap().is_none(), "emptied zset key removed");
+        assert!(
+            s.get(b"z", 2).unwrap().is_none(),
+            "emptied zset key removed"
+        );
 
         // Eviction via the expires_count>0 branch.
         let mut t = Store::new();
@@ -36552,14 +37483,23 @@ mod tests {
 
         // Timing: representative small zset — refill 16 + pop all 16 (byq16-composed path).
         let rounds = 60_000u64;
-        let batch: Vec<(f64, Vec<u8>)> = (0..16u32).map(|i| (f64::from(i), format!("m{i}").into_bytes())).collect();
+        let batch: Vec<(f64, Vec<u8>)> = (0..16u32)
+            .map(|i| (f64::from(i), format!("m{i}").into_bytes()))
+            .collect();
         let mut b = Store::new();
         let k: &[u8] = b"zp:bench";
-        for _ in 0..2000 { b.zadd(k, &batch, 1).ok(); for _ in 0..16 { b.zpopmin(k, 2).ok(); } }
+        for _ in 0..2000 {
+            b.zadd(k, &batch, 1).ok();
+            for _ in 0..16 {
+                b.zpopmin(k, 2).ok();
+            }
+        }
         let t0 = std::time::Instant::now();
         for _ in 0..rounds {
             b.zadd(std::hint::black_box(k), &batch, 1).ok();
-            for _ in 0..16 { std::hint::black_box(b.zpopmin(std::hint::black_box(k), 2)).ok(); }
+            for _ in 0..16 {
+                std::hint::black_box(b.zpopmin(std::hint::black_box(k), 2)).ok();
+            }
         }
         let full = t0.elapsed().as_nanos() as f64 / (rounds * 16) as f64;
         let mut c = Store::new();
@@ -36568,13 +37508,16 @@ mod tests {
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(c.entries.contains_key(std::hint::black_box(pk))); }
+        for _ in 0..inner {
+            acc += u64::from(c.entries.contains_key(std::hint::black_box(pk)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "ZPOPMIN small-zset no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36583,10 +37526,24 @@ mod tests {
     #[test]
     fn ltrim_xstream_bitfield_bare_drop_guard_matches() {
         let mut s = Store::new();
-        s.rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec(), b"e".to_vec()], 1).unwrap();
-        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"x".to_vec())], 1).unwrap();
-        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"y".to_vec())], 1).unwrap();
-        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"z".to_vec())], 1).unwrap();
+        s.rpush(
+            b"l",
+            &[
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec(),
+            ],
+            1,
+        )
+        .unwrap();
+        s.xadd(b"st", (1, 0), &[(b"f".to_vec(), b"x".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (2, 0), &[(b"f".to_vec(), b"y".to_vec())], 1)
+            .unwrap();
+        s.xadd(b"st", (3, 0), &[(b"f".to_vec(), b"z".to_vec())], 1)
+            .unwrap();
         s.bitfield_set(b"bf", 0, 8, 42, 1).unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
@@ -36604,7 +37561,10 @@ mod tests {
         assert_eq!(bf_old, 42);
         assert!(matches!(r_wrong, Err(StoreError::WrongType)));
         // Verify (these reads DO record — after the stat assertion).
-        assert_eq!(s.lrange(b"l", 0, -1, 2).unwrap(), vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(
+            s.lrange(b"l", 0, -1, 2).unwrap(),
+            vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        );
         assert_eq!(s.xlen(b"st", 2).unwrap(), 1);
         assert_eq!(s.bitfield_get(b"bf", 0, 8, false, 2).unwrap(), 99);
 
@@ -36614,27 +37574,42 @@ mod tests {
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
         t.ltrim(b"exp", 0, 0, 500).unwrap(); // on an expired key
-        assert!(t.get(b"exp", 600).unwrap().is_none(), "expired list evicted by LTRIM");
+        assert!(
+            t.get(b"exp", 600).unwrap().is_none(),
+            "expired list evicted by LTRIM"
+        );
 
         // Timing: LTRIM keep-all on a 16-element list (idempotent; always get_mut to size).
         let mut b = Store::new();
-        b.rpush(b"lt:bench", &(0..16u32).map(|_| b"v".to_vec()).collect::<Vec<_>>(), 1).unwrap();
+        b.rpush(
+            b"lt:bench",
+            &(0..16u32).map(|_| b"v".to_vec()).collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
         let k: &[u8] = b"lt:bench";
-        for _ in 0..2000 { b.ltrim(k, 0, -1, 2).ok(); }
+        for _ in 0..2000 {
+            b.ltrim(k, 0, -1, 2).ok();
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.ltrim(std::hint::black_box(k), 0, -1, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.ltrim(std::hint::black_box(k), 0, -1, 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "LTRIM(0,-1)@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36643,7 +37618,8 @@ mod tests {
     #[test]
     fn move_ops_bare_drop_guard_matches() {
         let mut s = Store::new();
-        s.rpush(b"src", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap();
+        s.rpush(b"src", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+            .unwrap();
         s.sadd(b"ss", &[b"x".to_vec(), b"y".to_vec()], 1).unwrap();
         s.set(b"rk".to_vec(), b"v".to_vec(), None, 1);
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
@@ -36659,7 +37635,10 @@ mod tests {
         assert!(r_smove.unwrap());
         assert!(!r_smove_absent.unwrap());
         // Verify (reads record — after the stat assertion).
-        assert_eq!(s.lrange(b"src", 0, -1, 2).unwrap(), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            s.lrange(b"src", 0, -1, 2).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
         assert_eq!(s.lrange(b"dst", 0, -1, 2).unwrap(), vec![b"c".to_vec()]);
         assert!(s.sismember(b"sd", b"x", 2).unwrap());
         assert!(!s.sismember(b"ss", b"x", 2).unwrap());
@@ -36671,36 +37650,63 @@ mod tests {
         u.set(b"k".to_vec(), b"v".to_vec(), Some(100_000), 1); // TTL
         assert!(u.expires_count >= 1);
         u.rename(b"k", b"k2", 2).unwrap();
-        assert!(u.expires_count >= 1, "TTL transferred (still one volatile key: k2)");
-        assert_eq!(u.get(b"k2", 200).unwrap(), Some(b"v".to_vec()), "k2 present, not expired at now=200");
+        assert!(
+            u.expires_count >= 1,
+            "TTL transferred (still one volatile key: k2)"
+        );
+        assert_eq!(
+            u.get(b"k2", 200).unwrap(),
+            Some(b"v".to_vec()),
+            "k2 present, not expired at now=200"
+        );
 
         // Eviction: expired source → RPOPLPUSH sees nothing.
         let mut t = Store::new();
         t.rpush(b"es", &[b"a".to_vec()], 1).unwrap();
         t.expire_at_milliseconds(b"es", 50, 1);
         assert!(t.expires_count >= 1);
-        assert_eq!(t.rpoplpush(b"es", b"ed", 500).unwrap(), None, "expired source → None");
+        assert_eq!(
+            t.rpoplpush(b"es", b"ed", 500).unwrap(),
+            None,
+            "expired source → None"
+        );
         assert!(t.get(b"es", 600).unwrap().is_none());
 
         // Timing: RPOPLPUSH self-rotate (source==dest, non-destructive) on a 16-elem list.
         let mut b = Store::new();
-        b.rpush(b"rl:bench", &(0..16u32).map(|i| format!("m{i}").into_bytes()).collect::<Vec<_>>(), 1).unwrap();
+        b.rpush(
+            b"rl:bench",
+            &(0..16u32)
+                .map(|i| format!("m{i}").into_bytes())
+                .collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
         let k: &[u8] = b"rl:bench";
-        for _ in 0..2000 { b.rpoplpush(k, k, 2).ok(); }
+        for _ in 0..2000 {
+            b.rpoplpush(k, k, 2).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.rpoplpush(std::hint::black_box(k), std::hint::black_box(k), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.rpoplpush(std::hint::black_box(k), std::hint::black_box(k), 2))
+                .ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "RPOPLPUSH self-rotate@16 no-TTL guarded: full={full:.2} ns | elided 2 drops ≈ {:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            2.0 * probe, full + 2.0 * probe, (full + 2.0 * probe) / full
+            2.0 * probe,
+            full + 2.0 * probe,
+            (full + 2.0 * probe) / full
         );
     }
 
@@ -36712,51 +37718,91 @@ mod tests {
         s.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 1).unwrap();
         s.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 1).unwrap();
         s.sadd(b"se", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
-        s.zadd(b"z", &[(1.0, b"m1".to_vec()), (2.0, b"m2".to_vec())], 1).unwrap();
+        s.zadd(b"z", &[(1.0, b"m1".to_vec()), (2.0, b"m2".to_vec())], 1)
+            .unwrap();
         s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
 
         let (hc, mut hf) = s.hscan(b"h", 0, None, 100, 2).unwrap();
         hf.sort();
         assert_eq!(hc, 0);
-        assert_eq!(hf, vec![(b"f1".to_vec(), b"v1".to_vec()), (b"f2".to_vec(), b"v2".to_vec())]);
+        assert_eq!(
+            hf,
+            vec![
+                (b"f1".to_vec(), b"v1".to_vec()),
+                (b"f2".to_vec(), b"v2".to_vec())
+            ]
+        );
         let (sc, mut sf) = s.sscan(b"se", 0, None, 100, 2).unwrap();
         sf.sort();
         assert_eq!((sc, sf), (0, vec![b"a".to_vec(), b"b".to_vec()]));
         let (zc, mut zf) = s.zscan(b"z", 0, None, 100, 2).unwrap();
         zf.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!((zc, zf), (0, vec![(b"m1".to_vec(), 1.0), (b"m2".to_vec(), 2.0)]));
-        assert_eq!(s.hscan(b"absent", 0, None, 100, 2).unwrap(), (0, Vec::new()));
-        assert_eq!(s.sscan(b"absent", 0, None, 100, 2).unwrap(), (0, Vec::new()));
-        assert!(matches!(s.hscan(b"str", 0, None, 100, 2), Err(StoreError::WrongType)));
-        assert!(matches!(s.zscan(b"str", 0, None, 100, 2), Err(StoreError::WrongType)));
+        assert_eq!(
+            (zc, zf),
+            (0, vec![(b"m1".to_vec(), 1.0), (b"m2".to_vec(), 2.0)])
+        );
+        assert_eq!(
+            s.hscan(b"absent", 0, None, 100, 2).unwrap(),
+            (0, Vec::new())
+        );
+        assert_eq!(
+            s.sscan(b"absent", 0, None, 100, 2).unwrap(),
+            (0, Vec::new())
+        );
+        assert!(matches!(
+            s.hscan(b"str", 0, None, 100, 2),
+            Err(StoreError::WrongType)
+        ));
+        assert!(matches!(
+            s.zscan(b"str", 0, None, 100, 2),
+            Err(StoreError::WrongType)
+        ));
 
         // Eviction via the expires_count>0 branch.
         let mut t = Store::new();
         t.sadd(b"exp", &[b"a".to_vec()], 1).unwrap();
         t.expire_at_milliseconds(b"exp", 50, 1);
         assert!(t.expires_count >= 1);
-        assert_eq!(t.sscan(b"exp", 0, None, 100, 500).unwrap(), (0, Vec::new()), "expired → empty");
+        assert_eq!(
+            t.sscan(b"exp", 0, None, 100, 500).unwrap(),
+            (0, Vec::new()),
+            "expired → empty"
+        );
         assert!(t.get(b"exp", 600).unwrap().is_none());
 
         // Timing: SSCAN a 16-member set (non-mutating; returns all in one call).
         let mut b = Store::new();
-        b.sadd(b"ss:bench", &(0..16u32).map(|i| format!("m{i}").into_bytes()).collect::<Vec<_>>(), 1).unwrap();
+        b.sadd(
+            b"ss:bench",
+            &(0..16u32)
+                .map(|i| format!("m{i}").into_bytes())
+                .collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
         let k: &[u8] = b"ss:bench";
-        for _ in 0..2000 { std::hint::black_box(b.sscan(k, 0, None, 100, 2)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(b.sscan(k, 0, None, 100, 2)).ok();
+        }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(b.sscan(std::hint::black_box(k), 0, None, 100, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(b.sscan(std::hint::black_box(k), 0, None, 100, 2)).ok();
+        }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
         let mut acc = 0u64;
         let t1 = std::time::Instant::now();
-        for _ in 0..inner { acc += u64::from(b.entries.contains_key(std::hint::black_box(k))); }
+        for _ in 0..inner {
+            acc += u64::from(b.entries.contains_key(std::hint::black_box(k)));
+        }
         let probe = t1.elapsed().as_nanos() as f64 / inner as f64;
         std::hint::black_box(acc);
         println!(
             "SSCAN@16 no-TTL guarded: full={full:.2} ns | elided drop's no-TTL contains_key ≈ {probe:.2} ns \
              ⇒ old ≈ {:.2} ns = {:.2}x",
-            full + probe, (full + probe) / full
+            full + probe,
+            (full + probe) / full
         );
     }
 
@@ -36771,14 +37817,18 @@ mod tests {
         use crate::ZRangeWithScoresScanEvent;
         fn build(n: u32) -> Store {
             let mut s = Store::new();
-            let members: Vec<(f64, Vec<u8>)> = (0..n).map(|i| (f64::from(i) + 0.5, format!("m{i:04}").into_bytes())).collect();
+            let members: Vec<(f64, Vec<u8>)> = (0..n)
+                .map(|i| (f64::from(i) + 0.5, format!("m{i:04}").into_bytes()))
+                .collect();
             s.zadd(b"z", &members, 1).unwrap();
             s
         }
         fn borrow(s: &mut Store, count: i64) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
             let mut out = Vec::new();
             s.zrandmember_count_withscores_borrow_scan(b"z", count, 2, |ev| {
-                if let ZRangeWithScoresScanEvent::Pair(m, sc) = ev { out.push((m.to_vec(), sc)) }
+                if let ZRangeWithScoresScanEvent::Pair(m, sc) = ev {
+                    out.push((m.to_vec(), sc))
+                }
             })?;
             Ok(out)
         }
@@ -36786,20 +37836,35 @@ mod tests {
         for &n in &[16u32, 1000] {
             let s = build(n);
             let entry = s.entries.get(b"z".as_slice()).unwrap();
-            let Value::SortedSet(zs) = &entry.value else { panic!("not a zset") };
+            let Value::SortedSet(zs) = &entry.value else {
+                panic!("not a zset")
+            };
             let idxs: Vec<usize> = vec![0, 5, (n as usize) - 1, 3, 0, (n as usize) / 2];
             let clone: Vec<(Vec<u8>, f64)> = zs.random_members_at_indices(&idxs);
             let mut borrowed = Vec::new();
-            zs.random_member_score_at_indices_borrow_scan(&idxs, |m, sc| borrowed.push((m.to_vec(), sc)));
-            assert_eq!(clone, borrowed, "n={n}: index→(member,score) access diverged");
+            zs.random_member_score_at_indices_borrow_scan(&idxs, |m, sc| {
+                borrowed.push((m.to_vec(), sc))
+            });
+            assert_eq!(
+                clone, borrowed,
+                "n={n}: index→(member,score) access diverged"
+            );
         }
         // Full-method validity: exact count, every member real with the matching score.
         for &count in &[5i64, 200, -7, 0] {
             let mut b = build(200);
             let res = borrow(&mut b, count).unwrap();
-            let expected = if count >= 0 { (count as usize).min(200) } else { count.unsigned_abs() as usize };
+            let expected = if count >= 0 {
+                (count as usize).min(200)
+            } else {
+                count.unsigned_abs() as usize
+            };
             assert_eq!(res.len(), expected, "count={count} wrong length");
-            assert!(res.iter().all(|(m, sc)| b.zscore(b"z", m, 2).unwrap() == Some(*sc)), "count={count} member/score mismatch");
+            assert!(
+                res.iter()
+                    .all(|(m, sc)| b.zscore(b"z", m, 2).unwrap() == Some(*sc)),
+                "count={count} member/score mismatch"
+            );
         }
         let mut z = Store::new();
         z.set(b"z".to_vec(), b"v".to_vec(), None, 1);
@@ -36808,13 +37873,23 @@ mod tests {
         // Timing A/B: large FULL zset, count 50 (clone allocs 50 members; borrow 0).
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.zrandmember_count(b"z", 50, 2)).ok(); std::hint::black_box(borrow(&mut bo, 50)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.zrandmember_count(b"z", 50, 2)).ok();
+            std::hint::black_box(borrow(&mut bo, 50)).ok();
+        }
         let reps = 200_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.zrandmember_count(std::hint::black_box(b"z"), 50, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.zrandmember_count(std::hint::black_box(b"z"), 50, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.zrandmember_count_withscores_borrow_scan(std::hint::black_box(b"z"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.zrandmember_count_withscores_borrow_scan(std::hint::black_box(b"z"), 50, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "ZRANDMEMBER WITHSCORES count=50 @2000 Full: clone(members)={clone_ns:.1} ns | borrow(w/score)={borrow_ns:.1} ns = {:.2}x",
@@ -36829,14 +37904,18 @@ mod tests {
         use crate::SmembersScanEvent;
         fn build(n: u32) -> Store {
             let mut s = Store::new();
-            let members: Vec<(f64, Vec<u8>)> = (0..n).map(|i| (f64::from(i), format!("m{i:04}").into_bytes())).collect();
+            let members: Vec<(f64, Vec<u8>)> = (0..n)
+                .map(|i| (f64::from(i), format!("m{i:04}").into_bytes()))
+                .collect();
             s.zadd(b"z", &members, 1).unwrap();
             s
         }
         fn borrow_members(s: &mut Store, count: i64) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut out = Vec::new();
             s.zrandmember_count_member_borrow_scan(b"z", count, 2, |ev| {
-                if let SmembersScanEvent::Member(m) = ev { out.push(m.to_vec()) }
+                if let SmembersScanEvent::Member(m) = ev {
+                    out.push(m.to_vec())
+                }
             })?;
             Ok(out)
         }
@@ -36849,37 +37928,68 @@ mod tests {
         for &n in &[16u32, 1000] {
             let s = build(n);
             let entry = s.entries.get(b"z".as_slice()).unwrap();
-            let Value::SortedSet(zs) = &entry.value else { panic!("not a zset") };
+            let Value::SortedSet(zs) = &entry.value else {
+                panic!("not a zset")
+            };
             let idxs: Vec<usize> = vec![0, 5, (n as usize) - 1, 3, 0, 5, (n as usize) / 2];
-            let clone_members: Vec<Vec<u8>> =
-                zs.random_members_at_indices(&idxs).into_iter().map(|(m, _)| m).collect();
+            let clone_members: Vec<Vec<u8>> = zs
+                .random_members_at_indices(&idxs)
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect();
             let mut borrow_members2 = Vec::new();
             zs.random_member_at_indices_borrow_scan(&idxs, |m| borrow_members2.push(m.to_vec()));
-            assert_eq!(clone_members, borrow_members2, "n={n}: index→member access diverged");
+            assert_eq!(
+                clone_members, borrow_members2,
+                "n={n}: index→member access diverged"
+            );
         }
         // Full-method validity (across counts): every returned member is real; count is right.
         for &count in &[5i64, 200, -7, -300, 0] {
             let mut b = build(200);
             let res = borrow_members(&mut b, count).unwrap();
-            let expected = if count >= 0 { (count as usize).min(200) } else { count.unsigned_abs() as usize };
+            let expected = if count >= 0 {
+                (count as usize).min(200)
+            } else {
+                count.unsigned_abs() as usize
+            };
             assert_eq!(res.len(), expected, "count={count} wrong length");
-            assert!(res.iter().all(|m| b.zscore(b"z", m, 2).unwrap().is_some()), "count={count} returned a non-member");
+            assert!(
+                res.iter().all(|m| b.zscore(b"z", m, 2).unwrap().is_some()),
+                "count={count} returned a non-member"
+            );
         }
         let mut z = Store::new();
         z.set(b"z".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(borrow_members(&mut z, 5), Err(StoreError::WrongType)));
-        assert_eq!(borrow_members(&mut Store::new(), 5).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(matches!(
+            borrow_members(&mut z, 5),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(
+            borrow_members(&mut Store::new(), 5).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
 
         // Timing A/B: large FULL-encoded zset, count 50.
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.zrandmember_count(b"z", 50, 2)).ok(); std::hint::black_box(borrow_members(&mut bo, 50)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.zrandmember_count(b"z", 50, 2)).ok();
+            std::hint::black_box(borrow_members(&mut bo, 50)).ok();
+        }
         let reps = 200_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.zrandmember_count(std::hint::black_box(b"z"), 50, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.zrandmember_count(std::hint::black_box(b"z"), 50, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.zrandmember_count_member_borrow_scan(std::hint::black_box(b"z"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.zrandmember_count_member_borrow_scan(std::hint::black_box(b"z"), 50, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "ZRANDMEMBER count=50 @2000 Full-zset: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
@@ -36896,14 +38006,22 @@ mod tests {
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
-                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i}").into_bytes(), 1).unwrap();
+                s.hset(
+                    b"h",
+                    format!("f{i:04}").into_bytes(),
+                    format!("v{i}").into_bytes(),
+                    1,
+                )
+                .unwrap();
             }
             s
         }
         fn borrow_fields(s: &mut Store, count: i64) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut out = Vec::new();
             s.hrandfield_count_field_borrow_scan(b"h", count, 2, |ev| {
-                if let SmembersScanEvent::Member(m) = ev { out.push(m.to_vec()) }
+                if let SmembersScanEvent::Member(m) = ev {
+                    out.push(m.to_vec())
+                }
             })?;
             Ok(out)
         }
@@ -36912,28 +38030,51 @@ mod tests {
                 let mut a = build(n);
                 let mut b = build(n);
                 // Clone path returns (field,value); the plain reply is fields only.
-                let clone_fields: Vec<Vec<u8>> =
-                    a.hrandfield_count(b"h", count, 2).unwrap().into_iter().map(|(f, _)| f).collect();
+                let clone_fields: Vec<Vec<u8>> = a
+                    .hrandfield_count(b"h", count, 2)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(f, _)| f)
+                    .collect();
                 let borrow_res = borrow_fields(&mut b, count).unwrap();
-                assert_eq!(clone_fields, borrow_res, "n={n} count={count}: borrow != clone fields");
+                assert_eq!(
+                    clone_fields, borrow_res,
+                    "n={n} count={count}: borrow != clone fields"
+                );
             }
         }
         // WRONGTYPE / missing.
         let mut z = Store::new();
         z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(borrow_fields(&mut z, 5), Err(StoreError::WrongType)));
-        assert_eq!(borrow_fields(&mut Store::new(), 5).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(matches!(
+            borrow_fields(&mut z, 5),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(
+            borrow_fields(&mut Store::new(), 5).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
 
         // Timing A/B: large hashtable hash, count 50.
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.hrandfield_count(b"h", 50, 2)).ok(); std::hint::black_box(borrow_fields(&mut bo, 50)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.hrandfield_count(b"h", 50, 2)).ok();
+            std::hint::black_box(borrow_fields(&mut bo, 50)).ok();
+        }
         let reps = 200_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.hrandfield_count(std::hint::black_box(b"h"), 50, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.hrandfield_count(std::hint::black_box(b"h"), 50, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.hrandfield_count_field_borrow_scan(std::hint::black_box(b"h"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.hrandfield_count_field_borrow_scan(std::hint::black_box(b"h"), 50, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "HRANDFIELD count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
@@ -36947,8 +38088,13 @@ mod tests {
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
-                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i}").into_bytes(), 1)
-                    .unwrap();
+                s.hset(
+                    b"h",
+                    format!("f{i:04}").into_bytes(),
+                    format!("v{i}").into_bytes(),
+                    1,
+                )
+                .unwrap();
             }
             s
         }
@@ -36967,13 +38113,22 @@ mod tests {
                 let mut b = build(n);
                 let clone_pairs = a.hrandfield_count(b"h", count, 2).unwrap();
                 let borrow_res = borrow_pairs(&mut b, count).unwrap();
-                assert_eq!(clone_pairs, borrow_res, "n={n} count={count}: borrow pairs != clone");
+                assert_eq!(
+                    clone_pairs, borrow_res,
+                    "n={n} count={count}: borrow pairs != clone"
+                );
             }
         }
         let mut z = Store::new();
         z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(borrow_pairs(&mut z, 5), Err(StoreError::WrongType)));
-        assert_eq!(borrow_pairs(&mut Store::new(), 5).unwrap(), Vec::<(Vec<u8>, Vec<u8>)>::new());
+        assert!(matches!(
+            borrow_pairs(&mut z, 5),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(
+            borrow_pairs(&mut Store::new(), 5).unwrap(),
+            Vec::<(Vec<u8>, Vec<u8>)>::new()
+        );
     }
 
     // (CrimsonHawk) hrandfield_borrow (single) yields the BYTE-IDENTICAL field to clone hrandfield
@@ -37028,24 +38183,41 @@ mod tests {
                 ((n, 0), None), // nothing after the last ⇒ empty
             ] {
                 let clone = s.xread(b"st", start_excl, count, 0).unwrap();
-                assert_eq!(clone, borrow(&mut s, start_excl, count), "n={n} start_excl={start_excl:?} c={count:?}");
+                assert_eq!(
+                    clone,
+                    borrow(&mut s, start_excl, count),
+                    "n={n} start_excl={start_excl:?} c={count:?}"
+                );
             }
         }
         let mut w = Store::new();
         w.set(b"st".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(w.xread_borrow_scan(b"st", (0, 0), None, 0, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            w.xread_borrow_scan(b"st", (0, 0), None, 0, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow(&mut Store::new(), (0, 0), None), Vec::new());
 
         // Timing A/B: 400-entry stream, 2 fields each, full read.
         let mut cl = build(400);
         let mut bo = build(400);
-        for _ in 0..200 { std::hint::black_box(cl.xread(b"st", (0, 0), None, 0)).ok(); std::hint::black_box(borrow(&mut bo, (0, 0), None)); }
+        for _ in 0..200 {
+            std::hint::black_box(cl.xread(b"st", (0, 0), None, 0)).ok();
+            std::hint::black_box(borrow(&mut bo, (0, 0), None));
+        }
         let reps = 20_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.xread(std::hint::black_box(b"st"), (0, 0), None, 0)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.xread(std::hint::black_box(b"st"), (0, 0), None, 0)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.xread_borrow_scan(std::hint::black_box(b"st"), (0, 0), None, 0, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.xread_borrow_scan(std::hint::black_box(b"st"), (0, 0), None, 0, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "XREAD full @400 entries x2 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
@@ -37074,7 +38246,13 @@ mod tests {
             s
         }
         type Rec = Vec<(crate::StreamId, Vec<(Vec<u8>, Vec<u8>)>)>;
-        fn borrow(s: &mut Store, start: crate::StreamId, end: crate::StreamId, count: Option<usize>, rev: bool) -> Rec {
+        fn borrow(
+            s: &mut Store,
+            start: crate::StreamId,
+            end: crate::StreamId,
+            count: Option<usize>,
+            rev: bool,
+        ) -> Rec {
             let mut recs: Rec = Vec::new();
             let mut pending: Option<Vec<u8>> = None;
             s.xrange_borrow_scan(b"st", start, end, count, 0, rev, |ev| match ev {
@@ -37100,29 +38278,61 @@ mod tests {
             ] {
                 // Forward (XRANGE) and reverse (XREVRANGE — wire order end,start).
                 let clone = s.xrange(b"st", start, end, count, 0).unwrap();
-                assert_eq!(clone, borrow(&mut s, start, end, count, false), "fwd n={n} {start:?}..{end:?} c={count:?}");
+                assert_eq!(
+                    clone,
+                    borrow(&mut s, start, end, count, false),
+                    "fwd n={n} {start:?}..{end:?} c={count:?}"
+                );
                 let rclone = s.xrevrange(b"st", end, start, count, 0).unwrap();
-                assert_eq!(rclone, borrow(&mut s, start, end, count, true), "rev n={n} {start:?}..{end:?} c={count:?}");
+                assert_eq!(
+                    rclone,
+                    borrow(&mut s, start, end, count, true),
+                    "rev n={n} {start:?}..{end:?} c={count:?}"
+                );
             }
         }
         // WRONGTYPE + missing.
         let mut w = Store::new();
         w.set(b"st".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, false, |_| {}), Err(StoreError::WrongType)));
-        assert!(matches!(w.xrange_borrow_scan(b"st", min, max, None, 0, true, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            w.xrange_borrow_scan(b"st", min, max, None, 0, false, |_| {}),
+            Err(StoreError::WrongType)
+        ));
+        assert!(matches!(
+            w.xrange_borrow_scan(b"st", min, max, None, 0, true, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow(&mut Store::new(), min, max, None, false), Vec::new());
         assert_eq!(borrow(&mut Store::new(), min, max, None, true), Vec::new());
 
         // Timing A/B: 500-entry stream, 3 fields each, full range.
         let mut cl = build(500);
         let mut bo = build(500);
-        for _ in 0..200 { std::hint::black_box(cl.xrange(b"st", min, max, None, 0)).ok(); std::hint::black_box(borrow(&mut bo, min, max, None, false)); }
+        for _ in 0..200 {
+            std::hint::black_box(cl.xrange(b"st", min, max, None, 0)).ok();
+            std::hint::black_box(borrow(&mut bo, min, max, None, false));
+        }
         let reps = 20_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.xrange(std::hint::black_box(b"st"), min, max, None, 0)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.xrange(std::hint::black_box(b"st"), min, max, None, 0)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.xrange_borrow_scan(std::hint::black_box(b"st"), min, max, None, 0, false, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.xrange_borrow_scan(
+                std::hint::black_box(b"st"),
+                min,
+                max,
+                None,
+                0,
+                false,
+                |ev| {
+                    std::hint::black_box(&ev);
+                },
+            )
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "XRANGE full-range @500 entries x3 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
@@ -37139,12 +38349,23 @@ mod tests {
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
-                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i:04}").into_bytes(), 1).unwrap();
+                s.hset(
+                    b"h",
+                    format!("f{i:04}").into_bytes(),
+                    format!("v{i:04}").into_bytes(),
+                    1,
+                )
+                .unwrap();
             }
             s
         }
         // borrow returns (next_cursor, flat [f,v,f,v,...]) to compare against clone hscan flattened.
-        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<Vec<u8>>) {
+        fn borrow(
+            s: &mut Store,
+            cursor: u64,
+            pattern: Option<&[u8]>,
+            count: usize,
+        ) -> (u64, Vec<Vec<u8>>) {
             let mut cur = 0u64;
             let mut out = Vec::new();
             s.hscan0_borrow_scan(b"h", cursor, pattern, count, 2, |ev| match ev {
@@ -37164,28 +38385,47 @@ mod tests {
                     let (nc, pairs) = s.hscan(b"h", cursor, pat, 10, 2).unwrap();
                     let flat: Vec<Vec<u8>> = pairs.into_iter().flat_map(|(f, v)| [f, v]).collect();
                     let (bc, bflat) = borrow(&mut s, cursor, pat, 10);
-                    assert_eq!((nc, &flat), (bc, &bflat), "n={n} pat={pat:?} cursor={cursor}");
+                    assert_eq!(
+                        (nc, &flat),
+                        (bc, &bflat),
+                        "n={n} pat={pat:?} cursor={cursor}"
+                    );
                     cursor = nc;
                     guard += 1;
-                    if cursor == 0 || guard > 5000 { break; }
+                    if cursor == 0 || guard > 5000 {
+                        break;
+                    }
                 }
             }
         }
         let mut z = Store::new();
         z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(z.hscan0_borrow_scan(b"h", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            z.hscan0_borrow_scan(b"h", 0, None, 10, 2, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
 
         // Timing A/B: hashtable hash, cursor-0 batch (count 10) — clones BOTH field+value.
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.hscan(b"h", 0, None, 10, 2)).ok(); std::hint::black_box(borrow(&mut bo, 0, None, 10)); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.hscan(b"h", 0, None, 10, 2)).ok();
+            std::hint::black_box(borrow(&mut bo, 0, None, 10));
+        }
         let reps = 1_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.hscan(std::hint::black_box(b"h"), 0, None, 10, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.hscan(std::hint::black_box(b"h"), 0, None, 10, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.hscan0_borrow_scan(std::hint::black_box(b"h"), 0, None, 10, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.hscan0_borrow_scan(std::hint::black_box(b"h"), 0, None, 10, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "HSCAN cursor-0 batch(10) @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
@@ -37199,11 +38439,17 @@ mod tests {
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
-                s.zadd(b"z", &[(f64::from(i), format!("m{i:04}").into_bytes())], 1).unwrap();
+                s.zadd(b"z", &[(f64::from(i), format!("m{i:04}").into_bytes())], 1)
+                    .unwrap();
             }
             s
         }
-        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<(Vec<u8>, f64)>) {
+        fn borrow(
+            s: &mut Store,
+            cursor: u64,
+            pattern: Option<&[u8]>,
+            count: usize,
+        ) -> (u64, Vec<(Vec<u8>, f64)>) {
             let mut cur = 0u64;
             let mut out = Vec::new();
             s.zscan0_borrow_scan(b"z", cursor, pattern, count, 2, |ev| match ev {
@@ -37223,16 +38469,25 @@ mod tests {
                 loop {
                     let (nc, pairs) = clone_store.zscan(b"z", cursor, pat, 10, 2).unwrap();
                     let (bc, bpairs) = borrow(&mut borrow_store, cursor, pat, 10);
-                    assert_eq!((nc, &pairs), (bc, &bpairs), "n={n} pat={pat:?} cursor={cursor}");
+                    assert_eq!(
+                        (nc, &pairs),
+                        (bc, &bpairs),
+                        "n={n} pat={pat:?} cursor={cursor}"
+                    );
                     cursor = nc;
                     guard += 1;
-                    if cursor == 0 || guard > 5000 { break; }
+                    if cursor == 0 || guard > 5000 {
+                        break;
+                    }
                 }
             }
         }
         let mut z = Store::new();
         z.set(b"z".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(z.zscan0_borrow_scan(b"z", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            z.zscan0_borrow_scan(b"z", 0, None, 10, 2, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
     }
 
@@ -37247,7 +38502,12 @@ mod tests {
             s.sadd(b"s", &members, 1).unwrap();
             s
         }
-        fn borrow(s: &mut Store, cursor: u64, pattern: Option<&[u8]>, count: usize) -> (u64, Vec<Vec<u8>>) {
+        fn borrow(
+            s: &mut Store,
+            cursor: u64,
+            pattern: Option<&[u8]>,
+            count: usize,
+        ) -> (u64, Vec<Vec<u8>>) {
             let mut cur = 0u64;
             let mut out = Vec::new();
             s.sscan0_borrow_scan(b"s", cursor, pattern, count, 2, |ev| match ev {
@@ -37267,29 +38527,48 @@ mod tests {
                 loop {
                     let (nc, members) = s.sscan(b"s", cursor, pat, 10, 2).unwrap();
                     let (bc, bmembers) = borrow(&mut s, cursor, pat, 10);
-                    assert_eq!((nc, &members), (bc, &bmembers), "n={n} pat={pat:?} cursor={cursor}");
+                    assert_eq!(
+                        (nc, &members),
+                        (bc, &bmembers),
+                        "n={n} pat={pat:?} cursor={cursor}"
+                    );
                     cursor = nc;
                     guard += 1;
-                    if cursor == 0 || guard > 5000 { break; }
+                    if cursor == 0 || guard > 5000 {
+                        break;
+                    }
                 }
             }
         }
         // WRONGTYPE / missing.
         let mut z = Store::new();
         z.set(b"s".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(z.sscan0_borrow_scan(b"s", 0, None, 10, 2, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            z.sscan0_borrow_scan(b"s", 0, None, 10, 2, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
 
         // Timing A/B: hashtable set, cursor-0 batch (count 10).
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.sscan(b"s", 0, None, 10, 2)).ok(); std::hint::black_box(borrow(&mut bo, 0, None, 10)); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.sscan(b"s", 0, None, 10, 2)).ok();
+            std::hint::black_box(borrow(&mut bo, 0, None, 10));
+        }
         let reps = 1_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.sscan(std::hint::black_box(b"s"), 0, None, 10, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.sscan(std::hint::black_box(b"s"), 0, None, 10, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.sscan0_borrow_scan(std::hint::black_box(b"s"), 0, None, 10, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.sscan0_borrow_scan(std::hint::black_box(b"s"), 0, None, 10, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "SSCAN cursor-0 batch(10) @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
@@ -37304,37 +38583,61 @@ mod tests {
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
-                s.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i}").into_bytes(), 1).unwrap();
+                s.hset(
+                    b"h",
+                    format!("f{i:04}").into_bytes(),
+                    format!("v{i}").into_bytes(),
+                    1,
+                )
+                .unwrap();
             }
             s
         }
         fn borrow_one(s: &mut Store) -> Option<Vec<u8>> {
             let mut out = None;
-            s.hrandfield_borrow(b"h", 2, |m| out = m.map(|b| b.to_vec())).unwrap();
+            s.hrandfield_borrow(b"h", 2, |m| out = m.map(|b| b.to_vec()))
+                .unwrap();
             out
         }
         for &n in &[16u32, 1000] {
             for _ in 0..8 {
                 let mut a = build(n);
                 let mut b = build(n);
-                assert_eq!(a.hrandfield(b"h", 2).unwrap(), borrow_one(&mut b), "n={n}: borrow != clone");
+                assert_eq!(
+                    a.hrandfield(b"h", 2).unwrap(),
+                    borrow_one(&mut b),
+                    "n={n}: borrow != clone"
+                );
             }
         }
         let mut z = Store::new();
         z.set(b"h".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(z.hrandfield_borrow(b"h", 2, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            z.hrandfield_borrow(b"h", 2, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow_one(&mut Store::new()), None);
 
         // Timing A/B: hashtable hash, single field.
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.hrandfield(b"h", 2)).ok(); std::hint::black_box(borrow_one(&mut bo)); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.hrandfield(b"h", 2)).ok();
+            std::hint::black_box(borrow_one(&mut bo));
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.hrandfield(std::hint::black_box(b"h"), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.hrandfield(std::hint::black_box(b"h"), 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.hrandfield_borrow(std::hint::black_box(b"h"), 2, |m| { std::hint::black_box(&m); }).ok(); }
+        for _ in 0..reps {
+            bo.hrandfield_borrow(std::hint::black_box(b"h"), 2, |m| {
+                std::hint::black_box(&m);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "HRANDFIELD single @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
@@ -37355,32 +38658,50 @@ mod tests {
         }
         fn borrow_one(s: &mut Store) -> Option<Vec<u8>> {
             let mut out = None;
-            s.srandmember_borrow(b"s", 2, |m| out = m.map(|b| b.to_vec())).unwrap();
+            s.srandmember_borrow(b"s", 2, |m| out = m.map(|b| b.to_vec()))
+                .unwrap();
             out
         }
         for &n in &[16u32, 1000] {
             for _ in 0..8 {
                 let mut a = build(n);
                 let mut b = build(n);
-                assert_eq!(a.srandmember(b"s", 2).unwrap(), borrow_one(&mut b), "n={n}: borrow != clone");
+                assert_eq!(
+                    a.srandmember(b"s", 2).unwrap(),
+                    borrow_one(&mut b),
+                    "n={n}: borrow != clone"
+                );
             }
         }
         // WRONGTYPE / missing / empty.
         let mut z = Store::new();
         z.set(b"s".to_vec(), b"v".to_vec(), None, 1);
-        assert!(matches!(z.srandmember_borrow(b"s", 2, |_| {}), Err(StoreError::WrongType)));
+        assert!(matches!(
+            z.srandmember_borrow(b"s", 2, |_| {}),
+            Err(StoreError::WrongType)
+        ));
         assert_eq!(borrow_one(&mut Store::new()), None);
 
         // Timing A/B: hashtable set, single member.
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.srandmember(b"s", 2)).ok(); std::hint::black_box(borrow_one(&mut bo)); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.srandmember(b"s", 2)).ok();
+            std::hint::black_box(borrow_one(&mut bo));
+        }
         let reps = 3_000_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.srandmember(std::hint::black_box(b"s"), 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.srandmember(std::hint::black_box(b"s"), 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.srandmember_borrow(std::hint::black_box(b"s"), 2, |m| { std::hint::black_box(&m); }).ok(); }
+        for _ in 0..reps {
+            bo.srandmember_borrow(std::hint::black_box(b"s"), 2, |m| {
+                std::hint::black_box(&m);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "SRANDMEMBER single @2000 hashtable: clone={clone_ns:.1} ns | borrow={borrow_ns:.1} ns = {:.2}x",
@@ -37402,7 +38723,9 @@ mod tests {
         fn borrow_collect(s: &mut Store, count: i64) -> Result<Vec<Vec<u8>>, StoreError> {
             let mut out = Vec::new();
             s.srandmember_count_borrow_scan(b"s", count, 2, |ev| {
-                if let SmembersScanEvent::Member(m) = ev { out.push(m.to_vec()) }
+                if let SmembersScanEvent::Member(m) = ev {
+                    out.push(m.to_vec())
+                }
             })?;
             Ok(out)
         }
@@ -37413,7 +38736,10 @@ mod tests {
                 let mut b = build(n);
                 let clone_res = a.srandmember_count(b"s", count, 2).unwrap();
                 let borrow_res = borrow_collect(&mut b, count).unwrap();
-                assert_eq!(clone_res, borrow_res, "n={n} count={count}: borrow-scan != clone");
+                assert_eq!(
+                    clone_res, borrow_res,
+                    "n={n} count={count}: borrow-scan != clone"
+                );
             }
         }
         // Miss / WRONGTYPE / keyspace stat.
@@ -37426,20 +38752,43 @@ mod tests {
         let (h1, _) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
         assert!(h1 > h0, "srandmember records a keyspace hit (like clone)"); // sismember also records; just check it moved
         assert_eq!(borrow_collect(&mut s, 5).map(|v| v.len()).unwrap_or(99), 5);
-        assert_eq!(borrow_collect(&mut Store::new(), 5).unwrap(), Vec::<Vec<u8>>::new()); // missing → empty
-        assert!(matches!(borrow_collect(&mut { let mut z = Store::new(); z.set(b"s".to_vec(), b"v".to_vec(), None, 1); z }, 5), Err(StoreError::WrongType)));
+        assert_eq!(
+            borrow_collect(&mut Store::new(), 5).unwrap(),
+            Vec::<Vec<u8>>::new()
+        ); // missing → empty
+        assert!(matches!(
+            borrow_collect(
+                &mut {
+                    let mut z = Store::new();
+                    z.set(b"s".to_vec(), b"v".to_vec(), None, 1);
+                    z
+                },
+                5
+            ),
+            Err(StoreError::WrongType)
+        ));
         let _ = (h0, m0);
 
         // Timing A/B: large hashtable set, count 50 — clone (50 allocs) vs borrow (0 allocs).
         let mut cl = build(2000);
         let mut bo = build(2000);
-        for _ in 0..2000 { std::hint::black_box(cl.srandmember_count(b"s", 50, 2)).ok(); std::hint::black_box(borrow_collect(&mut bo, 50)).ok(); }
+        for _ in 0..2000 {
+            std::hint::black_box(cl.srandmember_count(b"s", 50, 2)).ok();
+            std::hint::black_box(borrow_collect(&mut bo, 50)).ok();
+        }
         let reps = 200_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(cl.srandmember_count(std::hint::black_box(b"s"), 50, 2)).ok(); }
+        for _ in 0..reps {
+            std::hint::black_box(cl.srandmember_count(std::hint::black_box(b"s"), 50, 2)).ok();
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.srandmember_count_borrow_scan(std::hint::black_box(b"s"), 50, 2, |ev| { std::hint::black_box(&ev); }).ok(); }
+        for _ in 0..reps {
+            bo.srandmember_count_borrow_scan(std::hint::black_box(b"s"), 50, 2, |ev| {
+                std::hint::black_box(&ev);
+            })
+            .ok();
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "SRANDMEMBER count=50 @2000 hashtable: clone={clone_ns:.1} ns | borrow-scan={borrow_ns:.1} ns = {:.2}x",
@@ -41275,6 +42624,12 @@ mod tests {
         let mut via_helper: Vec<Vec<u8>> = Vec::new();
         intset.each_member_bytes(|m| via_helper.push(m.to_vec()));
         assert_eq!(via_iter, via_helper);
+        for (idx, expected) in via_iter.iter().enumerate() {
+            let mut got = Vec::new();
+            intset.with_index_bytes(idx, |m| got.extend_from_slice(m));
+            assert_eq!(&got, expected, "with_index_bytes mismatch at {idx}");
+        }
+        assert!(intset.with_index_bytes(via_iter.len(), |_| ()).is_none());
         // A/B: 1000-member intset — old materializes a Vec per member, new uses a stack buffer.
         let big = SetValue::Int((0..1000i64).collect());
         let reps = 20_000u64;
@@ -41349,6 +42704,56 @@ mod tests {
         );
     }
 
+    // (CrimsonHawk) Volatile-TTL uses the same "clone once after the scan" shape. Worst-case
+    // sample: every key has the same deadline and descending lexicographic order, so the old
+    // implementation cloned on every improvement while the new one tracks only the index.
+    #[test]
+    fn ttl_eviction_candidate_defers_clone_and_reports_ab() {
+        let mut store = Store::new();
+        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("t{i:03}").into_bytes()).collect();
+        for k in &keys {
+            store.set(k.clone(), b"v".to_vec(), Some(10_000), 1);
+        }
+        let sample: Vec<Vec<u8>> = keys.iter().rev().cloned().collect();
+        let picked = store.select_ttl_eviction_candidate_from_keys(&sample);
+        assert_eq!(picked.as_deref(), Some(keys[0].as_slice()));
+
+        let old_select = |s: &Store, sample: &[Vec<u8>]| -> Option<Vec<u8>> {
+            let mut best_key: Option<Vec<u8>> = None;
+            let mut best_ttl = u64::MAX;
+            for key in sample {
+                if !s.entries.contains_key(key.as_slice()) {
+                    continue;
+                }
+                if let Some(expires_at_ms) = s.expiry_ms(key)
+                    && (expires_at_ms < best_ttl
+                        || (expires_at_ms == best_ttl && best_key.as_ref().is_none_or(|b| key < b)))
+                {
+                    best_ttl = expires_at_ms;
+                    best_key = Some(key.clone());
+                }
+            }
+            best_key
+        };
+        assert_eq!(old_select(&store, &sample), picked);
+
+        let reps = 200_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(old_select(&store, &sample));
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(store.select_ttl_eviction_candidate_from_keys(&sample));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "TTL eviction select @100 (all-tied, worst case): clone-each={old_ns:.0} ns | defer-clone={new_ns:.0} ns = {:.2}x",
+            old_ns / new_ns
+        );
+    }
+
     // (CrimsonHawk) SmallStr::from_slice INLINES a short (<=15B) value with ZERO alloc; the old
     // `value.to_vec().into()` (from_vec) always allocated a Vec that was then copied into the inline
     // buffer and dropped (wasted). The APPEND-create-new value path now uses `value.into()` (from_slice).
@@ -41358,7 +42763,7 @@ mod tests {
         for v in [
             b"".as_slice(),
             b"hi",
-            b"exactly15bytes!",       // == inline cap
+            b"exactly15bytes!",                           // == inline cap
             b"one byte over the inline cap boundary now", // heap
         ] {
             assert_eq!(SmallStr::from_slice(v).as_slice(), v);
@@ -41432,7 +42837,11 @@ mod tests {
         let pairs: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.to_vec(), *s)).collect();
         assert_eq!(pairs.len(), n as usize);
         for (pos, (m, s)) in pairs.iter().enumerate() {
-            assert_eq!(zs.compact_position(*s, m), Some(pos), "compact_position at {pos}");
+            assert_eq!(
+                zs.compact_position(*s, m),
+                Some(pos),
+                "compact_position at {pos}"
+            );
         }
         assert_eq!(zs.compact_position(0.0, b"absent_zzzzz"), None);
         let crate::FullZSetOrder::Compact(keys) = &zs.ordered else {
@@ -41481,7 +42890,11 @@ mod tests {
         // rank(member) / rev_rank(member) equal the true sorted position (via rank_of_borrowed).
         for (pos, (m, _)) in pairs.iter().enumerate() {
             assert_eq!(zs.rank(m), Some(pos), "rank at {pos}");
-            assert_eq!(zs.rev_rank(m), Some(pairs.len() - 1 - pos), "rev_rank at {pos}");
+            assert_eq!(
+                zs.rev_rank(m),
+                Some(pairs.len() - 1 - pos),
+                "rev_rank at {pos}"
+            );
         }
         let tree = zs.ensure_rank_tree();
         // Direct equivalence: rank_of(clone-target) == rank_of_borrowed for every member.
@@ -46228,16 +47641,30 @@ mod tests {
                 .unwrap();
             }
             s.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap();
-            s.xreadgroup(b"s", b"g", b"c", group_read_options(StreamGroupReadCursor::NewEntries, false, None), 0)
-                .unwrap();
+            s.xreadgroup(
+                b"s",
+                b"g",
+                b"c",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, None),
+                0,
+            )
+            .unwrap();
             s
         }
         fn clone_hist(s: &mut Store) -> Rec {
             let recs = s
-                .xreadgroup(b"s", b"g", b"c", group_read_options(StreamGroupReadCursor::Id((0, 0)), false, None), 0)
+                .xreadgroup(
+                    b"s",
+                    b"g",
+                    b"c",
+                    group_read_options(StreamGroupReadCursor::Id((0, 0)), false, None),
+                    0,
+                )
                 .unwrap()
                 .unwrap();
-            recs.into_iter().map(|(id, f)| (id, if f.is_empty() { None } else { Some(f) })).collect()
+            recs.into_iter()
+                .map(|(id, f)| (id, if f.is_empty() { None } else { Some(f) }))
+                .collect()
         }
         fn borrow_hist(s: &mut Store) -> Rec {
             let mut recs: Rec = Vec::new();
@@ -46248,7 +47675,13 @@ mod tests {
                 XreadgroupHistEvent::RecordStartNil(id) => recs.push((id, None)),
                 XreadgroupHistEvent::Field(f) => match pending.take() {
                     None => pending = Some(f.to_vec()),
-                    Some(name) => recs.last_mut().unwrap().1.as_mut().unwrap().push((name, f.to_vec())),
+                    Some(name) => recs
+                        .last_mut()
+                        .unwrap()
+                        .1
+                        .as_mut()
+                        .unwrap()
+                        .push((name, f.to_vec())),
                 },
             });
             recs
@@ -46257,23 +47690,46 @@ mod tests {
         assert_eq!(clone_hist(&mut s), borrow_hist(&mut s), "live history");
         let mut s2 = build(5);
         s2.xdel(b"s", &[(1000, 2), (1000, 4)], 0).unwrap();
-        assert_eq!(clone_hist(&mut s2), borrow_hist(&mut s2), "tombstone history");
+        assert_eq!(
+            clone_hist(&mut s2),
+            borrow_hist(&mut s2),
+            "tombstone history"
+        );
 
         // Timing A/B: 400 pending entries x2 fields (borrow side does NOT reconstruct).
         let mut cl = build(400);
         let mut bo = build(400);
         for _ in 0..200 {
             std::hint::black_box(clone_hist(&mut cl));
-            bo.xreadgroup_history_borrow_scan(b"s", b"g", b"c", (0, 0), None, 0, |ev| { std::hint::black_box(&ev); });
+            bo.xreadgroup_history_borrow_scan(b"s", b"g", b"c", (0, 0), None, 0, |ev| {
+                std::hint::black_box(&ev);
+            });
         }
         let reps = 20_000u64;
         let t0 = std::time::Instant::now();
-        for _ in 0..reps { std::hint::black_box(clone_hist(&mut cl)); }
+        for _ in 0..reps {
+            std::hint::black_box(clone_hist(&mut cl));
+        }
         let clone_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
-        for _ in 0..reps { bo.xreadgroup_history_borrow_scan(std::hint::black_box(b"s"), b"g", b"c", (0, 0), None, 0, |ev| { std::hint::black_box(&ev); }); }
+        for _ in 0..reps {
+            bo.xreadgroup_history_borrow_scan(
+                std::hint::black_box(b"s"),
+                b"g",
+                b"c",
+                (0, 0),
+                None,
+                0,
+                |ev| {
+                    std::hint::black_box(&ev);
+                },
+            );
+        }
         let borrow_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
-        println!("XREADGROUP history @400 pending x2 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x", clone_ns / borrow_ns);
+        println!(
+            "XREADGROUP history @400 pending x2 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
+            clone_ns / borrow_ns
+        );
     }
 
     #[test]

@@ -340,7 +340,12 @@ fn bench_codec(c: &mut Criterion) {
     };
     let mut aoflen = c.benchmark_group("rdb_codec_aof_reclen");
     aoflen.bench_function("len_via_to_bytes_64k", |b| {
-        b.iter(|| std::hint::black_box(&aof_set).to_resp_frame().to_bytes().len())
+        b.iter(|| {
+            std::hint::black_box(&aof_set)
+                .to_resp_frame()
+                .to_bytes()
+                .len()
+        })
     });
     aoflen.bench_function("encoded_resp_len_64k", |b| {
         b.iter(|| std::hint::black_box(&aof_set).encoded_resp_len())

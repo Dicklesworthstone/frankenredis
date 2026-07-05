@@ -434,19 +434,13 @@ enum LuaCoroutineContinuation {
     /// suspends) once per iteration: on a truthy resume the body runs and the loop
     /// re-yields at the condition; a falsy resume exits the loop. A body-level
     /// yield still errors exactly as before, so this is purely additive.
-    While {
-        cond: Expr,
-        body: Block,
-    },
+    While { cond: Expr, body: Block },
     /// (CrimsonHawk 7lmle) A top-level `repeat ... until <coroutine.yield(...)>`
     /// whose loop condition is a bare yield. The body runs first, then the
     /// condition suspends (still inside the body's scope, so the yield args see
     /// body locals): a truthy resume exits the loop, a falsy resume re-runs the
     /// body and re-yields. Additive — a body-level yield still errors as before.
-    Repeat {
-        body: Block,
-        cond: Expr,
-    },
+    Repeat { body: Block, cond: Expr },
     /// (CrimsonHawk 7lmle) A top-level `for <names> in <iter exprs> do ... end`
     /// whose iterator expression list contains a bare `coroutine.yield(...)`.
     /// On resume the yielded value(s) complete the iterator triple (fn, state,
@@ -3530,7 +3524,10 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
         "loadstring",
         "load",
     ] {
-        globals.insert(name.to_string(), LuaValue::RustFunction(std::rc::Rc::from(*name)));
+        globals.insert(
+            name.to_string(),
+            LuaValue::RustFunction(std::rc::Rc::from(*name)),
+        );
     }
 
     let math_table = LuaTable::new_shared_template();
@@ -5834,18 +5831,13 @@ impl<'a> LuaState<'a> {
                             // While continuation is already stored); next_pc
                             // stays at outer_pc so the post-loop statements run
                             // once the condition finally reads falsy.
-                            match self.exec_stmt(
-                                &Stmt::While(cond, body),
-                                env,
-                                varargs,
-                            ) {
+                            match self.exec_stmt(&Stmt::While(cond, body), env, varargs) {
                                 Ok(ControlFlow::Return(vals)) => {
                                     return Ok(CoroutineRun::Complete(vals));
                                 }
                                 Ok(ControlFlow::Break | ControlFlow::None) => {}
                                 Err(e)
-                                    if is_lua_yield_signal(&e)
-                                        && self.pending_yield.is_some() =>
+                                    if is_lua_yield_signal(&e) && self.pending_yield.is_some() =>
                                 {
                                     let values = self.pending_yield.take().unwrap_or_default();
                                     return Ok(CoroutineRun::Yield {
@@ -5907,9 +5899,7 @@ impl<'a> LuaState<'a> {
                     env,
                     varargs,
                 )?;
-                match self
-                    .run_generic_for_from_iter_vals(&names, iter_vals, &body, env, varargs)?
-                {
+                match self.run_generic_for_from_iter_vals(&names, iter_vals, &body, env, varargs)? {
                     ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
                     ControlFlow::Break | ControlFlow::None => {
                         self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
@@ -8384,7 +8374,9 @@ impl<'a> LuaState<'a> {
             // direct calls keep the named/prefixed shape.
             "coroutine.create" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
-                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new((**func).clone()))])
+                    Ok(vec![LuaValue::Coroutine(LuaCoroutine::new(
+                        (**func).clone(),
+                    ))])
                 } else {
                     Err(lua_format_argerror(
                         self.current_invocation_name.as_deref(),
@@ -18807,7 +18799,10 @@ end
             return v1 .. ':' .. v2
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:truthy".to_vec()))));
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(b"11:truthy".to_vec())))
+        );
     }
 
     #[test]
@@ -18827,7 +18822,10 @@ end
             return v1 .. ':' .. v2
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
-        assert_eq!(result, Ok(RespFrame::BulkString(Some(b"11:falsy".to_vec()))));
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(b"11:falsy".to_vec())))
+        );
     }
 
     #[test]

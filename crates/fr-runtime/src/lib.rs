@@ -19273,26 +19273,22 @@ impl Runtime {
         let start = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan = self.server.store.zrangebylex_members_borrow_scan(
-            key,
-            min,
-            max,
-            false,
-            now_ms,
-            |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let scan =
+            self.server
+                .store
+                .zrangebylex_members_borrow_scan(key, min, max, false, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            },
-        );
+                });
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -19351,26 +19347,22 @@ impl Runtime {
         let start = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan = self.server.store.zrangebylex_members_borrow_scan(
-            key,
-            min,
-            max,
-            true,
-            now_ms,
-            |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let scan =
+            self.server
+                .store
+                .zrangebylex_members_borrow_scan(key, min, max, true, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            },
-        );
+                });
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -20247,8 +20239,15 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let error_msg =
-            self.execute_plain_zrangebyscore_core_into(key, min, max, false, now_ms, suppress_reply, out);
+        let error_msg = self.execute_plain_zrangebyscore_core_into(
+            key,
+            min,
+            max,
+            false,
+            now_ms,
+            suppress_reply,
+            out,
+        );
         let elapsed_us = self.finish_chained_command(st);
         let failed = error_msg.is_some();
         self.record_plain_zremrange_borrowed_metrics(
@@ -20361,26 +20360,22 @@ impl Runtime {
         let st = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan = self.server.store.zrangebylex_members_borrow_scan(
-            key,
-            min,
-            max,
-            false,
-            now_ms,
-            |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let scan =
+            self.server
+                .store
+                .zrangebylex_members_borrow_scan(key, min, max, false, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            },
-        );
+                });
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -21107,8 +21102,15 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let error_msg =
-            self.execute_plain_zrangebyscore_core_into(key, min, max, false, now_ms, suppress_reply, out);
+        let error_msg = self.execute_plain_zrangebyscore_core_into(
+            key,
+            min,
+            max,
+            false,
+            now_ms,
+            suppress_reply,
+            out,
+        );
         let elapsed_us = self.finish_chained_command(st);
         let failed = error_msg.is_some();
         self.record_plain_zremrange_borrowed_metrics(
@@ -21166,8 +21168,15 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let error_msg =
-            self.execute_plain_zrangebyscore_core_into(key, min, max, true, now_ms, suppress_reply, out);
+        let error_msg = self.execute_plain_zrangebyscore_core_into(
+            key,
+            min,
+            max,
+            true,
+            now_ms,
+            suppress_reply,
+            out,
+        );
         let elapsed_us = self.finish_chained_command(st);
         let failed = error_msg.is_some();
         self.record_plain_zremrange_borrowed_metrics(
@@ -22510,37 +22519,37 @@ impl Runtime {
                 }
             }
             Some("zset") => {
-                let result =
-                    self.server
-                        .store
-                        .zscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
-                            if suppress_reply {
-                                return;
+                let result = self
+                    .server
+                    .store
+                    .zscan0_borrow_scan(key, 0, None, 10, now_ms, |ev| {
+                        if suppress_reply {
+                            return;
+                        }
+                        match ev {
+                            fr_store::ZscanReplyEvent::Cursor(nc) => {
+                                out.extend_from_slice(b"*2\r\n");
+                                let cs = nc.to_string();
+                                fr_protocol::encode_bulk_string_slice(
+                                    Some(cs.as_bytes()),
+                                    false,
+                                    out,
+                                );
                             }
-                            match ev {
-                                fr_store::ZscanReplyEvent::Cursor(nc) => {
-                                    out.extend_from_slice(b"*2\r\n");
-                                    let cs = nc.to_string();
-                                    fr_protocol::encode_bulk_string_slice(
-                                        Some(cs.as_bytes()),
-                                        false,
-                                        out,
-                                    );
-                                }
-                                fr_store::ZscanReplyEvent::Len(n) => {
-                                    fr_protocol::encode_aggregate_header(n * 2, false, out);
-                                }
-                                fr_store::ZscanReplyEvent::Pair(member, score) => {
-                                    fr_protocol::encode_bulk_string_slice(Some(member), false, out);
-                                    let score = fr_store::redis_score_to_string(score);
-                                    fr_protocol::encode_bulk_string_slice(
-                                        Some(score.as_bytes()),
-                                        false,
-                                        out,
-                                    );
-                                }
+                            fr_store::ZscanReplyEvent::Len(n) => {
+                                fr_protocol::encode_aggregate_header(n * 2, false, out);
                             }
-                        });
+                            fr_store::ZscanReplyEvent::Pair(member, score) => {
+                                fr_protocol::encode_bulk_string_slice(Some(member), false, out);
+                                let score = fr_store::redis_score_to_string(score);
+                                fr_protocol::encode_bulk_string_slice(
+                                    Some(score.as_bytes()),
+                                    false,
+                                    out,
+                                );
+                            }
+                        }
+                    });
                 if let Err(err) = result {
                     let reply = CommandError::Store(err).to_resp();
                     if !suppress_reply {
@@ -26617,28 +26626,28 @@ impl Runtime {
         let packet_id = self.plain_read_borrowed_preamble("xrange", argv_len_sum, now_ms);
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let result = self
-            .server
-            .store
-            .xrange_borrow_scan(key, start, end, count, now_ms, false, |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::XrangeReplyEvent::RecordCount(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let result =
+            self.server
+                .store
+                .xrange_borrow_scan(key, start, end, count, now_ms, false, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
-                        fr_protocol::encode_aggregate_header(2, false, out);
-                        let id_bytes = fr_command::format_stream_id(id);
-                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
-                        fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                    match ev {
+                        fr_store::XrangeReplyEvent::RecordCount(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                            let id_bytes = fr_command::format_stream_id(id);
+                            fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                            fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                        }
+                        fr_store::XrangeReplyEvent::Field(f) => {
+                            fr_protocol::encode_bulk_string_slice(Some(f), false, out);
+                        }
                     }
-                    fr_store::XrangeReplyEvent::Field(f) => {
-                        fr_protocol::encode_bulk_string_slice(Some(f), false, out);
-                    }
-                }
-            });
+                });
         let elapsed_us = self.finish_chained_command(st);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -26816,28 +26825,28 @@ impl Runtime {
         let packet_id = self.plain_read_borrowed_preamble("xrevrange", argv_len_sum, now_ms);
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let result = self
-            .server
-            .store
-            .xrange_borrow_scan(key, start, end, count, now_ms, true, |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::XrangeReplyEvent::RecordCount(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let result =
+            self.server
+                .store
+                .xrange_borrow_scan(key, start, end, count, now_ms, true, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
-                        fr_protocol::encode_aggregate_header(2, false, out);
-                        let id_bytes = fr_command::format_stream_id(id);
-                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
-                        fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                    match ev {
+                        fr_store::XrangeReplyEvent::RecordCount(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                            let id_bytes = fr_command::format_stream_id(id);
+                            fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                            fr_protocol::encode_aggregate_header(pairs * 2, false, out);
+                        }
+                        fr_store::XrangeReplyEvent::Field(f) => {
+                            fr_protocol::encode_bulk_string_slice(Some(f), false, out);
+                        }
                     }
-                    fr_store::XrangeReplyEvent::Field(f) => {
-                        fr_protocol::encode_bulk_string_slice(Some(f), false, out);
-                    }
-                }
-            });
+                });
         let elapsed_us = self.finish_chained_command(st);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -26957,23 +26966,39 @@ impl Runtime {
                                 fr_store::XrangeReplyEvent::RecordCount(n) => {
                                     if n == 0 {
                                         // Empty XREAD ⇒ nil (`Array(None)`): `*-1` in RESP2, `_` in RESP3.
-                                        out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
+                                        out.extend_from_slice(if resp3 {
+                                            b"_\r\n"
+                                        } else {
+                                            b"*-1\r\n"
+                                        });
                                     } else if resp3 {
                                         // RESP3 map: `%1` + key + entries (no `*2` pair wrapper).
                                         fr_protocol::encode_map_header(1, true, out);
-                                        fr_protocol::encode_bulk_string_slice(Some(key), false, out);
+                                        fr_protocol::encode_bulk_string_slice(
+                                            Some(key),
+                                            false,
+                                            out,
+                                        );
                                         fr_protocol::encode_aggregate_header(n, false, out);
                                     } else {
                                         // RESP2 array-of-pairs: `*1` + `*2` + key + entries.
                                         out.extend_from_slice(b"*1\r\n*2\r\n");
-                                        fr_protocol::encode_bulk_string_slice(Some(key), false, out);
+                                        fr_protocol::encode_bulk_string_slice(
+                                            Some(key),
+                                            false,
+                                            out,
+                                        );
                                         fr_protocol::encode_aggregate_header(n, false, out);
                                     }
                                 }
                                 fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
                                     fr_protocol::encode_aggregate_header(2, false, out);
                                     let id_bytes = fr_command::format_stream_id(id);
-                                    fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                                    fr_protocol::encode_bulk_string_slice(
+                                        Some(&id_bytes),
+                                        false,
+                                        out,
+                                    );
                                     fr_protocol::encode_aggregate_header(pairs * 2, false, out);
                                 }
                                 fr_store::XrangeReplyEvent::Field(f) => {
@@ -28171,8 +28196,11 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_rand_member_borrowed(PlainRandMemberCmd::Srandmember, key, now_ms)
-        {
+        if !self.can_execute_plain_rand_member_borrowed(
+            PlainRandMemberCmd::Srandmember,
+            key,
+            now_ms,
+        ) {
             return None;
         }
 
@@ -28626,22 +28654,22 @@ impl Runtime {
         // HRANDFIELD count is no-stat; record the single keyspace access first (mirrors the
         // RespFrame Hrandfield arm) before the no-stat borrow-scan.
         let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self
-            .server
-            .store
-            .hrandfield_count_field_borrow_scan(key, count, now_ms, |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let result =
+            self.server
+                .store
+                .hrandfield_count_field_borrow_scan(key, count, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            });
+                });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -28852,31 +28880,31 @@ impl Runtime {
 
         let start = self.chained_command_start();
         let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self
-            .server
-            .store
-            .zrandmember_count_withscores_borrow_scan(key, count, now_ms, |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::ZRangeWithScoresScanEvent::Len(n) => {
-                        if resp3 {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        } else {
-                            fr_protocol::encode_aggregate_header(n * 2, false, out);
+        let result =
+            self.server
+                .store
+                .zrandmember_count_withscores_borrow_scan(key, count, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
+                    }
+                    match ev {
+                        fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                            if resp3 {
+                                fr_protocol::encode_aggregate_header(n, false, out);
+                            } else {
+                                fr_protocol::encode_aggregate_header(n * 2, false, out);
+                            }
+                        }
+                        fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                            if resp3 {
+                                fr_protocol::encode_aggregate_header(2, false, out);
+                            }
+                            fr_protocol::encode_bulk_string_slice(Some(member), false, out);
+                            let ss = fr_store::redis_score_to_string(score);
+                            fr_protocol::encode_bulk_string_slice(Some(ss.as_bytes()), false, out);
                         }
                     }
-                    fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
-                        if resp3 {
-                            fr_protocol::encode_aggregate_header(2, false, out);
-                        }
-                        fr_protocol::encode_bulk_string_slice(Some(member), false, out);
-                        let ss = fr_store::redis_score_to_string(score);
-                        fr_protocol::encode_bulk_string_slice(Some(ss.as_bytes()), false, out);
-                    }
-                }
-            });
+                });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -28970,22 +28998,22 @@ impl Runtime {
         // ZRANDMEMBER count is no-stat; record the single keyspace access first (mirrors the
         // RespFrame Zrandmember arm) before the no-stat borrow-scan.
         let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self
-            .server
-            .store
-            .zrandmember_count_member_borrow_scan(key, count, now_ms, |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let result =
+            self.server
+                .store
+                .zrandmember_count_member_borrow_scan(key, count, now_ms, |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            fr_protocol::encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            });
+                });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -45081,7 +45109,8 @@ mod tests {
                 rt.server.store.set(b"str".to_vec(), b"x".to_vec(), None, 1);
             }
 
-            for (ts, key) in (2u64..).zip([b"z".as_slice(), b"nokey".as_slice(), b"str".as_slice()]) {
+            for (ts, key) in (2u64..).zip([b"z".as_slice(), b"nokey".as_slice(), b"str".as_slice()])
+            {
                 let mut fast_bytes = Vec::new();
                 fast.execute_plain_zscan0_borrowed_into(key, b"0", ts, resp3, &mut fast_bytes)
                     .expect("well-formed ZSCAN key 0 should take fast path");
@@ -45094,14 +45123,8 @@ mod tests {
             }
 
             assert!(
-                fast.execute_plain_zscan0_borrowed_into(
-                    b"z",
-                    b"1",
-                    10,
-                    resp3,
-                    &mut Vec::new(),
-                )
-                .is_none()
+                fast.execute_plain_zscan0_borrowed_into(b"z", b"1", 10, resp3, &mut Vec::new(),)
+                    .is_none()
             );
 
             assert_eq!(
@@ -46009,12 +46032,24 @@ mod tests {
         // Non-float bound defers (None).
         assert!(
             direct
-                .execute_plain_zrangebyscore_borrowed_into(b"z", b"bad", b"+inf", 90, &mut Vec::new())
+                .execute_plain_zrangebyscore_borrowed_into(
+                    b"z",
+                    b"bad",
+                    b"+inf",
+                    90,
+                    &mut Vec::new()
+                )
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_zrevrangebyscore_borrowed_into(b"z", b"bad", b"-inf", 91, &mut Vec::new())
+                .execute_plain_zrevrangebyscore_borrowed_into(
+                    b"z",
+                    b"bad",
+                    b"-inf",
+                    91,
+                    &mut Vec::new()
+                )
                 .is_none()
         );
         assert_eq!(
@@ -46036,7 +46071,9 @@ mod tests {
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {
             rt.execute_frame(
-                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3.5", b"c", b"5", b"d"]),
+                command(&[
+                    b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3.5", b"c", b"5", b"d",
+                ]),
                 1,
             );
             rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
@@ -46056,11 +46093,20 @@ mod tests {
             generic
                 .execute_frame(command(&[b"ZRANGE", key, min, max, b"BYSCORE"]), ts)
                 .encode_into(&mut want);
-            assert_eq!(out, want, "ZRANGE BYSCORE key={key:?} min={min:?} max={max:?}");
+            assert_eq!(
+                out, want,
+                "ZRANGE BYSCORE key={key:?} min={min:?} max={max:?}"
+            );
         }
         assert!(
             direct
-                .execute_plain_zrange_byscore_borrowed_into(b"z", b"bad", b"+inf", 90, &mut Vec::new())
+                .execute_plain_zrange_byscore_borrowed_into(
+                    b"z",
+                    b"bad",
+                    b"+inf",
+                    90,
+                    &mut Vec::new()
+                )
                 .is_none()
         );
         assert_eq!(
@@ -46160,7 +46206,9 @@ mod tests {
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {
             rt.execute_frame(
-                command(&[b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d"]),
+                command(&[
+                    b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d",
+                ]),
                 1,
             );
             rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
@@ -46179,7 +46227,10 @@ mod tests {
             generic
                 .execute_frame(command(&[b"ZRANGE", key, min, max, b"BYLEX"]), ts)
                 .encode_into(&mut want);
-            assert_eq!(out, want, "ZRANGE BYLEX key={key:?} min={min:?} max={max:?}");
+            assert_eq!(
+                out, want,
+                "ZRANGE BYLEX key={key:?} min={min:?} max={max:?}"
+            );
         }
         assert!(
             direct
@@ -46202,7 +46253,9 @@ mod tests {
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {
             rt.execute_frame(
-                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d", b"5", b"e"]),
+                command(&[
+                    b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d", b"5", b"e",
+                ]),
                 1,
             );
             rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
@@ -46215,40 +46268,124 @@ mod tests {
 
         // ZRANGEBYSCORE key min max LIMIT offset count.
         for (ts, (key, min, max, off, cnt)) in (2..).zip([
-            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"2".as_slice()),
-            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"1".as_slice(), b"2".as_slice()),
-            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"2".as_slice(), b"10".as_slice()),
-            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"0".as_slice()), // count 0
-            (b"z".as_slice(), b"2".as_slice(), b"4".as_slice(), b"0".as_slice(), b"5".as_slice()),
-            (b"z".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"10".as_slice(), b"5".as_slice()), // offset past end
-            (b"str".as_slice(), b"-inf".as_slice(), b"+inf".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (
+                b"z".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"0".as_slice(),
+                b"2".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"1".as_slice(),
+                b"2".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"2".as_slice(),
+                b"10".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"0".as_slice(),
+                b"0".as_slice(),
+            ), // count 0
+            (
+                b"z".as_slice(),
+                b"2".as_slice(),
+                b"4".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"10".as_slice(),
+                b"5".as_slice(),
+            ), // offset past end
+            (
+                b"str".as_slice(),
+                b"-inf".as_slice(),
+                b"+inf".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrangebyscore_limit_borrowed_into(key, min, max, off, cnt, ts, &mut out)
+                .execute_plain_zrangebyscore_limit_borrowed_into(
+                    key, min, max, off, cnt, ts, &mut out,
+                )
                 .expect("ZRANGEBYSCORE LIMIT _into");
             assert_eq!(
                 out,
-                enc(&mut generic, &[b"ZRANGEBYSCORE", key, min, max, b"LIMIT", off, cnt], ts),
+                enc(
+                    &mut generic,
+                    &[b"ZRANGEBYSCORE", key, min, max, b"LIMIT", off, cnt],
+                    ts
+                ),
                 "ZRANGEBYSCORE LIMIT key={key:?} {min:?}..{max:?} off={off:?} cnt={cnt:?}"
             );
         }
 
         // ZREVRANGEBYSCORE key max min LIMIT offset count.
         for (ts, (key, max, min, off, cnt)) in (40..).zip([
-            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"2".as_slice()),
-            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"1".as_slice(), b"3".as_slice()),
-            (b"z".as_slice(), b"4".as_slice(), b"2".as_slice(), b"0".as_slice(), b"5".as_slice()),
-            (b"z".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"0".as_slice()),
-            (b"str".as_slice(), b"+inf".as_slice(), b"-inf".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (
+                b"z".as_slice(),
+                b"+inf".as_slice(),
+                b"-inf".as_slice(),
+                b"0".as_slice(),
+                b"2".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"+inf".as_slice(),
+                b"-inf".as_slice(),
+                b"1".as_slice(),
+                b"3".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"4".as_slice(),
+                b"2".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"+inf".as_slice(),
+                b"-inf".as_slice(),
+                b"0".as_slice(),
+                b"0".as_slice(),
+            ),
+            (
+                b"str".as_slice(),
+                b"+inf".as_slice(),
+                b"-inf".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrevrangebyscore_limit_borrowed_into(key, max, min, off, cnt, ts, &mut out)
+                .execute_plain_zrevrangebyscore_limit_borrowed_into(
+                    key, max, min, off, cnt, ts, &mut out,
+                )
                 .expect("ZREVRANGEBYSCORE LIMIT _into");
             assert_eq!(
                 out,
-                enc(&mut generic, &[b"ZREVRANGEBYSCORE", key, max, min, b"LIMIT", off, cnt], ts),
+                enc(
+                    &mut generic,
+                    &[b"ZREVRANGEBYSCORE", key, max, min, b"LIMIT", off, cnt],
+                    ts
+                ),
                 "ZREVRANGEBYSCORE LIMIT key={key:?} {max:?}..{min:?} off={off:?} cnt={cnt:?}"
             );
         }
@@ -46256,7 +46393,15 @@ mod tests {
         // Negative offset/count defers.
         assert!(
             direct
-                .execute_plain_zrangebyscore_limit_borrowed_into(b"z", b"-inf", b"+inf", b"-1", b"5", 90, &mut Vec::new())
+                .execute_plain_zrangebyscore_limit_borrowed_into(
+                    b"z",
+                    b"-inf",
+                    b"+inf",
+                    b"-1",
+                    b"5",
+                    90,
+                    &mut Vec::new()
+                )
                 .is_none()
         );
         assert_eq!(
@@ -46290,46 +46435,132 @@ mod tests {
 
         // ZRANGEBYLEX key min max LIMIT offset count.
         for (ts, (key, min, max, off, cnt)) in (2..).zip([
-            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"2".as_slice()),
-            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"1".as_slice(), b"3".as_slice()),
-            (b"z".as_slice(), b"[b".as_slice(), b"[d".as_slice(), b"0".as_slice(), b"5".as_slice()),
-            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"0".as_slice()), // count 0
-            (b"z".as_slice(), b"-".as_slice(), b"+".as_slice(), b"10".as_slice(), b"5".as_slice()), // offset past end
-            (b"str".as_slice(), b"-".as_slice(), b"+".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (
+                b"z".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+                b"0".as_slice(),
+                b"2".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+                b"1".as_slice(),
+                b"3".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"[b".as_slice(),
+                b"[d".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+                b"0".as_slice(),
+                b"0".as_slice(),
+            ), // count 0
+            (
+                b"z".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+                b"10".as_slice(),
+                b"5".as_slice(),
+            ), // offset past end
+            (
+                b"str".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrangebylex_limit_borrowed_into(key, min, max, off, cnt, ts, &mut out)
+                .execute_plain_zrangebylex_limit_borrowed_into(
+                    key, min, max, off, cnt, ts, &mut out,
+                )
                 .expect("ZRANGEBYLEX LIMIT _into");
             assert_eq!(
                 out,
-                enc(&mut generic, &[b"ZRANGEBYLEX", key, min, max, b"LIMIT", off, cnt], ts),
+                enc(
+                    &mut generic,
+                    &[b"ZRANGEBYLEX", key, min, max, b"LIMIT", off, cnt],
+                    ts
+                ),
                 "ZRANGEBYLEX LIMIT key={key:?} {min:?}..{max:?} off={off:?} cnt={cnt:?}"
             );
         }
 
         // ZREVRANGEBYLEX key max min LIMIT offset count.
         for (ts, (key, max, min, off, cnt)) in (40..).zip([
-            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"2".as_slice()),
-            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"1".as_slice(), b"3".as_slice()),
-            (b"z".as_slice(), b"[d".as_slice(), b"[b".as_slice(), b"0".as_slice(), b"5".as_slice()),
-            (b"z".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"0".as_slice()),
-            (b"str".as_slice(), b"+".as_slice(), b"-".as_slice(), b"0".as_slice(), b"5".as_slice()),
+            (
+                b"z".as_slice(),
+                b"+".as_slice(),
+                b"-".as_slice(),
+                b"0".as_slice(),
+                b"2".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"+".as_slice(),
+                b"-".as_slice(),
+                b"1".as_slice(),
+                b"3".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"[d".as_slice(),
+                b"[b".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
+            (
+                b"z".as_slice(),
+                b"+".as_slice(),
+                b"-".as_slice(),
+                b"0".as_slice(),
+                b"0".as_slice(),
+            ),
+            (
+                b"str".as_slice(),
+                b"+".as_slice(),
+                b"-".as_slice(),
+                b"0".as_slice(),
+                b"5".as_slice(),
+            ),
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrevrangebylex_limit_borrowed_into(key, max, min, off, cnt, ts, &mut out)
+                .execute_plain_zrevrangebylex_limit_borrowed_into(
+                    key, max, min, off, cnt, ts, &mut out,
+                )
                 .expect("ZREVRANGEBYLEX LIMIT _into");
             assert_eq!(
                 out,
-                enc(&mut generic, &[b"ZREVRANGEBYLEX", key, max, min, b"LIMIT", off, cnt], ts),
+                enc(
+                    &mut generic,
+                    &[b"ZREVRANGEBYLEX", key, max, min, b"LIMIT", off, cnt],
+                    ts
+                ),
                 "ZREVRANGEBYLEX LIMIT key={key:?} {max:?}..{min:?} off={off:?} cnt={cnt:?}"
             );
         }
 
         assert!(
             direct
-                .execute_plain_zrangebylex_limit_borrowed_into(b"z", b"-", b"+", b"-1", b"5", 90, &mut Vec::new())
+                .execute_plain_zrangebylex_limit_borrowed_into(
+                    b"z",
+                    b"-",
+                    b"+",
+                    b"-1",
+                    b"5",
+                    90,
+                    &mut Vec::new()
+                )
                 .is_none()
         );
         assert_eq!(

@@ -3509,7 +3509,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let mut stream_entries = Vec::with_capacity(count.min(RDB_COLLECTION_PRESIZE_CAP));
+                        let mut stream_entries =
+                            Vec::with_capacity(count.min(RDB_COLLECTION_PRESIZE_CAP));
                         for _ in 0..count {
                             if cursor + 16 > data.len() {
                                 return Err(PersistError::InvalidFrame);
@@ -3529,7 +3530,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             let (field_count, fc) = rdb_decode_length(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
                             cursor += fc;
-                            let mut fields = Vec::with_capacity(field_count.min(RDB_COLLECTION_PRESIZE_CAP));
+                            let mut fields =
+                                Vec::with_capacity(field_count.min(RDB_COLLECTION_PRESIZE_CAP));
                             for _ in 0..field_count {
                                 let (fname, c1) = rdb_decode_string(&data[cursor..])
                                     .ok_or(PersistError::InvalidFrame)?;
@@ -3770,7 +3772,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (node_count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let mut items = Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
+                        let mut items =
+                            Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
                         for _ in 0..node_count {
                             let (container, consumed) = rdb_decode_length(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -3817,7 +3820,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (node_count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let mut items = Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
+                        let mut items =
+                            Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
                         for _ in 0..node_count {
                             let (node_blob, consumed) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;

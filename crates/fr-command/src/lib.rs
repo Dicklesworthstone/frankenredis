@@ -23130,51 +23130,51 @@ fn format_info_os_string() -> String {
     static OS_CACHE: OnceLock<String> = OnceLock::new();
     OS_CACHE
         .get_or_init(|| {
-    fn fallback_os_name() -> &'static str {
-        match std::env::consts::OS {
-            "linux" => "Linux",
-            "macos" => "Darwin",
-            "windows" => "Windows",
-            "freebsd" => "FreeBSD",
-            "openbsd" => "OpenBSD",
-            "netbsd" => "NetBSD",
-            "dragonfly" => "DragonFly",
-            "solaris" => "SunOS",
-            other => other,
-        }
-    }
-    fn arch_machine() -> &'static str {
-        // Map Rust's std::env::consts::ARCH to upstream's uname
-        // `machine` token (Linux kernel returns x86_64 / aarch64 /
-        // armv7l / etc.). Rust uses x86_64 / aarch64 / arm — close
-        // enough for INFO parity; rare arches fall through unchanged.
-        match std::env::consts::ARCH {
-            "x86_64" => "x86_64",
-            "aarch64" => "aarch64",
-            "arm" => "armv7l",
-            "x86" => "i686",
-            "powerpc64" => "ppc64le",
-            other => other,
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let sysname = std::fs::read_to_string("/proc/sys/kernel/ostype")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| fallback_os_name().to_string());
-        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if release.is_empty() {
-            format!("{sysname} {}", arch_machine())
-        } else {
-            format!("{sysname} {release} {}", arch_machine())
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        format!("{} {}", fallback_os_name(), arch_machine())
-    }
+            fn fallback_os_name() -> &'static str {
+                match std::env::consts::OS {
+                    "linux" => "Linux",
+                    "macos" => "Darwin",
+                    "windows" => "Windows",
+                    "freebsd" => "FreeBSD",
+                    "openbsd" => "OpenBSD",
+                    "netbsd" => "NetBSD",
+                    "dragonfly" => "DragonFly",
+                    "solaris" => "SunOS",
+                    other => other,
+                }
+            }
+            fn arch_machine() -> &'static str {
+                // Map Rust's std::env::consts::ARCH to upstream's uname
+                // `machine` token (Linux kernel returns x86_64 / aarch64 /
+                // armv7l / etc.). Rust uses x86_64 / aarch64 / arm — close
+                // enough for INFO parity; rare arches fall through unchanged.
+                match std::env::consts::ARCH {
+                    "x86_64" => "x86_64",
+                    "aarch64" => "aarch64",
+                    "arm" => "armv7l",
+                    "x86" => "i686",
+                    "powerpc64" => "ppc64le",
+                    other => other,
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let sysname = std::fs::read_to_string("/proc/sys/kernel/ostype")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| fallback_os_name().to_string());
+                let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if release.is_empty() {
+                    format!("{sysname} {}", arch_machine())
+                } else {
+                    format!("{sysname} {release} {}", arch_machine())
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                format!("{} {}", fallback_os_name(), arch_machine())
+            }
         })
         .clone()
 }
@@ -56535,7 +56535,12 @@ mod tests {
                 return "nan".to_string();
             }
             if value.is_infinite() {
-                return if value.is_sign_positive() { "inf" } else { "-inf" }.to_string();
+                return if value.is_sign_positive() {
+                    "inf"
+                } else {
+                    "-inf"
+                }
+                .to_string();
             }
             let mut s = format!("{value:.17}");
             if s.contains('.') {
@@ -56555,10 +56560,10 @@ mod tests {
             seed ^= seed << 17;
             let r = (seed >> 11) as f64 / (1u64 << 53) as f64;
             let v = match seed & 3 {
-                0 => -180.0 + r * 360.0,     // longitude
-                1 => -85.05 + r * 170.1,     // latitude
-                2 => r * 20_000_000.0,       // distance in meters
-                _ => (r - 0.5) * 2_000.0,    // general
+                0 => -180.0 + r * 360.0,  // longitude
+                1 => -85.05 + r * 170.1,  // latitude
+                2 => r * 20_000_000.0,    // distance in meters
+                _ => (r - 0.5) * 2_000.0, // general
             };
             assert_eq!(format_coord_human(v), reference(v), "mismatch at v={v}");
         }
@@ -56578,7 +56583,11 @@ mod tests {
             1e-10,
             6e-18,
         ] {
-            assert_eq!(format_coord_human(v), reference(v), "mismatch at explicit v={v}");
+            assert_eq!(
+                format_coord_human(v),
+                reference(v),
+                "mismatch at explicit v={v}"
+            );
         }
     }
 

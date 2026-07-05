@@ -12,7 +12,12 @@ fn bench_get(c: &mut Criterion) {
     let mut store = Store::new();
     // A TTL-bearing key makes `count_expiring_keys() > 0`, so GETs skip the no-TTL fast
     // path and exercise the TTL+LRU branch under test (default policy is LRU = LFU off).
-    store.set(b"ttl:sentinel".to_vec(), b"x".to_vec(), Some(10_000_000), 1_000);
+    store.set(
+        b"ttl:sentinel".to_vec(),
+        b"x".to_vec(),
+        Some(10_000_000),
+        1_000,
+    );
     // The live target (no TTL): a hit on the read path.
     store.set(b"target:key".to_vec(), vec![b'v'; 64], None, 1_000);
 
@@ -36,9 +41,15 @@ fn bench_get(c: &mut Criterion) {
     store
         .xadd(b"xic", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1_000)
         .unwrap();
-    store.xgroup_create(b"xic", b"g", (0, 0), false, 1_000).unwrap();
-    store.xgroup_createconsumer(b"xic", b"g", b"c1", 1_001).unwrap();
-    store.xgroup_createconsumer(b"xic", b"g", b"c2", 1_002).unwrap();
+    store
+        .xgroup_create(b"xic", b"g", (0, 0), false, 1_000)
+        .unwrap();
+    store
+        .xgroup_createconsumer(b"xic", b"g", b"c1", 1_001)
+        .unwrap();
+    store
+        .xgroup_createconsumer(b"xic", b"g", b"c2", 1_002)
+        .unwrap();
 
     let mut g = c.benchmark_group("store_read");
     g.bench_function("get_string_bytes_ttl_lru_hit", |b| {
@@ -63,7 +74,9 @@ fn bench_get(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(store.strlen(std::hint::black_box(b"target:key"), 2_000)))
     });
     g.bench_function("value_type_ttl_lru_hit", |b| {
-        b.iter(|| std::hint::black_box(store.value_type(std::hint::black_box(b"target:key"), 2_000)))
+        b.iter(|| {
+            std::hint::black_box(store.value_type(std::hint::black_box(b"target:key"), 2_000))
+        })
     });
     g.bench_function("pttl_ttl_lru_hit", |b| {
         b.iter(|| std::hint::black_box(store.pttl(std::hint::black_box(b"target:key"), 2_000)))
@@ -137,7 +150,9 @@ fn bench_get(c: &mut Criterion) {
     // record_keyspace_lookup probe + the redundant second `expiry_ms`.
     g.bench_function("expiretime_ttl", |b| {
         b.iter(|| {
-            std::hint::black_box(store.expiretime_value(std::hint::black_box(b"ttl:sentinel"), 2_000))
+            std::hint::black_box(
+                store.expiretime_value(std::hint::black_box(b"ttl:sentinel"), 2_000),
+            )
         })
     });
     // TOUCH on a live no-TTL key (non-LFU): lazy-drop single `get_mut` access-touch.
@@ -194,7 +209,11 @@ fn bench_get(c: &mut Criterion) {
     // the 2-Vec composite alloc + BTree probe in hash_field_is_expired.
     g.bench_function("hget_no_fieldttl", |b| {
         b.iter(|| {
-            std::hint::black_box(store.hget(std::hint::black_box(b"hh"), std::hint::black_box(b"f0"), 2_000))
+            std::hint::black_box(store.hget(
+                std::hint::black_box(b"hh"),
+                std::hint::black_box(b"f0"),
+                2_000,
+            ))
         })
     });
     g.bench_function("xinfo_consumers_no_ttl", |b| {
@@ -469,7 +488,15 @@ fn bench_zrange_withscores(c: &mut Criterion) {
     g.bench_function("bylex_limit_clone_full_range", |b| {
         b.iter(|| {
             let members = store
-                .zrangebylex_limited(std::hint::black_box(b"z"), b"-", b"+", false, 0, Some(200), 2_000)
+                .zrangebylex_limited(
+                    std::hint::black_box(b"z"),
+                    b"-",
+                    b"+",
+                    false,
+                    0,
+                    Some(200),
+                    2_000,
+                )
                 .unwrap();
             std::hint::black_box(members.iter().map(Vec::len).sum::<usize>())
         })
@@ -578,7 +605,9 @@ fn bench_hrandfield_withvalues(c: &mut Criterion) {
     for i in 0..N {
         let mut value = vec![b'v'; VALUE_LEN];
         value[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-        store.hset(b"h", format!("f{i:04}").into_bytes(), value, 1_000).unwrap();
+        store
+            .hset(b"h", format!("f{i:04}").into_bytes(), value, 1_000)
+            .unwrap();
     }
 
     let mut g = c.benchmark_group("hrandfield_withvalues");
@@ -720,6 +749,56 @@ fn bench_srandmember_intset_borrow(c: &mut Criterion) {
     g.finish();
 }
 
+fn ttl_clone_each_best(keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut best_key: Option<Vec<u8>> = None;
+    let mut best_ttl = u64::MAX;
+    for key in keys {
+        let expires_at_ms = 10_000;
+        if expires_at_ms < best_ttl
+            || (expires_at_ms == best_ttl && best_key.as_ref().is_none_or(|b| key < b))
+        {
+            best_ttl = expires_at_ms;
+            best_key = Some(key.clone());
+        }
+    }
+    best_key
+}
+
+fn ttl_defer_winner_clone(keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut best_idx: Option<usize> = None;
+    let mut best_ttl = u64::MAX;
+    for (i, key) in keys.iter().enumerate() {
+        let expires_at_ms = 10_000;
+        if expires_at_ms < best_ttl
+            || (expires_at_ms == best_ttl
+                && best_idx.is_none_or(|b| key.as_slice() < keys[b].as_slice()))
+        {
+            best_ttl = expires_at_ms;
+            best_idx = Some(i);
+        }
+    }
+    best_idx.map(|i| keys[i].clone())
+}
+
+fn bench_ttl_eviction_candidate_clone(c: &mut Criterion) {
+    const N: usize = 100;
+    let keys: Vec<Vec<u8>> = (0..N).map(|i| format!("t{i:03}").into_bytes()).collect();
+    let sample: Vec<Vec<u8>> = keys.iter().rev().cloned().collect();
+    assert_eq!(
+        ttl_clone_each_best(&sample),
+        ttl_defer_winner_clone(&sample)
+    );
+
+    let mut g = c.benchmark_group("ttl_eviction_candidate_clone");
+    g.bench_function("orig_clone_each_best", |b| {
+        b.iter(|| std::hint::black_box(ttl_clone_each_best(std::hint::black_box(&sample))))
+    });
+    g.bench_function("defer_winner_clone", |b| {
+        b.iter(|| std::hint::black_box(ttl_defer_winner_clone(std::hint::black_box(&sample))))
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
@@ -728,6 +807,7 @@ criterion_group!(
     bench_hrandfield_withvalues,
     bench_zscan0_borrow,
     bench_zlexcount_borrowed_bounds,
-    bench_srandmember_intset_borrow
+    bench_srandmember_intset_borrow,
+    bench_ttl_eviction_candidate_clone
 );
 criterion_main!(benches);

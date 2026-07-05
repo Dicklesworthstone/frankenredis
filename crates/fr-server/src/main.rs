@@ -3604,8 +3604,7 @@ fn process_buffered_frames(
                     // _into migration parse_borrowed_multibulk_action already uses; large
                     // ranges measured 0.39x->parity. _into returns None (no bytes written)
                     // before any output on a deferred/invalid range, so the fallback is safe.
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_getrange_borrowed_into(
                             packet.key,
@@ -4189,9 +4188,7 @@ fn process_buffered_frames(
                     b"*2\r\n$3\r\n",
                     b"DEL",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_del_borrowed(&[packet.key], ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_del_borrowed(&[packet.key], ts) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -4235,8 +4232,7 @@ fn process_buffered_frames(
                     b"*2\r\n$5\r\n",
                     b"TOUCH",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_touch_borrowed(&[packet.key], ts)
+                    if let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -4879,11 +4875,9 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Ttl,
-                        packet.key,
-                        ts,
-                    ) {
+                    if let Some(response) =
+                        runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, packet.key, ts)
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -5058,7 +5052,9 @@ fn process_buffered_frames(
                     if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
                         cmd,
                         packet.key,
-                        &[packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6],
+                        &[
+                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
+                        ],
                         ts,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
@@ -5081,7 +5077,10 @@ fn process_buffered_frames(
                     if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
                         cmd,
                         packet.key,
-                        &[packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6, packet.v7],
+                        &[
+                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
+                            packet.v7,
+                        ],
                         ts,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
@@ -5104,7 +5103,10 @@ fn process_buffered_frames(
                     if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
                         cmd,
                         packet.key,
-                        &[packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6, packet.v7, packet.v8],
+                        &[
+                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
+                            packet.v7, packet.v8,
+                        ],
                         ts,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
@@ -5302,8 +5304,8 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
+                    if let Some(response) = runtime
+                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -5322,8 +5324,8 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts)
+                    if let Some(response) = runtime
+                        .execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -5600,8 +5602,8 @@ fn process_buffered_frames(
                     b"LMPOP",
                 ) {
                     // LMPOP 2 k1 k2 LEFT|RIGHT: key=numkeys, a=k1, b=k2, c=direction.
-                    if let Some(response) =
-                        runtime.execute_plain_lmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                    if let Some(response) = runtime
+                        .execute_plain_lmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -6065,12 +6067,10 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hrandfield_count_withvalues_packet(
-                        unparsed,
-                        &parser_config,
-                    )
-                {
+                } else if let Some(packet) = parse_borrowed_plain_hrandfield_count_withvalues_packet(
+                    unparsed,
+                    &parser_config,
+                ) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_hrandfield_count_withvalues_borrowed_into(
@@ -8980,8 +8980,7 @@ fn process_buffered_frames(
                     // WITHSCORES; anything else falls to the generic for its
                     // canonical syntax error. Zero-copy _into -> FastEncodedReply.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
-                        let client_resp3 =
-                            runtime.client_session().resp_protocol_version() == 3;
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         if runtime
                             .execute_plain_zrevrange_withscores_borrowed_into(
                                 packet.key,
@@ -9784,8 +9783,7 @@ fn process_buffered_frames(
                     // _into migration parse_borrowed_multibulk_action already uses; large
                     // ranges measured 0.39x->parity. _into returns None (no bytes written)
                     // before any output on a deferred/invalid range, so the fallback is safe.
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_getrange_borrowed_into(
                             packet.key,
@@ -15451,7 +15449,10 @@ fn parse_borrowed_plain_hmget_multi_packet<'a>(
         return None;
     }
     cursor += 4;
-    if !input.get(cursor..cursor + 5)?.eq_ignore_ascii_case(b"HMGET") {
+    if !input
+        .get(cursor..cursor + 5)?
+        .eq_ignore_ascii_case(b"HMGET")
+    {
         return None;
     }
     cursor += 5;
@@ -18033,7 +18034,10 @@ fn parse_borrowed_plain_smismember_multi_packet<'a>(
         return None;
     }
     cursor += 5;
-    if !input.get(cursor..cursor + 10)?.eq_ignore_ascii_case(b"SMISMEMBER") {
+    if !input
+        .get(cursor..cursor + 10)?
+        .eq_ignore_ascii_case(b"SMISMEMBER")
+    {
         return None;
     }
     cursor += 10;
@@ -18162,7 +18166,10 @@ fn parse_borrowed_plain_zmscore_multi_packet<'a>(
         return None;
     }
     cursor += 4;
-    if !input.get(cursor..cursor + 7)?.eq_ignore_ascii_case(b"ZMSCORE") {
+    if !input
+        .get(cursor..cursor + 7)?
+        .eq_ignore_ascii_case(b"ZMSCORE")
+    {
         return None;
     }
     cursor += 7;
@@ -20699,8 +20706,10 @@ fn process_argv_frame(
             // ~1 RTT instead of waiting for the replica's ~1Hz periodic ACK (which
             // made short-timeout WAIT undercount to :0 vs redis :1). No-op with no
             // replicas attached.
-            let solicit_ack =
-                matches!(blocked.op, BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. });
+            let solicit_ack = matches!(
+                blocked.op,
+                BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. }
+            );
             conn.blocked = Some(blocked);
             blocked_tokens.insert(token);
             if let Some(blocked) = &conn.blocked {
@@ -26547,7 +26556,10 @@ mod tests {
             assert_eq!(p.len, nm, "len for {nm}");
             assert_eq!(p.key, b"setA".as_slice());
             assert_eq!(p.members[0], b"m0".as_slice());
-            assert_eq!(p.members[nm - 1], format!("m{}", nm - 1).into_bytes().as_slice());
+            assert_eq!(
+                p.members[nm - 1],
+                format!("m{}", nm - 1).into_bytes().as_slice()
+            );
             assert_eq!(p.consumed, input.len(), "consumed all bytes for {nm}");
         }
         // > 32 members defers to the generic parser.
@@ -29505,7 +29517,7 @@ mod tests {
 
     #[test]
     fn borrowed_plain_hrandfield_count_withvalues_packet_parser_defers_other_shapes_or_limited_inputs()
-    {
+     {
         let cfg = ParserConfig::default();
         assert!(
             crate::parse_borrowed_plain_hrandfield_count_withvalues_packet(
