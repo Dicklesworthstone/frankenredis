@@ -35,6 +35,40 @@ absent-heavy probes; a monobound cmov search (single `<=`, arithmetic cursor, `.
 stay `#![forbid(unsafe_code)]`) is byte-identical and ~2x on misses. Reusable for any sorted-`i64`
 membership probe (listpack/ziplist integer scans, sorted-int intersections).
 
+## 2026-07-05 CrimsonHawk: KEEP — Lua numeric-for accumulator closed form — 1.62x vs ORIG primitive (byte-transparent)
+
+Consulted this ledger first and avoided the already-covered quick wins/no-ships (eviction clone deferral,
+SRANDMEMBER intset visitor, object-idletime probing, PFADD/PFMERGE, SETEX/PSETEX expiry guards, and the
+prior iterative Lua numeric-for add/square fast paths). The deeper primitive is algebraic fusion: for the
+recognized one-statement numeric-for accumulator loops (`s=s+i`, `s=i+s`, `s=s+i*i`, `s=i*i+s`), compute
+the arithmetic/square series in closed form instead of executing the body 1000 times. The closed form is
+admitted only for finite exact integer Lua numbers inside the `2^53` exact-f64 envelope, a numeric
+accumulator, nonzero integer step, successful checked integer arithmetic, and an iteration budget that
+would have succeeded in the old loop. Everything else falls back to the existing iterative fast path.
+
+BYTE-TRANSPARENT: the fast path still resolves the same local accumulator slot, preserves the numeric-for
+scope push/pop, charges the same successful iteration budget (`2*n + 1`), sets the same body line for
+nonempty loops, and refuses the closed form when the old path would hit `MAX_ITERATIONS`. Regression
+coverage now includes ascending, descending, strided, square, commuted, and numeric-string fallback cases.
+
+MEASURED (SHORT per-crate Criterion, release profile,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`, command `AGENT_NAME=CrimsonHawk
+CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec -- env FR_ALLOW_STUB_COMMANDS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod cargo bench --profile release -p fr-command
+--bench lua_eval -- numeric_for_sum_1000 --sample-size 10 --measurement-time 1`): ORIG current-round
+baseline on RCH `vmi1149989` measured `lua_eval/numeric_for_sum_1000` at **8.8138 us**
+`[8.6357, 9.1591]`; candidate measured on RCH `hz2` at **5.4464 us** `[5.3801, 5.5721]` =
+**1.62x vs ORIG**. Tried `RCH_WORKER=vmi1149989`, but `rch exec` exposes no worker pin flag and selected
+`hz2`; ratio is therefore recorded as mixed-worker RCH evidence, not same-worker proof. Gates:
+`git diff --check` GREEN; `cargo fmt --check` GREEN; `cargo check -p fr-command --all-targets` GREEN on
+RCH `hz2`; `cargo test -p fr-command lua_numeric_for_add_assign_fast_path_keeps_results -- --nocapture`
+GREEN on RCH `hz2`; `cargo test -p fr-conformance -- --nocapture` GREEN on RCH `vmi1149989` (194 lib
+tests, binary/unit tests, 99 smoke tests, doc-tests all passed). Broad
+`cargo clippy -p fr-command --all-targets -- -D warnings` remains blocked by pre-existing `fr-persist`
+`chunks_exact_to_as_chunks` lint debt unrelated to this Lua change, and all-targets no-deps also exposes
+existing `fr-command/src/lib.rs` test lint debt; targeted
+`cargo clippy -p fr-command --lib --no-deps -- -D warnings` was GREEN on RCH `ovh-b`.
+
 ## 2026-07-05 CrimsonHawk: KEEP — volatile-TTL eviction-candidate select defers the winner clone — 4.00x conservative / 5.47x RCH vs ORIG primitive (byte-transparent)
 
 Consulted the existing negative-evidence ledger first: LRU/LFU eviction selection had already landed the

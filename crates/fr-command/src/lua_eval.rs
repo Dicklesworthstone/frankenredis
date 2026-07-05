@@ -2976,6 +2976,7 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 
 const MAX_CALL_DEPTH: usize = 128;
 const MAX_ITERATIONS: u64 = 1_000_000;
+const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
 /// Sentinel error string emitted by `error()` when the argument is a
 /// non-string, non-number value (bool/nil/table/function/thread). The
@@ -4195,6 +4196,109 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    fn exact_lua_integer(value: f64) -> Option<i128> {
+        if !value.is_finite() || value.fract() != 0.0 {
+            return None;
+        }
+        let exact_limit = LUA_EXACT_INTEGER_LIMIT as f64;
+        if value < -exact_limit || value > exact_limit {
+            return None;
+        }
+        let int_value = value as i128;
+        if int_value as f64 == value {
+            Some(int_value)
+        } else {
+            None
+        }
+    }
+
+    fn numeric_for_trip_count(start: i128, stop: i128, step: i128) -> Option<u64> {
+        if step == 0 {
+            return None;
+        }
+        let count = if step > 0 {
+            if start > stop {
+                0
+            } else {
+                (stop - start) / step + 1
+            }
+        } else if start < stop {
+            0
+        } else {
+            (start - stop) / (-step) + 1
+        };
+        u64::try_from(count).ok()
+    }
+
+    fn checked_half_product(left: i128, right: i128) -> Option<i128> {
+        if left % 2 == 0 {
+            (left / 2).checked_mul(right)
+        } else if right % 2 == 0 {
+            left.checked_mul(right / 2)
+        } else {
+            None
+        }
+    }
+
+    fn checked_sum_of_squares_indices(n: i128) -> Option<i128> {
+        if n == 0 {
+            return Some(0);
+        }
+        let two_n_minus_one = n.checked_mul(2)?.checked_sub(1)?;
+        let mut factors = [n, n - 1, two_n_minus_one];
+        for divisor in [2, 3] {
+            let factor = factors.iter_mut().find(|factor| **factor % divisor == 0)?;
+            *factor /= divisor;
+        }
+        factors[0].checked_mul(factors[1])?.checked_mul(factors[2])
+    }
+
+    fn numeric_for_closed_form_delta(
+        addend: NumericForAddend,
+        start: f64,
+        stop: f64,
+        step: f64,
+        remaining_iterations: u64,
+    ) -> Option<(u64, u64, i128)> {
+        let start = Self::exact_lua_integer(start)?;
+        let stop = Self::exact_lua_integer(stop)?;
+        let step = Self::exact_lua_integer(step)?;
+        let trips = Self::numeric_for_trip_count(start, stop, step)?;
+        let consumed_iterations = trips.checked_mul(2)?.checked_add(1)?;
+        if consumed_iterations > remaining_iterations {
+            return None;
+        }
+        let n = i128::from(trips);
+        if n == 0 {
+            return Some((trips, consumed_iterations, 0));
+        }
+
+        let delta = match addend {
+            NumericForAddend::LoopVar => {
+                let last = start.checked_add((n - 1).checked_mul(step)?)?;
+                Self::checked_half_product(n, start.checked_add(last)?)?
+            }
+            NumericForAddend::LoopVarSquare => {
+                let sum_k = Self::checked_half_product(n, n - 1)?;
+                let sum_k_squared = Self::checked_sum_of_squares_indices(n)?;
+                let start_squared = start.checked_mul(start)?;
+                let step_squared = step.checked_mul(step)?;
+                let first = n.checked_mul(start_squared)?;
+                let second = start
+                    .checked_mul(step)?
+                    .checked_mul(2)?
+                    .checked_mul(sum_k)?;
+                let third = step_squared.checked_mul(sum_k_squared)?;
+                first.checked_add(second)?.checked_add(third)?
+            }
+        };
+        if delta.abs() <= LUA_EXACT_INTEGER_LIMIT {
+            Some((trips, consumed_iterations, delta))
+        } else {
+            None
+        }
+    }
+
     fn execute_numeric_for_add_assign_fast_path(
         &mut self,
         loop_name: &str,
@@ -4221,6 +4325,27 @@ impl<'a> LuaState<'a> {
                 return None;
             }
         };
+
+        if let Some(acc_int) = Self::exact_lua_integer(acc) {
+            let remaining_iterations = MAX_ITERATIONS.saturating_sub(self.iterations);
+            if let Some((trips, consumed_iterations, delta)) = Self::numeric_for_closed_form_delta(
+                addend,
+                current,
+                stop,
+                step,
+                remaining_iterations,
+            ) && let Some(final_acc) = acc_int.checked_add(delta)
+                && final_acc.abs() <= LUA_EXACT_INTEGER_LIMIT
+            {
+                self.iterations += consumed_iterations;
+                if trips > 0 {
+                    self.current_line = body_line;
+                }
+                *acc_cell.borrow_mut() = LuaValue::Number(final_acc as f64);
+                env.pop_scope();
+                return Some(Ok(ControlFlow::None));
+            }
+        }
 
         loop {
             self.iterations += 1;
@@ -20500,6 +20625,18 @@ end
             (
                 b"local s=0; for i=1,1000 do s=i*i+s end; return s",
                 RespFrame::Integer(333_833_500),
+            ),
+            (
+                b"local s=0; for i=1000,1,-1 do s=s+i end; return s",
+                RespFrame::Integer(500_500),
+            ),
+            (
+                b"local s=0; for i=1,999,2 do s=s+i end; return s",
+                RespFrame::Integer(250_000),
+            ),
+            (
+                b"local s=0; for i=1,10,3 do s=s+i*i end; return s",
+                RespFrame::Integer(166),
             ),
             (
                 b"local s='0'; for i=1,3 do s=s+i end; return s",
