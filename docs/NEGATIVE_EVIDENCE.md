@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — SWAR 8-digit integer parsing in parse_i64 — 2.04x/8-digits, 1.36x on an 18-digit parse (byte-exact)
+
+RADICAL primitive: SWAR (SIMD-within-a-register) integer parsing via Lemire's multiply-fold, replacing
+`parse_i64`'s per-digit scalar loop for long integers. `parse_i64` is on the hottest paths — every intset
+`canonical_int` (SISMEMBER/SADD/SREM/SINTER member), SET int-encoding, INCR/DECR. The scalar loop does one
+branch + two overflow checks PER digit; the SWAR path folds EIGHT validated digits per step with a single
+`u64` load + a few multiplies and NO per-digit branch: `eight_bytes_all_ascii_digits` (a 4-ALU-op SWAR
+range predicate) gates `parse_eight_digits_swar` (fold digit pairs ×10 → 2-digit groups ×100 → 4-digit
+halves ×10000, three multiplies total). Wired into `parse_i64` as `while p + 8 <= slen { … }` before the
+scalar tail — so numbers ≤ 8 digits skip it entirely (one length compare, NO regression) and ≥ 9-digit
+numbers (IDs, 13-digit ms timestamps, 18-19-digit snowflakes) get the fold.
+
+BYTE-EXACT: the SWAR path produces the identical running `v` and the identical u64-overflow rejection as
+the scalar loop (which digit rejects is irrelevant — both return `ValueNotInteger`); no leading-zero risk
+(it runs only after a validated `1..=9` first digit). `parse_i64_swar_matches_scalar_reference_and_reports_ab`
+asserts `parse_i64 == ` a verbatim copy of the original scalar loop over **5M+** inputs: every signed int
+in ±2M, a 1M coprime-stride sweep across the full i64 range, and boundary/overflow/leading-zero/sign/
+whitespace malforms (`9223372036854775808`, `18446744073709551616`, `007`, `+1`, `-0`, `1 2`, …). Callers
+green: incr (29) sadd (5) intset (7) sismember (2) setrange (4) append (11) lpush (6);
+`swar_parse_eight_digits_matches_scalar_and_reports_ab` sweeps 6M+ 8-digit values + non-digit rejection.
+
+MEASURED (fr-store A/B, per-crate rch):
+- pure 8-digit fold: scalar 1.98 ns vs SWAR 0.97 ns = **2.04x**.
+- full `parse_i64` on an 18-digit number: scalar 17.39 ns vs SWAR 12.78 ns = **1.36x** (prefix/suffix
+  checks + i64-range dilute the raw 2x; short ints unchanged).
+
+General lesson: a per-digit atoi loop is a branch-per-byte hotspot; SWAR-fold 8 digits at a time (Lemire)
+for the long-integer case behind a `p + 8 <= len` gate — byte-exact, ~2x on the digit run, zero cost for
+short inputs. Reusable anywhere fr parses decimal integers from bytes (arg counts, indices, ttls).
+
 ## 2026-07-05 CrimsonHawk: KEEP — branchless (cmov) intset membership search — 2.12x absent-heavy (SINTERCARD/SINTER), parity present (byte-transparent)
 
 RADICAL primitive (not another alloc-elim): a monobound BRANCHLESS binary search for the intset (`i64`)

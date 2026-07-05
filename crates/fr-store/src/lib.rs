@@ -29136,6 +29136,30 @@ fn normalize_weighted_score(score: f64, weight: f64) -> f64 {
     if s.is_nan() { 0.0 } else { s }
 }
 
+/// (CrimsonHawk) SWAR (SIMD-within-a-register) predicate: are all 8 bytes ASCII
+/// digits `'0'..='9'`? `& 0xF0` == `0x30` pins the high nibble to 3 (bytes
+/// `0x30..=0x3F`); adding 6 and re-checking the high nibble rejects `0x3A..=0x3F`
+/// (`':'..='?'`). One `u64` load + 4 ALU ops covers all 8 bytes, no per-byte branch.
+#[inline]
+fn eight_bytes_all_ascii_digits(chunk: u64) -> bool {
+    (chunk & 0xF0F0_F0F0_F0F0_F0F0) == 0x3030_3030_3030_3030
+        && (chunk.wrapping_add(0x0606_0606_0606_0606) & 0xF0F0_F0F0_F0F0_F0F0)
+            == 0x3030_3030_3030_3030
+}
+
+/// (CrimsonHawk) Parse 8 ASCII digits (already validated) into their value in
+/// `[0, 99_999_999]` via Lemire's SWAR multiply-fold — combines adjacent digit
+/// pairs (×10), then 2-digit groups (×100), then 4-digit halves (×10000), each a
+/// single multiply, with NO per-digit loop or branch. `chunk` is the little-endian
+/// `u64` of the 8 bytes in source order (byte 0 = most significant digit).
+#[inline]
+fn parse_eight_digits_swar(chunk: u64) -> u64 {
+    let val = chunk - 0x3030_3030_3030_3030;
+    let byte10 = ((val.wrapping_mul(1 + (10 << 8))) >> 8) & 0x00FF_00FF_00FF_00FF;
+    let short100 = ((byte10.wrapping_mul(1 + (100 << 16))) >> 16) & 0x0000_FFFF_0000_FFFF;
+    short100.wrapping_mul(1 + (10000 << 32)) >> 32
+}
+
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
     let slen = bytes.len();
     if slen == 0 || slen > 20 {
@@ -29157,6 +29181,23 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
     if bytes[p] >= b'1' && bytes[p] <= b'9' {
         let mut v: u64 = (bytes[p] - b'0') as u64;
         p += 1;
+        // (CrimsonHawk) SWAR fast path — fold 8 validated ASCII digits per step (Lemire multiply-fold)
+        // instead of the per-digit scalar loop below. Byte-EXACT: it produces the same running `v` and
+        // the same u64-overflow rejection as the scalar loop (which position rejects is irrelevant — both
+        // return ValueNotInteger). The chunk stops on the first non-digit so the scalar tail handles the
+        // remainder (and any error). No leading-zero risk: this branch only runs after a 1..=9 first digit.
+        while p + 8 <= slen {
+            let chunk = u64::from_le_bytes(bytes[p..p + 8].try_into().unwrap());
+            if !eight_bytes_all_ascii_digits(chunk) {
+                break;
+            }
+            let eight = parse_eight_digits_swar(chunk);
+            if v > (u64::MAX - eight) / 100_000_000 {
+                return Err(StoreError::ValueNotInteger);
+            }
+            v = v * 100_000_000 + eight;
+            p += 8;
+        }
         while p < slen {
             let b = bytes[p];
             if b.is_ascii_digit() {
@@ -42632,6 +42673,184 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) SWAR 8-digit parse (Lemire multiply-fold) matches scalar over a broad exhaustive
+    // sweep + edges, and the all-digits predicate rejects non-digits. A/B vs the scalar digit loop.
+    #[test]
+    fn swar_parse_eight_digits_matches_scalar_and_reports_ab() {
+        use crate::{eight_bytes_all_ascii_digits, parse_eight_digits_swar};
+        fn to_8(n: u64) -> [u8; 8] {
+            let mut a = [b'0'; 8];
+            let mut n = n;
+            for i in (0..8).rev() {
+                a[i] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            a
+        }
+        fn scalar8(a: &[u8; 8]) -> u64 {
+            let mut v = 0u64;
+            for &c in a {
+                v = v * 10 + (c - b'0') as u64;
+            }
+            v
+        }
+        // Direction sanity: byte 0 must be the most-significant digit.
+        assert_eq!(
+            parse_eight_digits_swar(u64::from_le_bytes(*b"12345678")),
+            12_345_678
+        );
+        // Exhaustive over the low 3M values + a coprime stride across the full 8-digit range + edges.
+        let mut probes: Vec<u64> = (0..3_000_000u64).collect();
+        probes.extend((0..3_000_000u64).map(|k| (k.wrapping_mul(33_333_331) + 7) % 100_000_000));
+        probes.extend([0, 1, 9_999_999, 10_000_000, 99_999_999, 12_345_678, 87_654_321]);
+        for n in probes {
+            let a = to_8(n);
+            let chunk = u64::from_le_bytes(a);
+            assert!(eight_bytes_all_ascii_digits(chunk), "n={n}");
+            assert_eq!(parse_eight_digits_swar(chunk), scalar8(&a), "n={n}");
+        }
+        // Predicate rejects non-digits (colon, slash, letters, space).
+        for bad in [b"1234567:", b"1234/678", b"abcdefgh", b"1234 678", b"12345678"] {
+            let is_digit = eight_bytes_all_ascii_digits(u64::from_le_bytes(*bad));
+            assert_eq!(is_digit, bad.iter().all(|c| c.is_ascii_digit()), "bad={bad:?}");
+        }
+        // A/B: SWAR vs scalar 8-digit accumulation.
+        let a = to_8(87_654_321);
+        let chunk = u64::from_le_bytes(a);
+        let reps = 20_000_000u64;
+        let mut sink = 0u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink.wrapping_add(scalar8(std::hint::black_box(&a)));
+        }
+        let scalar_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink.wrapping_add(parse_eight_digits_swar(std::hint::black_box(chunk)));
+        }
+        let swar_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        std::hint::black_box(sink);
+        println!(
+            "8-digit parse: scalar={scalar_ns:.2} ns | SWAR={swar_ns:.2} ns = {:.2}x",
+            scalar_ns / swar_ns
+        );
+    }
+
+    // (CrimsonHawk) parse_i64 with the SWAR digit fast path is byte-EXACT to the original scalar loop
+    // across millions of signed ints, boundary/overflow strings, leading-zero/sign/whitespace malforms.
+    #[test]
+    fn parse_i64_swar_matches_scalar_reference_and_reports_ab() {
+        use crate::parse_i64;
+        // Verbatim copy of the ORIGINAL scalar parse_i64 (pre-SWAR) as the oracle.
+        fn reference(bytes: &[u8]) -> Option<i64> {
+            let slen = bytes.len();
+            if slen == 0 || slen > 20 {
+                return None;
+            }
+            if slen == 1 && bytes[0] == b'0' {
+                return Some(0);
+            }
+            let mut p = 0;
+            let negative = bytes[0] == b'-';
+            if negative {
+                p += 1;
+                if p == slen {
+                    return None;
+                }
+            }
+            if bytes[p] >= b'1' && bytes[p] <= b'9' {
+                let mut v: u64 = (bytes[p] - b'0') as u64;
+                p += 1;
+                while p < slen {
+                    let b = bytes[p];
+                    if b.is_ascii_digit() {
+                        if v > (u64::MAX / 10) {
+                            return None;
+                        }
+                        v *= 10;
+                        let digit = (b - b'0') as u64;
+                        if v > (u64::MAX - digit) {
+                            return None;
+                        }
+                        v += digit;
+                        p += 1;
+                    } else {
+                        return None;
+                    }
+                }
+                if negative {
+                    let limit = (i64::MIN as u64).wrapping_neg();
+                    if v > limit {
+                        return None;
+                    }
+                    return Some(v.wrapping_neg() as i64);
+                } else {
+                    if v > i64::MAX as u64 {
+                        return None;
+                    }
+                    return Some(v as i64);
+                }
+            }
+            None
+        }
+        for n in -2_000_000i64..2_000_000 {
+            let s = n.to_string();
+            assert_eq!(parse_i64(s.as_bytes()).ok(), reference(s.as_bytes()), "n={n}");
+        }
+        let mut x = i64::MIN;
+        for _ in 0..1_000_000u64 {
+            let s = x.to_string();
+            assert_eq!(parse_i64(s.as_bytes()).ok(), reference(s.as_bytes()), "x={x}");
+            x = x.wrapping_add(18_446_744_073_709_551i64);
+        }
+        for bad in [
+            &b""[..],
+            b"00",
+            b"007",
+            b"+1",
+            b"--1",
+            b"-",
+            b"1a",
+            b"1 2",
+            b" 1",
+            b"1 ",
+            b"123456789012345678901",
+            b"9223372036854775808",
+            b"-9223372036854775809",
+            b"18446744073709551616",
+            b"99999999999999999999",
+            b"0",
+            b"-0",
+            b"01234567890",
+            b"1000000000000000000",
+        ] {
+            assert_eq!(
+                parse_i64(bad).ok(),
+                reference(bad),
+                "bad={:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        let long = b"123456789012345678";
+        let reps = 10_000_000u64;
+        let mut sink = 0i64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink.wrapping_add(reference(std::hint::black_box(&long[..])).unwrap_or(0));
+        }
+        let scalar_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink.wrapping_add(parse_i64(std::hint::black_box(&long[..])).unwrap_or(0));
+        }
+        let swar_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        std::hint::black_box(sink);
+        println!(
+            "parse_i64 @18-digit: scalar={scalar_ns:.2} ns | SWAR={swar_ns:.2} ns = {:.2}x",
+            scalar_ns / swar_ns
+        );
     }
 
     // (CrimsonHawk) Branchless (cmov) intset membership — byte-identical to std binary_search, faster on
