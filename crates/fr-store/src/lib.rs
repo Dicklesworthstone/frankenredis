@@ -3225,6 +3225,11 @@ const SET_BULK_BUILD_MIN: usize = 64;
 /// `insert_borrowed` calls are cheaper than the merge's sort + result-Vec alloc.
 const SADD_INT_MERGE_MIN: usize = 8;
 
+/// (CrimsonHawk) Minimum member count for the bulk integer-SREM retain-filter fast
+/// path (`SetValue::try_srem_int_batch_retain`); below this, K individual
+/// `shift_remove` calls are cheaper than the sort + single retain pass.
+const SREM_INT_BATCH_MIN: usize = 8;
+
 /// This is the foundational storage type for the intset memory optimisation
 /// (frankenredis-hjob8); it is verified in isolation here and wired into
 /// `Value::Set` in a follow-up.
@@ -3637,6 +3642,53 @@ impl SetValue {
             SetValue::Int(_) => self.shift_remove(member),
             SetValue::Generic(s) => s.swap_remove(member),
         }
+    }
+
+    /// (CrimsonHawk) Batch-retain fast path for bulk integer SREM from an intset:
+    /// the twin of [`try_sadd_int_batch_merge`]. K individual `shift_remove` calls
+    /// are each an O(n) `Vec::remove` shift (O(k·n) total); this parses+sorts the K
+    /// targets (O(k log k)) then removes them all in a SINGLE in-place retain pass
+    /// (O(n)) via a two-pointer merge. Returns `Some(removed)`, byte-identical to
+    /// summing `shift_remove`, iff `self` is `Int` and K ≥ `SREM_INT_BATCH_MIN`.
+    ///
+    /// No size/encoding gate is needed (removal only shrinks, never promotes) and
+    /// non-integer members need no fallback: they can never be in an intset, so
+    /// `shift_remove` returns false for them — the retain simply skips them. Order
+    /// (ascending) and the `removed` count (distinct present targets, so duplicate
+    /// args collapse exactly as repeated `shift_remove` no-ops) match the loop.
+    fn try_srem_int_batch_retain<M: AsRef<[u8]>>(&mut self, members: &[M]) -> Option<u64> {
+        if members.len() < SREM_INT_BATCH_MIN {
+            return None;
+        }
+        let SetValue::Int(v) = self else {
+            return None;
+        };
+        let mut to_remove: Vec<i64> = Vec::with_capacity(members.len());
+        for m in members {
+            if let Some(n) = Self::canonical_int(m.as_ref()) {
+                to_remove.push(n);
+            }
+        }
+        to_remove.sort_unstable();
+        to_remove.dedup();
+        let mut write = 0usize;
+        let mut r = 0usize;
+        let mut removed = 0u64;
+        for read in 0..v.len() {
+            let x = v[read];
+            while r < to_remove.len() && to_remove[r] < x {
+                r += 1;
+            }
+            if r < to_remove.len() && to_remove[r] == x {
+                removed += 1;
+                r += 1;
+            } else {
+                v[write] = x;
+                write += 1;
+            }
+        }
+        v.truncate(write);
+        Some(removed)
     }
 
     pub fn iter(&self) -> SetValueIter<'_> {
@@ -14658,14 +14710,22 @@ impl Store {
                 entry.touch(now_ms);
                 match &mut entry.value {
                     Value::Set(s) => {
-                        let mut removed = 0_u64;
-                        for m in members {
-                            // (frankenredis-sremfast) Order-agnostic O(1) remove
-                            // for hashtable-encoded sets (was O(n) per member).
-                            if s.swap_remove(m) {
-                                removed += 1;
+                        // (CrimsonHawk) Bulk integer SREM from an intset collapses K O(n)
+                        // shift_removes into one O(n) retain pass; else the per-member loop
+                        // (frankenredis-sremfast swap_remove is order-agnostic O(1) for
+                        // hashtable-encoded sets, and O(n) shift_remove for intsets).
+                        let removed = match s.try_srem_int_batch_retain(members) {
+                            Some(n) => n,
+                            None => {
+                                let mut removed = 0_u64;
+                                for m in members {
+                                    if s.swap_remove(m) {
+                                        removed += 1;
+                                    }
+                                }
+                                removed
                             }
-                        }
+                        };
                         if s.is_empty() {
                             // Emptying the set deletes the key — a real modification
                             // (internal_entries_remove signals it); only reached when
@@ -42927,6 +42987,84 @@ mod tests {
         println!(
             "parse_i64 @18-digit: scalar={scalar_ns:.2} ns | SWAR={swar_ns:.2} ns = {:.2}x",
             scalar_ns / swar_ns
+        );
+    }
+
+    // (CrimsonHawk) Bulk integer SREM retain-filter (O(n+k log k)) is byte-identical to K individual
+    // shift_remove (O(k·n)) — same final intset AND same `removed` — incl absent/non-int/duplicate members.
+    #[test]
+    fn srem_int_batch_retain_matches_individual_and_reports_ab() {
+        use crate::SetValue;
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let n = (next() % 400) as usize;
+            let mut existing: Vec<i64> = (0..n).map(|_| (next() % 400) as i64 - 200).collect();
+            existing.sort_unstable();
+            existing.dedup();
+            let k = 8 + (next() % 220) as usize;
+            let members: Vec<Vec<u8>> = (0..k)
+                .map(|_| {
+                    if next() % 6 == 0 {
+                        b"notanint".to_vec() // never in an intset ⇒ no-op both paths
+                    } else {
+                        ((next() % 500) as i64 - 250).to_string().into_bytes()
+                    }
+                })
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let mut set_ind = SetValue::Int(existing.clone());
+            let mut removed_ind = 0u64;
+            for m in &refs {
+                if set_ind.swap_remove(m) {
+                    removed_ind += 1;
+                }
+            }
+            let mut set_rt = SetValue::Int(existing.clone());
+            let removed_rt = set_rt
+                .try_srem_int_batch_retain(&refs)
+                .expect("retain should apply for an intset with K >= min");
+            assert_eq!(removed_rt, removed_ind, "removed mismatch");
+            assert_eq!(
+                set_rt.as_int_slice().unwrap(),
+                set_ind.as_int_slice().unwrap(),
+                "final set mismatch"
+            );
+        }
+        // A/B: SREM 120 present ints spread across a 400-element intset (front-loaded ⇒ each individual
+        // Vec::remove shifts the tail; both paths clone the base first).
+        let base: Vec<i64> = (0..400i64).collect();
+        let members: Vec<Vec<u8>> = (0..120i64).map(|n| (n * 3).to_string().into_bytes()).collect();
+        let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+        let reps = 40_000u64;
+        let mut sink = 0u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut set = SetValue::Int(base.clone());
+            for m in &refs {
+                if set.swap_remove(m) {
+                    sink += 1;
+                }
+            }
+            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+        }
+        let ind_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut set = SetValue::Int(base.clone());
+            sink += set.try_srem_int_batch_retain(&refs).unwrap_or(0);
+            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+        }
+        let rt_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        std::hint::black_box(sink);
+        println!(
+            "SREM 120 ints from 400-intset (incl base clone): individual={ind_ns:.0} ns | retain={rt_ns:.0} ns = {:.2}x",
+            ind_ns / rt_ns
         );
     }
 

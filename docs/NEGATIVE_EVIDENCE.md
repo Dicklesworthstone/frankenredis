@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — bulk integer SREM retain-filter (O(k·n) → O(n + k log k)) — 3.11x, byte-identical
+
+The algorithmic TWIN of the SADD sort-merge, closing the intset bulk-mutation symmetry. Bulk SREM of K
+integers from an intset was K `shift_remove` calls — each `binary_search` + an O(n) `Vec::remove` shift, so
+O(k·n) (the `sremfast` swap_remove is O(1) only for the HASHTABLE encoding; for an intset it delegates to
+the sorted `shift_remove`). Replaced with `try_srem_int_batch_retain`: parse+`sort_unstable`+`dedup` the K
+targets (O(k log k)), then ONE in-place two-pointer retain pass over the intset (O(n)) that drops every
+target in a single tail-compaction instead of K separate shifts.
+
+CLEANER than the SADD twin — no size/encoding gate (removal only shrinks, never promotes) and NO non-int
+fallback: a non-integer member can never be in an intset, so `shift_remove` returns false for it and the
+retain simply skips it. Ascending order and the `removed` count (distinct present targets — duplicate args
+collapse exactly as repeated `shift_remove` no-ops) match the individual loop.
+BYTE-IDENTICAL: `srem_int_batch_retain_matches_individual_and_reports_ab` asserts final-set AND `removed`
+equality over 3000 randomized scenarios mixing present / absent / non-int / duplicated members; srem (5)
+spop (5) sadd (6) intset (7) smembers (3) sscan (3) sinter (4) sunion (2) suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, SREM 120 present ints spread across a 400-element intset, base clone
+in BOTH arms): individual = 7281 ns vs retain = 2342 ns = **3.11x** (higher than the SADD 2.60x — SREM
+removals are front-loaded, so each `Vec::remove` shifts more of the tail). General lesson: a per-item
+`sorted_vec.remove()` loop is a hidden O(k·n); a batched sort-then-single-retain compaction is O(n + k log k)
+and byte-identical. Intset bulk SADD (merge) + SREM (retain) now BOTH beat ORIG (redis mutates one member
+at a time). Same shape reusable for any bulk sorted-vec delete.
+
 ## 2026-07-05 CrimsonHawk: KEEP — bulk integer SADD sort-merge (O(k·n) → O(n + k log k)) — 2.60x interleaved, byte-identical
 
 RADICAL algorithmic primitive (not a microarch tweak): bulk SADD of K integers into an EXISTING intset was
