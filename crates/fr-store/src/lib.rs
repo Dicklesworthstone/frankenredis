@@ -17712,6 +17712,7 @@ impl Store {
     /// and membership/order via [`SortedSet::score_bound_range_limited_refs`] (which
     /// preserves the deep-offset treap jump + lazy skip/take), streaming borrowed
     /// members with no `Vec<(Vec<u8>, f64)>` clone.
+    #[allow(clippy::too_many_arguments)]
     pub fn zrangebyscore_members_limit_borrow_scan(
         &mut self,
         key: &[u8],
@@ -19895,6 +19896,7 @@ impl Store {
     /// same `range(start..=end)` walk + `count` limit, same post-walk `touch` (Stream + non-empty
     /// range only). Records are collected as borrowed `(id, FieldsRef)` refs solely to emit the outer
     /// `*N` count before the records; the fields never leave the buffer.
+    #[allow(clippy::too_many_arguments)]
     pub fn xrange_borrow_scan(
         &mut self,
         key: &[u8],
@@ -20603,6 +20605,7 @@ impl Store {
     /// read: mut-then-immut, output-invariant), then the `pending.range((Excluded(start),Unbounded))`
     /// walk filtered by consumer with each entry's fields BORROWED from the packed buffer (or a
     /// `RecordStartNil` tombstone when the underlying stream entry was `XDEL`'d). `RecordCount` first.
+    #[allow(clippy::too_many_arguments)]
     pub fn xreadgroup_history_borrow_scan(
         &mut self,
         key: &[u8],
@@ -24062,7 +24065,6 @@ impl Store {
                             let refs: Vec<(&[u8], f64)> = zs
                                 .iter_asc()
                                 .filter(|(member, _)| scan_pattern_matches(pattern, member))
-                                .map(|(member, score)| (member, score))
                                 .collect();
                             sink(ZscanReplyEvent::Cursor(0));
                             sink(ZscanReplyEvent::Len(refs.len()));
@@ -35082,10 +35084,8 @@ mod tests {
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
 
         // HGETALL borrow-scan: Len + interleaved k,v (insertion order).
-        let (glen, gkv) = scan_len_members(&mut s, |s, sink| {
-            s.hgetall_borrow_scan(b"h", 2, |e| sink(e))
-        })
-        .unwrap();
+        let (glen, gkv) =
+            scan_len_members(&mut s, |s, sink| s.hgetall_borrow_scan(b"h", 2, sink)).unwrap();
         assert_eq!(glen, 2);
         assert_eq!(
             gkv,
@@ -35093,12 +35093,12 @@ mod tests {
         );
         // HKEYS / HVALS.
         let (klen, keys) = scan_len_members(&mut s, |s, sink| {
-            s.hcollection_borrow_scan(b"h", 2, false, |e| sink(e))
+            s.hcollection_borrow_scan(b"h", 2, false, sink)
         })
         .unwrap();
         assert_eq!((klen, keys), (2, vec![b"a".to_vec(), b"bb".to_vec()]));
         let (vlen, vals) = scan_len_members(&mut s, |s, sink| {
-            s.hcollection_borrow_scan(b"h", 2, true, |e| sink(e))
+            s.hcollection_borrow_scan(b"h", 2, true, sink)
         })
         .unwrap();
         assert_eq!((vlen, vals), (2, vec![b"1".to_vec(), b"22".to_vec()]));
@@ -36750,6 +36750,7 @@ mod tests {
             })?;
             Ok(o)
         }
+        #[allow(clippy::too_many_arguments)]
         fn lim(
             s: &mut Store,
             k: &[u8],
@@ -36924,6 +36925,7 @@ mod tests {
             })?;
             Ok(o)
         }
+        #[allow(clippy::too_many_arguments)]
         fn lexlim(
             s: &mut Store,
             k: &[u8],
@@ -38068,6 +38070,8 @@ mod tests {
     #[test]
     fn hrandfield_count_pair_borrow_scan_matches_clone() {
         use crate::HrandfieldWithValuesScanEvent;
+        type HashPairs = Vec<(Vec<u8>, Vec<u8>)>;
+
         fn build(n: u32) -> Store {
             let mut s = Store::new();
             for i in 0..n {
@@ -38081,7 +38085,7 @@ mod tests {
             }
             s
         }
-        fn borrow_pairs(s: &mut Store, count: i64) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        fn borrow_pairs(s: &mut Store, count: i64) -> Result<HashPairs, StoreError> {
             let mut out = Vec::new();
             s.hrandfield_count_pair_borrow_scan(b"h", count, 2, |ev| {
                 if let HrandfieldWithValuesScanEvent::Pair(field, value) = ev {
