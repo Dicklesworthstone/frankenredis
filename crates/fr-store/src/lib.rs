@@ -3263,6 +3263,29 @@ impl SetValue {
         }
     }
 
+    /// (CrimsonHawk) Visit every member's bytes in iteration order, WITHOUT the
+    /// per-int `Vec` alloc that `iter()` pays for the intset encoding (its
+    /// `Cow::Owned(set_int_to_bytes(n))` materializes a heap `Vec` per member).
+    /// Ints are formatted into a reused stack buffer; the generic encoding streams
+    /// its borrowed members unchanged. Byte-identical order + bytes to
+    /// `for m in self.iter() { f(m.as_ref()) }`.
+    fn each_member_bytes(&self, mut f: impl FnMut(&[u8])) {
+        match self.as_int_slice() {
+            Some(ints) => {
+                let mut buf = [0u8; 21];
+                for &n in ints {
+                    let len = integer_decimal_into(&mut buf, n);
+                    f(&buf[..len]);
+                }
+            }
+            None => {
+                for m in self.iter() {
+                    f(m.as_ref());
+                }
+            }
+        }
+    }
+
     fn from_single_borrowed(member: &[u8], max_intset_entries: usize) -> Self {
         if max_intset_entries > 0
             && let Some(n) = Self::canonical_int(member)
@@ -4135,6 +4158,23 @@ fn integer_decimal_bytes(value: i64) -> Vec<u8> {
     }
     out.extend_from_slice(&scratch[start..]);
     out
+}
+
+/// (CrimsonHawk) Canonical decimal bytes for `value` written into a caller-owned
+/// stack buffer (`>= 21` bytes: up to 19 digits + optional sign), returning the
+/// written length. Byte-identical to [`integer_decimal_bytes`] but WITHOUT the
+/// per-call `Vec` — lets intset reads stream members with zero heap allocation.
+fn integer_decimal_into(out: &mut [u8; 21], value: i64) -> usize {
+    let mut scratch = [0u8; 20];
+    let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
+    let digits = &scratch[start..];
+    let mut len = 0;
+    if value.is_negative() {
+        out[0] = b'-';
+        len = 1;
+    }
+    out[len..len + digits.len()].copy_from_slice(digits);
+    len + digits.len()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14584,9 +14624,7 @@ impl Store {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         sink(SmembersScanEvent::Len(s.len()));
-                        for m in s.iter() {
-                            sink(SmembersScanEvent::Member(m.as_ref()));
-                        }
+                        s.each_member_bytes(|m| sink(SmembersScanEvent::Member(m)));
                         entry.touch(now_ms);
                         Ok(())
                     }
@@ -14614,9 +14652,7 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     sink(SmembersScanEvent::Len(s.len()));
-                    for m in s.iter() {
-                        sink(SmembersScanEvent::Member(m.as_ref()));
-                    }
+                    s.each_member_bytes(|m| sink(SmembersScanEvent::Member(m)));
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
@@ -41226,6 +41262,40 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) Intset members stream through `each_member_bytes` (stack buffer) instead of
+    // `iter()`'s `Cow::Owned(set_int_to_bytes(n))` (a heap Vec per member) — byte-identical bytes/order.
+    #[test]
+    fn intset_each_member_bytes_matches_iter_and_reports_ab() {
+        use crate::SetValue;
+        // Byte-identity vs the Cow iter() path across tricky ints (MIN/MAX/negative/zero).
+        let intset = SetValue::Int(vec![i64::MIN, -100, -1, 0, 1, 100, i64::MAX]);
+        let via_iter: Vec<Vec<u8>> = intset.iter().map(|m| m.into_owned()).collect();
+        let mut via_helper: Vec<Vec<u8>> = Vec::new();
+        intset.each_member_bytes(|m| via_helper.push(m.to_vec()));
+        assert_eq!(via_iter, via_helper);
+        // A/B: 1000-member intset — old materializes a Vec per member, new uses a stack buffer.
+        let big = SetValue::Int((0..1000i64).collect());
+        let reps = 20_000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            big.iter().for_each(|m| {
+                std::hint::black_box(m.as_ref());
+            });
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / (reps * 1000) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            big.each_member_bytes(|m| {
+                std::hint::black_box(m);
+            });
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / (reps * 1000) as f64;
+        println!(
+            "intset member stream: iter()+Cow::Owned={old_ns:.1} ns/member | each_member_bytes(stack)={new_ns:.1} ns/member = {:.2}x",
+            old_ns / new_ns
+        );
     }
 
     // (CrimsonHawk) The LRU/LFU eviction-candidate selection clones the winner ONCE at the end (by

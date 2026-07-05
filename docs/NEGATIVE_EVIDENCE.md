@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — intset SMEMBERS streams members alloc-free (stack buffer, not per-int Vec) — 3.08x/member (byte-transparent)
+
+Dug a DIFFERENT primitive (per-member iterator-materialization alloc, not a running-best clone) in an
+UNTOUCHED area (Sets; peer active on zset/lua). `SetValueIter` yields `Cow::Owned(set_int_to_bytes(n))`
+for the INTSET encoding — a fresh heap `Vec` per member, materialized only to be encoded into the reply
+and dropped. `smembers_borrow_scan` (the zero-copy SMEMBERS fast path) hit this on every integer-set read
+(sets of IDs are common). Added `SetValue::each_member_bytes(f)`: for the intset it formats each i64 into
+a REUSED 21-byte stack buffer via new `integer_decimal_into` (same `fr_protocol::write_u64_digits` + sign
+logic as `integer_decimal_bytes`, no `Vec`); the generic encoding streams its borrowed members unchanged.
+Routed both SMEMBERS loops (non-LFU + LFU) through it.
+
+BYTE-TRANSPARENT: `intset_each_member_bytes_matches_iter_and_reports_ab` asserts `each_member_bytes` ==
+`iter().map(into_owned)` across i64::MIN / MAX / negatives / zero; existing smembers (3) + intset (5)
+fuzz/conformance suites stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, 1000-member intset streamed): `iter()`+`Cow::Owned` (Vec/member) =
+14.0 ns/member vs `each_member_bytes` (stack buffer) = **4.5 ns/member = 3.08x** — the per-member heap Vec
+gone. For a 1000-member intset SMEMBERS that is ~9.5 µs of alloc churn removed per call. The
+`each_member_bytes` helper is reusable — SINTER/SUNION/SDIFF/SSCAN/SRANDMEMBER read paths hit the same
+`Cow::Owned` intset materialization and are the next targets. General lesson: an iterator that returns
+`Cow::Owned` to unify encodings pays a hidden per-item heap alloc on the owned arm — give hot consumers a
+`fn each_*(f: impl FnMut(&[u8]))` that formats into a reused stack buffer.
+
 ## 2026-07-04 CrimsonHawk: KEEP — Lua numeric-for square accumulator fast path — EVAL compute 18.06x vs ORIG (byte-transparent)
 
 Follow-on dig in the same Redis 7.2.4 scripting gap: after the bounded numeric-for `s=s+i`
