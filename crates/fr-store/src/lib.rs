@@ -3553,21 +3553,6 @@ impl SetValue {
         }
     }
 
-    /// Visit the member at encoding index `idx` without forcing the intset arm
-    /// through an owned `Vec`. The visited bytes are identical to
-    /// `get_index(idx).as_deref()`, but intsets use a stack decimal buffer for
-    /// the duration of the callback.
-    fn with_index_bytes<R>(&self, idx: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
-        match self {
-            SetValue::Int(v) => v.get(idx).map(|&n| {
-                let mut buf = [0u8; 21];
-                let len = integer_decimal_into(&mut buf, n);
-                f(&buf[..len])
-            }),
-            SetValue::Generic(s) => s.get_index(idx).map(f),
-        }
-    }
-
     /// (frankenredis-spopfast) Remove and return the member at encoding index
     /// `idx` — the by-position counterpart of `shift_remove`, used by SPOP to
     /// avoid the `iter().nth(idx)` O(idx) scan (and, for intsets, the
@@ -15718,11 +15703,7 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Set(s) => match idx {
-                        Some(i) => {
-                            if s.with_index_bytes(i, |m| sink(Some(m))).is_none() {
-                                sink(None);
-                            }
-                        }
+                        Some(i) => sink(s.get_index(i).as_deref()),
                         None => sink(None),
                     },
                     _ => unreachable!("type checked above"),
@@ -15906,7 +15887,9 @@ impl Store {
                 Value::Set(s) => {
                     sink(SmembersScanEvent::Len(indices.len()));
                     for &idx in &indices {
-                        s.with_index_bytes(idx, |m| sink(SmembersScanEvent::Member(m)));
+                        if let Some(c) = s.get_index(idx) {
+                            sink(SmembersScanEvent::Member(c.as_ref()));
+                        }
                     }
                     Ok(())
                 }
@@ -42624,12 +42607,6 @@ mod tests {
         let mut via_helper: Vec<Vec<u8>> = Vec::new();
         intset.each_member_bytes(|m| via_helper.push(m.to_vec()));
         assert_eq!(via_iter, via_helper);
-        for (idx, expected) in via_iter.iter().enumerate() {
-            let mut got = Vec::new();
-            intset.with_index_bytes(idx, |m| got.extend_from_slice(m));
-            assert_eq!(&got, expected, "with_index_bytes mismatch at {idx}");
-        }
-        assert!(intset.with_index_bytes(via_iter.len(), |_| ()).is_none());
         // A/B: 1000-member intset — old materializes a Vec per member, new uses a stack buffer.
         let big = SetValue::Int((0..1000i64).collect());
         let reps = 20_000u64;

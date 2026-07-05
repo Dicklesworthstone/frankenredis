@@ -710,45 +710,6 @@ fn bench_zlexcount_borrowed_bounds(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_srandmember_intset_borrow(c: &mut Criterion) {
-    use fr_store::SmembersScanEvent;
-
-    const N: usize = 512;
-    let mut store = Store::new();
-    for i in 0..N {
-        store
-            .sadd(b"s", &[i.to_string().into_bytes()], 1_000)
-            .unwrap();
-    }
-
-    let mut g = c.benchmark_group("srandmember_intset_borrow");
-    g.bench_function("single", |b| {
-        b.iter(|| {
-            let mut acc = 0usize;
-            store
-                .srandmember_borrow(std::hint::black_box(b"s"), 2_000, |m| {
-                    acc += m.map_or(0, <[u8]>::len);
-                })
-                .unwrap();
-            std::hint::black_box(acc)
-        })
-    });
-    g.bench_function("count50", |b| {
-        b.iter(|| {
-            let mut acc = 0usize;
-            store
-                .srandmember_count_borrow_scan(std::hint::black_box(b"s"), 50, 2_000, |ev| {
-                    if let SmembersScanEvent::Member(m) = ev {
-                        acc += m.len();
-                    }
-                })
-                .unwrap();
-            std::hint::black_box(acc)
-        })
-    });
-    g.finish();
-}
-
 fn ttl_clone_each_best(keys: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut best_key: Option<Vec<u8>> = None;
     let mut best_ttl = u64::MAX;
@@ -807,7 +768,6 @@ criterion_group!(
     bench_hrandfield_withvalues,
     bench_zscan0_borrow,
     bench_zlexcount_borrowed_bounds,
-    bench_srandmember_intset_borrow,
     bench_ttl_eviction_candidate_clone
 );
 criterion_main!(benches);

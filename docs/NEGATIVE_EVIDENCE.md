@@ -4,7 +4,7 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-05 CrimsonHawk: KEEP — volatile-TTL eviction-candidate select defers the winner clone — 5.47x vs ORIG primitive (byte-transparent)
+## 2026-07-05 CrimsonHawk: KEEP — volatile-TTL eviction-candidate select defers the winner clone — 4.00x conservative / 5.47x RCH vs ORIG primitive (byte-transparent)
 
 Consulted the existing negative-evidence ledger first: LRU/LFU eviction selection had already landed the
 running-best clone deferral, but the `volatile-ttl` sibling still used the old `best_key =
@@ -30,6 +30,25 @@ shape): command `AGENT_NAME=CrimsonHawk CARGO_TARGET_DIR=/data/projects/.rch-tar
 `ttl_eviction_candidate_clone/orig_clone_each_best` point estimate **1.5674 us** `[1.4711, 1.6886]`;
 NEW `ttl_eviction_candidate_clone/defer_winner_clone` point estimate **286.62 ns** `[286.45, 286.90]` =
 **5.47x vs ORIG**. Build gate: `cargo check -p fr-store --all-targets` via RCH `vmi1149989`: GREEN.
+Local fallback reproduction after the RCH worker pin was ignored measured ORIG `orig_clone_each_best`
+**1.4131 us** `[1.4076, 1.4269]` vs NEW `defer_winner_clone` **353.46 ns**
+`[341.99, 371.86]` = **4.00x vs ORIG**, so this ledger records the shipped conservative ratio as
+4.00x and the same-worker RCH primitive ratio as 5.47x.
+
+## 2026-07-05 CrimsonHawk: NO-SHIP — SRANDMEMBER intset index visitor was noise/regression; removed
+
+Tried to extend the SMEMBERS intset stack-buffer lesson to SRANDMEMBER's index-based borrowed paths with
+`SetValue::with_index_bytes(idx, f)`, so `srandmember_borrow` and `srandmember_count_borrow_scan` could
+avoid `get_index(idx)` materializing a `Cow::Owned(Vec<u8>)` for intset members. The idea looked plausible
+from the successful full-stream SMEMBERS lever, but SRANDMEMBER's index path is too small/noisy and the
+extra callback shape did not earn its keep.
+
+MEASURED (SHORT same-host local Criterion fallback, `CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`;
+RCH worker pin was unavailable/ignored): ORIG `srandmember_intset_borrow/single` **54.950 ns**
+`[53.954, 56.115]` vs candidate **58.179 ns** `[54.319, 62.508]` = **0.94x vs ORIG**; ORIG
+`srandmember_intset_borrow/count50` **1.9568 us** `[1.8877, 2.0051]` vs candidate **2.0646 us**
+`[1.9803, 2.1789]` = **0.95x vs ORIG**. Dropped the helper, runtime calls, and bench row. Keep
+`each_member_bytes` only for full streaming consumers until a fresh measured primitive says otherwise.
 
 ## 2026-07-05 CrimsonHawk: KEEP — intset SMEMBERS streams members alloc-free (stack buffer, not per-int Vec) — 3.08x/member (byte-transparent)
 
