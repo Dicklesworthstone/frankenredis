@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — branchless intset probe reaches the last 2 membership sites (skewed SINTER/SDIFF) — 1.16x disjoint (byte-identical)
+
+Completion sweep: the branchless (cmov) `intset_binary_search_contains` (shipped b687c0b05, 2.12x absent on
+the raw search) had been wired into SISMEMBER + SINTERCARD but NOT the two skewed set-algebra probes. When
+the large intset dwarfs the small one (`large >= 32·small`), `intersect_sorted_i64` (SINTER) and
+`diff_sorted_i64` (SDIFF) fall out of the linear-merge path into a per-`small`-member full-array
+`binary_search` over the large array. Both are absent-heavy in the common disjoint case — SINTER keeps
+`is_ok` hits, SDIFF keeps `is_err` misses — so both benefit from the no-misprediction search. Replaced both
+std `binary_search` calls with `intset_binary_search_contains`; this KEEPS the deliberate cache-warm
+full-array probe (the finger/galloping variant was measured ~16x slower and is intentionally avoided), only
+removing the data-dependent branch.
+
+WHY NOT GALLOPING (already-rejected, not retried): a shrinking-finger / galloping probe over the large
+array was measured ~16x slower here (cache: the hot top-of-tree nodes stay resident across a fixed-array
+search) and the standalone galloping-intersection perf-assert also degraded to 0.80x. Branchless is
+orthogonal — same array, same access pattern, just cmov instead of a mispredicted branch.
+
+BYTE-IDENTICAL: `intset_skewed_intersect_diff_branchless_matches_and_reports_ab` asserts
+`intersect_sorted_i64`/`diff_sorted_i64` == std-`binary_search` references over 500 random skewed cases
+(mixed present/absent small members); sinter (4) sdiff (3) sintercard (1) sunion (2) intset (8) suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, skewed DISJOINT intersect, 40 small into 4000 large, per-probe):
+std `binary_search` = 13.73 ns vs branchless = 11.88 ns = **1.16x** — modest at the function level (the raw
+search win of 2.12x is diluted by the `.collect()` and small-array iteration); parity on overlapping
+(present-heavy) intersections, so no regression. All intset membership sites are now branchless. General
+lesson: after landing a microarch primitive, sweep every caller of the primitive it replaces —
+`binary_search().is_ok()`/`.is_err()` on a hot sorted array is the branchless-search signature.
+
 ## 2026-07-05 CrimsonHawk: KEEP — bulk integer SREM retain-filter (O(k·n) → O(n + k log k)) — 3.11x, byte-identical
 
 The algorithmic TWIN of the SADD sort-merge, closing the intset bulk-mutation symmetry. Bulk SREM of K

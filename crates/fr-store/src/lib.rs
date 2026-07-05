@@ -3930,7 +3930,9 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
         // top-of-tree nodes stay resident across all probes) — measured ~16x
         // slower. So keep the cache-warm full-array search the old code used.
         for &x in small {
-            if large.binary_search(&x).is_ok() {
+            // (CrimsonHawk) Branchless (cmov) full-array probe — same cache-warm search, no branch
+            // to mispredict on absent-heavy (disjoint) intersections. Byte-identical to `binary_search`.
+            if intset_binary_search_contains(large, x) {
                 out.push(x);
             }
         }
@@ -3980,10 +3982,11 @@ fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     }
 
     if b.len() >= a.len().saturating_mul(GALLOP_RATIO) {
-        // `b` dwarfs `a`: full-array binary search per `a` member (cache-warm).
+        // `b` dwarfs `a`: full-array binary search per `a` member (cache-warm). Branchless (cmov) probe
+        // — SDIFF keeps members ABSENT from `b`, so probes are absent-heavy: exactly the branchless win.
         a.iter()
             .copied()
-            .filter(|x| b.binary_search(x).is_err())
+            .filter(|x| !intset_binary_search_contains(b, *x))
             .collect()
     } else {
         // Similar sizes: a single linear merge, emitting `a` members absent in `b`.
@@ -42987,6 +42990,77 @@ mod tests {
         println!(
             "parse_i64 @18-digit: scalar={scalar_ns:.2} ns | SWAR={swar_ns:.2} ns = {:.2}x",
             scalar_ns / swar_ns
+        );
+    }
+
+    // (CrimsonHawk) Skewed intset SINTER/SDIFF probe (large >= 32x small) now uses the branchless (cmov)
+    // full-array search — byte-identical to std binary_search, faster on the absent-heavy disjoint case.
+    #[test]
+    fn intset_skewed_intersect_diff_branchless_matches_and_reports_ab() {
+        use crate::{diff_sorted_i64, intersect_sorted_i64};
+        fn ref_intersect(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            small
+                .iter()
+                .copied()
+                .filter(|x| large.binary_search(x).is_ok())
+                .collect::<Vec<_>>()
+        }
+        fn ref_diff(a: &[i64], b: &[i64]) -> Vec<i64> {
+            a.iter()
+                .copied()
+                .filter(|x| b.binary_search(x).is_err())
+                .collect::<Vec<_>>()
+        }
+        let mut seed = 0xdead_beef_cafe_1234u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..500 {
+            let mut large: Vec<i64> = (0..2000).map(|_| (next() % 100_000) as i64).collect();
+            large.sort_unstable();
+            large.dedup();
+            // small (~20) with a deliberate mix of present + absent (skewed ratio guarantees the probe path)
+            let mut small: Vec<i64> = (0..20)
+                .map(|_| {
+                    if next() % 2 == 0 {
+                        large[(next() as usize) % large.len()] // present
+                    } else {
+                        (next() % 100_000) as i64 + 100_000 // absent (out of large's range)
+                    }
+                })
+                .collect();
+            small.sort_unstable();
+            small.dedup();
+            assert_eq!(
+                intersect_sorted_i64(&small, &large),
+                ref_intersect(&small, &large)
+            );
+            assert_eq!(diff_sorted_i64(&small, &large), ref_diff(&small, &large));
+        }
+        // A/B: skewed DISJOINT intersection (absent-heavy) — branchless fn vs std-binary_search reference.
+        let large: Vec<i64> = (0..4000i64).map(|n| n * 2).collect(); // evens
+        let small: Vec<i64> = (0..40i64).map(|n| n * 2 + 1).collect(); // odds ⇒ all absent
+        let reps = 200_000u64;
+        let mut sink = 0i64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink.wrapping_add(ref_intersect(std::hint::black_box(&small), &large).len() as i64);
+        }
+        let std_ns = t0.elapsed().as_nanos() as f64 / (reps * small.len() as u64) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            sink = sink
+                .wrapping_add(intersect_sorted_i64(std::hint::black_box(&small), &large).len() as i64);
+        }
+        let bl_ns = t1.elapsed().as_nanos() as f64 / (reps * small.len() as u64) as f64;
+        std::hint::black_box(sink);
+        println!(
+            "skewed intset SINTER probe (disjoint, per-probe): std binary_search={std_ns:.2} ns | branchless={bl_ns:.2} ns = {:.2}x",
+            std_ns / bl_ns
         );
     }
 
