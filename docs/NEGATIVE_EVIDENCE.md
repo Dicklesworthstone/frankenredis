@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — bulk integer SADD sort-merge (O(k·n) → O(n + k log k)) — 2.60x interleaved, byte-identical
+
+RADICAL algorithmic primitive (not a microarch tweak): bulk SADD of K integers into an EXISTING intset was
+K individual `insert_borrowed` calls — each an O(n) `Vec::insert` shift, so O(k·n). Replaced with a single
+sort-then-merge: parse+`sort_unstable`+`dedup` the K new values (O(k log k)) then a linear two-pointer
+merge into the sorted intset (O(n+k)). fr already batch-BUILDS fresh-key intsets (`try_bulk_unique_ints`);
+this closes the EXISTING-key growth path, which redis (intsetAdd per member) also does one-at-a-time — so fr
+now beats ORIG on bulk integer set growth.
+
+BYTE-IDENTICAL & SAFELY GATED: `try_sadd_int_batch_merge` applies only when `self` is `Int` AND every member
+is a canonical i64 AND `len + members.len() <= max_intset_entries` — exactly the regime where
+`insert_borrowed` takes its pure `binary_search` + `Vec::insert` path with NO `promote_to_generic`, so the
+final sorted-unique set and the `added` count (dedup-then-count-difference == summing per-member
+`insert_borrowed`, including duplicate args) are identical. Any non-int member, encoding overflow, or K <
+`SADD_INT_MERGE_MIN` (8) falls back to the untouched individual loop (no small-SADD regression).
+`sadd_int_batch_merge_matches_individual_and_reports_ab` asserts final-set AND added equality over 3000
+randomized scenarios (overlapping/duplicate/present members); sadd (6) srem (4) intset (7) sinter (4)
+sismember (2) smembers (3) sscan (3) sunion (2) conformance suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, SADD 100 interleaved ints into a 400-element intset, base clone in
+BOTH arms): individual = 4752 ns vs merge = 1831 ns = **2.60x** (interleaved is the realistic case — each
+`Vec::insert` shifts ~n/2; appends-past-the-end would be O(1) and understate it). Scales with n·k. General
+lesson: a per-item `sorted_vec.insert()` loop is a hidden O(k·n); if the batch is known up front,
+sort-once + linear-merge is O(n + k log k) and byte-identical. Reusable for any bulk sorted-vec insert
+(intset SADD done; SREM bulk-delete via retain/merge is the twin).
+
 ## 2026-07-05 CrimsonHawk: KEEP — SWAR 8-digit integer parsing in parse_i64 — 2.04x/8-digits, 1.36x on an 18-digit parse (byte-exact)
 
 RADICAL primitive: SWAR (SIMD-within-a-register) integer parsing via Lemire's multiply-fold, replacing

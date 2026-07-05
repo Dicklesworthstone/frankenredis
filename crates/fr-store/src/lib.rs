@@ -3220,6 +3220,11 @@ pub enum HrandfieldWithValuesScanEvent<'a> {
 /// just past this threshold.
 const SET_BULK_BUILD_MIN: usize = 64;
 
+/// (CrimsonHawk) Minimum member count for the bulk integer-SADD sort-merge fast
+/// path (`SetValue::try_sadd_int_batch_merge`). Below this, K individual
+/// `insert_borrowed` calls are cheaper than the merge's sort + result-Vec alloc.
+const SADD_INT_MERGE_MIN: usize = 8;
+
 /// This is the foundational storage type for the intset memory optimisation
 /// (frankenredis-hjob8); it is verified in isolation here and wired into
 /// `Value::Set` in a follow-up.
@@ -3531,6 +3536,72 @@ impl SetValue {
             },
             SetValue::Generic(s) => s.insert_borrowed(member),
         }
+    }
+
+    /// (CrimsonHawk) Batch-merge fast path for bulk integer SADD into an EXISTING
+    /// intset: replaces K individual `insert_borrowed` calls — each an O(n)
+    /// `Vec::insert` shift, so O(k·n) total — with a single sort-then-merge, O(n +
+    /// k·log k). Returns `Some(added)` (byte-identical to summing `insert_borrowed`)
+    /// iff it applied, else `None` (the caller runs the individual loop).
+    ///
+    /// Gated so the result is provably still an intset (`self` is `Int` AND every
+    /// member is a canonical i64 AND `len + members.len() <= max_intset_entries`),
+    /// which is exactly the case where `insert_borrowed` would take its pure
+    /// `binary_search` + `Vec::insert` path with NO `promote_to_generic` — so the
+    /// final sorted-unique set and the `added` count match it exactly. A small K is
+    /// left to the individual loop (merge's sort + result alloc do not pay off).
+    fn try_sadd_int_batch_merge<M: AsRef<[u8]>>(
+        &mut self,
+        members: &[M],
+        max_intset_entries: usize,
+    ) -> Option<u64> {
+        if members.len() < SADD_INT_MERGE_MIN {
+            return None;
+        }
+        let SetValue::Int(v) = self else {
+            return None;
+        };
+        if v.len() + members.len() > max_intset_entries {
+            return None;
+        }
+        let mut new_vals: Vec<i64> = Vec::with_capacity(members.len());
+        for m in members {
+            match Self::canonical_int(m.as_ref()) {
+                Some(n) => new_vals.push(n),
+                None => return None,
+            }
+        }
+        new_vals.sort_unstable();
+        new_vals.dedup();
+        let mut merged: Vec<i64> = Vec::with_capacity(v.len() + new_vals.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        let mut added = 0u64;
+        while i < v.len() && j < new_vals.len() {
+            match v[i].cmp(&new_vals[j]) {
+                std::cmp::Ordering::Less => {
+                    merged.push(v[i]);
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(new_vals[j]);
+                    j += 1;
+                    added += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(v[i]);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        merged.extend_from_slice(&v[i..]);
+        while j < new_vals.len() {
+            merged.push(new_vals[j]);
+            j += 1;
+            added += 1;
+        }
+        *v = merged;
+        Some(added)
     }
 
     /// Remove `member`, returning true if it was present. (Generic removal keeps
@@ -14481,12 +14552,18 @@ impl Store {
                         let was_intset_encoded = !had_set_listpack_encoding
                             && !had_set_hashtable_encoding
                             && Self::set_fits_intset(s, max_intset_entries);
-                        let mut added = 0_u64;
-                        for m in members {
-                            if s.insert_borrowed(m.as_ref(), max_intset_entries) {
-                                added += 1;
+                        let added = match s.try_sadd_int_batch_merge(members, max_intset_entries) {
+                            Some(n) => n,
+                            None => {
+                                let mut added = 0_u64;
+                                for m in members {
+                                    if s.insert_borrowed(m.as_ref(), max_intset_entries) {
+                                        added += 1;
+                                    }
+                                }
+                                added
                             }
-                        }
+                        };
                         if added > 0 {
                             // An intset that overflows set-max-intset-entries via an
                             // integer add converts DIRECTLY to hashtable, never
@@ -42850,6 +42927,83 @@ mod tests {
         println!(
             "parse_i64 @18-digit: scalar={scalar_ns:.2} ns | SWAR={swar_ns:.2} ns = {:.2}x",
             scalar_ns / swar_ns
+        );
+    }
+
+    // (CrimsonHawk) Bulk integer SADD sort-merge (O(n+k log k)) is byte-identical to K individual
+    // insert_borrowed (O(k·n)) — same final sorted-unique intset AND same `added` — over random scenarios.
+    #[test]
+    fn sadd_int_batch_merge_matches_individual_and_reports_ab() {
+        use crate::SetValue;
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let max_intset = 512usize;
+        for _ in 0..3000 {
+            let n_existing = (next() % 220) as usize;
+            let k = 8 + (next() % 220) as usize;
+            if n_existing + k > max_intset {
+                continue;
+            }
+            let mut existing: Vec<i64> =
+                (0..n_existing).map(|_| (next() % 400) as i64 - 200).collect();
+            existing.sort_unstable();
+            existing.dedup();
+            // Members: overlapping range (some new, some present, some duplicated within the args).
+            let members: Vec<Vec<u8>> = (0..k)
+                .map(|_| ((next() % 500) as i64 - 250).to_string().into_bytes())
+                .collect();
+            let mut set_ind = SetValue::Int(existing.clone());
+            let mut added_ind = 0u64;
+            for m in &members {
+                if set_ind.insert_borrowed(m, max_intset) {
+                    added_ind += 1;
+                }
+            }
+            let mut set_mrg = SetValue::Int(existing.clone());
+            let added_mrg = set_mrg
+                .try_sadd_int_batch_merge(&members, max_intset)
+                .expect("merge should apply under the size gate");
+            assert_eq!(added_mrg, added_ind, "added mismatch");
+            assert_eq!(
+                set_mrg.as_int_slice().unwrap(),
+                set_ind.as_int_slice().unwrap(),
+                "final set mismatch"
+            );
+        }
+        // A/B: SADD 100 INTERLEAVED fresh ints into a 400-element intset (the realistic case — each
+        // individual Vec::insert shifts ~n/2 elements; appends-past-the-end would be the best case for
+        // the individual loop and understate the win). Both paths clone the base first.
+        let base: Vec<i64> = (0..400i64).map(|n| n * 2).collect(); // evens 0..798
+        let members: Vec<Vec<u8>> = (0..100i64).map(|n| (n * 8 + 1).to_string().into_bytes()).collect(); // odds, front-loaded
+        let reps = 40_000u64;
+        let mut sink = 0u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut set = SetValue::Int(base.clone());
+            for m in &members {
+                if set.insert_borrowed(m, 512) {
+                    sink += 1;
+                }
+            }
+            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+        }
+        let ind_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut set = SetValue::Int(base.clone());
+            sink += set.try_sadd_int_batch_merge(&members, 512).unwrap_or(0);
+            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+        }
+        let mrg_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        std::hint::black_box(sink);
+        println!(
+            "SADD 100 ints into 400-intset (incl base clone): individual={ind_ns:.0} ns | merge={mrg_ns:.0} ns = {:.2}x",
+            ind_ns / mrg_ns
         );
     }
 
