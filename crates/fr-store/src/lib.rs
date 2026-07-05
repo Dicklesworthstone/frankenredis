@@ -3238,6 +3238,37 @@ fn set_int_to_bytes(n: i64) -> Vec<u8> {
     integer_decimal_bytes(n)
 }
 
+/// (CrimsonHawk) Branchless (cmov) membership test for a sorted, unique-`i64`
+/// intset — byte-identical result to `arr.binary_search(&target).is_ok()`. The
+/// index update is unconditional arithmetic (`bot += (cond as usize) * mid`), so
+/// the hot comparison lowers to a conditional-move with NO data-dependent branch
+/// to mispredict, and — unlike std's `Ordering`-returning search — there is a
+/// single `<=` comparison per step and no early-exit branch. That wins on the
+/// absent-heavy lookups intset intersection generates (SINTERCARD/SINTER probe the
+/// smallest set against every other, short-circuiting on the first miss).
+///
+/// The monobound invariant `bot + top <= len` holds every step (initially `0 +
+/// len`; each step replaces `top` with `top - mid` and adds at most `mid` to
+/// `bot`), so `bot + mid < bot + top <= len` and the final `bot < len`. The
+/// `.min(last)` clamps are no-ops under that invariant but prove in-bounds to the
+/// compiler so it drops the panic branch — this crate is `#![forbid(unsafe_code)]`.
+fn intset_binary_search_contains(arr: &[i64], target: i64) -> bool {
+    let len = arr.len();
+    if len == 0 {
+        return false;
+    }
+    let last = len - 1;
+    let mut bot = 0usize;
+    let mut top = len;
+    while top > 1 {
+        let mid = top / 2;
+        let probe = arr[(bot + mid).min(last)];
+        bot += (probe <= target) as usize * mid;
+        top -= mid;
+    }
+    arr[bot.min(last)] == target
+}
+
 /// Iterator over `SetValue` members yielding owned bytes for the intset
 /// encoding (each i64 formatted on demand) and borrowed bytes for the generic
 /// encoding. (frankenredis-hjob8)
@@ -3424,7 +3455,7 @@ impl SetValue {
     pub fn contains(&self, member: &[u8]) -> bool {
         match self {
             SetValue::Int(v) => match Self::canonical_int(member) {
-                Some(n) => v.binary_search(&n).is_ok(),
+                Some(n) => intset_binary_search_contains(v, n),
                 None => false,
             },
             SetValue::Generic(s) => s.contains(member),
@@ -15248,7 +15279,10 @@ impl Store {
             if all_int {
                 let mut count = 0_u64;
                 for &x in min_ints {
-                    if other_ints.iter().all(|o| o.binary_search(&x).is_ok()) {
+                    if other_ints
+                        .iter()
+                        .all(|o| intset_binary_search_contains(o, x))
+                    {
                         count = count.saturating_add(1);
                         if limit > 0 && count >= limit {
                             return Ok(limit);
@@ -42598,6 +42632,72 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    // (CrimsonHawk) Branchless (cmov) intset membership — byte-identical to std binary_search, faster on
+    // absent-heavy lookups (SINTERCARD/SINTER short-circuit). Exhaustive identity + A/B both directions.
+    #[test]
+    fn intset_branchless_contains_matches_binary_search_and_reports_ab() {
+        use crate::intset_binary_search_contains;
+        // Exhaustive byte-identity vs std binary_search over small sorted-unique arrays + all targets.
+        for n in 0..=64usize {
+            let arr: Vec<i64> = (0..n as i64).map(|i| i * 2).collect();
+            for t in -2..=(2 * n as i64 + 2) {
+                assert_eq!(
+                    intset_binary_search_contains(&arr, t),
+                    arr.binary_search(&t).is_ok(),
+                    "n={n} t={t}"
+                );
+            }
+        }
+        let edge = vec![i64::MIN, -100, -1, 0, 1, 100, i64::MAX];
+        for t in [i64::MIN, i64::MIN + 1, -100, -50, 0, 1, 99, 100, i64::MAX - 1, i64::MAX] {
+            assert_eq!(
+                intset_binary_search_contains(&edge, t),
+                edge.binary_search(&t).is_ok()
+            );
+        }
+        // A/B on a 512-element intset (default set-max-intset-entries): absent-heavy (the SINTER pattern)
+        // and present-heavy.
+        let arr: Vec<i64> = (0..512i64).map(|i| i * 3).collect();
+        let absent: Vec<i64> = (0..512i64).map(|i| i * 3 + 1).collect();
+        let present = arr.clone();
+        let reps = 5000u64;
+        let mut sink = 0u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &t in &absent {
+                sink += arr.binary_search(&t).is_ok() as u64;
+            }
+        }
+        let std_abs = t0.elapsed().as_nanos() as f64 / (reps * 512) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &t in &absent {
+                sink += intset_binary_search_contains(&arr, t) as u64;
+            }
+        }
+        let bl_abs = t1.elapsed().as_nanos() as f64 / (reps * 512) as f64;
+        let t2 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &t in &present {
+                sink += arr.binary_search(&t).is_ok() as u64;
+            }
+        }
+        let std_pre = t2.elapsed().as_nanos() as f64 / (reps * 512) as f64;
+        let t3 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &t in &present {
+                sink += intset_binary_search_contains(&arr, t) as u64;
+            }
+        }
+        let bl_pre = t3.elapsed().as_nanos() as f64 / (reps * 512) as f64;
+        std::hint::black_box(sink);
+        println!(
+            "intset contains @512: ABSENT std={std_abs:.2} branchless={bl_abs:.2} = {:.2}x | PRESENT std={std_pre:.2} branchless={bl_pre:.2} = {:.2}x",
+            std_abs / bl_abs,
+            std_pre / bl_pre
+        );
     }
 
     // (CrimsonHawk) Intset members stream through `each_member_bytes` (stack buffer) instead of

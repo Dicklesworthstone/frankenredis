@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: KEEP — branchless (cmov) intset membership search — 2.12x absent-heavy (SINTERCARD/SINTER), parity present (byte-transparent)
+
+RADICAL primitive (not another alloc-elim): a monobound BRANCHLESS binary search for the intset (`i64`)
+membership probe, replacing `slice::binary_search`. std's search returns `Ordering` (two comparisons/step
++ an early-exit branch); the monobound form does ONE `<=` per step, updates the cursor by unconditional
+arithmetic (`bot += (probe <= target) as usize * mid`) — a conditional-MOVE, no data-dependent branch to
+mispredict — and has no early exit. Under `#![forbid(unsafe_code)]` the indices are clamped with `.min(
+last)` (no-ops under the monobound invariant `bot + top <= len`, but they prove in-bounds so the compiler
+drops the panic branch). Applied to `SetValue::contains` (SISMEMBER/SMISMEMBER) and the all-int
+SINTERCARD/SINTER intersection probe (`other_ints.iter().all(|o| ..contains(o, x))`).
+
+WHY IT WINS WHERE IT MATTERS: intersection short-circuits on the first MISS, so its probes are
+absent-heavy — exactly the case where std's early-exit never fires (the branch is pure overhead) and the
+monobound's no-misprediction search pulls ahead. Present-heavy lookups are parity (std's early exit
+offsets the monobound's always-full log2(n)).
+
+BYTE-TRANSPARENT: `intset_branchless_contains_matches_binary_search_and_reports_ab` asserts
+`intset_binary_search_contains == binary_search(..).is_ok()` EXHAUSTIVELY over every sorted-unique array
+n∈0..=64 and every target in-and-out of range, plus i64::MIN/MAX/negative/zero edges; sismember (2) +
+sinter (4) + smismember (2) + intset (7) conformance suites stay GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, 512-element intset = default set-max-intset-entries):
+- ABSENT-heavy (the SINTERCARD/SINTER pattern): std `binary_search` = 17.25 ns/probe vs branchless =
+  8.15 ns/probe = **2.12x**.
+- PRESENT-heavy: std = 9.50 ns vs branchless = 9.58 ns = 0.99x (parity, within noise — no regression).
+
+General lesson: `slice::binary_search`'s `Ordering` return + early-exit is a misprediction source on
+absent-heavy probes; a monobound cmov search (single `<=`, arithmetic cursor, `.min()`-clamped indices to
+stay `#![forbid(unsafe_code)]`) is byte-identical and ~2x on misses. Reusable for any sorted-`i64`
+membership probe (listpack/ziplist integer scans, sorted-int intersections).
+
 ## 2026-07-05 CrimsonHawk: KEEP — volatile-TTL eviction-candidate select defers the winner clone — 4.00x conservative / 5.47x RCH vs ORIG primitive (byte-transparent)
 
 Consulted the existing negative-evidence ledger first: LRU/LFU eviction selection had already landed the
