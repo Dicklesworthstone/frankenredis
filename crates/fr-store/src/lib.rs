@@ -3220,6 +3220,15 @@ pub enum HrandfieldWithValuesScanEvent<'a> {
 /// just past this threshold.
 const SET_BULK_BUILD_MIN: usize = 64;
 
+/// (CrimsonHawk) Minimum member count for the fresh-key bulk INT build
+/// ([`SetValue::try_bulk_unique_ints`]). Separate from the string threshold: the
+/// intset's individual fresh-build is O(k²) `Vec::insert` shifts up to
+/// `set-max-intset-entries` (default 512, vs the listpack's 128 cap), so the
+/// sort+dedup bulk (O(k log k)) pays off far earlier. A measured min-of-5
+/// fresh-build sweep shows the bulk winning from k≈4 (k=8 → 2.03x, k=16..128 →
+/// 1.45-1.82x); the old shared `SET_BULK_BUILD_MIN=64` left k=8..63 on the slow path.
+const SADD_BULK_INT_MIN: usize = 8;
+
 /// (CrimsonHawk) Minimum member count for the bulk integer-SADD sort-merge fast
 /// path (`SetValue::try_sadd_int_batch_merge`). Below this, K individual
 /// `insert_borrowed` calls are cheaper than the merge's sort + result-Vec alloc.
@@ -3413,7 +3422,7 @@ impl SetValue {
         members: &[M],
         max_intset_entries: usize,
     ) -> Option<(SetValue, u64)> {
-        if members.len() < SET_BULK_BUILD_MIN || members.len() > max_intset_entries {
+        if members.len() < SADD_BULK_INT_MIN || members.len() > max_intset_entries {
             return None;
         }
         let mut ints: Vec<i64> = Vec::with_capacity(members.len());
@@ -43258,6 +43267,102 @@ mod tests {
             "SREM 120 ints from 400-intset (incl base clone): individual={ind_ns:.0} ns | retain={rt_ns:.0} ns = {:.2}x",
             ind_ns / rt_ns
         );
+    }
+
+    // (CrimsonHawk) With SADD_BULK_INT_MIN lowered to 8, the fresh-key int bulk build now runs for
+    // k=8..63; assert it is byte-identical to the individual insert_borrowed loop over that whole range.
+    #[test]
+    fn saddbulk_int_matches_individual_across_lowered_threshold() {
+        use crate::SetValue;
+        let mut seed = 0xabcd_1234_5678_9012u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let k = 8 + (next() % 100) as usize; // 8..=107, spans the lowered range + past the old 64
+            let members: Vec<Vec<u8>> = (0..k)
+                .map(|_| ((next() % 2000) as i64 - 1000).to_string().into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let mut si = SetValue::new();
+            let mut ai = 0u64;
+            for m in &refs {
+                if si.insert_borrowed(m, 100_000) {
+                    ai += 1;
+                }
+            }
+            let (sb, ab) = SetValue::try_bulk_unique_ints(&refs, 100_000)
+                .expect("bulk-int must apply for k>=SADD_BULK_INT_MIN(8)");
+            assert_eq!(ab, ai, "added mismatch k={k}");
+            assert_eq!(
+                sb.as_int_slice().unwrap(),
+                si.as_int_slice().unwrap(),
+                "set mismatch k={k}"
+            );
+        }
+    }
+
+    // (CrimsonHawk) Fresh-key bulk-build crossover: individual insert_borrowed into an EMPTY intset
+    // (O(k²) shifts) vs try_bulk_unique_ints (sort+dedup, O(k log k)) — to audit SET_BULK_BUILD_MIN=64.
+    #[test]
+    #[ignore = "measurement tool; audits SET_BULK_BUILD_MIN for fresh-key int SADD"]
+    fn saddbulk_int_freshbuild_crossover_sweep() {
+        use crate::SetValue;
+        fn bench(k: usize) -> (f64, f64) {
+            // Random-ish members in a wide range (some dup) → realistic fresh int-set build.
+            let members: Vec<Vec<u8>> = (0..k as i64)
+                .map(|x| ((x.wrapping_mul(2_654_435_761)) % 1_000_000).to_string().into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let reps = 100_000u64;
+            let mut sink = 0u64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut s = SetValue::new();
+                for m in &refs {
+                    if s.insert_borrowed(m, 1_000_000) {
+                        sink += 1;
+                    }
+                }
+                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+            }
+            let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                // Inlined bulk build (bypasses the SET_BULK_BUILD_MIN gate to expose the true crossover).
+                let mut ints: Vec<i64> = refs
+                    .iter()
+                    .map(|m| std::str::from_utf8(m).unwrap().parse::<i64>().unwrap())
+                    .collect();
+                ints.sort_unstable();
+                ints.dedup();
+                sink += ints.len() as u64;
+                std::hint::black_box(&ints);
+            }
+            let bulk = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            (ind, bulk)
+        }
+        let best = |k: usize| {
+            let (mut bi, mut bb) = (f64::MAX, f64::MAX);
+            for _ in 0..5 {
+                let (i, b) = bench(k);
+                bi = bi.min(i);
+                bb = bb.min(b);
+            }
+            (bi, bb)
+        };
+        for &k in &[4usize, 8, 12, 16, 24, 32, 48, 64, 96, 128] {
+            let (ind, bulk) = best(k);
+            println!(
+                "FRESH int-build K={k:3}: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
+                ind / bulk,
+                if ind > bulk { "BULK-wins" } else { "individual-wins" }
+            );
+        }
     }
 
     // (CrimsonHawk) Crossover sweep: individual insert_borrowed vs the sort-merge across (N, K) to pick a

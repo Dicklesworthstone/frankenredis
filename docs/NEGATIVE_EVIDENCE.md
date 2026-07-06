@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-06 CrimsonHawk: KEEP — fresh-key bulk-INT SADD threshold 64→8 (split from the string const) — 1.45-2.03x for k=8..63, byte-identical
+
+Third threshold audit (the vein that already caught the SADD-merge and SREM-retain regressions). The
+fresh-key SADD bulk build (`try_bulk_unique_ints`: parse+sort+dedup = O(k log k)) was gated behind the
+SHARED `SET_BULK_BUILD_MIN=64`. But that 64 was tuned for the STRING case — its doc even says so: the
+listpack (generic) encoding caps at 128, so the string quadratic peaks near there. The INT case caps at
+`set-max-intset-entries` (default 512), so the individual fresh-build's O(k²) `Vec::insert` shifts have a
+FAR longer tail, and the bulk pays off much earlier. Result: k=8..63 fresh-key INT SADD was stuck on the
+slow O(k²) individual path.
+
+MEASURED (fr-store min-of-5 A/B, per-crate rch, individual insert_borrowed into an empty intset vs bulk
+sort+dedup, gate bypassed to expose the true crossover): bulk wins from k=4 (1.22x) — k=8 → **2.03x**, k=16
+→ 1.58x, k=24 → 1.62x, k=32 → 1.45x, k=48 → 1.51x, k=64 → 1.54x, k=128 → 1.82x. (The inlined bulk used std
+`parse`; the real path uses SWAR `canonical_int`, so the shipped speedup is if anything larger.)
+
+FIX: split off `SADD_BULK_INT_MIN = 8` and gate `try_bulk_unique_ints` on it; left `try_bulk_unique_strings`
+on the unchanged `SET_BULK_BUILD_MIN=64` (its listpack crossover was not measured this round — safe to keep).
+BYTE-IDENTICAL: the bulk-int algorithm (parse+sort+dedup→intset) is k-independent, so it was already proven
+== the individual loop for k>=64; `saddbulk_int_matches_individual_across_lowered_threshold` now asserts
+final-set AND added equality over 3000 random k=8..107 cases; sadd (7) intset (8) saddbulk (2) generic_set
+(2) suites GREEN; `#[ignore]` fresh-build crossover sweep tool added.
+
+STRING follow-on: measure the `try_bulk_unique_strings` listpack crossover next; 64 may also be loweable for
+strings (its individual build has the O(n) per-insert listpack scan), but I did not measure it, so per the
+"never assume, always sweep" lesson I left it alone.
+
 ## 2026-07-06 CrimsonHawk: KEEP (REGRESSION FIX #2) — SREM int-retain 2·k·k>=n size gate — my "in-place is safe" assumption was WRONG; fixes a 0.82x retain regression for small-k/large-n, byte-identical
 
 Yesterday's SADD fix note said SREM's IN-PLACE retain "wins from k~2 → left alone". That was an untested
