@@ -4,6 +4,38 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-05 CrimsonHawk: SURFACE (BLOCKER) — bounded per-crate levers landed/rejected; next target needs a FRESH sweep, not stale (pre-arc) data
+
+Not a "we're maxed" claim — a concrete blocker: I cannot responsibly pick this round's target because my
+inputs are stale. This session's 11-win arc (branchless intset membership ×5 sites, SWAR parse_i64, batch
+SADD-merge/SREM-retain, SMEMBERS stack-buffer, evict/lex/rank alloc-elim) POST-DATES every head-to-head
+artifact in this ledger (newest are 2026-06-20..24 baselines: e.g. they list `SINTERCARD 0.66x` and
+`SINTER-small 0.73x`, but I made the SINTERCARD/SINTER-skewed probe branchless on 2026-07-05). Picking a
+"0.6x" line from those tables would re-optimize something already fixed.
+
+VERIFIED THIS ROUND (so nobody re-checks): keyspace `entries` = `hashbrown::HashMap` (SwissTable h2 + SIMD
+group probe) + `foldhash` — already optimal on the per-command hottest path; HSCAN/SSCAN/ZSCAN reply
+`_into` borrow-scans shipped (2.20x/1.80x, whole cursor walk); ChunkedList is NOT a naive
+`VecDeque<Vec<u8>>` (0 such sites — packed/arena/`Arc` already), its arena-tail (0.63-0.87x) and
+VecDeque-decode (0.53x) rewrites were REJECTED and the 0.77-0.83x figure is flagged obsolete; LZF
+match-extension + `common_prefix_len` SWAR, CRC64 slice-by-8, BITPOS/popcount SWAR word-at-a-time all done.
+
+BLOCKER: every remaining KNOWN gap is structural and out of a clean 60m per-crate window — (1) command-hash
+dispatch (ohsk5): highest universal value but lives in `fr-server/main.rs`, whose `next_packet_id()` output
+is pinned by FR-P2C-* log-contract goldens, so a linear-chain→jump-table rewrite is a multi-round,
+golden-sensitive change; (2) ChunkedList packed-listpack nodes (99fwc): rewrite rejected twice; (3) EVAL
+Lua bytecode VM: the biggest single gap (compute-loop 0.07x) but peer-owned (lua) + multi-day; (4)
+keyspace/set-representation RAM 2x (p8dd2): RAM, not throughput.
+
+RECOMMENDATION (unblock next round, in order): (a) launch a FRESH default-config redis-7.2.4 oracle (the
+shared 16782 is config-polluted) + `taskset`-pinned fr, run `broad_command_headtohead.py` +
+`extended2_headtohead_ch.py`, and diff vs redis to get CURRENT (post-arc) gaps — this is the data-driven
+unblock and the only reliable way to choose a bounded target; (b) if a fresh sub-0.85x bounded command
+surfaces, attack it; (c) else commit a DEDICATED multi-round effort to ohsk5 command-hash dispatch (the
+single highest-value structural lever), starting by regenerating the FR-P2C-* goldens under the new
+dispatch so the jump-table change can be verified byte-for-byte. No code landed this round (no clean
+byte-exact bounded win found); no rejection to revert.
+
 ## 2026-07-05 CrimsonHawk: KEEP — branchless intset probe reaches the last 2 membership sites (skewed SINTER/SDIFF) — 1.16x disjoint (byte-identical)
 
 Completion sweep: the branchless (cmov) `intset_binary_search_contains` (shipped b687c0b05, 2.12x absent on
