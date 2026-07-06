@@ -3674,6 +3674,14 @@ impl SetValue {
         let SetValue::Int(v) = self else {
             return None;
         };
+        // (CrimsonHawk) SIZE gate, like SADD's merge. Even though the retain is IN-PLACE (no result
+        // alloc), it still touches EVERY element in one O(n) compaction pass — so for small k it loses
+        // to k partial `Vec::remove` shifts. A measured min-of-5 crossover sweep (intset n<=512) puts the
+        // retain crossover near `2·k·k >= n` (~k >= √(n/2)): n=128 wins from k=8, n=512 only from k≈16;
+        // the old flat `k>=8` ran the slow retain for k=8..15 on large intsets (n=512,k=8 was 0.82x).
+        if members.len().saturating_mul(members.len()).saturating_mul(2) < v.len() {
+            return None;
+        }
         let mut to_remove: Vec<i64> = Vec::with_capacity(members.len());
         for m in members {
             if let Some(n) = Self::canonical_int(m.as_ref()) {
@@ -43075,6 +43083,83 @@ mod tests {
         );
     }
 
+    // (CrimsonHawk) Crossover sweep for SREM: individual shift_remove vs the IN-PLACE retain compaction.
+    // Retain has no result alloc (unlike SADD merge), so it should win from very low k. `#[ignore]` (~10s).
+    #[test]
+    #[ignore = "measurement tool; documents the SREM retain threshold"]
+    fn srem_int_retain_crossover_sweep() {
+        use crate::SetValue;
+        fn bench(n: usize, k: usize) -> (f64, f64) {
+            let base: Vec<i64> = (0..n as i64).map(|x| x * 2).collect(); // evens
+            // k PRESENT members, front-loaded so each individual Vec::remove shifts a long tail.
+            let step = (n / k.max(1)).max(1);
+            let members: Vec<Vec<u8>> = (0..k)
+                .map(|x| ((x * step) as i64 * 2).to_string().into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let reps = 80_000u64;
+            let mut sink = 0u64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut s = SetValue::Int(base.clone());
+                for m in &refs {
+                    if s.swap_remove(m) {
+                        sink += 1;
+                    }
+                }
+                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+            }
+            let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut v = base.clone();
+                let mut to_remove: Vec<i64> = refs
+                    .iter()
+                    .map(|m| std::str::from_utf8(m).unwrap().parse::<i64>().unwrap())
+                    .collect();
+                to_remove.sort_unstable();
+                to_remove.dedup();
+                let (mut write, mut r) = (0usize, 0usize);
+                for read in 0..v.len() {
+                    let x = v[read];
+                    while r < to_remove.len() && to_remove[r] < x {
+                        r += 1;
+                    }
+                    if r < to_remove.len() && to_remove[r] == x {
+                        r += 1;
+                    } else {
+                        v[write] = x;
+                        write += 1;
+                    }
+                }
+                v.truncate(write);
+                sink += v.len() as u64;
+            }
+            let ret = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            (ind, ret)
+        }
+        let best = |n: usize, k: usize| {
+            let (mut bi, mut br) = (f64::MAX, f64::MAX);
+            for _ in 0..5 {
+                let (i, r) = bench(n, k);
+                bi = bi.min(i);
+                br = br.min(r);
+            }
+            (bi, br)
+        };
+        for &n in &[64usize, 128, 256, 512] {
+            for &k in &[2usize, 3, 4, 5, 6, 8] {
+                let (ind, ret) = best(n, k);
+                println!(
+                    "SREM N={n:4} K={k}: individual={ind:7.0} ns | retain={ret:7.0} ns = {:.2}x {}",
+                    ind / ret,
+                    if ind > ret { "RETAIN" } else { "indiv" }
+                );
+            }
+        }
+    }
+
     // (CrimsonHawk) Bulk integer SREM retain-filter (O(n+k log k)) is byte-identical to K individual
     // shift_remove (O(k·n)) — same final intset AND same `removed` — incl absent/non-int/duplicate members.
     #[test]
@@ -43111,15 +43196,37 @@ mod tests {
                 }
             }
             let mut set_rt = SetValue::Int(existing.clone());
-            let removed_rt = set_rt
+            // Retain now also has a 2·k·k>=n SIZE gate, so it may decline for small-k/large-n; when it
+            // DOES apply it must be byte-identical to the individual loop.
+            if let Some(removed_rt) = set_rt.try_srem_int_batch_retain(&refs) {
+                assert_eq!(removed_rt, removed_ind, "removed mismatch");
+                assert_eq!(
+                    set_rt.as_int_slice().unwrap(),
+                    set_ind.as_int_slice().unwrap(),
+                    "final set mismatch"
+                );
+            }
+        }
+        // Guaranteed-apply cases (2·k·k >= n) so the retain itself is always exercised for byte-identity.
+        for &(n, k) in &[(8usize, 8usize), (128, 8), (256, 16), (400, 32)] {
+            let existing: Vec<i64> = (0..n as i64).map(|x| x * 2).collect();
+            let members: Vec<Vec<u8>> = (0..k as i64)
+                .map(|x| (x * 6).to_string().into_bytes()) // spread present + some absent
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let mut si = SetValue::Int(existing.clone());
+            let mut ri = 0u64;
+            for m in &refs {
+                if si.swap_remove(m) {
+                    ri += 1;
+                }
+            }
+            let mut sr = SetValue::Int(existing.clone());
+            let rr = sr
                 .try_srem_int_batch_retain(&refs)
-                .expect("retain should apply for an intset with K >= min");
-            assert_eq!(removed_rt, removed_ind, "removed mismatch");
-            assert_eq!(
-                set_rt.as_int_slice().unwrap(),
-                set_ind.as_int_slice().unwrap(),
-                "final set mismatch"
-            );
+                .expect("2·k·k>=n ⇒ retain must apply");
+            assert_eq!(rr, ri);
+            assert_eq!(sr.as_int_slice().unwrap(), si.as_int_slice().unwrap());
         }
         // A/B: SREM 120 present ints spread across a 400-element intset (front-loaded ⇒ each individual
         // Vec::remove shifts the tail; both paths clone the base first).

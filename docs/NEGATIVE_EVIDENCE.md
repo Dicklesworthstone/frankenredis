@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-06 CrimsonHawk: KEEP (REGRESSION FIX #2) — SREM int-retain 2·k·k>=n size gate — my "in-place is safe" assumption was WRONG; fixes a 0.82x retain regression for small-k/large-n, byte-identical
+
+Yesterday's SADD fix note said SREM's IN-PLACE retain "wins from k~2 → left alone". That was an untested
+assumption and it was WRONG. Auditing it with a min-of-5 crossover sweep: the retain still touches EVERY
+element in one O(n) compaction pass, so it too has a crossover — near `2·k·k >= n` (~k >= √(n/2)), LOWER
+than the merge's √n (retain has no result alloc) but non-zero. Measured (intset n<=512): n=64 crosses at
+k≈4, n=128 at k≈5, n=256 at k≈8, n=512 above k=8 (k=8 = 0.82x, i.e. retain 539 ns vs individual 441 ns).
+So the shipped flat `SREM_INT_BATCH_MIN=8` ran the SLOW retain for k=8..~15 on large intsets = a fr-vs-redis
+regression (redis does one-at-a-time shift_remove == fr's individual path).
+
+FIX: add `2*members.len()*members.len() >= v.len()` to `try_srem_int_batch_retain` (kept the k>=8 floor).
+Large-k bulk SREM still uses the retain (the K=120 A/B re-measured 4.64x); small-k/large-n falls back to the
+fast individual loop. BYTE-IDENTICAL: the retain result was already proven == the shift_remove loop for any
+k; the gate only changes WHICH path runs. `srem_int_batch_retain_matches_individual_and_reports_ab` updated
+(assert-when-applies + guaranteed-apply 2·k·k>=n cases); srem (5) sadd (6) intset (8) spop (5) suites GREEN;
+a `#[ignore]` SREM crossover sweep tool added.
+
+MEASURED ratio-vs-ORIG (ORIG = shipped flat-k>=8 retain; fr-store A/B, per-crate rch): worst regressed
+point n=512,k=8 — retain 539 ns vs the individual 441 ns the gate now selects = **~1.22x** (bench includes
+the common base clone; production has none, so the real gain is larger; fr goes from 0.82x back to ~1.0x vs
+redis there). REINFORCED LESSON: BOTH out-of-place (alloc+copy) AND in-place (full compaction pass) batch
+fast paths have a size-dependent crossover — the O(n) full pass is the cost, not just the alloc. ALWAYS
+sweep the (n,k) grid before shipping a batch fast path, and NEVER assume "in-place ⇒ no crossover".
+
 ## 2026-07-06 CrimsonHawk: KEEP (REGRESSION FIX) — SADD int-merge k·k>=n size gate — restores ~2x (removes a self-inflicted 0.50x merge regression for small-k/large-n), byte-identical
 
 Measuring the SADD-merge crossover (to consider LOWERING the K>=8 threshold) instead exposed a regression I
