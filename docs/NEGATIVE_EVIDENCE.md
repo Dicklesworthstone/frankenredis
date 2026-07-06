@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-06 CrimsonHawk: KEEP (REGRESSION FIX) — SADD int-merge k·k>=n size gate — restores ~2x (removes a self-inflicted 0.50x merge regression for small-k/large-n), byte-identical
+
+Measuring the SADD-merge crossover (to consider LOWERING the K>=8 threshold) instead exposed a regression I
+shipped in it: unlike SREM's IN-PLACE retain, `try_sadd_int_batch_merge` allocates a FRESH n+k result Vec,
+so for small k it loses to k cache-hot in-place `Vec::insert`s. Clean min-of-5 A/B (intset capped at
+set-max-intset-entries, so n<=512) shows the merge WINNING only once ~`k >= sqrt(n)`: n=128 wins from
+k≈12, n=512 only from k≈24 (k=8→0.58x, k=12→0.50x, k=16→0.99x, k=24→1.36x). The shipped flat `k>=8` gate
+therefore ran the SLOW merge for k=8..~23 on large intsets — a fr-vs-redis regression (redis does
+one-at-a-time intsetAdd ~= fr's individual path).
+
+FIX: add a `members.len()*members.len() >= v.len()` (k·k>=n) size gate to the merge, keeping the
+`SADD_INT_MERGE_MIN` floor for the tiny corner. Now large-k bulk SADD still merges (the original K=100
+→ 2.60-3.29x win is preserved: the same test re-measured 3.29x), and small-k/large-n falls back to the
+fast individual loop. SREM's retain is UNGATED-by-size (in-place, no alloc — it wins from k≈2, verified by
+reasoning + the existing 3.11x A/B), so it is left alone. BYTE-IDENTICAL: the merge result was already
+proven == individual for any k; the gate only changes WHICH path runs. `sadd_int_batch_merge_matches_
+individual_and_reports_ab` updated (assert-when-applies + guaranteed-apply k·k>=n cases); sadd (6) srem (5)
+intset (8) suites GREEN; the crossover sweep kept as an `#[ignore]` measurement tool.
+
+MEASURED ratio-vs-ORIG (ORIG = the shipped flat-k>=8 merge; fr-store A/B, per-crate rch): at the worst
+regressed point n=512,k=12 the merge was 1070 ns vs the individual 540 ns the gate now selects = **~1.98x**
+(and fr goes from ~0.50x back to ~1.0x vs redis there). General lesson: an out-of-place batch (alloc + full
+copy) has a size-dependent crossover ~sqrt(n); an in-place batch (compaction) does not — gate them
+differently, and always sweep the (n,k) grid, not one big-k point, before shipping a batch fast path.
+
 ## 2026-07-05 CrimsonHawk: SURFACE (BLOCKER) — bounded per-crate levers landed/rejected; next target needs a FRESH sweep, not stale (pre-arc) data
 
 Not a "we're maxed" claim — a concrete blocker: I cannot responsibly pick this round's target because my

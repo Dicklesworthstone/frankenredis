@@ -3555,6 +3555,14 @@ impl SetValue {
     /// `binary_search` + `Vec::insert` path with NO `promote_to_generic` — so the
     /// final sorted-unique set and the `added` count match it exactly. A small K is
     /// left to the individual loop (merge's sort + result alloc do not pay off).
+    ///
+    /// (CrimsonHawk) SIZE gate: unlike SREM's in-place retain, this merge allocates
+    /// a FRESH `n+k` result Vec, so for small `k` it loses to `k` cache-hot in-place
+    /// `Vec::insert`s. A measured min-of-5 crossover sweep (intset capped at
+    /// set-max-intset-entries) shows the merge winning only once `k·k >= n`
+    /// (~`k >= √n`): e.g. n=128 wins from k≈12, n=512 from k≈24, and n=64 from k=8.
+    /// Below that it was a real regression (n=512,k=12 was 0.50x). Gate on `k·k >= n`
+    /// with the `SADD_INT_MERGE_MIN` floor for the tiny-set/tiny-k corner.
     fn try_sadd_int_batch_merge<M: AsRef<[u8]>>(
         &mut self,
         members: &[M],
@@ -3566,6 +3574,9 @@ impl SetValue {
         let SetValue::Int(v) = self else {
             return None;
         };
+        if members.len().saturating_mul(members.len()) < v.len() {
+            return None;
+        }
         if v.len() + members.len() > max_intset_entries {
             return None;
         }
@@ -43142,6 +43153,95 @@ mod tests {
         );
     }
 
+    // (CrimsonHawk) Crossover sweep: individual insert_borrowed vs the sort-merge across (N, K) to pick a
+    // data-driven gate. Prints ratios; no assertion. `#[ignore]` (measurement tool, ~24s) — run with
+    // `cargo test -p fr-store --release sadd_int_merge_crossover_sweep -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement tool (~24s); documents the k·k>=n merge gate"]
+    fn sadd_int_merge_crossover_sweep() {
+        use crate::SetValue;
+        fn bench(n: usize, k: usize) -> (f64, f64) {
+            // interleaved fresh members (worst case for individual: each insert shifts ~n/2)
+            let base: Vec<i64> = (0..n as i64).map(|x| x * 2).collect();
+            let members: Vec<Vec<u8>> = (0..k as i64)
+                .map(|x| (x * (2 * n as i64 / k.max(1) as i64) + 1).to_string().into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let reps = 60_000u64;
+            let mut sink = 0u64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut s = SetValue::Int(base.clone());
+                for m in &refs {
+                    if s.insert_borrowed(m, 100_000) {
+                        sink += 1;
+                    }
+                }
+                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+            }
+            let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut v = base.clone();
+                // Inlined merge body (mirrors try_sadd_int_batch_merge, without the K-gate).
+                let mut new_vals: Vec<i64> = refs
+                    .iter()
+                    .map(|m| std::str::from_utf8(m).unwrap().parse::<i64>().unwrap())
+                    .collect();
+                new_vals.sort_unstable();
+                new_vals.dedup();
+                let mut merged: Vec<i64> = Vec::with_capacity(v.len() + new_vals.len());
+                let (mut i, mut j) = (0usize, 0usize);
+                while i < v.len() && j < new_vals.len() {
+                    match v[i].cmp(&new_vals[j]) {
+                        std::cmp::Ordering::Less => {
+                            merged.push(v[i]);
+                            i += 1;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            merged.push(new_vals[j]);
+                            j += 1;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            merged.push(v[i]);
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                }
+                merged.extend_from_slice(&v[i..]);
+                merged.extend_from_slice(&new_vals[j..]);
+                v = merged;
+                sink += v.len() as u64;
+            }
+            let mrg = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            (ind, mrg)
+        }
+        // Min-of-5 sub-runs to cut alloc/scheduler jitter; production has no per-op clone, so the
+        // merge (which allocs a fresh result Vec) is if anything MORE disadvantaged at small K than shown.
+        let best = |n: usize, k: usize| -> (f64, f64) {
+            let mut bi = f64::MAX;
+            let mut bm = f64::MAX;
+            for _ in 0..5 {
+                let (i, m) = bench(n, k);
+                bi = bi.min(i);
+                bm = bm.min(m);
+            }
+            (bi, bm)
+        };
+        for &n in &[128usize, 512, 2000] {
+            for &k in &[8usize, 12, 16, 24, 32, 48, 64] {
+                let (ind, mrg) = best(n, k);
+                println!(
+                    "N={n:5} K={k:3}: individual={ind:8.0} ns | merge={mrg:8.0} ns = {:.2}x {}",
+                    ind / mrg,
+                    if ind > mrg { "MERGE-wins" } else { "individual-wins" }
+                );
+            }
+        }
+    }
+
     // (CrimsonHawk) Bulk integer SADD sort-merge (O(n+k log k)) is byte-identical to K individual
     // insert_borrowed (O(k·n)) — same final sorted-unique intset AND same `added` — over random scenarios.
     #[test]
@@ -43177,15 +43277,36 @@ mod tests {
                 }
             }
             let mut set_mrg = SetValue::Int(existing.clone());
-            let added_mrg = set_mrg
-                .try_sadd_int_batch_merge(&members, max_intset)
-                .expect("merge should apply under the size gate");
-            assert_eq!(added_mrg, added_ind, "added mismatch");
-            assert_eq!(
-                set_mrg.as_int_slice().unwrap(),
-                set_ind.as_int_slice().unwrap(),
-                "final set mismatch"
-            );
+            // The merge now also has a k·k>=n SIZE gate, so it may decline for small-k/large-n; when it
+            // DOES apply it must be byte-identical to the individual loop.
+            if let Some(added_mrg) = set_mrg.try_sadd_int_batch_merge(&members, max_intset) {
+                assert_eq!(added_mrg, added_ind, "added mismatch");
+                assert_eq!(
+                    set_mrg.as_int_slice().unwrap(),
+                    set_ind.as_int_slice().unwrap(),
+                    "final set mismatch"
+                );
+            }
+        }
+        // Guaranteed-apply cases (k*k >= n) so the merge itself is always exercised for byte-identity.
+        for &(n, k) in &[(8usize, 8usize), (64, 16), (256, 32), (400, 64)] {
+            let existing: Vec<i64> = (0..n as i64).map(|x| x * 3).collect();
+            let members: Vec<Vec<u8>> = (0..k as i64)
+                .map(|x| (x * 5 - 7).to_string().into_bytes())
+                .collect();
+            let mut si = SetValue::Int(existing.clone());
+            let mut ai = 0u64;
+            for m in &members {
+                if si.insert_borrowed(m, 100_000) {
+                    ai += 1;
+                }
+            }
+            let mut sm = SetValue::Int(existing.clone());
+            let am = sm
+                .try_sadd_int_batch_merge(&members, 100_000)
+                .expect("k*k>=n ⇒ merge must apply");
+            assert_eq!(am, ai);
+            assert_eq!(sm.as_int_slice().unwrap(), si.as_int_slice().unwrap());
         }
         // A/B: SADD 100 INTERLEAVED fresh ints into a 400-element intset (the realistic case — each
         // individual Vec::insert shifts ~n/2 elements; appends-past-the-end would be the best case for
