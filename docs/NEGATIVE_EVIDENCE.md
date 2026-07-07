@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-07 CrimsonHawk: REVERT (0-gain) — existing-key SADD into a packed generic set: rebuild bulk is MARGINAL/loses for the bounded packed range. Code reverted; byte-exact but not worth it.
+
+The villain follow-on: existing-key SADD into a packed(listpack) generic STRING set does K individual
+O(n)-scan `insert_borrowed`s = O(k·n). Implemented `try_sadd_generic_str_batch` (gated `packed_len().is_some()`
++ k>=8): collect existing (owned Vec) → hash-dedup new → rebuild via `from_unique_str_members` (O(n+k)).
+BYTE-IDENTICAL — `sadd_generic_str_batch_matches_individual` (3000 random cases: overlapping/dup/fresh
+members, members+order+encoding+`added`) GREEN, plus sadd/srem/sinter/sdiff/smembers conformance GREEN.
+
+BUT the A/B (min-of-1, admittedly noisy) showed it MARGINAL and often LOSING, so REVERTED per 0-gain:
+n=32,k=8 = 0.84x (LOSS), n=64,k=16 = 0.99x, n=16,k=8 = 1.11x, n=100,k=24 = 1.09x, best n=64,k=48 = 1.47x.
+Two reasons: (1) the packed encoding CAPS at PACKED_MAX_ENTRIES=128, so n is small and the O(k·n) scans are
+CHEAP in absolute terms — there is little to win; (2) my rebuild collects the existing members into an
+OWNED `Vec<Vec<u8>>` (n small allocs) to dodge the borrow of `*g`, and that alloc overhead exceeds the
+scans for small n. A flat k>=8 gate would REGRESS small-n cases (0.84x) — the same (n,k)-crossover trap as
+the SADD-merge/SREM-retain, but here the ceiling is so low the fix is not worth a regression-prone gate.
+NOTE for any revisit: use a BORROWED existing-collect (build the new set inside a block so the `&*g` borrow
+ends before `*g = new`, avoiding the owned Vec allocs) AND measure with the set PRE-BUILT (my bench rebuilt
+it via O(n²) inserts each iteration, polluting the ratio) — the true production win (set already built) is
+larger than the bench showed, but still bounded by n<=128. Reverted cleanly (empty code diff); ledger only.
+
 ## 2026-07-07 CrimsonHawk: NO-SHIP (audit, negative) — fresh-key HSET bulk is ALREADY optimal + UNGATED; no small-k regression (bulk wins from k=1). Measured; sweep tool kept.
 
 Hypothesis (after the 4 SADD threshold wins): the fresh-key HSET bulk build (`hset_borrowed_many` →
