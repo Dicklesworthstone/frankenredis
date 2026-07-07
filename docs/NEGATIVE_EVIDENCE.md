@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-07 CrimsonHawk: NO-SHIP (audit, negative) — fresh-key HSET bulk is ALREADY optimal + UNGATED; no small-k regression (bulk wins from k=1). Measured; sweep tool kept.
+
+Hypothesis (after the 4 SADD threshold wins): the fresh-key HSET bulk build (`hset_borrowed_many` →
+uniqueness `seen`-HashSet + `HashFieldMap::from_unique_pairs_borrowed`) is UNGATED, so a single-field HSET
+(the common case) pays two extra allocs vs a plain insert — a possible small-k regression, the inverse of
+the SADD gap. WRONG. A min-of-5 fresh-key sweep (individual `HashFieldMap::default()`+insert loop vs the
+full store bulk path incl. the uniqueness pre-scan) shows BULK wins at EVERY k, from k=1:
+k=1 1.42x, k=2 1.70x, k=4 2.55x, k=8 2.61x, k=16 4.21x, k=32 8.28x, k=64 15.1x, k=128 **28.4x**. Reason: the
+individual packed(listpack) `HashFieldMap` insert has an O(n) membership scan per field → O(k²) and
+catastrophic (98 ns @k=1 → 102_551 ns @k=128), while the bulk path is O(k) even including the discarded
+uniqueness HashSet. So the ungated bulk is CORRECT — a small-k gate would REGRESS it. No code change; the
+`#[ignore] hset_freshbuild_crossover_sweep` tool is kept for future re-measurement.
+
+FOLLOW-ONS surfaced (NOT done here — bigger/riskier): (1) EXISTING-key multi-field HSET into a non-empty
+packed hash still does K individual O(n)-scan inserts = O(k·n) (redis parity — listpackFind — so a
+hashset-of-existing pre-pass O(n+k) would BEAT redis, but needs value-update + added-count semantics
+care); (2) LFU-enabled HSET skips the bulk path entirely (per-pair `hset_borrowed` loop for LFU
+bookkeeping) → O(k²) for LFU cache workloads, but bulk-then-single-LFU-bump byte-exactness is unverified.
+Also: the bulk path hashes each field TWICE (uniqueness HashSet then the build); a packed dedup-build would
+hash once (marginal — bulk already wins with the double-hash).
+
 ## 2026-07-07 CrimsonHawk: KEEP — fresh-key bulk-STRING SADD threshold 64→8 — 1.67-5.75x for k=16..63 (up to 11.9x), byte-identical
 
 The string half of yesterday's split (int was already lowered 64→8). The individual fresh-key string build

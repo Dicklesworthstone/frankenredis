@@ -43308,6 +43308,71 @@ mod tests {
         }
     }
 
+    // (CrimsonHawk) Fresh-key HSET: the bulk build (seen-HashSet uniqueness + from_unique_pairs_borrowed)
+    // is UNGATED — even a single-field HSET pays the two extra allocs. Sweep vs a plain insert loop to see
+    // whether a small-k gate is warranted (the inverse of the SADD gap).
+    #[test]
+    #[ignore = "measurement tool; audits fresh-key HSET bulk vs individual (small-k crossover)"]
+    fn hset_freshbuild_crossover_sweep() {
+        use crate::HashFieldMap;
+        fn bench(k: usize) -> (f64, f64) {
+            let fields: Vec<Vec<u8>> = (0..k).map(|i| format!("field{i:04}").into_bytes()).collect();
+            let vals: Vec<Vec<u8>> = (0..k).map(|i| format!("value{i:04}").into_bytes()).collect();
+            let reps = 300_000u64;
+            let mut sink = 0u64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut m = HashFieldMap::default();
+                for i in 0..k {
+                    m.insert(fields[i].clone(), vals[i].clone());
+                }
+                sink += m.len() as u64;
+            }
+            let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                // Full store bulk path: uniqueness pre-scan + borrowed collect + O(k) build.
+                let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+                    std::collections::HashSet::with_capacity_and_hasher(
+                        k,
+                        foldhash::quality::RandomState::default(),
+                    );
+                let unique = (0..k).all(|i| seen.insert(fields[i].as_slice()));
+                drop(seen);
+                let borrowed: Vec<(&[u8], &[u8])> = (0..k)
+                    .map(|i| (fields[i].as_slice(), vals[i].as_slice()))
+                    .collect();
+                let m = if unique {
+                    HashFieldMap::from_unique_pairs_borrowed(&borrowed)
+                } else {
+                    HashFieldMap::default()
+                };
+                sink += m.len() as u64;
+                std::hint::black_box(&m);
+            }
+            let bulk = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            (ind, bulk)
+        }
+        let best = |k: usize| {
+            let (mut bi, mut bb) = (f64::MAX, f64::MAX);
+            for _ in 0..5 {
+                let (i, b) = bench(k);
+                bi = bi.min(i);
+                bb = bb.min(b);
+            }
+            (bi, bb)
+        };
+        for &k in &[1usize, 2, 3, 4, 6, 8, 16, 32, 64, 128] {
+            let (ind, bulk) = best(k);
+            println!(
+                "FRESH hset K={k:3} pairs: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
+                ind / bulk,
+                if ind > bulk { "BULK-wins" } else { "individual-wins" }
+            );
+        }
+    }
+
     // (CrimsonHawk) With SET_BULK_BUILD_MIN lowered to 8, the fresh-key STRING bulk build now runs for
     // k=8..63; assert it is byte-identical (members in first-occurrence order + `added`) to the individual
     // insert_borrowed loop over that whole range.
