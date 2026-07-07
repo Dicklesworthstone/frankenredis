@@ -30523,24 +30523,32 @@ fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
     if bits == 0 {
         return 0;
     }
-    let mut value: u64 = 0;
-    for b in 0..u64::from(bits) {
-        let pos = bit_offset.wrapping_add(b);
-        let byte_idx = (pos / 8) as usize;
-        let bit_idx = 7 - (pos % 8) as u8;
-        let bit_val = if byte_idx < bytes.len() {
-            (bytes[byte_idx] >> bit_idx) & 1
-        } else {
-            0
-        };
-        value = (value << 1) | u64::from(bit_val);
+    // (CrimsonHawk) Byte-wise big-endian gather: the MSB-first field spans at most 9
+    // bytes (bits<=64, up to a 7-bit intra-byte start), so read those bytes into a
+    // u128 then shift+mask — O(bytes) with no per-bit `/8`,`%8`, instead of the old
+    // O(bits) per-bit loop. Byte-IDENTICAL to that loop (same MSB-first extraction,
+    // same out-of-bounds-reads-as-0, same sign extension).
+    let start_byte = (bit_offset / 8) as usize;
+    let start_bit = (bit_offset % 8) as u32;
+    let end_bit = start_bit + u32::from(bits); // bits consumed from start_byte's MSB
+    let n_bytes = (end_bit as usize + 7) / 8; // <= 9
+    let mut acc: u128 = 0;
+    for i in 0..n_bytes {
+        let byte = bytes.get(start_byte + i).copied().unwrap_or(0);
+        acc = (acc << 8) | u128::from(byte);
     }
+    let trailing = n_bytes as u32 * 8 - end_bit;
+    let field_mask: u64 = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut value = ((acc >> trailing) as u64) & field_mask;
     if signed && bits < 64 {
-        // Sign-extend: if the MSB of the field is set, fill upper bits with 1s
+        // Sign-extend: if the MSB of the field is set, fill upper bits with 1s.
         let sign_bit = 1u64 << (bits - 1);
         if value & sign_bit != 0 {
-            let mask = u64::MAX << bits;
-            value |= mask;
+            value |= u64::MAX << bits;
         }
     }
     value as i64
@@ -52108,6 +52116,74 @@ mod tests {
                 .bitpos(b"nokey", true, None, None, BitRangeUnit::Byte, 0)
                 .unwrap(),
             -1
+        );
+    }
+
+    // (CrimsonHawk) The byte-wise bitfield_read is byte-identical to the original per-bit loop across
+    // random buffers, all offsets (incl out-of-bounds), all widths 1..=64, both signs; A/B on a u64 read.
+    #[test]
+    fn bitfield_read_bytewise_matches_bitwise_and_reports_ab() {
+        fn ref_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
+            if bits == 0 {
+                return 0;
+            }
+            let mut value: u64 = 0;
+            for b in 0..u64::from(bits) {
+                let pos = bit_offset.wrapping_add(b);
+                let byte_idx = (pos / 8) as usize;
+                let bit_idx = 7 - (pos % 8) as u8;
+                let bit_val = if byte_idx < bytes.len() {
+                    (bytes[byte_idx] >> bit_idx) & 1
+                } else {
+                    0
+                };
+                value = (value << 1) | u64::from(bit_val);
+            }
+            if signed && bits < 64 {
+                let sign_bit = 1u64 << (bits - 1);
+                if value & sign_bit != 0 {
+                    value |= u64::MAX << bits;
+                }
+            }
+            value as i64
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..300_000 {
+            let len = 1 + (next() % 12) as usize;
+            let buf: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+            let bits = 1 + (next() % 64) as u8; // 1..=64
+            let bit_offset = next() % (len as u64 * 8 + 20); // include out-of-bounds
+            let signed = next() & 1 == 0;
+            assert_eq!(
+                crate::bitfield_read(&buf, bit_offset, bits, signed),
+                ref_read(&buf, bit_offset, bits, signed),
+                "buf={buf:?} off={bit_offset} bits={bits} signed={signed}"
+            );
+        }
+        let buf = [0xA5u8; 16];
+        let reps = 8_000_000u64;
+        let mut sink = 0i64;
+        let t0 = std::time::Instant::now();
+        for i in 0..reps {
+            sink = sink.wrapping_add(ref_read(std::hint::black_box(&buf), i % 9, 64, false));
+        }
+        let ref_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for i in 0..reps {
+            sink =
+                sink.wrapping_add(crate::bitfield_read(std::hint::black_box(&buf), i % 9, 64, false));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        std::hint::black_box(sink);
+        println!(
+            "bitfield_read u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
+            ref_ns / new_ns
         );
     }
 

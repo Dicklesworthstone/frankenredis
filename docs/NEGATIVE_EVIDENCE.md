@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-07 CrimsonHawk: KEEP — bitfield_read byte-wise gather replaces the per-bit loop — 7.45x on a u64 read (byte-identical)
+
+Pivoted off the exhausted collection-bulk vein. Consulting the July-3 head-to-head (fr faster-or-parity;
+<0.9x = load noise), the real residuals were BITFIELD (dispatch), GEODIST (trig, byte-risk — and
+`geo_deinterleave64` is already the magic-number Morton decode), and RESTORE-decode (structural). BITFIELD's
+core `bitfield_read` turned out to be a genuine scalar hot loop: it read the MSB-first field ONE BIT at a
+time — `for b in 0..bits { byte_idx = pos/8; bit_idx = 7-pos%8; value = (value<<1)|bit }` — so a `u64` GET
+did 64 iterations each with a `/8` and `%8`.
+
+FIX: the field spans at most 9 bytes (bits<=64, up to a 7-bit intra-byte start), so gather those bytes
+big-endian into a `u128`, then `>> trailing & mask` — O(bytes)≤9 iters, no per-bit division. Sign extension
+unchanged. Used by every BITFIELD read (`bitfield_get` / `_batch` / `_no_stat`).
+
+BYTE-IDENTICAL: `bitfield_read_bytewise_matches_bitwise_and_reports_ab` asserts equality with a verbatim copy
+of the old per-bit loop over 300k random cases — random buffers, EVERY offset incl out-of-bounds (reads-as-0),
+all widths 1..=64, both signednesses; bitfield (4) bitcount (4) bitpos (11) setbit (3) getbit (2) suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, `u64` read at rotating offsets): per-bit loop = 67.95 ns vs byte-wise
+= 9.11 ns = **7.45x**. (Smaller widths win less — a u8 GET is 8 iters → 1 — but every BITFIELD GET/u64/i64
+read benefits.) General lesson: MSB-first bit-field extraction is a classic per-bit-loop trap; a big-endian
+byte gather + shift/mask is byte-identical and O(bytes). `bitfield_write` is the same-shaped per-bit loop —
+a follow-on candidate (byte-wise masked write), left for a measured next pass.
+
 ## 2026-07-07 CrimsonHawk: REVERT (0-gain) — existing-key SADD into a packed generic set: rebuild bulk is MARGINAL/loses for the bounded packed range. Code reverted; byte-exact but not worth it.
 
 The villain follow-on: existing-key SADD into a packed(listpack) generic STRING set does K individual
