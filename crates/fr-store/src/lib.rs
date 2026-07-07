@@ -3213,12 +3213,15 @@ pub enum HrandfieldWithValuesScanEvent<'a> {
     Pair(&'a [u8], &'a [u8]),
 }
 
-/// Minimum member count before the fresh-key SADD path attempts the bulk
-/// all-non-integer build ([`SetValue::try_bulk_unique_strings`]). Below this the
-/// O(n²) listpack rebuild is negligible and not worth the O(n) pre-scan; the
-/// generic (listpack) encoding caps at 128 entries, so the quadratic cost peaks
-/// just past this threshold.
-const SET_BULK_BUILD_MIN: usize = 64;
+/// Minimum member count for the fresh-key bulk all-non-integer (STRING) build
+/// ([`SetValue::try_bulk_unique_strings`]). The individual build inserts into a
+/// packed (listpack) set with an O(n) membership PRE-SCAN per insert, so it is
+/// O(k²) and — measured — catastrophic well before the 128-entry listpack cap:
+/// a min-of-5 fresh-build sweep clocks the individual loop at 1089 ns @k=16,
+/// 3568 @k=32, 13135 @k=64 vs the hash-dedup bulk at 650 / 1249 / 2283 ns
+/// (1.67x / 2.86x / 5.75x, rising to 11.9x @k=128). The old value of 64 left
+/// k=8..63 on the quadratic path; 8 mirrors [`SADD_BULK_INT_MIN`].
+const SET_BULK_BUILD_MIN: usize = 8;
 
 /// (CrimsonHawk) Minimum member count for the fresh-key bulk INT build
 /// ([`SetValue::try_bulk_unique_ints`]). Separate from the string threshold: the
@@ -43301,6 +43304,110 @@ mod tests {
                 sb.as_int_slice().unwrap(),
                 si.as_int_slice().unwrap(),
                 "set mismatch k={k}"
+            );
+        }
+    }
+
+    // (CrimsonHawk) With SET_BULK_BUILD_MIN lowered to 8, the fresh-key STRING bulk build now runs for
+    // k=8..63; assert it is byte-identical (members in first-occurrence order + `added`) to the individual
+    // insert_borrowed loop over that whole range.
+    #[test]
+    fn saddbulk_str_matches_individual_across_lowered_threshold() {
+        use crate::SetValue;
+        let mut seed = 0x5eed_face_0102_0304u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let k = 8 + (next() % 100) as usize; // 8..=107 (packed range)
+            let members: Vec<Vec<u8>> = (0..k)
+                .map(|_| format!("m{}z", next() % 2000).into_bytes()) // non-int, with dups
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let mut si = SetValue::new();
+            let mut ai = 0u64;
+            for m in &refs {
+                if si.insert_borrowed(m, 128) {
+                    ai += 1;
+                }
+            }
+            let (sb, ab) = SetValue::try_bulk_unique_strings(&refs)
+                .expect("bulk-string must apply for k>=SET_BULK_BUILD_MIN(8)");
+            assert_eq!(ab, ai, "added mismatch k={k}");
+            let mi: Vec<Vec<u8>> = si.iter().map(|c| c.into_owned()).collect();
+            let mb: Vec<Vec<u8>> = sb.iter().map(|c| c.into_owned()).collect();
+            assert_eq!(mi, mb, "member/order mismatch k={k}");
+        }
+    }
+
+    // (CrimsonHawk) Fresh-key bulk STRING build crossover: individual insert_borrowed of NON-int members
+    // into an EMPTY set (packed/listpack O(k²) scan) vs the bulk hash-dedup — audits SET_BULK_BUILD_MIN=64
+    // for the string path (the int path already split to SADD_BULK_INT_MIN=8).
+    #[test]
+    #[ignore = "measurement tool; audits SET_BULK_BUILD_MIN for fresh-key string SADD"]
+    fn saddbulk_str_freshbuild_crossover_sweep() {
+        use crate::{GenericSet, SetValue};
+        fn bench(k: usize) -> (f64, f64) {
+            // Non-integer members so the set is generic (packed listpack for small): "m<hex>a".
+            let members: Vec<Vec<u8>> = (0..k as u64)
+                .map(|x| format!("m{:x}a", x.wrapping_mul(2_654_435_761) % 1_000_000).into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+            let reps = 100_000u64;
+            let mut sink = 0u64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut s = SetValue::new();
+                for m in &refs {
+                    if s.insert_borrowed(m, 128) {
+                        sink += 1;
+                    }
+                }
+                sink += s.len() as u64;
+            }
+            let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                // Bulk PACKED path used by try_bulk_unique_strings for k<=PACKED_MAX (bypasses its <64 gate):
+                // hash-dedup then from_unique_str_members (one O(k) build vs the O(k²) listpack scan loop).
+                let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+                    std::collections::HashSet::with_capacity_and_hasher(
+                        refs.len(),
+                        foldhash::quality::RandomState::default(),
+                    );
+                let mut unique: Vec<&[u8]> = Vec::with_capacity(refs.len());
+                for m in &refs {
+                    if seen.insert(*m) {
+                        unique.push(*m);
+                    }
+                }
+                let set = GenericSet::from_unique_str_members(&unique);
+                sink += unique.len() as u64;
+                sink += set.len() as u64;
+                std::hint::black_box(&set);
+            }
+            let bulk = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            (ind, bulk)
+        }
+        let best = |k: usize| {
+            let (mut bi, mut bb) = (f64::MAX, f64::MAX);
+            for _ in 0..5 {
+                let (i, b) = bench(k);
+                bi = bi.min(i);
+                bb = bb.min(b);
+            }
+            (bi, bb)
+        };
+        for &k in &[4usize, 8, 12, 16, 24, 32, 48, 64, 96, 128] {
+            let (ind, bulk) = best(k);
+            println!(
+                "FRESH str-build K={k:3}: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
+                ind / bulk,
+                if ind > bulk { "BULK-wins" } else { "individual-wins" }
             );
         }
     }

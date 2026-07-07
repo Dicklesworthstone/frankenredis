@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-07 CrimsonHawk: KEEP — fresh-key bulk-STRING SADD threshold 64→8 — 1.67-5.75x for k=16..63 (up to 11.9x), byte-identical
+
+The string half of yesterday's split (int was already lowered 64→8). The individual fresh-key string build
+inserts into a PACKED (listpack) set with an O(n) membership pre-scan per insert → O(k²), and a min-of-5
+fresh-build sweep shows it is catastrophic well before the 128-entry listpack cap: individual = 1089 ns
+@k=16, 3568 @k=32, 7849 @k=48, 13135 @k=64, 34036 @k=128; the hash-dedup bulk (dedup + from_unique_str_
+members, O(k)) = 650 / 1249 / 1797 / 2283 / 2856 ns. So `SET_BULK_BUILD_MIN=64` left k=8..63 on the
+quadratic path for no reason (its doc's "quadratic peaks just past 128" reasoning ignored that the cost is
+already multi-µs at k=32).
+
+FIX: lower `SET_BULK_BUILD_MIN` 64→8 (it is string-only now that the int path uses `SADD_BULK_INT_MIN`).
+BYTE-IDENTICAL: `try_bulk_unique_strings` is k-independent (hash-dedup, first-occurrence order) and was
+already proven == the individual loop for k>=64; `saddbulk_str_matches_individual_across_lowered_threshold`
+asserts members-in-insertion-order AND `added` equality over 3000 random k=8..107 cases; sadd (8) saddbulk
+(3) generic_set (2) intset (8) suites GREEN; `#[ignore]` string fresh-build crossover sweep added.
+
+MEASURED ratio-vs-ORIG (individual O(k²) packed build the gate now skips, vs bulk; fr-store min-of-5 A/B,
+per-crate rch): k=8 → 1.08x, k=16 → **1.67x**, k=24 → 2.24x, k=32 → **2.86x**, k=48 → **4.37x**, k=63 →
+~5.75x (and 11.9x @k=128 for the already-bulk range). AUDIT-VEIN TALLY = 4 ships (SADD-merge √n fix,
+SREM-retain √(n/2) fix, bulk-int 64→8, bulk-string 64→8). Both fresh-key bulk-build thresholds now
+measured; the vein moves on to other un-swept `< CONST` fast-path gates.
+
 ## 2026-07-06 CrimsonHawk: KEEP — fresh-key bulk-INT SADD threshold 64→8 (split from the string const) — 1.45-2.03x for k=8..63, byte-identical
 
 Third threshold audit (the vein that already caught the SADD-merge and SREM-retain regressions). The
