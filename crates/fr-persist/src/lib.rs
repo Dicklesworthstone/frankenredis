@@ -405,7 +405,7 @@ fn parse_aof_manifest_entry(
     let mut file_seq = None;
     let mut file_type = None;
 
-    for pair in argv.chunks_exact(2) {
+    for pair in argv.as_chunks::<2>().0 {
         let key = pair[0].as_str();
         let value = pair[1].as_str();
         if key.eq_ignore_ascii_case("file") {
@@ -1349,8 +1349,8 @@ static CRC64_REDIS_SLICE: [[u64; 256]; 16] = build_crc64_redis_slice();
 /// slice-by-16 CrimsonHawk)
 pub fn crc64_redis(data: &[u8]) -> u64 {
     let mut crc = 0_u64;
-    let mut chunks = data.chunks_exact(16);
-    for chunk in chunks.by_ref() {
+    let (chunks, remainder) = data.as_chunks::<16>();
+    for chunk in chunks {
         let one = u64::from_le_bytes(chunk[0..8].try_into().unwrap()) ^ crc;
         let two = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
         crc = CRC64_REDIS_SLICE[15][(one & 0xff) as usize]
@@ -1370,7 +1370,7 @@ pub fn crc64_redis(data: &[u8]) -> u64 {
             ^ CRC64_REDIS_SLICE[1][((two >> 48) & 0xff) as usize]
             ^ CRC64_REDIS_SLICE[0][((two >> 56) & 0xff) as usize];
     }
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         crc = (crc >> 8) ^ CRC64_REDIS_SLICE[0][((crc as u8) ^ byte) as usize];
     }
     crc
@@ -3844,7 +3844,9 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             return Err(PersistError::InvalidFrame);
                         }
                         let fields = entries
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|pair| (pair[0].clone(), pair[1].clone()))
                             .collect();
                         RdbValue::Hash(fields)
@@ -3860,7 +3862,9 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             return Err(PersistError::InvalidFrame);
                         }
                         let fields = entries
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|pair| (pair[0].clone(), pair[1].clone()))
                             .collect();
                         RdbValue::Hash(fields)
@@ -3877,7 +3881,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             return Err(PersistError::InvalidFrame);
                         }
                         let mut members = Vec::with_capacity(entries.len() / 2);
-                        for pair in entries.chunks_exact(2) {
+                        for pair in entries.as_chunks::<2>().0 {
                             let score = std::str::from_utf8(&pair[1])
                                 .ok()
                                 .and_then(|s| s.parse::<f64>().ok())

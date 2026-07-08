@@ -19559,6 +19559,7 @@ impl Runtime {
     /// `zrangebylex_members_limit_borrow_scan` (no clone; lazy skip/take). Same gate
     /// / well-formed-bound defer / preamble / record_source_key_lookups / metrics as
     /// the owned form. Owned form retained.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangebylex_limit_borrowed_into(
         &mut self,
         key: &[u8],
@@ -20521,6 +20522,7 @@ impl Runtime {
     /// key max min LIMIT offset count` (descending), member array streamed with
     /// borrowed members via the shared `execute_plain_zbyscore_limit_core_into`
     /// (rev=true). Owned form retained.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrangebyscore_limit_borrowed_into(
         &mut self,
         key: &[u8],
@@ -20702,6 +20704,7 @@ impl Runtime {
     /// max min LIMIT offset count` (descending), member array streamed with borrowed
     /// members via `stream_bylex_limit_members_into` (rev=true; store bounds in
     /// (min, max) order). Owned form retained.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrangebylex_limit_borrowed_into(
         &mut self,
         key: &[u8],
@@ -20978,6 +20981,7 @@ impl Runtime {
     /// (borrowed members, no `Vec<(Vec<u8>, f64)>` clone). A member-only array is
     /// byte-identical in RESP2/RESP3, so no `resp3` param. Returns the error code
     /// string (for error-stat accounting) if the reply was an error, else `None`.
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_zrangebyscore_core_into(
         &mut self,
         key: &[u8],
@@ -21390,6 +21394,7 @@ impl Runtime {
     /// `zrangebyscore_members_limit_borrow_scan` (no clone; preserves the deep-offset
     /// treap jump + lazy skip/take). Same inverted/wrong-type guard, gate, preamble,
     /// metrics; owned form retained.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangebyscore_limit_borrowed_into(
         &mut self,
         key: &[u8],
@@ -26586,6 +26591,7 @@ impl Runtime {
     /// the per-field `to_pairs()` clone (11.88x store A/B on a 500-entry stream). Same gate, bound
     /// parsing, `count` handling, preamble, metrics and error accounting as the RespFrame path; the
     /// stream reply is a plain array in RESP2 and RESP3.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_xrange_borrowed_into(
         &mut self,
         key: &[u8],
@@ -26785,6 +26791,7 @@ impl Runtime {
     /// reverse mirror of [`Self::execute_plain_xrange_borrowed_into`]: same nested reply streamed
     /// borrowed into `out`, but the wire order is `end start` and `xrange_borrow_scan` walks the
     /// range DESCENDING (`rev = true`). Identical per-field clone elimination.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_xrevrange_borrowed_into(
         &mut self,
         key: &[u8],
@@ -27253,6 +27260,7 @@ impl Runtime {
     /// 2-hit accounting: `exists_no_touch` (resolution) + `xreadgroup_history_borrow_scan`
     /// (`record_keyspace_lookup`). History ALWAYS includes the stream (`[key, entries]`, entries maybe
     /// empty); tombstones (XDEL'd pending) render `[id, nil]`. RESP2 array-of-pairs / RESP3 `%1` map.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_xreadgroup_history_borrowed_into(
         &mut self,
         group: &[u8],

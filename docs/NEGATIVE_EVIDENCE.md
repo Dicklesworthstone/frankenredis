@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CodexRedis/CrimsonHawk: KEEP — bitfield_write byte-wise store replaces the per-bit loop — 5.99x on a u64 write (byte-identical)
+
+Follow-on to the landed `bitfield_read` byte-wise gather. The negative-evidence check matters here:
+the June-27 rejected BITFIELD SET attempts specialized the byte-aligned unsigned `u8` command path and
+lost at the command level. This is a different lever: the shared `bitfield_write` primitive now edits the
+bounded big-endian byte window for any width up to 64 bits, preserving the surrounding bits with a shifted
+mask, instead of walking one bit at a time with per-bit `/8` and `%8`.
+
+BYTE-IDENTICAL: `bitfield_write_bytewise_matches_bitwise_and_reports_ab` compares against a verbatim copy
+of the old per-bit loop over 300k random in-bounds writes — random buffers, every width 1..=64, random
+offsets, and signed payload bits. Surrounding bits are preserved by gathering at most 9 bytes, applying
+`field_mask << trailing`, and scattering the same byte window back.
+
+MEASURED ratio-vs-ORIG (release fr-store A/B, `AGENT_NAME=CodexRedis`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`, via `rch` local fallback because workers were
+inadmissible): per-bit write = 101.52 ns vs byte-wise write = 18.05 ns = **5.63x** on a rotating-offset
+u64 write. Debug-profile smoke also reported 770.08 ns vs 169.99 ns = 4.53x.
+CrimsonHawk post-gate release remeasure on the final tree via `rch` remote:
+per-bit write = 104.03 ns vs byte-wise write = 17.36 ns = **5.99x**.
+
+COMMAND-LEVEL GUARD: the requested literal `cargo bench --release` spelling was attempted and Cargo
+rejected it; the supported `cargo bench --profile release` form was run after building `fr-server` in the
+same RCH target. Existing `bitfield_vs_redis/BITFIELD_SET_u8_0_1` on `ovh-a` measured Redis 82.60 us vs
+FrankenRedis 153.10 us, so the narrow `u8` release cell remains red versus Redis. That row is a guard only,
+not the keep claim. The keep claim is the byte-identical shared write primitive and its 64-bit write
+ratio-vs-ORIG; do not retry the rejected byte-aligned `u8` command specialization as a follow-up.
+
 ## 2026-07-07 CrimsonHawk: KEEP — bitfield_read byte-wise gather replaces the per-bit loop — 7.45x on a u64 read (byte-identical)
 
 Pivoted off the exhausted collection-bulk vein. Consulting the July-3 head-to-head (fr faster-or-parity;

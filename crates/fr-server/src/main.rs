@@ -19134,7 +19134,7 @@ fn parse_borrowed_plain_mset_multi_packet<'a>(
         return None;
     }
     // arr_len = 1 (MSET) + 2*npairs, always ODD; serve 9..=MAX pairs (arr_len >= 19).
-    if arr_len < 19 || arr_len % 2 == 0 {
+    if arr_len < 19 || arr_len.is_multiple_of(2) {
         return None;
     }
     let npairs = (arr_len - 1) / 2;
@@ -19173,6 +19173,7 @@ fn parse_borrowed_plain_mset_multi_packet<'a>(
     })
 }
 
+#[allow(clippy::large_enum_variant)]
 enum BorrowedPlainMsetPacket<'a> {
     Two(BorrowedPlainMsetTwoPacket<'a>),
     Three(BorrowedPlainMsetThreePacket<'a>),

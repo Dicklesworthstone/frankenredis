@@ -3594,10 +3594,8 @@ impl SetValue {
         }
         let mut new_vals: Vec<i64> = Vec::with_capacity(members.len());
         for m in members {
-            match Self::canonical_int(m.as_ref()) {
-                Some(n) => new_vals.push(n),
-                None => return None,
-            }
+            let n = Self::canonical_int(m.as_ref())?;
+            new_vals.push(n);
         }
         new_vals.sort_unstable();
         new_vals.dedup();
@@ -3691,7 +3689,12 @@ impl SetValue {
         // to k partial `Vec::remove` shifts. A measured min-of-5 crossover sweep (intset n<=512) puts the
         // retain crossover near `2·k·k >= n` (~k >= √(n/2)): n=128 wins from k=8, n=512 only from k≈16;
         // the old flat `k>=8` ran the slow retain for k=8..15 on large intsets (n=512,k=8 was 0.82x).
-        if members.len().saturating_mul(members.len()).saturating_mul(2) < v.len() {
+        if members
+            .len()
+            .saturating_mul(members.len())
+            .saturating_mul(2)
+            < v.len()
+        {
             return None;
         }
         let mut to_remove: Vec<i64> = Vec::with_capacity(members.len());
@@ -30525,13 +30528,13 @@ fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
     }
     // (CrimsonHawk) Byte-wise big-endian gather: the MSB-first field spans at most 9
     // bytes (bits<=64, up to a 7-bit intra-byte start), so read those bytes into a
-    // u128 then shift+mask — O(bytes) with no per-bit `/8`,`%8`, instead of the old
+    // u128 then shift+mask - O(bytes) with no per-bit `/8`,`%8`, instead of the old
     // O(bits) per-bit loop. Byte-IDENTICAL to that loop (same MSB-first extraction,
     // same out-of-bounds-reads-as-0, same sign extension).
     let start_byte = (bit_offset / 8) as usize;
     let start_bit = (bit_offset % 8) as u32;
     let end_bit = start_bit + u32::from(bits); // bits consumed from start_byte's MSB
-    let n_bytes = (end_bit as usize + 7) / 8; // <= 9
+    let n_bytes = (end_bit as usize).div_ceil(8); // <= 9
     let mut acc: u128 = 0;
     for i in 0..n_bytes {
         let byte = bytes.get(start_byte + i).copied().unwrap_or(0);
@@ -30557,19 +30560,34 @@ fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
 /// Write `bits` bits of `value` starting at `bit_offset` in a byte slice (MSB-first).
 /// The byte slice must already be large enough to hold the write.
 fn bitfield_write(bytes: &mut [u8], bit_offset: u64, bits: u8, value: i64) {
-    let value = value as u64;
-    for b in 0..u64::from(bits) {
-        let pos = bit_offset.wrapping_add(b);
-        let byte_idx = (pos / 8) as usize;
-        let bit_idx = 7 - (pos % 8) as u8;
-        // Extract the bit from value (MSB of the field first)
-        let bit_pos = (bits as u64) - 1 - b;
-        let bit_val = (value >> bit_pos) & 1;
-        if bit_val == 1 {
-            bytes[byte_idx] |= 1 << bit_idx;
-        } else {
-            bytes[byte_idx] &= !(1 << bit_idx);
-        }
+    if bits == 0 {
+        return;
+    }
+    // Same geometry as `bitfield_read`: the target field spans at most 9 bytes.
+    // Preserve surrounding bits by editing the gathered big-endian window.
+    let start_byte = (bit_offset / 8) as usize;
+    let start_bit = (bit_offset % 8) as u32;
+    let end_bit = start_bit + u32::from(bits);
+    let n_bytes = (end_bit as usize).div_ceil(8);
+    let trailing = n_bytes as u32 * 8 - end_bit;
+
+    let mut acc: u128 = 0;
+    for i in 0..n_bytes {
+        acc = (acc << 8) | u128::from(bytes[start_byte + i]);
+    }
+
+    let field_mask = if bits >= 64 {
+        u128::from(u64::MAX)
+    } else {
+        (1u128 << bits) - 1
+    };
+    let aligned_mask = field_mask << trailing;
+    let field_bits = (u128::from(value as u64) & field_mask) << trailing;
+    acc = (acc & !aligned_mask) | field_bits;
+
+    for i in (0..n_bytes).rev() {
+        bytes[start_byte + i] = (acc & 0xff) as u8;
+        acc >>= 8;
     }
 }
 
@@ -42883,7 +42901,9 @@ mod tests {
         // Exhaustive over the low 3M values + a coprime stride across the full 8-digit range + edges.
         let mut probes: Vec<u64> = (0..3_000_000u64).collect();
         probes.extend((0..3_000_000u64).map(|k| (k.wrapping_mul(33_333_331) + 7) % 100_000_000));
-        probes.extend([0, 1, 9_999_999, 10_000_000, 99_999_999, 12_345_678, 87_654_321]);
+        probes.extend([
+            0, 1, 9_999_999, 10_000_000, 99_999_999, 12_345_678, 87_654_321,
+        ]);
         for n in probes {
             let a = to_8(n);
             let chunk = u64::from_le_bytes(a);
@@ -42891,9 +42911,19 @@ mod tests {
             assert_eq!(parse_eight_digits_swar(chunk), scalar8(&a), "n={n}");
         }
         // Predicate rejects non-digits (colon, slash, letters, space).
-        for bad in [b"1234567:", b"1234/678", b"abcdefgh", b"1234 678", b"12345678"] {
+        for bad in [
+            b"1234567:",
+            b"1234/678",
+            b"abcdefgh",
+            b"1234 678",
+            b"12345678",
+        ] {
             let is_digit = eight_bytes_all_ascii_digits(u64::from_le_bytes(*bad));
-            assert_eq!(is_digit, bad.iter().all(|c| c.is_ascii_digit()), "bad={bad:?}");
+            assert_eq!(
+                is_digit,
+                bad.iter().all(|c| c.is_ascii_digit()),
+                "bad={bad:?}"
+            );
         }
         // A/B: SWAR vs scalar 8-digit accumulation.
         let a = to_8(87_654_321);
@@ -42976,12 +43006,20 @@ mod tests {
         }
         for n in -2_000_000i64..2_000_000 {
             let s = n.to_string();
-            assert_eq!(parse_i64(s.as_bytes()).ok(), reference(s.as_bytes()), "n={n}");
+            assert_eq!(
+                parse_i64(s.as_bytes()).ok(),
+                reference(s.as_bytes()),
+                "n={n}"
+            );
         }
         let mut x = i64::MIN;
         for _ in 0..1_000_000u64 {
             let s = x.to_string();
-            assert_eq!(parse_i64(s.as_bytes()).ok(), reference(s.as_bytes()), "x={x}");
+            assert_eq!(
+                parse_i64(s.as_bytes()).ok(),
+                reference(s.as_bytes()),
+                "x={x}"
+            );
             x = x.wrapping_add(18_446_744_073_709_551i64);
         }
         for bad in [
@@ -43087,13 +43125,15 @@ mod tests {
         let mut sink = 0i64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
-            sink = sink.wrapping_add(ref_intersect(std::hint::black_box(&small), &large).len() as i64);
+            sink =
+                sink.wrapping_add(ref_intersect(std::hint::black_box(&small), &large).len() as i64);
         }
         let std_ns = t0.elapsed().as_nanos() as f64 / (reps * small.len() as u64) as f64;
         let t1 = std::time::Instant::now();
         for _ in 0..reps {
-            sink = sink
-                .wrapping_add(intersect_sorted_i64(std::hint::black_box(&small), &large).len() as i64);
+            sink = sink.wrapping_add(
+                intersect_sorted_i64(std::hint::black_box(&small), &large).len() as i64,
+            );
         }
         let bl_ns = t1.elapsed().as_nanos() as f64 / (reps * small.len() as u64) as f64;
         std::hint::black_box(sink);
@@ -43251,7 +43291,9 @@ mod tests {
         // A/B: SREM 120 present ints spread across a 400-element intset (front-loaded ⇒ each individual
         // Vec::remove shifts the tail; both paths clone the base first).
         let base: Vec<i64> = (0..400i64).collect();
-        let members: Vec<Vec<u8>> = (0..120i64).map(|n| (n * 3).to_string().into_bytes()).collect();
+        let members: Vec<Vec<u8>> = (0..120i64)
+            .map(|n| (n * 3).to_string().into_bytes())
+            .collect();
         let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
         let reps = 40_000u64;
         let mut sink = 0u64;
@@ -43324,8 +43366,12 @@ mod tests {
     fn hset_freshbuild_crossover_sweep() {
         use crate::HashFieldMap;
         fn bench(k: usize) -> (f64, f64) {
-            let fields: Vec<Vec<u8>> = (0..k).map(|i| format!("field{i:04}").into_bytes()).collect();
-            let vals: Vec<Vec<u8>> = (0..k).map(|i| format!("value{i:04}").into_bytes()).collect();
+            let fields: Vec<Vec<u8>> = (0..k)
+                .map(|i| format!("field{i:04}").into_bytes())
+                .collect();
+            let vals: Vec<Vec<u8>> = (0..k)
+                .map(|i| format!("value{i:04}").into_bytes())
+                .collect();
             let reps = 300_000u64;
             let mut sink = 0u64;
             let t0 = std::time::Instant::now();
@@ -43376,7 +43422,11 @@ mod tests {
             println!(
                 "FRESH hset K={k:3} pairs: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
                 ind / bulk,
-                if ind > bulk { "BULK-wins" } else { "individual-wins" }
+                if ind > bulk {
+                    "BULK-wins"
+                } else {
+                    "individual-wins"
+                }
             );
         }
     }
@@ -43480,7 +43530,11 @@ mod tests {
             println!(
                 "FRESH str-build K={k:3}: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
                 ind / bulk,
-                if ind > bulk { "BULK-wins" } else { "individual-wins" }
+                if ind > bulk {
+                    "BULK-wins"
+                } else {
+                    "individual-wins"
+                }
             );
         }
     }
@@ -43494,7 +43548,11 @@ mod tests {
         fn bench(k: usize) -> (f64, f64) {
             // Random-ish members in a wide range (some dup) → realistic fresh int-set build.
             let members: Vec<Vec<u8>> = (0..k as i64)
-                .map(|x| ((x.wrapping_mul(2_654_435_761)) % 1_000_000).to_string().into_bytes())
+                .map(|x| {
+                    ((x.wrapping_mul(2_654_435_761)) % 1_000_000)
+                        .to_string()
+                        .into_bytes()
+                })
                 .collect();
             let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
             let reps = 100_000u64;
@@ -43540,7 +43598,11 @@ mod tests {
             println!(
                 "FRESH int-build K={k:3}: individual={ind:8.0} ns | bulk={bulk:8.0} ns = {:.2}x {}",
                 ind / bulk,
-                if ind > bulk { "BULK-wins" } else { "individual-wins" }
+                if ind > bulk {
+                    "BULK-wins"
+                } else {
+                    "individual-wins"
+                }
             );
         }
     }
@@ -43556,7 +43618,11 @@ mod tests {
             // interleaved fresh members (worst case for individual: each insert shifts ~n/2)
             let base: Vec<i64> = (0..n as i64).map(|x| x * 2).collect();
             let members: Vec<Vec<u8>> = (0..k as i64)
-                .map(|x| (x * (2 * n as i64 / k.max(1) as i64) + 1).to_string().into_bytes())
+                .map(|x| {
+                    (x * (2 * n as i64 / k.max(1) as i64) + 1)
+                        .to_string()
+                        .into_bytes()
+                })
                 .collect();
             let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
             let reps = 60_000u64;
@@ -43628,7 +43694,11 @@ mod tests {
                 println!(
                     "N={n:5} K={k:3}: individual={ind:8.0} ns | merge={mrg:8.0} ns = {:.2}x {}",
                     ind / mrg,
-                    if ind > mrg { "MERGE-wins" } else { "individual-wins" }
+                    if ind > mrg {
+                        "MERGE-wins"
+                    } else {
+                        "individual-wins"
+                    }
                 );
             }
         }
@@ -43653,8 +43723,9 @@ mod tests {
             if n_existing + k > max_intset {
                 continue;
             }
-            let mut existing: Vec<i64> =
-                (0..n_existing).map(|_| (next() % 400) as i64 - 200).collect();
+            let mut existing: Vec<i64> = (0..n_existing)
+                .map(|_| (next() % 400) as i64 - 200)
+                .collect();
             existing.sort_unstable();
             existing.dedup();
             // Members: overlapping range (some new, some present, some duplicated within the args).
@@ -43704,7 +43775,9 @@ mod tests {
         // individual Vec::insert shifts ~n/2 elements; appends-past-the-end would be the best case for
         // the individual loop and understate the win). Both paths clone the base first.
         let base: Vec<i64> = (0..400i64).map(|n| n * 2).collect(); // evens 0..798
-        let members: Vec<Vec<u8>> = (0..100i64).map(|n| (n * 8 + 1).to_string().into_bytes()).collect(); // odds, front-loaded
+        let members: Vec<Vec<u8>> = (0..100i64)
+            .map(|n| (n * 8 + 1).to_string().into_bytes())
+            .collect(); // odds, front-loaded
         let reps = 40_000u64;
         let mut sink = 0u64;
         let t0 = std::time::Instant::now();
@@ -43749,7 +43822,18 @@ mod tests {
             }
         }
         let edge = vec![i64::MIN, -100, -1, 0, 1, 100, i64::MAX];
-        for t in [i64::MIN, i64::MIN + 1, -100, -50, 0, 1, 99, 100, i64::MAX - 1, i64::MAX] {
+        for t in [
+            i64::MIN,
+            i64::MIN + 1,
+            -100,
+            -50,
+            0,
+            1,
+            99,
+            100,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
             assert_eq!(
                 intset_binary_search_contains(&edge, t),
                 edge.binary_search(&t).is_ok()
@@ -52176,13 +52260,81 @@ mod tests {
         let ref_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
         for i in 0..reps {
-            sink =
-                sink.wrapping_add(crate::bitfield_read(std::hint::black_box(&buf), i % 9, 64, false));
+            sink = sink.wrapping_add(crate::bitfield_read(
+                std::hint::black_box(&buf),
+                i % 9,
+                64,
+                false,
+            ));
         }
         let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         std::hint::black_box(sink);
         println!(
             "bitfield_read u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
+            ref_ns / new_ns
+        );
+    }
+
+    // (CrimsonHawk) The byte-wise bitfield_write is byte-identical to the original
+    // per-bit loop across random in-bounds writes; A/B on a u64 write.
+    #[test]
+    fn bitfield_write_bytewise_matches_bitwise_and_reports_ab() {
+        fn ref_write(bytes: &mut [u8], bit_offset: u64, bits: u8, value: i64) {
+            let value = value as u64;
+            for b in 0..u64::from(bits) {
+                let pos = bit_offset.wrapping_add(b);
+                let byte_idx = (pos / 8) as usize;
+                let bit_idx = 7 - (pos % 8) as u8;
+                let bit_pos = u64::from(bits) - 1 - b;
+                let bit_val = (value >> bit_pos) & 1;
+                if bit_val == 1 {
+                    bytes[byte_idx] |= 1 << bit_idx;
+                } else {
+                    bytes[byte_idx] &= !(1 << bit_idx);
+                }
+            }
+        }
+
+        let mut seed = 0xB17F_5712_EA5E_D00D_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..300_000 {
+            let len = 9 + (next() % 8) as usize;
+            let mut expected: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+            let mut actual = expected.clone();
+            let bits = 1 + (next() % 64) as u8;
+            let max_offset = len as u64 * 8 - u64::from(bits);
+            let bit_offset = next() % (max_offset + 1);
+            let value = i64::from_ne_bytes(next().to_ne_bytes());
+            ref_write(&mut expected, bit_offset, bits, value);
+            crate::bitfield_write(&mut actual, bit_offset, bits, value);
+            assert_eq!(
+                actual, expected,
+                "off={bit_offset} bits={bits} value={value}"
+            );
+        }
+
+        let reps = 6_000_000u64;
+        let mut ref_buf = [0xA5u8; 16];
+        let t0 = std::time::Instant::now();
+        for i in 0..reps {
+            ref_write(std::hint::black_box(&mut ref_buf), i % 9, 64, i as i64);
+        }
+        let ref_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let mut new_buf = [0xA5u8; 16];
+        let t1 = std::time::Instant::now();
+        for i in 0..reps {
+            crate::bitfield_write(std::hint::black_box(&mut new_buf), i % 9, 64, i as i64);
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        assert_eq!(new_buf, ref_buf);
+        std::hint::black_box(new_buf);
+        println!(
+            "bitfield_write u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
             ref_ns / new_ns
         );
     }
