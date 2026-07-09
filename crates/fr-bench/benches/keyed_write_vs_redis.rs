@@ -525,6 +525,8 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     let xlen_packet = pipelined_xlen_packet(COMMANDS_PER_ITER);
     let zremrange_prefill = pipelined_zremrangebyrank_prefill_packet(COMMANDS_PER_ITER);
     let zremrange_packet = pipelined_zremrangebyrank_noop_packet(COMMANDS_PER_ITER);
+    let zcount_prefill = pipelined_zcount_prefill_packet(COMMANDS_PER_ITER);
+    let zcount_packet = pipelined_zcount_packet(COMMANDS_PER_ITER);
     for (label, prefill, packet, prefill_is_resp) in [
         ("XLEN", &xlen_prefill, &xlen_packet, true),
         (
@@ -533,6 +535,7 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
             &zremrange_packet,
             false,
         ),
+        ("ZCOUNT", &zcount_prefill, &zcount_packet, false),
     ] {
         for engine in engines {
             dispatch_floor_group.bench_with_input(
@@ -941,6 +944,32 @@ fn pipelined_zremrangebyrank_noop_packet(count: usize) -> Vec<u8> {
     for index in 0..count {
         let key = format!("zr:{index:03}");
         packet.extend_from_slice(&encode_command(&["ZREMRANGEBYRANK", &key, "10", "20"]));
+    }
+    packet
+}
+
+// (CrimsonHawk) ZCOUNT dispatch-floor bench: each key holds 16 members so the
+// count exercises the rank walk while the pipelined `ZCOUNT key 0 16` isolates
+// the dispatch cost the preclassifier removes.
+fn pipelined_zcount_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 96);
+    for index in 0..count {
+        let key = format!("zc:{index:03}");
+        let mut args: Vec<Vec<u8>> = vec![b"ZADD".to_vec(), key.into_bytes()];
+        for m in 0..16u32 {
+            args.push(m.to_string().into_bytes());
+            args.push(format!("m{m}").into_bytes());
+        }
+        packet.extend_from_slice(&encode_command_vecs(&args));
+    }
+    packet
+}
+
+fn pipelined_zcount_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("zc:{index:03}");
+        packet.extend_from_slice(&encode_command(&["ZCOUNT", &key, "0", "16"]));
     }
     packet
 }

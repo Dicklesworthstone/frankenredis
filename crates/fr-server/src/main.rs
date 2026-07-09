@@ -12140,6 +12140,7 @@ enum BorrowedMultibulkAction {
 enum BorrowedDispatchFloorClass {
     Xlen,
     Zremrangebyrank,
+    Zcount,
 }
 
 fn classify_borrowed_dispatch_floor_packet(
@@ -12161,6 +12162,18 @@ fn classify_borrowed_dispatch_floor_packet(
         && input.get(24..26)? == b"\r\n"
     {
         return Some(BorrowedDispatchFloorClass::Zremrangebyrank);
+    }
+    // (CrimsonHawk) ZCOUNT is dispatch-bound at 0.46x vs redis 7.2.4 — cascade arm
+    // sits at ~5486 (later than XLEN was), `process_buffered_frames` ~38% self vs
+    // executor ~9%. `*4\r\n$6\r\nZCOUNT\r\n` (key + min + max), reuses the existing
+    // `parse_borrowed_plain_zcount_packet` + `execute_plain_zcount_borrowed`.
+    if config.max_array_len >= 4
+        && config.max_bulk_len >= b"ZCOUNT".len()
+        && input.get(..8)? == b"*4\r\n$6\r\n"
+        && input.get(8..14)?.eq_ignore_ascii_case(b"ZCOUNT")
+        && input.get(14..16)? == b"\r\n"
+    {
+        return Some(BorrowedDispatchFloorClass::Zcount);
     }
     None
 }
@@ -12206,6 +12219,26 @@ fn try_dispatch_floor_classified_action(
                 b"ZREMRANGEBYRANK",
             ) && let Some(response) =
                 runtime.execute_plain_zremrangebyrank_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zcount => {
+            if let Some(packet) = parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -29169,6 +29202,13 @@ mod tests {
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::Zremrangebyrank)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nzCoUnT\r\n$1\r\nz\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Zcount)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

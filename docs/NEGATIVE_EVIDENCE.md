@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — ZCOUNT added to the dispatch-floor preclassifier — 2.00x vs ORIG, 0.46x→0.95x vs redis 7.2.4 (byte-exact)
+
+NEGATIVE-EVIDENCE CHECK: not a re-tried rejected lever. Extends CodexRedisDig's landed preclassifier
+framework (`6be709901`, XLEN/ZREMRANGEBYRANK). Coordinated: the peer moved on to a GETEX candidate
+(saw the `redis-cod-getex-candidate` build), so I took ZCOUNT — a different, un-claimed dispatch-floor
+command. Agent-mail is degraded read-only (write-back queue locked) so the reservation message bounced;
+claiming here + in the commit instead. Did NOT touch GETEX or the peer's commands.
+
+PROFILE (post-preclassifier fr binary under a ZCOUNT blast on a 1000-member zset): `process_buffered_frames`
+37.9% (dispatch cascade) + ~8% `__memcmp_avx2` (command-name compares) + failed parser attempts, vs
+`execute_plain_zcount_borrowed` only 9% (`ZRankTreap::rank_of` 7.7% is inherent count work). ZCOUNT's cascade
+arm sits at ~5486 (later than XLEN was at 4960) so it traversed ~130 arms — dispatch-bound, NOT algorithm
+(the warm-threshold count fix already shipped, `bdcc79a02`).
+
+FIX: one `BorrowedDispatchFloorClass::Zcount` variant + a `*4\r\n$6\r\nZCOUNT\r\n` classify arm + a dispatch
+arm reusing the EXISTING `parse_borrowed_plain_zcount_packet` + `execute_plain_zcount_borrowed` (same parser /
+executor / generic fallback as the cascade arm → correctness preserved by construction: bad bounds → parser
+returns None → generic path → exact error). Added a mixed-case classifier unit test + a ZCOUNT case to the
+`dispatch_floor_vs_redis` criterion bench.
+
+MEASURED (release binary, pinned):
+- Ratio vs ORIG (candidate binary vs original `redis-cod` binary, interleaved TCP A/B, batch 500, 41 trials):
+  candidate 0.243 ms / original 0.487 ms = **2.003x**.
+- vs redis 7.2.4 (`broad_command_headtohead.py`, pipe 400, trials 21): ZCOUNT **0.46x → 0.95x**; the
+  `LOSSES(<0.9x)` list went from `[zcount 0.457]` to `[]` (empty); no regressions.
+- Conformance: ZCOUNT differential fr vs redis 7.2.4, 16 edge cases (exclusive bounds `(0`/`(9`, ±inf, empty,
+  missing key, WRONGTYPE, malformed `bad`/`notanum` → `ERR min or max is not a float`, bare `(`) = 0 diffs.
+- Classifier unit tests green (2 passed).
+
+VEIN NOTE for the endgame: the classifier runs at 2674 BEFORE GET's cascade arm (2725), so each added arm
+costs EVERY command (incl. GET) one byte-prefix check. Fine at 3 commands; past ~10-15 the hot path (GET/SET)
+regresses and it wants an O(1) token jump-table rather than a growing linear front-gate.
+
 ## 2026-07-09 CrimsonHawk/CodexRedisDig: KEEP — ohsk5 RESP command-token preclassifier for dispatch-floor XLEN/ZREMRANGEBYRANK — XLEN 1.89x, ZREMRANGEBYRANK-noop 3.68x vs ORIG
 
 NEGATIVE-EVIDENCE CHECK: did NOT retry the rejected "missing fast path" vein. The immediately preceding
