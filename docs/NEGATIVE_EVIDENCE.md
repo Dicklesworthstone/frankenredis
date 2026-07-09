@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: REVERT (0-gain) + SURFACE — SMISMEMBER 100-member 0.82x is NOT the parser cliff; store-membership/encode-bound
+
+Ran a fresh broad head-to-head vs redis 7.2.4 (`broad_command_headtohead.py`, both servers self-launched).
+Result: fr faster-or-parity almost everywhere — the set-algebra wins show through (**sunionstore 5.52x,
+sinterstore/sdiffstore 2.34x, sintercard 1.77x, lpos 2.25x, bitcount 1.96x**); the only stable loss is
+**`SMISMEMBER setA <100 members>` = 0.82x**. (getrange/zcount/zrange occasionally print <0.9x but flip run-to-
+run = LOAD NOISE.)
+
+Hypothesis: 100 members > `SMISMEMBER_MULTI_MAX=32` drops it to the generic borrowed dispatch (owned arg
+copies + `RespFrame::Array`), so I raised the cap 32→1024 (Vec-sized-to-nmembers, no over-init). MEASURED:
+0.82x → 0.85x = **~0-gain** (fr 22.9ms → 22.4ms, ~2%, inside noise). So the parser cliff is NOT the
+bottleneck here — a 100-member SMISMEMBER on a 2000-member GENERIC set is dominated by the 100 membership
+checks + the 100-integer reply, which BOTH the fast and generic paths pay. REVERTED the cap change (0-gain +
+an unverified small-multi Vec-alloc risk vs the current no-alloc fixed array).
+
+SURFACE (real lever for a future turn): fr's set-membership (`CompactStrSet::contains` / large-generic-set
+lookup) or the SMISMEMBER reply encode is ~1.2x slower than redis's `dictFind` for the all-present-hits shape
+— needs `perf` on `execute_plain_smismember_borrowed_into` to localize (contains vs encode). NOTE this is
+odd given SINTERSTORE/SUNIONSTORE (also contains-based) are fr-FASTER, so it may be SMISMEMBER-specific
+(per-member dispatch/encode overhead) rather than the raw lookup. Don't re-try the cap raise.
+
 ## 2026-07-08 CrimsonHawk: KEEP (Route A — SINTER) — SINTER borrow-scan fast path — 2.43x store-level, byte-exact vs redis 7.2.4
 
 Completed the set-algebra trio. SINTER was already "direct-Vec" (1 copy, not 2 like SUNION/SDIFF had), so I
