@@ -67,6 +67,12 @@ def setup(c):
     c.cmd("HSET", "bigh", *[x for j in range(1000) for x in (f"f{j}", f"v{j}")])
     c.cmd("RPUSH", "biglist", *[f"e{j}" for j in range(2000)])
     c.cmd("RPUSH", "dlist", *[f"d{j % 50}" for j in range(2000)])  # many dups for LREM/LPOS
+    # (CrimsonHawk) uncovered families: streams / geo / hll
+    for j in range(500):
+        c.cmd("XADD", "bigstream", f"{j + 1}-0", "f", f"v{j}")
+    c.cmd("GEOADD", "biggeo", *[x for j in range(1000) for x in (13.0 + j * 0.001, 52.0 + j * 0.001, f"p{j}")])
+    c.cmd("PFADD", "bighll", *[f"e{j}" for j in range(2000)])
+    c.cmd("PFADD", "bighll2", *[f"g{j}" for j in range(2000)])
 
 
 WORK = {
@@ -100,6 +106,16 @@ WORK = {
     "type": ["TYPE", "bigz"],
     "strlen": ["STRLEN", "bigstr"],
     "zremrangebyrank": ["ZREMRANGEBYRANK", "nope", 0, 10],
+    "xlen": ["XLEN", "bigstream"],
+    "xrange_n": ["XRANGE", "bigstream", "-", "+", "COUNT", 100],
+    "xadd": ["XADD", "bigstream2", "*", "f", "v"],
+    "geodist": ["GEODIST", "biggeo", "p0", "p500"],
+    "geosearch": ["GEOSEARCH", "biggeo", "FROMMEMBER", "p500", "BYRADIUS", "100", "km", "COUNT", "10"],
+    "geopos": ["GEOPOS", "biggeo", "p500"],
+    "pfcount1": ["PFCOUNT", "bighll"],
+    "pfcount2": ["PFCOUNT", "bighll", "bighll2"],
+    "pfadd": ["PFADD", "bighll", "newelem"],
+    "pfmerge": ["PFMERGE", "hlldst", "bighll", "bighll2"],
 }
 
 

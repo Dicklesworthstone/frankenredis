@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE — ALL command families now measured vs redis 7.2.4; fr faster-or-parity on every real-work path; remaining tail = dispatch-bound (ohsk5) / zset (peer) / geodist (byte-risk)
+
+Extended `extended2_headtohead_ch.py` with the last UNMEASURED families — streams / geo / hll — and swept.
+Results (fr/redis ratio, >1 = fr faster): **pfcount-multi 3.38x, pfmerge 2.68x** (HLL SIMD merge is excellent),
+xrange 1.12x, geosearch 1.04x, geopos 0.96x, pfadd 0.94x. So streams-range / geo-search / HLL-merge are all
+fr-competitive. Combined with the prior broad / extended / large-value sweeps + this session's BITOP fix
+(0.79→0.97x), **fr is now measured faster-or-parity on EVERY real-work command path** (large-value GET/SET,
+set-algebra, zset-range, stream-range, geo-search, HLL-merge, bitmaps).
+
+The entire remaining loss list is one of three buckets, none a clean per-crate lever:
+1. SUB-MS dispatch/bookkeeping-bound (xlen 0.78 / xadd 0.85 / type 0.83 / setbit 0.76 / getbit 0.89 / getdel
+   0.69 / getex 0.64 / object_freq 0.85 / sintercard_lim 0.71 / lmpop 0.84 / copy_list 0.78 [Arc-COW clone is
+   O(1), so pure dispatch] / smove 0.80 / hincrbyfloat 0.81 / pfcount-single 0.66). perf (SMISMEMBER, BITOP)
+   put `process_buffered_frames` at 15-27% self — these tiny commands are dominated by fr's per-command
+   pipeline (array parse + linear parser chain + parity-required bookkeeping: packet_id/stats/clock), the same
+   bucket as GET/SET. Rare in real mixed traffic (sweep measures each in isolation).
+2. ZSET (zrank/zrank_ws/zscore/zpopmin_n/zremrangebyrank) — peer (CoralOx/jeff) area.
+3. geodist 0.70x — haversine trig (libm, same as redis) + sub-ms dispatch; the only float-fmt lever is
+   byte-risky (declined prior).
+
+THE ONE STRUCTURAL LEVER LEFT: ohsk5 — replace `process_buffered_frames`' linear parser-chain dispatch with a
+command-hash / arr-len jump table. Would shave the sub-ms tail but is LOW-ROI (~3-5% aggregate; the slow
+commands are rare) + HIGH-RISK (rewrite THE hottest fn) + crowded (peers eyeing it) → wants a dedicated
+coordinated cycle, not a drive-by. No clean single-crate perf lever remains for me; the frontier is
+IO/dispatch/structural from here. (Kept the streams/geo/hll additions to extended2 as permanent coverage.)
+
 ## 2026-07-09 CrimsonHawk: KEEP — BITOP 2-operand single-pass zip-collect — bitop_and 0.88x → 0.97x vs redis 7.2.4 (byte-exact)
 
 Overturned the prior "the BITOP copy-first memmove is inherent to safe code" caveat. A store-level A/B proved
