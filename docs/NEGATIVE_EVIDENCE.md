@@ -4,6 +4,19 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: CLOSE — SORT loss DECOMPOSED: it's dominated by the STRUCTURAL ChunkedList `store_as_list` (99fwc, already-rejected), NOT the sort/clones. Stop chasing SORT.
+
+Follow-up to the SORT entry below. Isolated the loss with **`SORT lst BY nosort STORE`** (collect + store, NO sort
+step): it's **already 0.734x** — so the bulk of the SORT-STORE loss is the collect + `store_as_list` (building a
+ChunkedList), which is the KNOWN 99fwc structural dead-end (the ChunkedList-construction fix was measured SLOWER and
+rejected — see the list-RESTORE ledger). Sort-step deltas on top: numeric adds ~nothing (0.734→0.720), ALPHA adds a
+smaller key-length-scaling component (0.734→0.538 for 8-char keys, →0.706 for 1-char). So the earlier "candidate
+levers" (drop the ALPHA-no-BY tiebreak / `mem::take` reorder / faster f64 parse) target only the SMALL sort-step
+component and have a LOW ceiling — the structural store dominates. CONCLUSION: SORT is not a clean bounded perf
+lever; its dominant cost is ChunkedList construction (99fwc, multi-day, rejected). **Don't re-investigate SORT for
+perf.** (Method note: SORT's multi-element array reply breaks naive `\r\n` reply-drains — a proper drain hangs;
+use STORE for a `:N` reply, and remember STORE contaminates with the ChunkedList-build cost.)
+
 ## 2026-07-09 CrimsonHawk: REJECT (0-gain) + SURFACE — SORT is a real EXECUTOR loss (ALPHA 0.58x vs redis) but the reply-clone (into_iter) lever is 0-gain; cost is the sort comparison / collect+reorder clones
 
 Hunting for another EXECUTOR lever (fr does more CPU than redis, cost scales with work — the PFADD sweet spot), I
