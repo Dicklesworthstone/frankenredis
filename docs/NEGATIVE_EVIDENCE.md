@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: REJECT (0-gain) + SURFACE — SORT is a real EXECUTOR loss (ALPHA 0.58x vs redis) but the reply-clone (into_iter) lever is 0-gain; cost is the sort comparison / collect+reorder clones
+
+Hunting for another EXECUTOR lever (fr does more CPU than redis, cost scales with work — the PFADD sweet spot), I
+measured executor-heavy commands cleanly (STORE/single-line replies to avoid the multi-element reply-drain bug).
+fr WINS the big ones: **PFMERGE_4dense 3.60x** (my HLL fixes paid off), **BITCOUNT_1MB 3.35x, BITOP_AND 1.72x**.
+The one real executor LOSS: **SORT** — numeric-STORE 0.72x, **ALPHA-STORE 0.54–0.58x** (fr ~2x redis), scales with
+list size (not dispatch — BY-pattern SORT WINS 1.42x). Bench SORT numbers are otherwise unreliable (multi-element
+array replies break naive `\r\n` reply-counting — use STORE for a `:N` single-line reply).
+
+ROOT-CAUSE CHASE: fr's SORT does ~3 clones/element for STORE (collect-from-list C1 → reorder C2 → reply-frame C3;
+STORE then MOVES C3→list). Only C3 is trivially removable (`sliced.iter().map(el.clone())` →
+`.into_iter().map(el)`); C2 can't move (the sorted `indexed: Vec<(usize,&[u8])>` holds refs INTO `elements`, so a
+`mem::take` borrow-conflicts — that's why it clones). TRIED the C3 into_iter (built green, byte-exact-by-construction):
+**measured 0-gain — num-STORE 1.02x, ALPHA-STORE 1.06x (within noise), vs-redis still 0.58x. REVERTED.** So the
+reply clone is NOT the bottleneck.
+
+REMAINING (deferred — needs a profile I couldn't get: SORT is CPU-heavy but a single python client can't saturate
+fr, and `perf record -p` returned no samples): the cost is the sort COMPARISON path (~n·log n `sort_alpha_compare`
++ an index-tiebreak `then_with` per compare that's unnecessary for ALPHA-without-BY where equal keys are identical
+elements) and/or the C1 collect-from-ChunkedList (structural, 99fwc). Candidate levers for a fresh turn: drop the
+tiebreak for ALPHA-no-BY full sorts; collect owned indices then `mem::take` (drop `indexed` first to clear the
+borrow); a faster f64 parse for numeric. Not a clean bounded win this turn.
+
 ## 2026-07-09 CrimsonHawk: SURFACE — the remaining sub-ms bench losses are ALL dispatch-POSITION-bound (cost ∝ cascade arm index); EXISTS multi-key is the #1 preclassifier target
 
 Ran the un-examined per-crate benches (set_algebra / bitfield / exists / geo). fr WINS big on real-work
