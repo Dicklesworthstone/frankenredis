@@ -15129,7 +15129,8 @@ impl Store {
                 res.iter().map(|m| m.into_owned()).collect()
             }
         };
-        out.sort();
+        // (CrimsonHawk) sort_unstable: SINTER members are unique — byte-identical, pdqsort, no scratch alloc.
+        out.sort_unstable();
         Ok(out)
     }
 
@@ -15604,7 +15605,9 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
+        // (CrimsonHawk) sort_unstable: set members are unique, so there are no equal elements to reorder —
+        // byte-identical to the stable sort, but pdqsort is faster and skips the stable-sort scratch alloc.
+        v.sort_unstable();
         Ok(v)
     }
 
@@ -15688,7 +15691,9 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
+        // (CrimsonHawk) sort_unstable: set members are unique, so there are no equal elements to reorder —
+        // byte-identical to the stable sort, but pdqsort is faster and skips the stable-sort scratch alloc.
+        v.sort_unstable();
         Ok(v)
     }
 
@@ -52474,6 +52479,62 @@ mod tests {
                 .bitpos(b"nokey", true, None, None, BitRangeUnit::Byte, 0)
                 .unwrap(),
             -1
+        );
+    }
+
+    // (CrimsonHawk) sort_unstable is byte-identical to sort on unique-member reply vecs (SINTER/SUNION/SDIFF)
+    // across a random sweep, and the A/B shows the pdqsort/no-scratch path is faster.
+    #[test]
+    fn set_reply_sort_unstable_matches_stable_and_reports_ab() {
+        let mut seed = 0x51ed_2701_dead_beefu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Byte-identity: unique Vec<u8> members => sort() == sort_unstable().
+        for _ in 0..3000 {
+            let n = 1 + (next() % 400) as usize;
+            let mut set = std::collections::HashSet::new();
+            while set.len() < n {
+                let len = 1 + (next() % 12) as usize;
+                set.insert((0..len).map(|_| (next() & 0xff) as u8).collect::<Vec<u8>>());
+            }
+            let base: Vec<Vec<u8>> = set.into_iter().collect();
+            let mut a = base.clone();
+            a.sort();
+            let mut b = base.clone();
+            b.sort_unstable();
+            assert_eq!(a, b);
+        }
+        // A/B: reset-then-sort a large unique reply (clone_from is common to both arms → ratio isolates sort).
+        let ncount = 4000usize;
+        let mut set = std::collections::HashSet::new();
+        while set.len() < ncount {
+            let len = 4 + (next() % 16) as usize;
+            set.insert((0..len).map(|_| (next() & 0xff) as u8).collect::<Vec<u8>>());
+        }
+        let base: Vec<Vec<u8>> = set.into_iter().collect();
+        let reps = 4000u64;
+        let mut work: Vec<Vec<u8>> = Vec::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            work.clone_from(&base);
+            work.sort();
+            std::hint::black_box(&work[0]);
+        }
+        let stable_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            work.clone_from(&base);
+            work.sort_unstable();
+            std::hint::black_box(&work[0]);
+        }
+        let unstable_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "set reply sort (n={ncount}, incl common clone_from): stable={stable_ns:.0} ns | unstable={unstable_ns:.0} ns = {:.2}x",
+            stable_ns / unstable_ns
         );
     }
 

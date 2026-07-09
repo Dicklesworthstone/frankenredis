@@ -59,6 +59,22 @@ RNG stream, dirty count, and modification count. `cargo fmt --check`, `git diff 
 remote focused fr-store proof, and `cargo test -p fr-conformance -- --nocapture` passed; conformance ended
 with 194/194 lib tests and 99/99 smoke tests GREEN. Current-toolchain `chunks_exact_to_as_chunks` /
 `manual_slice_fill` style lints in fr-store were mechanically converted on the way to the final clippy pass.
+## 2026-07-08 CrimsonHawk: KEEP — SINTER/SUNION/SDIFF replies use sort_unstable instead of stable sort — 1.13x+ (byte-identical)
+
+Same profiling area as yesterday's NO-SHIP (the borrow-scan there was blocked by the byte-sort). Different,
+simpler lever on that exact sort: SINTER (out.sort), SUNION, SDIFF all byte-sorted their `Vec<Vec<u8>>` reply
+with the STABLE `.sort()` (Timsort — allocates an O(n) scratch buffer + merge overhead). Set members are
+UNIQUE, so there are no equal elements to reorder → `.sort_unstable()` (pdqsort, in-place, no scratch) is
+BYTE-IDENTICAL and faster.
+
+BYTE-IDENTICAL: `set_reply_sort_unstable_matches_stable_and_reports_ab` builds 3000 random unique member sets
+and asserts `sort()` == `sort_unstable()`; sinter (4) sunion (2) sdiff (3) suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, n=4000 reply, reset-then-sort with a `clone_from` COMMON to both arms):
+stable 342,713 ns vs unstable 303,023 ns = **1.13x** — and since the clone_from is shared overhead in both
+arms, the sort-in-isolation speedup is larger (the reset dilutes the ratio). General: `Vec<Vec<u8>>::sort()`
+→ `sort_unstable()` is always byte-identical (equal ⇒ identical bytes) and cheaper; audit other set/key reply
+sorts (KEYS, SMEMBERS-collect paths, SUNIONSTORE result) — none require stability.
 
 ## 2026-07-08 CrimsonHawk: NO-SHIP (profiling sweep) — each_member_bytes can't extend to SINTER/SUNION/SDIFF (byte-sort blocks borrow-scan); benched read ops + packed contains verified optimal
 
