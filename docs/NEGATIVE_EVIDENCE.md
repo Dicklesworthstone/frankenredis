@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — dense-HLL PFADD in-place register patch — 2.43–8.58x vs ORIG (byte-identical to current behavior)
+
+The per-crate `cargo bench` flagged PFADD losing 0.06–0.30x. Confirmed with FRESH unique elements (the real HLL
+growth path; the old idempotent sweep hid it as parity): PFADD is **3–17x slower than redis** — dense fresh-add
+**0.08x**, sparse **0.06x**. ROOT CAUSE: `pfadd_impl` decodes the HLL, updates registers, then **`hll_encode`
+RE-ENCODES all 16384 registers (line ~22338) on EVERY modifying PFADD** — O(16384)/add. Redis patches registers
+in place, O(elements). (This is a genuine bug, not covered by the "HLL optimized" memory — PFCOUNT/PFMERGE were
+optimized, PFADD was not.)
+
+FIX: a dense in-place fast path. When the key already holds a dense HLL, `materialize_string()` (→ `&mut Vec<u8>`,
+O(1) for a heap value) then patch ONLY the touched 6-bit registers directly in the stored payload via new
+`hll_dense_{get,set}_register` (matching `hll_encode_dense_registers`' 4-reg/3-byte LSB-first layout), O(elements).
+TTL preserved (in-place, no reinsert), register cache invalidated, dirty accounted. **Byte-IDENTICAL to the
+current re-encode path** — the card field is reset to the same `[0;7,0x80]` sentinel `hll_encode` writes.
+
+MEASURED (candidate vs ORIG `redis-cc-dg` binary, dense HLL, min-of-15, pinned): **PFADD_1v 8.58x, _4v 2.43x,
+_8v 2.58x vs ORIG** (vs redis: 0.08x → 0.19–0.69x). CONFORMANCE: candidate vs fr-current = **0 diffs / 12** (GET
+byte-compare of the raw HLL across dense-build / PFCOUNT-cache / fresh-adds / no-op / new / TTL / wrong-type);
+behavior-neutral.
+
+SURFACED (follow-ups, NOT done here): (1) **sparse PFADD still re-encodes** (O(sparse)/add) — needs an in-place
+`hllSparseSet` opcode-patch port (bigger; the sparse phase is small-cardinality HLLs). (2) **Pre-existing card
+divergence vs redis**: on cache-invalidation fr ZEROES the count (`[0;7,0x80]`) while redis KEEPS the stale count
+and only sets the invalid MSB — fr-current has this too (candidate-vs-redis = the SAME 2 card diffs as
+fr-current-vs-redis); functionally irrelevant (invalid bit ⇒ recomputed) but a real byte-level gap worth a
+CONSISTENT fix across all HLL write paths. (3) PFADD_4v/8v still 0.19–0.25x vs redis — per-element overhead to
+profile next.
+
 ## 2026-07-09 CrimsonHawk: SURFACE + REJECT — variadic-write dispatch cliff (keyed_values5-8) is REAL (+25-30% on 5-8v) but the cascade REORDER fix is net-negative; the clean fix is a front-gate preclassifier (peer's vein)
 
 Ran the directive's per-crate `cargo bench` (keyed_write_vs_redis) — it surfaced a broad loss the ad-hoc TCP

@@ -22238,6 +22238,56 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        // (CrimsonHawk) Dense HLL in-place fast path. The generic path below decodes
+        // the HLL, updates registers, then RE-ENCODES all 16384 registers (O(16384))
+        // on every PFADD — measured ~12x slower than redis on a dense HLL. When the
+        // key already holds a dense HLL, patch only the touched 6-bit registers
+        // directly in the stored string (O(elements)). Byte-identical to the
+        // re-encode: same register bytes, TTL preserved (in-place, no reinsert), and
+        // the cardinality-cache field reset to redis' invalidated sentinel exactly as
+        // `hll_encode` writes it (`[0;7, 0x80]`).
+        let dense_hit = self
+            .entries
+            .get(key)
+            .and_then(|entry| entry.value.string_bytes())
+            .is_some_and(|data| hll_parse_encoding(data.as_ref()).ok() == Some(HllEncoding::Dense));
+        if dense_hit {
+            let register_updates = {
+                let entry = self
+                    .entries
+                    .get_mut(key)
+                    .expect("dense_hit implies the key exists");
+                let mut updates = 0_u64;
+                {
+                    let data = entry
+                        .value
+                        .materialize_string()
+                        .expect("dense_hit implies a String value");
+                    let (header, payload) = data.split_at_mut(HLL_REDIS_HEADER_SIZE);
+                    for element in elements {
+                        let hash = hll_hash(element.as_ref());
+                        let index = (hash as usize) & (HLL_REGISTERS - 1);
+                        let count = hll_rho(hash >> HLL_P);
+                        if count > hll_dense_get_register(payload, index) {
+                            hll_dense_set_register(payload, index, count);
+                            updates += 1;
+                        }
+                    }
+                    if updates > 0 {
+                        header[8..16].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+                    }
+                }
+                if updates > 0 {
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                }
+                updates
+            };
+            if register_updates > 0 {
+                self.hll_register_cache.remove(key);
+                self.dirty = self.dirty.saturating_add(register_updates);
+            }
+            return Ok(register_updates > 0);
+        }
         if !self.entries.contains_key(key)
             && let Some((data, register_updates)) =
                 hll_encode_sparse_create_from_pfadd(elements, self.hll_sparse_max_bytes)
@@ -31325,6 +31375,34 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         regs[3] = ((w >> 18) & 0x3f) as u8;
     }
     Ok(registers)
+}
+
+// (CrimsonHawk) Single-register read/patch on a live dense HLL payload, matching
+// `hll_encode_dense_registers`' layout (4 registers per 3-byte LSB-first group).
+// Lets PFADD update a dense HLL in place in O(elements) instead of re-encoding all
+// 16384 registers per call.
+#[inline]
+fn hll_dense_get_register(payload: &[u8], index: usize) -> u8 {
+    let g = (index / 4) * 3;
+    let off = (index % 4) * 6;
+    let w = u32::from(payload[g])
+        | (u32::from(payload[g + 1]) << 8)
+        | (u32::from(payload[g + 2]) << 16);
+    ((w >> off) & 0x3f) as u8
+}
+
+#[inline]
+fn hll_dense_set_register(payload: &mut [u8], index: usize, value: u8) {
+    let g = (index / 4) * 3;
+    let off = (index % 4) * 6;
+    let mut w = u32::from(payload[g])
+        | (u32::from(payload[g + 1]) << 8)
+        | (u32::from(payload[g + 2]) << 16);
+    w &= !(0x3f_u32 << off);
+    w |= (u32::from(value) & 0x3f) << off;
+    payload[g] = w as u8;
+    payload[g + 1] = (w >> 8) as u8;
+    payload[g + 2] = (w >> 16) as u8;
 }
 
 fn hll_encode_sparse_registers(registers: &[u8]) -> Option<Vec<u8>> {
