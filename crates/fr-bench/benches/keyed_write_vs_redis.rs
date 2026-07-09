@@ -238,6 +238,30 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
         },
     ];
 
+    // (BlackThrush) Optional same-worker A/B: when FR_SERVER_ORIG_BIN is set, spawn a
+    // second frankenredis built from a prior commit as a "frankenredis-orig" engine so
+    // the dispatch_floor group measures candidate vs orig vs redis in ONE process on
+    // ONE worker — the only way to compare across the multi-agent rch fleet honestly.
+    let orig_bin = env::var_os("FR_SERVER_ORIG_BIN").map(PathBuf::from);
+    let orig_port = free_port(fr_port + 1);
+    let _fr_orig = orig_bin.as_ref().map(|bin| {
+        assert!(
+            bin.is_file(),
+            "FR_SERVER_ORIG_BIN not found: {}",
+            bin.display()
+        );
+        let server = spawn_frankenredis(bin, orig_port);
+        wait_for_ping(orig_port);
+        server
+    });
+    let mut floor_engines = engines.to_vec();
+    if _fr_orig.is_some() {
+        floor_engines.push(Engine {
+            name: "frankenredis-orig",
+            port: orig_port,
+        });
+    }
+
     let mut group = c.benchmark_group("keyed_write_vs_redis");
     group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
 
@@ -532,6 +556,16 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     let type_packet = pipelined_type_packet(COMMANDS_PER_ITER);
     let pfcount_prefill = pipelined_pfcount_prefill_packet(COMMANDS_PER_ITER);
     let pfcount_packet = pipelined_pfcount_packet(COMMANDS_PER_ITER);
+    let strlen_prefill = pipelined_strlen_prefill_packet(COMMANDS_PER_ITER);
+    let strlen_packet = pipelined_strlen_packet(COMMANDS_PER_ITER);
+    let llen_prefill = pipelined_llen_prefill_packet(COMMANDS_PER_ITER);
+    let llen_packet = pipelined_llen_packet(COMMANDS_PER_ITER);
+    let scard_prefill = pipelined_scard_prefill_packet(COMMANDS_PER_ITER);
+    let scard_packet = pipelined_scard_packet(COMMANDS_PER_ITER);
+    let hlen_prefill = pipelined_hlen_prefill_packet(COMMANDS_PER_ITER);
+    let hlen_packet = pipelined_hlen_packet(COMMANDS_PER_ITER);
+    let zcard_prefill = pipelined_zcard_prefill_packet(COMMANDS_PER_ITER);
+    let zcard_packet = pipelined_zcard_packet(COMMANDS_PER_ITER);
     for (label, prefill, packet, prefill_is_resp, packet_is_resp) in [
         ("XLEN", &xlen_prefill, &xlen_packet, true, false),
         (
@@ -550,8 +584,13 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
             false,
         ),
         ("ZCOUNT", &zcount_prefill, &zcount_packet, false, false),
+        ("STRLEN", &strlen_prefill, &strlen_packet, false, false),
+        ("LLEN", &llen_prefill, &llen_packet, false, false),
+        ("SCARD", &scard_prefill, &scard_packet, false, false),
+        ("HLEN", &hlen_prefill, &hlen_packet, false, false),
+        ("ZCARD", &zcard_prefill, &zcard_packet, false, false),
     ] {
-        for engine in engines {
+        for engine in floor_engines.iter().copied() {
             dispatch_floor_group.bench_with_input(
                 BenchmarkId::new(label, engine.name),
                 &engine,
@@ -1048,6 +1087,99 @@ fn pipelined_pfcount_packet(count: usize) -> Vec<u8> {
     for index in 0..count {
         let key = format!("pf:{index:03}");
         packet.extend_from_slice(&encode_command(&["PFCOUNT", &key]));
+    }
+    packet
+}
+
+// (BlackThrush) cardinality-cluster dispatch-floor benches. Each command is a
+// single-key O(1) length/cardinality read (STRLEN/LLEN/SCARD/HLEN/ZCARD) that the
+// preclassifier hoists out of the ~position-85 cascade arm to the dispatch floor.
+fn pipelined_strlen_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for index in 0..count {
+        let key = format!("sl:{index:03}");
+        packet.extend_from_slice(&encode_command(&["SET", &key, "value"]));
+    }
+    packet
+}
+
+fn pipelined_strlen_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("sl:{index:03}");
+        packet.extend_from_slice(&encode_command(&["STRLEN", &key]));
+    }
+    packet
+}
+
+fn pipelined_llen_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for index in 0..count {
+        let key = format!("ll:{index:03}");
+        packet.extend_from_slice(&encode_command(&["RPUSH", &key, "a", "b", "c"]));
+    }
+    packet
+}
+
+fn pipelined_llen_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("ll:{index:03}");
+        packet.extend_from_slice(&encode_command(&["LLEN", &key]));
+    }
+    packet
+}
+
+fn pipelined_scard_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for index in 0..count {
+        let key = format!("sc:{index:03}");
+        packet.extend_from_slice(&encode_command(&["SADD", &key, "1", "2", "3"]));
+    }
+    packet
+}
+
+fn pipelined_scard_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("sc:{index:03}");
+        packet.extend_from_slice(&encode_command(&["SCARD", &key]));
+    }
+    packet
+}
+
+fn pipelined_hlen_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("hl:{index:03}");
+        packet.extend_from_slice(&encode_command(&["HSET", &key, "f1", "v1", "f2", "v2"]));
+    }
+    packet
+}
+
+fn pipelined_hlen_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("hl:{index:03}");
+        packet.extend_from_slice(&encode_command(&["HLEN", &key]));
+    }
+    packet
+}
+
+fn pipelined_zcard_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("zd:{index:03}");
+        packet.extend_from_slice(&encode_command(&["ZADD", &key, "1", "a", "2", "b"]));
+    }
+    packet
+}
+
+fn pipelined_zcard_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("zd:{index:03}");
+        packet.extend_from_slice(&encode_command(&["ZCARD", &key]));
     }
     packet
 }

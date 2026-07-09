@@ -12138,13 +12138,20 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    BitfieldGet(PlainBitfieldGetCmd),
+    BitfieldSet,
     Exists(usize),
     Getex,
     GetexExpire,
     GetexPersist,
+    Hlen,
+    Llen,
     Pfcount,
+    Scard,
+    Strlen,
     Type,
     Xlen,
+    Zcard,
     Zremrangebyrank,
     Zcount,
 }
@@ -12156,11 +12163,18 @@ struct BorrowedDispatchFloorToken<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Bitfield,
+    BitfieldRo,
     Exists,
     Getex,
+    Hlen,
+    Llen,
     Pfcount,
+    Scard,
+    Strlen,
     Type,
     Xlen,
+    Zcard,
     Zcount,
     Zremrangebyrank,
 }
@@ -12181,21 +12195,48 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         4 => match uppercase_ascii_token::<4>(token)? {
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
+            [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
+            [b'L', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Llen),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
+            [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
+            [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
+            [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
             [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pfcount)
             }
+            _ => None,
+        },
+        8 => match uppercase_ascii_token::<8>(token)? {
+            [b'B', b'I', b'T', b'F', b'I', b'E', b'L', b'D'] => {
+                Some(BorrowedDispatchFloorCommand::Bitfield)
+            }
+            _ => None,
+        },
+        11 => match uppercase_ascii_token::<11>(token)? {
+            [
+                b'B',
+                b'I',
+                b'T',
+                b'F',
+                b'I',
+                b'E',
+                b'L',
+                b'D',
+                b'_',
+                b'R',
+                b'O',
+            ] => Some(BorrowedDispatchFloorCommand::BitfieldRo),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -12285,6 +12326,15 @@ fn classify_borrowed_dispatch_floor_packet(
     let token = borrowed_dispatch_floor_token(input, config)?;
     let command = borrowed_dispatch_floor_command(token.command)?;
     match (token.array_len, command) {
+        (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
+            BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
+        ),
+        (6, BorrowedDispatchFloorCommand::Bitfield) => {
+            Some(BorrowedDispatchFloorClass::BitfieldSet)
+        }
+        (5, BorrowedDispatchFloorCommand::BitfieldRo) => Some(
+            BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::BitfieldRo),
+        ),
         (array_len, BorrowedDispatchFloorCommand::Exists)
             if (2..=KEYS_MULTI_MAX + 1).contains(&array_len) =>
         {
@@ -12292,6 +12342,11 @@ fn classify_borrowed_dispatch_floor_packet(
         }
         (2, BorrowedDispatchFloorCommand::Type) => Some(BorrowedDispatchFloorClass::Type),
         (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
+        (2, BorrowedDispatchFloorCommand::Strlen) => Some(BorrowedDispatchFloorClass::Strlen),
+        (2, BorrowedDispatchFloorCommand::Llen) => Some(BorrowedDispatchFloorClass::Llen),
+        (2, BorrowedDispatchFloorCommand::Scard) => Some(BorrowedDispatchFloorClass::Scard),
+        (2, BorrowedDispatchFloorCommand::Hlen) => Some(BorrowedDispatchFloorClass::Hlen),
+        (2, BorrowedDispatchFloorCommand::Zcard) => Some(BorrowedDispatchFloorClass::Zcard),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
         (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
@@ -12378,6 +12433,59 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::BitfieldGet(cmd) => {
+            if let Some(packet) = parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
+                && packet.cmd == cmd
+                && let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
+                    packet.cmd,
+                    packet.key,
+                    packet.get_arg,
+                    packet.enc_arg,
+                    packet.offset_arg,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitfieldSet => {
+            if let Some(packet) = parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitfield_set_borrowed(
+                    packet.key,
+                    packet.set_arg,
+                    packet.enc_arg,
+                    packet.offset_arg,
+                    packet.value_arg,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Exists(nkeys) => {
             if let Some(consumed) =
                 dispatch_floor_fast_exists_into(nkeys, unparsed, &parser_config, runtime, ts, out)
@@ -12541,6 +12649,109 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_cardinality_borrowed(
                     PlainCardinalityCmd::Xlen,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Strlen => {
+            if let Some(packet) = parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Llen => {
+            if let Some(packet) = parse_borrowed_plain_llen_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Scard => {
+            if let Some(packet) = parse_borrowed_plain_scard_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hlen => {
+            if let Some(packet) = parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                    PlainCardinalityCmd::Hlen,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zcard => {
+            if let Some(packet) = parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                    PlainCardinalityCmd::Zcard,
                     packet.key,
                     ts,
                 )
@@ -29597,6 +29808,74 @@ mod tests {
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$8\r\nbItFiElD\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldGet(
+                PlainBitfieldGetCmd::Bitfield
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$11\r\nBiTfIeLd_Ro\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldGet(
+                PlainBitfieldGetCmd::BitfieldRo
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$8\r\nBITFIELD\r\n$2\r\nbf\r\n$3\r\nSET\r\n$2\r\nu8\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldSet)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$6\r\nStRlEn\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Strlen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nlLeN\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Llen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$5\r\nScArD\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Scard)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nHlEn\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Hlen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$5\r\nzCaRd\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Zcard)
+        );
+        // Arity guard: the cardinality cluster is *2-only; a *3 STRLEN falls through.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nSTRLEN\r\n$1\r\nk\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
                 b"*9\r\n$6\r\neXiStS\r\n$2\r\nk0\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n",
                 &cfg,
             ),
@@ -29680,6 +29959,16 @@ mod tests {
                 b"*2\r\n$7\r\nPFCOUNT\r\n$1\r\nh\r\n",
                 &ParserConfig {
                     max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$11\r\nBITFIELD_RO\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n",
+                &ParserConfig {
+                    max_bulk_len: b"BITFIELD".len(),
                     ..ParserConfig::default()
                 },
             ),

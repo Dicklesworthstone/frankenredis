@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CodexRedisDig: KEEP — packed command-token dispatch floor for BITFIELD single-op + cardinality cluster — BITFIELD 2.45–2.56x vs ORIG
+
+NEGATIVE-EVIDENCE CHECK: consulted this ledger first and did NOT retry the exhausted missing-fast-path vein, the
+rejected dispatch cascade reorder, or the SORT/ChunkedList dead end. The remaining sub-ms losses were dispatch-tail
+bound; a current short profile pass made `BITFIELD` the hottest clean next target (`BITFIELD_GET_u8_0` 206.09 us,
+`BITFIELD_RO_GET_u8_0` 216.82 us, `BITFIELD_SET_u8_0_1` 208.33 us on ORIG, only 0.47–0.54x Redis throughput).
+`GEOHASH` was still slow but less severe on this pass (`GEOHASH_1` 209.89 us, `GEOHASH_4` 329.09 us).
+
+PRIMITIVE: kept the existing exact borrowed BITFIELD parsers/executors as the behavioral authority, but hoisted
+canonical `BITFIELD key GET <enc> <offset>`, `BITFIELD_RO key GET <enc> <offset>`, and
+`BITFIELD key SET <enc> <offset> <value>` to the packed command-token dispatch floor. The same token metadata probe
+also covers the single-key O(1) cardinality cluster (`STRLEN`, `LLEN`, `SCARD`, `HLEN`, `ZCARD`). This follows the
+alien-graveyard ART/Swiss-table lesson at the front gate: tiny cache-resident command metadata first, full parser
+fallback second. It is not a whole hash-table/tree transplant. Invalid arity, parser-limit, multi-op, signed/overflow
+or otherwise noncanonical BITFIELD forms still fall through to the generic borrowed path.
+
+MEASURED A/B (short per-crate release Criterion, `AGENT_NAME=CodexRedisDig`, legacy Redis 7.2.4 oracle,
+`FR_SERVER_BIN="$CARGO_TARGET_DIR/release/frankenredis"` after building the compared server binary). The requested
+shared target dir `/data/projects/.rch-targets/redis-cod` still contained old-nightly artifacts and failed with rustc
+ABI `E0514`; no cache cleanup was performed. Used fresh sibling target dirs
+`/data/projects/.rch-targets/redis-cod-next-baseline` and
+`/data/projects/.rch-targets/redis-cod-next-candidate` instead.
+
+| row | ORIG fr median | candidate fr median | ratio vs ORIG | candidate Redis median | candidate fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `BITFIELD_GET_u8_0` | 206.09 us | 84.026 us | **2.45x** | 101.18 us | **1.20x** |
+| `BITFIELD_RO_GET_u8_0` | 216.82 us | 84.584 us | **2.56x** | 110.95 us | **1.31x** |
+| `BITFIELD_SET_u8_0_1` | 208.33 us | 82.422 us | **2.53x** | 112.27 us | **1.36x** |
+
+COMPANION SURFACE: the same dispatch-floor token primitive also landed bench-visible O(1) cardinality rows. ORIG was
+measured by running the current harness against the pre-change `46c970e47` server binary; candidate was the rebuilt
+current checkout. Ratios vs ORIG: `STRLEN` 66.335 -> 49.491 us = **1.34x**, `LLEN` 67.008 -> 48.921 us =
+**1.37x**, `SCARD` 64.362 -> 50.920 us = **1.26x**, `HLEN` 66.984 -> 47.734 us = **1.40x**, `ZCARD` 69.490 ->
+49.499 us = **1.40x**. After preserving existing token priority within length buckets, the mixed dispatch-floor
+guard remained Redis-positive for existing classes and Criterion reported no candidate-side `ZCOUNT` change.
+
+CORRECTNESS: focused dispatch-floor classifier tests are green; `cargo fmt --check`, `git diff --check`, workspace
+`cargo check --workspace --all-targets`, workspace `cargo clippy --workspace --all-targets -- -D warnings`, and full
+`fr-conformance` are green. The final `fr-conformance` run passed 194 library tests, all conformance binaries, 99
+smoke tests, and doctests; live-oracle diagnostic mismatches remained non-strict and all tests reported `ok`.
+
 ## 2026-07-09 CodexRedisDig: KEEP — packed command-token dispatch floor for EXISTS 1..32 keys — exists8 4.10–4.72x vs ORIG
 
 NEGATIVE-EVIDENCE CHECK: did NOT retry the exhausted missing-fast-path vein, the rejected cascade reorder, or the
