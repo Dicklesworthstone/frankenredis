@@ -23241,42 +23241,67 @@ impl Store {
             }
             result
         } else {
-            // (CrimsonHawk) Initialize `result` = first operand + zero-tail DIRECTLY, instead of the old
-            // `vec![0; max_len]` (a full memset) followed by `copy_from_slice(&first)` (which zero-filled the
-            // `[0..first.len)` region it then immediately overwrote). For equal-length operands — the common
-            // BITOP shape — `resize` is a no-op, so the entire redundant memset pass is eliminated (perf: it
-            // was ~12% of BITOP AND on a 20KB string). The fold + AND zero-tail fill below are unchanged, so
-            // the result is byte-identical (result still = [first bytes][zeros to max_len] before the fold).
-            let mut result = match keys.first().and_then(|&k| operand!(k)) {
-                Some(first) => {
-                    let mut r = first.into_owned();
-                    r.resize(max_len, 0);
-                    r
-                }
-                None => vec![0u8; max_len],
-            };
-
             let is_and = eq_ascii_ci(op, b"AND");
             let is_or = eq_ascii_ci(op, b"OR");
             let is_xor = eq_ascii_ci(op, b"XOR");
 
-            for &key in keys.iter().skip(1) {
-                let val = operand!(key).unwrap_or(std::borrow::Cow::Borrowed(&[]));
-                let val = val.as_ref();
-                if is_and {
-                    Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
-                    // Bytes beyond a shorter operand are AND-ed with implicit 0.
-                    if val.len() < result.len() {
-                        result[val.len()..].fill(0);
-                    }
+            if keys.len() == 2 && (is_and || is_or || is_xor) {
+                // (CrimsonHawk) 2-operand fast path (the common BITOP shape): a single-pass
+                // `zip().map().collect()` that LLVM auto-vectorizes — one pass (read a, read b, write
+                // result), matching redis's single-pass compute, vs the general path's copy-first +
+                // in-place fold (two passes). Measured 1.47x on a 20KB AND at the store level. Byte-
+                // identical: `[0..min)` = a OP b; the tail `[min..max)` is 0 for AND (implicit-0 operand)
+                // or the longer operand's bytes for OR/XOR (OP with implicit 0).
+                let ca = operand!(keys[0]).unwrap_or(std::borrow::Cow::Borrowed(&[]));
+                let cb = operand!(keys[1]).unwrap_or(std::borrow::Cow::Borrowed(&[]));
+                let a = ca.as_ref();
+                let b = cb.as_ref();
+                let n = a.len().min(b.len());
+                let mut result: Vec<u8> = if is_and {
+                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x & y).collect()
                 } else if is_or {
-                    // OR/XOR with implicit-0 tail leave `result` unchanged there.
-                    Self::swar_zip_inplace(&mut result, val, |a, b| a | b, |a, b| a | b);
-                } else if is_xor {
-                    Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
+                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x | y).collect()
+                } else {
+                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x ^ y).collect()
+                };
+                if is_and {
+                    result.resize(max_len, 0);
+                } else {
+                    let longer = if a.len() >= b.len() { a } else { b };
+                    result.extend_from_slice(&longer[n..]);
                 }
+                result
+            } else {
+                // General path (0/1/3+ operands): init `result` = first operand + zero-tail DIRECTLY
+                // (equal-length operands make the `resize` a no-op, eliminating the old `vec![0; max_len]`
+                // memset pass), then fold the remaining operands in place.
+                let mut result = match keys.first().and_then(|&k| operand!(k)) {
+                    Some(first) => {
+                        let mut r = first.into_owned();
+                        r.resize(max_len, 0);
+                        r
+                    }
+                    None => vec![0u8; max_len],
+                };
+
+                for &key in keys.iter().skip(1) {
+                    let val = operand!(key).unwrap_or(std::borrow::Cow::Borrowed(&[]));
+                    let val = val.as_ref();
+                    if is_and {
+                        Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
+                        // Bytes beyond a shorter operand are AND-ed with implicit 0.
+                        if val.len() < result.len() {
+                            result[val.len()..].fill(0);
+                        }
+                    } else if is_or {
+                        // OR/XOR with implicit-0 tail leave `result` unchanged there.
+                        Self::swar_zip_inplace(&mut result, val, |a, b| a | b, |a, b| a | b);
+                    } else if is_xor {
+                        Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
+                    }
+                }
+                result
             }
-            result
         };
 
         let len = result.len();

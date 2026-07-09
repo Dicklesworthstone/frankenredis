@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — BITOP 2-operand single-pass zip-collect — bitop_and 0.88x → 0.97x vs redis 7.2.4 (byte-exact)
+
+Overturned the prior "the BITOP copy-first memmove is inherent to safe code" caveat. A store-level A/B proved
+the SAFE `a.iter().zip(b).map(|(x,y)| x&y).collect()` is **1.47x** faster than the 2-pass `to_vec() +
+swar_zip_inplace` on a 20KB AND — LLVM AUTO-VECTORIZES the collect into a single pass (read a, read b, write
+result = ~60KB traffic), matching redis, vs the general path's copy-first + in-place fold (~100KB). No unsafe
+needed; the earlier "2-pass is the safe floor" was wrong (collect fills the fresh Vec in ONE pass from the
+computed values — no separate init).
+
+Wired a 2-operand fast path into `store::bitop` (the common BITOP shape): `[0..min) = a OP b` via collect;
+tail `[min..max)` = 0 for AND (`resize`) or the longer operand's bytes for OR/XOR (`extend_from_slice`).
+0/1/3+ operands + NOT keep the general path.
+
+BYTE-EXACT: `swar_bitop_matches_scalar` store test green; `bitop_edge_differ.py` = **28 checks byte-exact vs
+redis 7.2.4** (incl diff-len-pad [unequal operands], missing-as-zero, empty-deletes-dest, overwrite). MEASURED
+(extended2 head-to-head): bitop_and **0.88x → 0.97x** (verdict `~`, parity). Full BITOP arc this session:
+0.79x (memset waste) → 0.88x (drop memset) → 0.97x (single-pass collect). GENERAL: a fresh `zip().map().collect()`
+is a safe 1-pass alternative to init+in-place-fold; LLVM vectorizes it — check other 2-input elementwise ops.
+
 ## 2026-07-08 CrimsonHawk: KEEP — BITOP AND/OR/XOR drops the redundant result memset — bitop_and 0.79x → 0.88x vs redis 7.2.4 (byte-exact)
 
 Data-driven: three fresh head-to-heads vs redis 7.2.4 (broad + large-value gate + extended) show fr
