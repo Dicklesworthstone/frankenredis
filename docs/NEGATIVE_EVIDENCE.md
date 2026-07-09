@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE (perf, ohsk5 ROI UPDATED) — the remaining sub-ms losses are inherent dispatch-chain (fast paths ALREADY engage), NOT missing fast paths; chain is ~50% for tiny commands
+
+Ran the "profile-then-fast-path" hunt on the next sub-ms losses. Result: the common ones are NOT missing fast
+paths — they ALREADY have them, and the loss is the dispatch chain itself.
+- XLEN 0.53x (21-trial median, consistent, NOT noise): store.xlen is O(1) (`entries.len()`) and
+  `execute_plain_cardinality_borrowed` DOES engage (perf 9.7%), yet `process_buffered_frames` = 44.9% (24.4%
+  self) + failed `parse_borrowed_plain_key_arg2`/`keys_multi` parsers + memcmp.
+- ZREMRANGEBYRANK 0.42x: `execute_plain_zremrangebyrank_borrowed` engages (perf 4.6%), yet
+  `process_buffered_frames` = 51.5% (**34.4% self**) + memcmp 26.3% + failed arg1/arg2/arg3/arg4/multi parsers
+  (~25% total).
+- ZSCORE/TYPE also already have borrowed fast paths (grep-confirmed).
+
+So the CLEAN missing-fast-path vein is EXHAUSTED for common commands — ZRANK/ZREVRANK WITHSCORE (the `*4`
+option-forms that fell to the GENERIC path) were the last. DISTINGUISHER: perf shows `execute_frame_internal`
++ `command_table_index` (generic → fixable via a fast path) vs a `execute_plain_*_borrowed` executor
+(inherent tail → only ohsk5 helps). XLEN/ZREMRANGEBYRANK are the latter.
+
+**ohsk5 ROI CORRECTION (hard data):** the old "~3-5% aggregate, low-ROI" estimate is WRONG for the sub-ms
+tail — the linear parser-chain dispatch is **~50% of the time for tiny commands** (process_buffered_frames
+24-34% self + ~25% redundantly-re-parsed same-arity parser fails + command-name memcmp). Hot commands
+(GET/SET, chain top) are fast; the whole diverse-command tail pays ~2x redis. ohsk5 (a command-name /
+(arr_len,cmd_len) jump-table so each frame is parsed ONCE then dispatched, instead of N arms each re-parsing
+`*N\r\n$len\r\n` + memcmp'ing the name) would ~halve tiny-command latency — a REAL, high-value structural
+lever, worth a dedicated coordinated cycle. No clean single-crate perf lever remains for me.
+
 ## 2026-07-09 CrimsonHawk: KEEP — ZREVRANK … WITHSCORE borrowed fast path (ZRANK-WITHSCORE twin) — zrevrank_ws ~0.56x → 0.95x vs redis 7.2.4 (byte-exact)
 
 The direct twin of yesterday's ZRANK WITHSCORE win, same root cause (the `*4` option-form lacked a borrowed
