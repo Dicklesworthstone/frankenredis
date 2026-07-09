@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: NO-SHIP (profiling sweep) — each_member_bytes can't extend to SINTER/SUNION/SDIFF (byte-sort blocks borrow-scan); benched read ops + packed contains verified optimal
+
+Pivoted off the mined scalar/itoa/bit veins to a profiling-oriented sweep of the benched store hot ops
+(`store_read.rs`: get/exists/strlen/getrange/getbit/bitfield_get/incr/…). Findings (skip next round):
+- `bitfield_get` already single-lookup-collapsed + uses the now-byte-wise `bitfield_read`.
+- `PackedStrSet::contains` = `iter().any(|m| m == member)` — Rust slice `==` LENGTH-filters before memcmp,
+  iter yields borrowed `&[u8]` — already optimal (no per-entry alloc), matches redis listpackFind.
+- The shipped `each_member_bytes` stack-buffer helper (SMEMBERS intset, no per-member alloc) CANNOT extend
+  to its noted "next targets" SINTER/SUNION/SDIFF: those replies **byte-sort** the members (`v.sort()` on
+  `Vec<Vec<u8>>`), and for an intset result the decimal-byte order ≠ ascending-value order, so members MUST
+  be materialized (owned) to sort — no borrow-scan / stack-buffer path exists. SSCAN already borrow-scanned;
+  SRANDMEMBER visitor rejected earlier. So that vein is CLOSED, not merely un-done.
+- PARTIAL win remaining (out-of-window): the GENERIC-set (string) SUNION/SDIFF copies each member via
+  `into_owned` (`to_vec`) BEFORE the byte-sort, whereas sorting `Vec<&[u8]>` borrowed refs would elide the
+  copy — needs a signature/borrow-scan refactor of `sunion`/`sdiff` (they return `Vec<Vec<u8>>`); the intset
+  arm still can't (byte-sort needs materialization). Flagged for a dedicated pass.
+
+No code change this round (no clean byte-exact per-crate lever; remaining are structural — ohsk5 dispatch
+[low-ROI/high-risk], ChunkedList [rejected], or the sunion/sdiff borrow-scan refactor above). PEER velocity
+high (bitfield_write + existing-packed-HSET overlay landed by CodexRedis) — re-check origin first next round.
+
 ## 2026-07-08 CrimsonHawk: KEEP — push_usize_decimal reuses the two-digit-LUT itoa instead of a divide loop — 1.14x db / 1.50x large (byte-identical)
 
 Continuing the scalar-loop vein (after a peer independently landed my bitfield_write byte-wise store — I
