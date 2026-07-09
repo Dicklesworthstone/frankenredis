@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: REJECT (negligible) — CompactFieldMap short-key final-compare micro-lever; the set/hash membership hot path is optimal
+
+Chased the last SMISMEMBER perf line item — `CompactFieldMap::lookup_slot_prehashed` (12.1% self, on the
+all-set/hash-lookups path), specifically the final `&self.buf[fr] == field` compare (memcmp, ~4.7% self).
+- VERIFIED the probe is already optimal: h2 1-byte hash-tag pre-check before the arena decode+memcmp
+  (shipped 07-02, -22.5% on SINTER) + field-only decode (skip the value-len varint). Open-addressing linear
+  probe with a good load factor → 1-3 slots per lookup. Nothing to squeeze in the probe itself.
+- ATTEMPTED the short-key compare: for 2-5 byte members a manual `a.len()==b.len() && a.iter().zip(b).all(==)`
+  A/B'd at **1.18x** vs slice `==` (memcmp) at the micro level (memcmp pays a call + size-dispatch that a
+  short inline loop avoids). But the compare is a SMALL fraction of the lookup (probe + tag + cfm_field_range
+  decode dominate), so E2E ≈ 4.7% × (1 − 1/1.18) ≈ **0.7% of one rare-ish command** = negligible, and it's on
+  the hottest all-lookups path (subtle-bug risk). REJECTED (memory's earlier "risky/small, not pursued" call
+  was correct). Probe test removed; no code change.
+
+CONFIRMS: the SMISMEMBER/set-membership hot path (probe + foldhash + compare) is optimal. Combined with the
+prior full-frontier sweep, there is no clean single-crate perf lever left — the frontier is dispatch (ohsk5,
+low-ROI/high-risk/crowded) / IO / structural-RAM (~2x, CoralOx) / peer-zset / byte-risk (geodist) from here.
+
 ## 2026-07-09 CrimsonHawk: SURFACE — ALL command families now measured vs redis 7.2.4; fr faster-or-parity on every real-work path; remaining tail = dispatch-bound (ohsk5) / zset (peer) / geodist (byte-risk)
 
 Extended `extended2_headtohead_ch.py` with the last UNMEASURED families — streams / geo / hll — and swept.
