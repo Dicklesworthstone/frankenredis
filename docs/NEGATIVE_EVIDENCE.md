@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE + REJECT — variadic-write dispatch cliff (keyed_values5-8) is REAL (+25-30% on 5-8v) but the cascade REORDER fix is net-negative; the clean fix is a front-gate preclassifier (peer's vein)
+
+Ran the directive's per-crate `cargo bench` (keyed_write_vs_redis) — it surfaced a broad loss the ad-hoc TCP
+sweeps missed: LPUSH/RPUSH/SADD/PFADD lose at 5+ values, with a sharp **LPUSH 4v (1.094x) → 5v (0.800x) cliff**.
+STRUCTURAL CAUSE: in dispatch chain A, `parse_borrowed_plain_keyed_values{1,4,3,2}` are clustered early (~3858-3927)
+but `keyed_values{5,6,7,8}` are stranded ~1300 lines / ~60 arms later (~5207). So 5-8-value keyed writes traverse
+~60 extra dispatch arms. **This CORRECTS my earlier memory claim that LPUSH/RPUSH losses are ChunkedList structural
+(99fwc) — the 5-8v cost is dispatch POSITION, not the list data-structure.** (fr-internal min-of-41: LPUSH 4v→5v
+jumps +20%, a discontinuity, not linear per-value cost.)
+
+TRIED: byte-exact block-move of chain-A `keyed_values{5-8}` up to right after `keyed_values2` (Python line-move,
+100 lines; disjoint arities → no misdispatch; build green; conformance **0 diffs / 72** incl 3-9v LPUSH/RPUSH/SADD/
+PFADD + EXPIRE flags + ZADD-multi). ISOLATED dispatch A/B (wrong-type path, no growth/DEL confounder, min-of-41
+candidate-vs-original): **5v/6v/8v = 1.28x/1.29x/1.26x (cliff FIXED, +25-30%)** — BUT **4v REGRESSED to 0.86x
+(~14% slower)**. 4v's arm didn't move (still 3881), so the 4v regression is pure **code-layout / i-cache fallout**
+from shifting 100 lines in the hottest fn; PLUS the ~60 commands now after the moved block (expire/setex/psetex/
+zadd_flag) each pay 4 extra prefix-checks. 4v + those commons are MORE frequent than 5-8v pushes → **net-negative.
+REVERTED.**
+
+CONCLUSION: the cliff is a REAL, worthwhile target (+25-30% on 5-8v variadic writes), but a cascade reorder is the
+wrong instrument (layout-fragile + taxes downstream commons). The clean fix is a **front-gate preclassifier entry
+for the 5-8-value keyed-write shapes** (CodexRedisDig's dispatch-floor `classify_borrowed_dispatch_floor_packet`
+vein) — a direct jump adds NO cascade-position cost to anyone. Surfaced for coordination; I did not touch the
+preclassifier (peer-owned).
+
 ## 2026-07-09 CrimsonHawk: SURFACE/VERIFY — GET CPU cost is MEASURED-negligible (fr IO-bound); peer preclassifier + flag matrices byte-exact (60 fresh probes)
 
 Closed a gap from the prior "CPU frontier saturated" entries, which were an *inference*. Now a **measurement**:
