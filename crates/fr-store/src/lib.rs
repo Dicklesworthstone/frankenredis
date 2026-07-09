@@ -10054,7 +10054,9 @@ impl Store {
             .into_iter()
             .filter(|key| self.entries.contains_key(key.as_slice()) && glob_match(pattern, key))
             .collect();
-        result.sort();
+        // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
+        // pdqsort is faster and skips the stable-sort scratch alloc (KEYS over a large keyspace).
+        result.sort_unstable();
         result
     }
 
@@ -10177,7 +10179,9 @@ impl Store {
                 }
             })
             .collect();
-        result.sort();
+        // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
+        // pdqsort is faster and skips the stable-sort scratch alloc (KEYS over a large keyspace).
+        result.sort_unstable();
         result
     }
 
@@ -52479,6 +52483,56 @@ mod tests {
                 .bitpos(b"nokey", true, None, None, BitRangeUnit::Byte, 0)
                 .unwrap(),
             -1
+        );
+    }
+
+    // (CrimsonHawk) KEYS-scale (n=10000) sort A/B — matched keys are unique, so sort_unstable is byte-identical
+    // and the pdqsort/no-scratch path pays off more at KEYS scale than the small set-reply case.
+    #[test]
+    fn keys_reply_sort_unstable_matches_stable_and_reports_ab() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // KEYS-like unique keys: a common prefix + a varying suffix (stresses memcmp on the shared prefix).
+        let ncount = 10_000usize;
+        let mut set = std::collections::HashSet::new();
+        while set.len() < ncount {
+            let mut k = b"user:session:".to_vec();
+            let suf = 6 + (next() % 10) as usize;
+            k.extend((0..suf).map(|_| b"0123456789abcdef"[(next() & 0xf) as usize]));
+            set.insert(k);
+        }
+        let base: Vec<Vec<u8>> = set.into_iter().collect();
+        {
+            let mut a = base.clone();
+            a.sort();
+            let mut b = base.clone();
+            b.sort_unstable();
+            assert_eq!(a, b);
+        }
+        let reps = 2000u64;
+        let mut work: Vec<Vec<u8>> = Vec::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            work.clone_from(&base);
+            work.sort();
+            std::hint::black_box(&work[0]);
+        }
+        let stable_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            work.clone_from(&base);
+            work.sort_unstable();
+            std::hint::black_box(&work[0]);
+        }
+        let unstable_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "KEYS reply sort (n={ncount}, incl common clone_from): stable={stable_ns:.0} ns | unstable={unstable_ns:.0} ns = {:.2}x",
+            stable_ns / unstable_ns
         );
     }
 

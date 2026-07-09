@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP — KEYS reply uses sort_unstable instead of stable sort — 1.11x @10k keys (byte-identical)
+
+Follow-on from the SINTER/SUNION/SDIFF sort_unstable win, now on KEYS (`frankenredis-keysfast`): both glob
+paths (prefix-range + full-scan) byte-sorted the matched `Vec<Vec<u8>>` with the STABLE `.sort()` (Timsort +
+O(n) scratch). Matched keys are UNIQUE → no equal elements → `.sort_unstable()` (pdqsort, in-place) is
+BYTE-IDENTICAL and faster.
+
+BYTE-IDENTICAL: `keys_reply_sort_unstable_matches_stable_and_reports_ab` builds 10k unique prefixed keys and
+asserts `sort()` == `sort_unstable()`; the `keys` suite (53 tests) GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, n=10,000 KEYS reply, reset-then-sort with `clone_from` COMMON to both
+arms): stable 870,175 ns vs unstable 785,190 ns = **1.11x** (~85µs saved per large KEYS; the shared clone_from
+overhead dilutes the ratio, so the sort-in-isolation speedup is larger). Remaining `.sort()` sites in fr-store
+are cold migrate/dump argv builds or tests — the hot reply sorts (SINTER/SUNION/SDIFF + KEYS) are now all
+sort_unstable. Micro-vein effectively drained.
+
 ## 2026-07-09 CodexRedisDig: KEEP — shared Lua globals template plus write overlay skips per-EVAL stdlib clone — 1.75x vs ORIG (byte-identical)
 
 Negative-evidence pass first: did NOT retry rejected BITFIELD u8 command specialization, fixed-capacity
