@@ -2255,8 +2255,9 @@ fn expect_live_resp3_crlf(input: &[u8], start: usize) -> Result<usize, LiveResp3
 }
 
 fn acl_log_field<'a>(entry: &'a [RespFrame], key: &str) -> &'a RespFrame {
-    entry
-        .chunks_exact(2)
+    let (pairs, _) = entry.as_chunks::<2>();
+    pairs
+        .iter()
         .find_map(|pair| match pair {
             [RespFrame::BulkString(Some(field_name)), value]
                 if field_name.eq_ignore_ascii_case(key.as_bytes()) =>
@@ -2329,7 +2330,9 @@ fn load_named_conformance_cases(
 fn hello_field<'a>(reply: &'a RespFrame, key: &str) -> &'a RespFrame {
     match reply {
         RespFrame::Array(Some(fields)) => fields
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .find_map(|pair| match pair {
                 [RespFrame::BulkString(Some(field_name)), value]
                     if field_name.eq_ignore_ascii_case(key.as_bytes()) =>

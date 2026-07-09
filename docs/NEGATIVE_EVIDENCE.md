@@ -37,6 +37,58 @@ VEIN NOTE for the endgame: the classifier runs at 2674 BEFORE GET's cascade arm 
 costs EVERY command (incl. GET) one byte-prefix check. Fine at 3 commands; past ~10-15 the hot path (GET/SET)
 regresses and it wants an O(1) token jump-table rather than a growing linear front-gate.
 
+## 2026-07-09 CodexRedisDig: KEEP — RESP front-token classifier for GETEX/TYPE/PFCOUNT dispatch floor — GETEX_PERSIST 2.23x, GETEX_EXAT 2.16x, GETEX_PXAT 2.17x vs ORIG
+
+NEGATIVE-EVIDENCE CHECK: did NOT retry the exhausted "missing fast path" vein. GETEX/PERSIST/EXAT/PXAT,
+TYPE, and PFCOUNT already had borrowed executors; the hot loss was the same dispatch-chain pathology as
+XLEN/ZREMRANGEBYRANK: late arms in `process_buffered_frames` repeatedly reject unrelated parser prefixes
+before the exact parser/executor engages. Graveyard grounding: the §7.5/§7.7 ART/Swiss-table lesson is a
+drop-in, cache-friendly metadata probe, not a tree transplant at Redis command-token sizes. The shipped
+primitive is a bounded RESP front-token classifier: parse only the canonical array length + first bulk command
+token, classify by `(array_len, command_len, command_token)`, then jump to the existing byte-exact
+parser/executor or fall back to the generic borrowed path.
+
+IMPLEMENTED: replaced the two-command serial dispatch-floor recognizer with a shared front-token parser and
+added GETEX `*2`, `*3 PERSIST`, `*4 EX|PX|EXAT|PXAT`, TYPE `*2`, and PFCOUNT `*2` classes. All semantics
+remain in the existing `parse_borrowed_plain_*` parsers and `execute_plain_*` runtime methods; malformed,
+noncanonical, unsupported, or parser-limit-exceeding frames fall through unchanged.
+
+MEASURED A/B (same host via `rch exec` local fallback, release profile, exact
+`FR_SERVER_BIN="$CARGO_TARGET_DIR/release/frankenredis"` after building the compared server binary; Criterion
+`getex_*_vs_redis` groups against legacy Redis 7.2.4):
+
+| row | ORIG fr median | candidate fr median | ratio vs ORIG | candidate Redis median | candidate fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `GETEX_PERSIST` | 146.97 us | 66.027 us | **2.23x** | 74.817 us | **1.13x** |
+| `GETEX_EXAT` | 148.27 us | 68.537 us | **2.16x** | 82.143 us | **1.20x** |
+| `GETEX_PXAT` | 147.60 us | 67.918 us | **2.17x** | 77.195 us | **1.14x** |
+
+INTEGRATED DISPATCH-FLOOR CHECK (same candidate binary, `dispatch_floor_vs_redis`): `XLEN` 46.787 us vs Redis
+52.334 us = **1.12x** fr/Redis throughput; `ZREMRANGEBYRANK_noop` 51.356 us vs Redis 60.902 us = **1.19x**;
+`TYPE_string` 46.688 us vs Redis 56.702 us = **1.21x**; `PFCOUNT_single` 50.134 us vs Redis 57.297 us =
+**1.14x**. TYPE/PFCOUNT are candidate-only Redis-relative rows for this integrated patch; the ratio-vs-ORIG
+claim above is the same-host GETEX A/B.
+
+FOCUSED TYPE/PFCOUNT A/B VS LEGACY ORIGINAL (RCH release profile, per-crate
+`cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- TYPE_string|PFCOUNT_single --noplot`;
+the bench harness now self-builds the current `fr-server` binary when `FR_SERVER_BIN` is unset so worker-side
+benchmark runs cannot accidentally use a stale/missing server binary):
+
+| row | ORIG worker / fr median | candidate worker / fr median | ratio vs ORIG | candidate Redis median | candidate fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `TYPE_string` | `vmi1152480` / 91.643 us | `vmi1149989` / 32.871 us | **2.79x** | 40.833 us | **1.24x** |
+| `PFCOUNT_single` | `vmi1152480` / 190.01 us | `vmi1149989` / 36.835 us | **5.16x** | 40.596 us | **1.10x** |
+
+RCH did not expose a worker pin for the ORIG-vs-candidate pair, so the TYPE/PFCOUNT ratio is cross-worker
+evidence; the final post-rebase candidate run (combined with upstream ZCOUNT in the same classifier) still
+beats legacy Redis on `vmi1149989` and keeps explicit server-binary provenance. The rejected alternatives
+remain rejected: no new TYPE/PFCOUNT executor was added, and this does not retry the missing-fast-path vein.
+
+CORRECTNESS: focused classifier tests are green; `cargo fmt --check`, workspace `cargo check`, workspace
+`cargo clippy --workspace --all-targets -- -D warnings`, and byte-exact `fr-conformance` are green for this
+landing. The current-nightly `chunks_exact_to_as_chunks` lint was cleared at the reported even-pair helper
+sites so the official clippy gate remains usable.
+
 ## 2026-07-09 CrimsonHawk/CodexRedisDig: KEEP — ohsk5 RESP command-token preclassifier for dispatch-floor XLEN/ZREMRANGEBYRANK — XLEN 1.89x, ZREMRANGEBYRANK-noop 3.68x vs ORIG
 
 NEGATIVE-EVIDENCE CHECK: did NOT retry the rejected "missing fast path" vein. The immediately preceding

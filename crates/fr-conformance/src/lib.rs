@@ -2187,11 +2187,12 @@ fn flat_bulk_pairs_as_map(frame: &RespFrame) -> Option<Vec<(Vec<u8>, RespFrame)>
     let RespFrame::Array(Some(items)) = frame else {
         return None;
     };
-    if items.len() % 2 != 0 {
+    let (pairs, remainder) = items.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
     let mut out = Vec::with_capacity(items.len() / 2);
-    for pair in items.chunks_exact(2) {
+    for pair in pairs {
         let RespFrame::BulkString(Some(key)) = &pair[0] else {
             return None;
         };
@@ -2397,11 +2398,12 @@ fn canonical_config_get_entries(frame: &RespFrame) -> Option<Vec<(Vec<u8>, Vec<u
     let RespFrame::Array(Some(items)) = frame else {
         return None;
     };
-    if items.len() % 2 != 0 {
+    let (pairs, remainder) = items.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(items.len() / 2);
-    for chunk in items.chunks_exact(2) {
+    for chunk in pairs {
         let (RespFrame::BulkString(Some(k)), RespFrame::BulkString(Some(v))) =
             (&chunk[0], &chunk[1])
         else {
@@ -2649,11 +2651,12 @@ fn canonical_scan_reply(frame: &RespFrame, pair_shape: bool) -> Option<RespFrame
         return None;
     };
     if pair_shape {
-        if items.len() % 2 != 0 {
+        let (item_pairs, remainder) = items.as_chunks::<2>();
+        if !remainder.is_empty() {
             return None;
         }
         let mut pairs: Vec<(Vec<u8>, RespFrame)> = Vec::with_capacity(items.len() / 2);
-        for chunk in items.chunks_exact(2) {
+        for chunk in item_pairs {
             let (RespFrame::BulkString(Some(key)), value) = (&chunk[0], &chunk[1]) else {
                 return None;
             };
@@ -2711,11 +2714,12 @@ fn canonical_hgetall_pairs(frame: &RespFrame) -> Option<Vec<(Vec<u8>, Vec<u8>)>>
     let RespFrame::Array(Some(items)) = frame else {
         return None;
     };
-    if items.len() % 2 != 0 {
+    let (item_pairs, remainder) = items.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
     let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(items.len() / 2);
-    for chunk in items.chunks_exact(2) {
+    for chunk in item_pairs {
         let (RespFrame::BulkString(Some(field)), RespFrame::BulkString(Some(value))) =
             (&chunk[0], &chunk[1])
         else {
@@ -10504,9 +10508,10 @@ mod tests {
         let RespFrame::Array(Some(items)) = reply else {
             panic!("expected HGETALL array");
         };
-        assert!(items.len() % 2 == 0, "HGETALL returned odd-length array");
+        let (pairs, remainder) = items.as_chunks::<2>();
+        assert!(remainder.is_empty(), "HGETALL returned odd-length array");
         let mut out = std::collections::BTreeMap::new();
-        for pair in items.chunks_exact(2) {
+        for pair in pairs {
             let (RespFrame::BulkString(Some(f_)), RespFrame::BulkString(Some(v))) =
                 (&pair[0], &pair[1])
             else {
@@ -10533,9 +10538,10 @@ mod tests {
         let RespFrame::Array(Some(items)) = reply else {
             panic!("expected ZRANGE array");
         };
-        assert!(items.len() % 2 == 0, "ZRANGE WITHSCORES odd-length array");
+        let (pairs, remainder) = items.as_chunks::<2>();
+        assert!(remainder.is_empty(), "ZRANGE WITHSCORES odd-length array");
         let mut out = Vec::new();
-        for pair in items.chunks_exact(2) {
+        for pair in pairs {
             let (RespFrame::BulkString(Some(m)), RespFrame::BulkString(Some(s))) =
                 (&pair[0], &pair[1])
             else {

@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -527,15 +528,28 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     let zremrange_packet = pipelined_zremrangebyrank_noop_packet(COMMANDS_PER_ITER);
     let zcount_prefill = pipelined_zcount_prefill_packet(COMMANDS_PER_ITER);
     let zcount_packet = pipelined_zcount_packet(COMMANDS_PER_ITER);
-    for (label, prefill, packet, prefill_is_resp) in [
-        ("XLEN", &xlen_prefill, &xlen_packet, true),
+    let type_prefill = pipelined_type_prefill_packet(COMMANDS_PER_ITER);
+    let type_packet = pipelined_type_packet(COMMANDS_PER_ITER);
+    let pfcount_prefill = pipelined_pfcount_prefill_packet(COMMANDS_PER_ITER);
+    let pfcount_packet = pipelined_pfcount_packet(COMMANDS_PER_ITER);
+    for (label, prefill, packet, prefill_is_resp, packet_is_resp) in [
+        ("XLEN", &xlen_prefill, &xlen_packet, true, false),
         (
             "ZREMRANGEBYRANK_noop",
             &zremrange_prefill,
             &zremrange_packet,
             false,
+            false,
         ),
-        ("ZCOUNT", &zcount_prefill, &zcount_packet, false),
+        ("TYPE_string", &type_prefill, &type_packet, false, true),
+        (
+            "PFCOUNT_single",
+            &pfcount_prefill,
+            &pfcount_packet,
+            false,
+            false,
+        ),
+        ("ZCOUNT", &zcount_prefill, &zcount_packet, false, false),
     ] {
         for engine in engines {
             dispatch_floor_group.bench_with_input(
@@ -552,7 +566,11 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
                         }
                         let start = Instant::now();
                         for _ in 0..iters {
-                            client.run_packet(packet, COMMANDS_PER_ITER);
+                            if packet_is_resp {
+                                client.run_resp_packet(packet, COMMANDS_PER_ITER);
+                            } else {
+                                client.run_packet(packet, COMMANDS_PER_ITER);
+                            }
                         }
                         let elapsed = start.elapsed();
                         client.flushall();
@@ -606,14 +624,38 @@ fn redis_server_bin() -> PathBuf {
 }
 
 fn fr_server_bin() -> PathBuf {
-    env::var_os("FR_SERVER_BIN")
+    if let Some(bin) = env::var_os("FR_SERVER_BIN") {
+        return PathBuf::from(bin);
+    }
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let target_dir = env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("target"));
-            target_dir.join("release/frankenredis")
-        })
+        .unwrap_or_else(|| PathBuf::from("target"));
+    let bin = target_dir.join("release/frankenredis");
+    ensure_default_fr_server_bin(&bin);
+    bin
+}
+
+fn ensure_default_fr_server_bin(bin: &Path) {
+    static SERVER_BUILD: OnceLock<()> = OnceLock::new();
+    SERVER_BUILD.get_or_init(|| {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("fr-bench manifest lives under workspace/crates/fr-bench");
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .current_dir(workspace)
+            .args(["build", "--profile", "release", "-p", "fr-server"])
+            .status()
+            .expect("build fr-server benchmark binary");
+        assert!(status.success(), "fr-server build failed before benchmark");
+        assert!(
+            bin.is_file(),
+            "FR_SERVER_BIN not found after build: {}",
+            bin.display()
+        );
+    });
 }
 
 fn spawn_redis(bin: &Path, port: u16) -> Server {
@@ -970,6 +1012,42 @@ fn pipelined_zcount_packet(count: usize) -> Vec<u8> {
     for index in 0..count {
         let key = format!("zc:{index:03}");
         packet.extend_from_slice(&encode_command(&["ZCOUNT", &key, "0", "16"]));
+    }
+    packet
+}
+
+fn pipelined_type_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 40);
+    for index in 0..count {
+        let key = format!("typ:{index:03}");
+        packet.extend_from_slice(&encode_command(&["SET", &key, "v"]));
+    }
+    packet
+}
+
+fn pipelined_type_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("typ:{index:03}");
+        packet.extend_from_slice(&encode_command(&["TYPE", &key]));
+    }
+    packet
+}
+
+fn pipelined_pfcount_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("pf:{index:03}");
+        packet.extend_from_slice(&encode_command(&["PFADD", &key, "m"]));
+    }
+    packet
+}
+
+fn pipelined_pfcount_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("pf:{index:03}");
+        packet.extend_from_slice(&encode_command(&["PFCOUNT", &key]));
     }
     packet
 }
