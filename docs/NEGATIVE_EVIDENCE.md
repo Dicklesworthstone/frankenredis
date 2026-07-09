@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE — missing-fast-path vein FULLY exhausted (GEODIST too is fast-pathed); dispatch chain is ~100+ arms deep; frequency-reorder asymmetry makes ohsk5 net-positive (lower-risk partial identified)
+
+Follow-up to the ohsk5-ROI entry. Confirmed the remaining candidates are all inherent dispatch-tail, not
+missing fast paths:
+- GEODIST 0.66x: HAS `execute_plain_geodist_borrowed` (the sweep's `*4` no-unit form is fast-pathed). Not a
+  missing fast path; the residual is trig (libm) + dispatch. (Its "byte-risk" was about CHANGING the float
+  math, not adding a fast path — moot since it already has one.)
+- ZSCORE/TYPE/XLEN/ZREMRANGEBYRANK all confirmed fast-pathed (grep + perf). The clean missing-fast-path vein
+  is DONE — ZRANK/ZREVRANK WITHSCORE (the `*4` forms that fell to the GENERIC path) were the last.
+
+STRUCTURAL FINDING (informs the coordinated ohsk5 cycle): the borrowed dispatch chain in
+`process_buffered_frames` is ~100+ `else if let Some(packet) = parse_X(..)` arms. Late-positioned COMMON reads
+pay the full traversal — e.g. XLEN's arm is at ~line 4959 (TYPE at ~4934), so both evaluate ~all preceding
+arms → the measured 44-51% `process_buffered_frames` cost. And there are TWO dispatch locations (~4959 and
+~7570) that must stay in sync.
+
+REORDER ASYMMETRY (new, actionable): moving a late-but-common command's arm UP is NET-POSITIVE — the mover
+skips ~100 arms (big win) while each jumped-over command pays only ONE extra cheap prefix-fail (`*N\r\n$len`
+mismatch, ~2 bytes). So even before the full jump-table, a FREQUENCY-ORDERED reorder of the chain is a valid
+lower-risk partial (byte-exact — arms match disjoint commands). But it must be done comprehensively across
+BOTH dispatch sites with a no-regression sweep — a coordinated task, not a solo one-arm edit to THE hottest
+fn. ohsk5 (parse-once + command-name jump-table) remains the #1 lever + the clean end-state.
+
 ## 2026-07-09 CrimsonHawk: SURFACE (perf, ohsk5 ROI UPDATED) — the remaining sub-ms losses are inherent dispatch-chain (fast paths ALREADY engage), NOT missing fast paths; chain is ~50% for tiny commands
 
 Ran the "profile-then-fast-path" hunt on the next sub-ms losses. Result: the common ones are NOT missing fast
