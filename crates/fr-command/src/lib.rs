@@ -73056,8 +73056,9 @@ mod tests {
 
     fn sorted_bulk_pairs(flat: Vec<Vec<u8>>) -> Vec<(Vec<u8>, Vec<u8>)> {
         assert_eq!(flat.len() % 2, 0, "flat pair list must be even");
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = flat
-            .chunks_exact(2)
+        let (chunks, _) = flat.as_chunks::<2>();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = chunks
+            .iter()
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect();
         pairs.sort();

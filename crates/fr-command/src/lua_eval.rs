@@ -3038,7 +3038,7 @@ enum CoroutineRun {
 pub struct LuaState<'a> {
     pub store: &'a mut Store,
     pub now_ms: u64,
-    globals: LuaMap<String, LuaValue>,
+    globals: LuaGlobals,
     /// (frankenredis-j02x9) Set to true at the start of execute(); once
     /// locked, any write to a top-level global raises "Attempt to modify
     /// a readonly table" and any read of an undefined global raises
@@ -3480,17 +3480,72 @@ impl Env {
 }
 
 thread_local! {
-    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<LuaMap<String, LuaValue>>> =
+    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<Rc<LuaMap<String, LuaValue>>>> =
         const { RefCell::new(None) };
 }
 
-fn lua_base_globals_template() -> LuaMap<String, LuaValue> {
+fn lua_base_globals_template() -> Rc<LuaMap<String, LuaValue>> {
     LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
         template
-            .get_or_insert_with(build_lua_base_globals_template)
+            .get_or_insert_with(|| Rc::new(build_lua_base_globals_template()))
             .clone()
     })
+}
+
+#[derive(Clone, Debug)]
+struct LuaGlobals {
+    base: Rc<LuaMap<String, LuaValue>>,
+    overlay: LuaMap<String, LuaValue>,
+}
+
+impl LuaGlobals {
+    fn from_shared_base(base: Rc<LuaMap<String, LuaValue>>) -> Self {
+        Self {
+            base,
+            overlay: LuaMap::default(),
+        }
+    }
+
+    fn from_flat_map(map: LuaMap<String, LuaValue>) -> Self {
+        Self {
+            base: Rc::new(LuaMap::default()),
+            overlay: map,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&LuaValue> {
+        self.overlay.get(key).or_else(|| self.base.get(key))
+    }
+
+    fn insert(&mut self, key: String, value: LuaValue) -> Option<LuaValue> {
+        self.overlay.insert(key, value)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.overlay.contains_key(key) || self.base.contains_key(key)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&String, &LuaValue)> {
+        self.overlay.iter().chain(
+            self.base
+                .iter()
+                .filter(|(key, _)| !self.overlay.contains_key(key.as_str())),
+        )
+    }
+
+    fn values(&self) -> impl Iterator<Item = &LuaValue> {
+        self.iter().map(|(_, value)| value)
+    }
+}
+
+impl<'a> IntoIterator for &'a LuaGlobals {
+    type Item = (&'a String, &'a LuaValue);
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
 }
 
 fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
@@ -3764,7 +3819,16 @@ fn lua_redis_table_template() -> LuaTable {
 
 impl<'a> LuaState<'a> {
     pub fn new(store: &'a mut Store, now_ms: u64) -> Self {
-        let globals = lua_base_globals_template();
+        let globals = LuaGlobals::from_shared_base(lua_base_globals_template());
+        Self::with_globals(store, now_ms, globals)
+    }
+
+    fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
+        let globals = LuaGlobals::from_flat_map(lua_base_globals_template().as_ref().clone());
+        Self::with_globals(store, now_ms, globals)
+    }
+
+    fn with_globals(store: &'a mut Store, now_ms: u64, globals: LuaGlobals) -> Self {
         let rng_seed = store.rng_seed;
         // (frankenredis-lwj8o) Initialize math.random's PRNG with the
         // low 32 bits of the store's rng_seed (or 1 if zero). User
@@ -11070,7 +11134,8 @@ fn config_get_resp_to_lua_map(frame: &RespFrame, resp3: bool) -> Option<LuaTable
     }
 
     let table = LuaTable::new();
-    for chunk in items.chunks_exact(2) {
+    let (chunks, _) = items.as_chunks::<2>();
+    for chunk in chunks {
         let key = match &chunk[0] {
             RespFrame::BulkString(Some(bytes)) => bytes.clone(),
             RespFrame::SimpleString(text) => text.as_bytes().to_vec(),
@@ -13609,6 +13674,18 @@ pub fn eval_script(
     eval_compiled_script(compiled, keys, argv, store, now_ms)
 }
 
+#[doc(hidden)]
+pub fn eval_script_cloned_globals_for_bench(
+    script: &[u8],
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, String> {
+    let compiled = compile_lua_chunk_cached(script)?;
+    eval_compiled_script_inner(compiled, keys, argv, store, now_ms, true)
+}
+
 pub(crate) fn eval_compiled_script(
     compiled: Rc<Block>,
     keys: &[Vec<u8>],
@@ -13616,13 +13693,28 @@ pub(crate) fn eval_compiled_script(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, String> {
+    eval_compiled_script_inner(compiled, keys, argv, store, now_ms, false)
+}
+
+fn eval_compiled_script_inner(
+    compiled: Rc<Block>,
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    clone_globals_template: bool,
+) -> Result<RespFrame, String> {
     store.clear_script_propagation_state();
     store.script_propagation_mode = SCRIPT_PROPAGATE_ALL;
     // (frankenredis-qqq17) Break any Rc cycles this script allocates when it
     // returns. Declared before `state` so the LuaState/Env drop first (reverse
     // declaration order), leaving only leaked cycle islands for the sweep.
     let _lua_gc = LuaGcScope::enter();
-    let mut state = LuaState::new(store, now_ms);
+    let mut state = if clone_globals_template {
+        LuaState::new_with_cloned_globals_for_bench(store, now_ms)
+    } else {
+        LuaState::new(store, now_ms)
+    };
 
     let keys_vals: Vec<LuaValue> = keys.iter().map(|k| LuaValue::Str(k.clone())).collect();
     let argv_vals: Vec<LuaValue> = argv.iter().map(|a| LuaValue::Str(a.clone())).collect();

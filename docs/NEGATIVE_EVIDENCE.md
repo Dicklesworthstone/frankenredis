@@ -59,6 +59,7 @@ RNG stream, dirty count, and modification count. `cargo fmt --check`, `git diff 
 remote focused fr-store proof, and `cargo test -p fr-conformance -- --nocapture` passed; conformance ended
 with 194/194 lib tests and 99/99 smoke tests GREEN. Current-toolchain `chunks_exact_to_as_chunks` /
 `manual_slice_fill` style lints in fr-store were mechanically converted on the way to the final clippy pass.
+
 ## 2026-07-08 CrimsonHawk: KEEP — SINTER/SUNION/SDIFF replies use sort_unstable instead of stable sort — 1.13x+ (byte-identical)
 
 Same profiling area as yesterday's NO-SHIP (the borrow-scan there was blocked by the byte-sort). Different,
