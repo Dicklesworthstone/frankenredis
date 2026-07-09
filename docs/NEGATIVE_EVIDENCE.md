@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE/VERIFY — GET CPU cost is MEASURED-negligible (fr IO-bound); peer preclassifier + flag matrices byte-exact (60 fresh probes)
+
+Closed a gap from the prior "CPU frontier saturated" entries, which were an *inference*. Now a **measurement**:
+launched **8 concurrent GET clients** (multi-process fork fleet, 16 sockets, pinned) against fr — fr held at
+**0.0% CPU and produced ZERO `perf record -p` samples**. A python client fleet cannot saturate fr's GET path; its
+per-command CPU cost is negligible and small-command performance is entirely syscall/IO-bound (recv/send per
+pipelined batch, already amortized). **There is no CPU hot path left to optimize for small commands** — the only
+remaining lever is IO (large-value copy / syscall batching → writev/io_uring, deferred + unsafe + not
+per-crate-benchable) or structural data-structures. To profile fr under CPU load you need a C-level client
+(redis-benchmark); a python fleet is too slow.
+
+Pivoted to hardening instead of hunting. Independently differential-probed vs redis 7.2.4 (`INFO server` confirmed
+7.2.4): **CodexRedisDig's just-landed GETEX/TYPE/PFCOUNT preclassifier (`656825ed2`)** across the full GETEX option
+matrix (EX/PX/EXAT/PXAT/PERSIST, EX 0/-1, past EXAT→delete, PERSIST+EX, multi-opt, BADOPT, missing arg,
+non-numeric, overflow, wrong-type, nil) — **0 diffs / 30**. And the **EXPIRE (NX/XX/GT/LT incl. GT/LT on no-TTL
+keys + invalid combos), ZADD (GT/LT/NX/XX/CH/INCR + invalid combos), SET (NX/XX/GET/KEEPTTL/EX/EXAT)** flag
+matrices — **0 diffs / 30**. The correctness surface (incl. the new preclassifier) is byte-exact; no bug to fix.
+
+CONCLUSION: no clean solo CPU lever and no correctness bug found this turn. fr is CPU-saturated + byte-exact; the
+frontier is IO/structural/peer-owned.
+
 ## 2026-07-09 CrimsonHawk: KEEP SINTERCARD drop-loop guard (+3.5–5.9%); REJECT the same guard on full-scan SINTER/SUNION/SDIFF (0-gain)
 
 Probed extending the single-key-write `drop_if_expired`-guard vein to the bare `for key in keys { drop_if_expired }`
