@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: SURFACE — the remaining sub-ms bench losses are ALL dispatch-POSITION-bound (cost ∝ cascade arm index); EXISTS multi-key is the #1 preclassifier target
+
+Ran the un-examined per-crate benches (set_algebra / bitfield / exists / geo). fr WINS big on real-work
+(SUNIONSTORE 12.9x, SINTERSTORE/SDIFFSTORE 1.8-2.1x); the losses are all sub-ms: **EXISTS-N 0.26–0.62x,
+BITFIELD GET/SET 0.45–0.51x, GEOHASH 0.52x, SINTERCARD LIMIT 0.78x** (rigorous min-of-31, not bench noise).
+
+ROOT CAUSE (quantified, radically consistent): **the per-command cost scales LINEARLY with the command's
+borrowed-dispatch CASCADE ARM INDEX, not with the work.** Evidence:
+- EXISTS time is ~FLAT across 4→32 keys (fr 0.75→1.0ms) while redis grows linearly (0.20→0.63ms) — a large
+  FIXED per-command cost, not per-key. Its executor is lean (a `exists_no_touch` loop, same bookkeeping as GET).
+- The fixed cost tracks arm position: GET arm @2725 → ~0.5µs; GEOHASH-single arm @6611 → ~1.0µs; EXISTS
+  multi-key arms @~8900–11000 → ~1.87µs. Same command shape, 4x the cost, purely from cascade depth.
+
+So these are NOT executor levers — they're the dispatch tail. The clean fix is **preclassification** (front-gate,
+position-independent) = CodexRedisDig's `classify_borrowed_dispatch_floor_packet` vein. A cascade REORDER is
+net-negative (see the keyed_values entry: layout regression + downstream tax). Ranked preclassifier targets by
+frequency×loss: **EXISTS multi-key (#1 — top-frequency command, 0.26–0.62x, arms deepest)**, then GEOHASH,
+BITFIELD, SINTERCARD-LIMIT. NOTE the linear front-gate's ~15-command headroom (past that it taxes GET) means the
+FULL fix for the whole sub-ms tail is the O(1) command-token JUMP-TABLE (the ohsk5 endgame) — still peer-owned.
+Not a clean solo lever for me; surfaced for the preclassifier owner.
+
 ## 2026-07-09 CrimsonHawk: KEEP — sparse-HLL encode scan 8-byte chunked run-skip — sparse PFADD 1.84x (byte-exact)
 
 Follow-up to the dense PFADD fix: SPARSE PFADD still re-encodes per add (`hll_encode(Sparse)` →
