@@ -3386,6 +3386,34 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SDIFF")
+                {
+                    // (CrimsonHawk) SDIFF streams its Set/array reply straight into the write buffer via
+                    // sdiff_borrow_scan (borrowed generic members, no owned Vec<Vec<u8>>), like SUNION.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_sdiff_borrowed_into(
+                            &packet.keys[..packet.len],
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"MGET")
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;

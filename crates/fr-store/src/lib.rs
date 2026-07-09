@@ -15739,6 +15739,41 @@ impl Store {
         Ok(v)
     }
 
+    /// (CrimsonHawk) Borrow-scan variant of `sdiff` for the fast reply path — the SDIFF twin of
+    /// `sunion_borrow_scan`. Reuses `sdiff_value` (identical preamble) and streams the sorted members
+    /// through the sink; GENERIC results sink members BORROWED (`&[u8]`, no per-member `to_vec`), the intset
+    /// arm materializes (byte-sort of decimal reps != value order). Byte-identical event stream to `sdiff`.
+    pub fn sdiff_borrow_scan(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        let Some(result) = self.sdiff_value(keys, now_ms)? else {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        };
+        match result.as_ref() {
+            SetValue::Generic(g) => {
+                let mut refs: Vec<&[u8]> = g.iter().collect();
+                refs.sort_unstable();
+                sink(SmembersScanEvent::Len(refs.len()));
+                for r in refs {
+                    sink(SmembersScanEvent::Member(r));
+                }
+            }
+            SetValue::Int(_) => {
+                let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
+                v.sort_unstable();
+                sink(SmembersScanEvent::Len(v.len()));
+                for m in &v {
+                    sink(SmembersScanEvent::Member(m));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// (BlackThrush) SDIFF result as a `SetValue` (no sorted-`Vec` flatten) so
     /// SDIFFSTORE stores it directly instead of round-tripping through a sorted
     /// `Vec<Vec<u8>>` + re-collect — mirrors the sunionstore-direct pattern.
@@ -51473,6 +51508,52 @@ mod tests {
             .unwrap();
         let result = store.sunion(&[b"s1", b"s2"], 0).unwrap();
         assert_eq!(result, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    // (CrimsonHawk) sdiff_borrow_scan streams the SAME sorted members as plain sdiff across generic /
+    // intset (byte-order != value-order) / mixed / missing / all-consumed shapes.
+    #[test]
+    fn sdiff_borrow_scan_matches_plain_sdiff() {
+        for shape in 0..5 {
+            let mut store = Store::new();
+            match shape {
+                0 => {
+                    store
+                        .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec(), b"z".to_vec()], 0)
+                        .unwrap();
+                    store.sadd(b"s2", &[b"b".to_vec()], 0).unwrap();
+                }
+                1 => {
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()], 0)
+                        .unwrap();
+                    store.sadd(b"s2", &[b"3".to_vec()], 0).unwrap();
+                }
+                2 => {
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"x".to_vec(), b"y".to_vec()], 0)
+                        .unwrap();
+                    store.sadd(b"s2", &[b"x".to_vec()], 0).unwrap();
+                }
+                3 => {}
+                _ => {
+                    store.sadd(b"s1", &[b"a".to_vec()], 0).unwrap();
+                    store.sadd(b"s2", &[b"a".to_vec()], 0).unwrap();
+                }
+            }
+            let keys: Vec<&[u8]> = vec![b"s1", b"s2", b"s3"];
+            let mut sink_members: Vec<Vec<u8>> = Vec::new();
+            let mut sink_len = None;
+            store
+                .sdiff_borrow_scan(&keys, 0, |ev| match ev {
+                    crate::SmembersScanEvent::Len(n) => sink_len = Some(n),
+                    crate::SmembersScanEvent::Member(m) => sink_members.push(m.to_vec()),
+                })
+                .unwrap();
+            let plain = store.sdiff(&keys, 0).unwrap();
+            assert_eq!(sink_members, plain, "shape {shape} members");
+            assert_eq!(sink_len, Some(plain.len()), "shape {shape} len");
+        }
     }
 
     // (CrimsonHawk) sunion_borrow_scan streams the SAME sorted members as plain sunion across generic /

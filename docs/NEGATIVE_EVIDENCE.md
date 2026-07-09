@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP (Route A — SDIFF) — SDIFF borrow-scan fast path, byte-exact vs redis 7.2.4
+
+The SDIFF twin of the SUNION fast path (same session), completed with the proven recipe:
+- fr-store `Store::sdiff_borrow_scan` — reuses `sdiff_value` (identical preamble; note `sdiff_value` returns
+  `Option<Box<SetValue>>` so the match is `result.as_ref()`), generic result sinks members BORROWED, intset
+  arm materializes. `sdiff_borrow_scan_matches_plain_sdiff` (generic/intset/mixed/missing/all-consumed) GREEN.
+- fr-runtime `execute_plain_sdiff_borrowed_into` + `record_plain_sdiff_borrowed_metrics` +
+  `plain_sdiff_owned_argv` — verbatim mirrors of the SUNION versions (`sunion`→`sdiff`), same conservative
+  `plain_borrowed_default_key_read_allows` gate (no ACL/gate bypass).
+- fr-server dispatch: near-verbatim copy of the SUNION `parse_borrowed_plain_keys_multi_packet` arm
+  (`b"SUNION"`→`b"SDIFF"`).
+
+CONFORMANCE: `algebra_resp3_differ.py` against MY build vs redis 7.2.4 — **1600 iters BYTE-EXACT** (resp2 +
+resp3 algebra + resp3-typed, SDIFF/SINTER/SUNION(+STORE)/SMISMEMBER). fr-server builds clean.
+
+RATIO: SDIFF uses the IDENTICAL borrow-scan mechanism as SUNION (store-level **2.01x** on the generic-result
+reply materialization the fast path replaces — eliding copy #2 + sorting `&[u8]` refs); SDIFF's result is the
+difference (typically smaller than a union), so the absolute saving scales with result size. Generic-set
+SUNION + SDIFF now both stream their reply with no owned `Vec<Vec<u8>>`. SINTER is possible but its result is
+often intset-heavy (materializes to byte-sort → smaller win); deferred.
+
 ## 2026-07-08 CrimsonHawk: KEEP (Route A WIRED) — SUNION fast path now streams the borrowed union reply — 2.01x store-level, byte-exact vs redis 7.2.4
 
 Completed the Route A wiring flagged in the prior entry. `Store::sunion_borrow_scan` (2.01x store-level, was
