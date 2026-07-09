@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -333,14 +334,38 @@ fn redis_server_bin() -> PathBuf {
 }
 
 fn fr_server_bin() -> PathBuf {
-    env::var_os("FR_SERVER_BIN")
+    if let Some(bin) = env::var_os("FR_SERVER_BIN") {
+        return PathBuf::from(bin);
+    }
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let target_dir = env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("target"));
-            target_dir.join("release/frankenredis")
-        })
+        .unwrap_or_else(|| PathBuf::from("target"));
+    let bin = target_dir.join("release/frankenredis");
+    ensure_default_fr_server_bin(&bin);
+    bin
+}
+
+fn ensure_default_fr_server_bin(bin: &Path) {
+    static SERVER_BUILD: OnceLock<()> = OnceLock::new();
+    SERVER_BUILD.get_or_init(|| {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("fr-bench manifest lives under workspace/crates/fr-bench");
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .current_dir(workspace)
+            .args(["build", "--profile", "release", "-p", "fr-server"])
+            .status()
+            .expect("build fr-server benchmark binary");
+        assert!(status.success(), "fr-server build failed before benchmark");
+        assert!(
+            bin.is_file(),
+            "FR_SERVER_BIN not found after build: {}",
+            bin.display()
+        );
+    });
 }
 
 fn spawn_redis(bin: &Path, port: u16) -> Server {

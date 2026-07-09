@@ -12138,6 +12138,7 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    Exists(usize),
     Getex,
     GetexExpire,
     GetexPersist,
@@ -12151,6 +12152,74 @@ enum BorrowedDispatchFloorClass {
 struct BorrowedDispatchFloorToken<'a> {
     array_len: usize,
     command: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorrowedDispatchFloorCommand {
+    Exists,
+    Getex,
+    Pfcount,
+    Type,
+    Xlen,
+    Zcount,
+    Zremrangebyrank,
+}
+
+fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
+    if token.len() != N {
+        return None;
+    }
+    let mut upper = [0u8; N];
+    for (idx, byte) in token.iter().copied().enumerate() {
+        upper[idx] = byte.to_ascii_uppercase();
+    }
+    Some(upper)
+}
+
+fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
+    match token.len() {
+        4 => match uppercase_ascii_token::<4>(token)? {
+            [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
+            [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
+            _ => None,
+        },
+        5 => match uppercase_ascii_token::<5>(token)? {
+            [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
+            _ => None,
+        },
+        6 => match uppercase_ascii_token::<6>(token)? {
+            [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
+            [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
+            _ => None,
+        },
+        7 => match uppercase_ascii_token::<7>(token)? {
+            [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Pfcount)
+            }
+            _ => None,
+        },
+        15 => match uppercase_ascii_token::<15>(token)? {
+            [
+                b'Z',
+                b'R',
+                b'E',
+                b'M',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'R',
+                b'A',
+                b'N',
+                b'K',
+            ] => Some(BorrowedDispatchFloorCommand::Zremrangebyrank),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn parse_borrowed_dispatch_floor_decimal(
@@ -12214,30 +12283,86 @@ fn classify_borrowed_dispatch_floor_packet(
     config: &ParserConfig,
 ) -> Option<BorrowedDispatchFloorClass> {
     let token = borrowed_dispatch_floor_token(input, config)?;
-    match (token.array_len, token.command.len()) {
-        (2, 4) if token.command.eq_ignore_ascii_case(b"TYPE") => {
-            Some(BorrowedDispatchFloorClass::Type)
+    let command = borrowed_dispatch_floor_command(token.command)?;
+    match (token.array_len, command) {
+        (array_len, BorrowedDispatchFloorCommand::Exists)
+            if (2..=KEYS_MULTI_MAX + 1).contains(&array_len) =>
+        {
+            Some(BorrowedDispatchFloorClass::Exists(array_len - 1))
         }
-        (2, 4) if token.command.eq_ignore_ascii_case(b"XLEN") => {
-            Some(BorrowedDispatchFloorClass::Xlen)
-        }
-        (2, 5) if token.command.eq_ignore_ascii_case(b"GETEX") => {
-            Some(BorrowedDispatchFloorClass::Getex)
-        }
-        (3, 5) if token.command.eq_ignore_ascii_case(b"GETEX") => {
-            Some(BorrowedDispatchFloorClass::GetexPersist)
-        }
-        (4, 5) if token.command.eq_ignore_ascii_case(b"GETEX") => {
-            Some(BorrowedDispatchFloorClass::GetexExpire)
-        }
-        (2, 7) if token.command.eq_ignore_ascii_case(b"PFCOUNT") => {
-            Some(BorrowedDispatchFloorClass::Pfcount)
-        }
-        (4, 6) if token.command.eq_ignore_ascii_case(b"ZCOUNT") => {
-            Some(BorrowedDispatchFloorClass::Zcount)
-        }
-        (4, 15) if token.command.eq_ignore_ascii_case(b"ZREMRANGEBYRANK") => {
+        (2, BorrowedDispatchFloorCommand::Type) => Some(BorrowedDispatchFloorClass::Type),
+        (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
+        (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
+        (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
+        (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
+        (2, BorrowedDispatchFloorCommand::Pfcount) => Some(BorrowedDispatchFloorClass::Pfcount),
+        (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
+        (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_floor_fast_exists_into(
+    nkeys: usize,
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> Option<usize> {
+    match nkeys {
+        1 => {
+            let packet = parse_borrowed_plain_key_only_packet(
+                unparsed,
+                parser_config,
+                b"*2\r\n$6\r\n",
+                b"EXISTS",
+            )?;
+            runtime.execute_plain_exists_borrowed_into(&[packet.key], ts, out)?;
+            Some(packet.consumed)
+        }
+        2 => {
+            let packet = parse_borrowed_plain_exists_two_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        3 => {
+            let packet = parse_borrowed_plain_exists_three_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        4 => {
+            let packet = parse_borrowed_plain_exists_four_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        5 => {
+            let packet = parse_borrowed_plain_exists_five_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        6 => {
+            let packet = parse_borrowed_plain_exists_six_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        7 => {
+            let packet = parse_borrowed_plain_exists_seven_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        8 => {
+            let packet = parse_borrowed_plain_exists_eight_packet(unparsed, parser_config)?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            Some(packet.consumed)
+        }
+        9..=KEYS_MULTI_MAX => {
+            let packet =
+                parse_borrowed_plain_keys_multi_packet(unparsed, parser_config, b"EXISTS")?;
+            runtime.execute_plain_exists_borrowed_into(&packet.keys[..packet.len], ts, out)?;
+            Some(packet.consumed)
         }
         _ => None,
     }
@@ -12253,6 +12378,22 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::Exists(nkeys) => {
+            if let Some(consumed) =
+                dispatch_floor_fast_exists_into(nkeys, unparsed, &parser_config, runtime, ts, out)
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Getex => {
             if let Some(packet) = parse_borrowed_plain_getex_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_getex_borrowed(packet.key, ts)
@@ -29456,6 +29597,27 @@ mod tests {
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
+                b"*9\r\n$6\r\neXiStS\r\n$2\r\nk0\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Exists(8))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*33\r\n$6\r\nEXISTS\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Exists(32))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*34\r\n$6\r\nEXISTS\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
                 b"*02\r\n$4\r\nXLEN\r\n$1\r\ns\r\n",
                 &cfg,
             ),
@@ -29518,6 +29680,16 @@ mod tests {
                 b"*2\r\n$7\r\nPFCOUNT\r\n$1\r\nh\r\n",
                 &ParserConfig {
                     max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*9\r\n$6\r\nEXISTS\r\n$2\r\nk0\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n",
+                &ParserConfig {
+                    max_array_len: 8,
                     ..ParserConfig::default()
                 },
             ),

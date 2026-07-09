@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CodexRedisDig: KEEP — packed command-token dispatch floor for EXISTS 1..32 keys — exists8 4.10–4.72x vs ORIG
+
+NEGATIVE-EVIDENCE CHECK: did NOT retry the exhausted missing-fast-path vein, the rejected cascade reorder, or the
+SORT/ChunkedList dead end. The latest profile/surface entry says the remaining sub-ms losses are dispatch-position
+bound, with EXISTS multi-key the #1 target: the executor is already borrowed and lean, but 2..8-key EXISTS reached
+the exact parsers only after the long `process_buffered_frames` cascade. The new primitive keeps the existing RESP
+front-token parser but turns the command token into a small packed uppercase discriminant first, then routes
+canonical `EXISTS` array lengths directly to the existing exact-N/keys-multi parsers and
+`execute_plain_exists_borrowed_into`. Malformed, noncanonical, too-large, or parser-limit-exceeding frames still fall
+through to the generic borrowed path.
+
+IMPLEMENTED: `BorrowedDispatchFloorClass::Exists(nkeys)` for `EXISTS` 1..=32 keys, a packed-token
+`BorrowedDispatchFloorCommand` classifier shared by the current dispatch-floor commands, and a fast EXISTS dispatcher
+that reuses the already-shipped exact parsers for 1..8 keys plus the existing `KEYS_MULTI_MAX` parser for 9..32.
+The `exists_vs_redis` bench now self-builds the current `fr-server` binary when `FR_SERVER_BIN` is unset, matching the
+keyed-write harness and preventing stale server-binary measurements.
+
+MEASURED A/B (short per-crate release Criterion, `AGENT_NAME=CodexRedisDig`, legacy Redis 7.2.4 oracle,
+`FR_SERVER_BIN="$CARGO_TARGET_DIR/release/frankenredis"` after building each compared server binary). The requested
+shared target dir `/data/projects/.rch-targets/redis-cod` contained old-nightly artifacts and failed with rustc ABI
+`E0514`; no cache cleanup was performed. Used fresh sibling target dirs
+`/data/projects/.rch-targets/redis-cod-exists-baseline` and
+`/data/projects/.rch-targets/redis-cod-exists-candidate` instead.
+
+| row | ORIG fr median | candidate fr median | ratio vs ORIG | candidate Redis median | candidate fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `exists8_all_hit` | 330.73 us | 79.184 us | **4.18x** | 114.07 us | **1.44x** |
+| `exists8_half_hit` | 344.09 us | 72.978 us | **4.72x** | 111.37 us | **1.53x** |
+| `exists8_duplicates` | 323.94 us | 79.023 us | **4.10x** | 125.87 us | **1.59x** |
+
+REGRESSION CHECK: `dispatch_floor_vs_redis` remained green for the existing classes on the candidate binary:
+`XLEN` 44.778 us vs Redis 53.682 us = **1.20x**, `ZREMRANGEBYRANK_noop` 50.814 us vs Redis 57.665 us =
+**1.13x**, `PFCOUNT_single` 48.706 us vs Redis 60.618 us = **1.24x**, `ZCOUNT` 56.108 us vs Redis 83.618 us =
+**1.49x**. A noisy combined run made `TYPE_string` look suspect, so it was re-run focused: fr 49.384 us vs Redis
+72.239 us = **1.46x**, with Criterion reporting no detected frankenredis performance change.
+
+CORRECTNESS: focused dispatch-floor classifier tests are green; `cargo fmt --check`, workspace
+`cargo check --workspace --all-targets`, workspace `cargo clippy --workspace --all-targets -- -D warnings`, and full
+`fr-conformance` are green. The final `fr-conformance` run passed 194 library tests, all conformance binaries, 99
+smoke tests, and doctests; live-oracle diagnostic mismatches remained non-strict and all tests reported `ok`.
+
 ## 2026-07-09 CrimsonHawk: CLOSE — SORT loss DECOMPOSED: it's dominated by the STRUCTURAL ChunkedList `store_as_list` (99fwc, already-rejected), NOT the sort/clones. Stop chasing SORT.
 
 Follow-up to the SORT entry below. Isolated the loss with **`SORT lst BY nosort STORE`** (collect + store, NO sort
