@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: SURFACE (perf-profiled, lead CLOSED) — SMISMEMBER 0.82x is distributed per-command cost, not one hotspot; no clean per-crate lever
+
+`perf record` on frankenredis under a `SMISMEMBER setA <100 members>` blast (2000-member generic set, all
+present). SELF hotspots: `process_buffered_frames` 15.6%, `CompactFieldMap::lookup_slot_prehashed` 12.1%,
+`parse_command_args_borrowed_into` 10.9%, `GenericSet::contains` 7.2%, `foldhash` 6.0%, `memcmp_avx2` 4.7%,
+`execute_plain_smismember_borrowed_into` 4.0%, `store::smismember` 1.7%.
+
+Read-out:
+- Membership (lookup_slot + contains + foldhash + memcmp) ≈ **30%** — this is fr's SwissTable+foldhash, and it
+  CANNOT be the differentiator vs redis: SINTERSTORE/SUNIONSTORE do far MORE contains and are fr-FASTER.
+- `parse_command_args_borrowed_into` is the generic BORROWED parser (no owned-arg allocs — it borrows argv),
+  so engaging the exact-N fast path (last turn's cap raise) only removes generic *dispatch* overhead, ~3-5%,
+  which is exactly the ~0-gain measured. CONFIRMS the cap raise was correctly reverted; don't re-try it.
+- No single dominant fixable hotspot — cost is spread across parse (~11%) + dispatch (~16%) + contains (~30%)
+  + encode, all roughly-necessary fr per-command work. SMISMEMBER 0.82x is the same bucket as GET/SET being
+  bookkeeping-bound: fr's per-command pipeline does slightly more distributed work than redis's tight
+  `smismemberCommand` loop. The only micro-lever is inlining short-key compares to dodge `memcmp_avx2` call
+  overhead (~4.7% self, short members only) — hot-path (all set/hash lookups), risky, small; NOT pursued.
+
+LEAD CLOSED: SMISMEMBER is not a clean per-crate lever. Broad sweep otherwise = fr faster-or-parity (set-algebra
+borrow-scan wins landed this session: sunionstore 5.52x, sinter/sdiffstore 2.34x, sintercard 1.77x).
+
 ## 2026-07-08 CrimsonHawk: REVERT (0-gain) + SURFACE — SMISMEMBER 100-member 0.82x is NOT the parser cliff; store-membership/encode-bound
 
 Ran a fresh broad head-to-head vs redis 7.2.4 (`broad_command_headtohead.py`, both servers self-launched).
