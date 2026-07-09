@@ -11695,6 +11695,8 @@ impl Store {
                     added = a;
                 }
             }
+        } else if let Some(hadded) = m.try_update_existing_packed_borrowed(pairs) {
+            added = hadded;
         } else {
             let mut a = 0_usize;
             for p in pairs.chunks_exact(2) {
@@ -11703,6 +11705,53 @@ impl Store {
                 }
             }
             added = a;
+        }
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(added)
+    }
+
+    /// Bench-only copy of the pre-overlay existing-hash HSET loop. Production
+    /// callers must use [`Self::hset_borrowed_many`]; this exists so the
+    /// Criterion A/B can keep measuring the exact old primitive after the live
+    /// path changes.
+    #[doc(hidden)]
+    pub fn hset_borrowed_many_existing_loop_for_bench(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if pairs.len() < 2 {
+            return Ok(0);
+        }
+        if self.lfu_tracking_enabled() {
+            let mut added = 0_usize;
+            for pair in pairs.chunks_exact(2) {
+                if self.hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)? {
+                    added += 1;
+                }
+            }
+            return Ok(added);
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let count = (pairs.len() / 2) as u64;
+        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let mut added = 0_usize;
+        for pair in pairs.chunks_exact(2) {
+            if m.insert(pair[0].to_vec(), pair[1].to_vec()).is_none() {
+                added += 1;
+            }
         }
         entry.touch_lru(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
@@ -43427,6 +43476,82 @@ mod tests {
                 } else {
                     "individual-wins"
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn hset_existing_packed_bulk_rebuild_matches_individual_loop() {
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for case in 0..2000usize {
+            let existing_len = 16 + (next() % 72) as usize;
+            let update_len = 8 + (next() % 56) as usize;
+            let existing_fields: Vec<Vec<u8>> = (0..existing_len)
+                .map(|i| format!("f{i:03}").into_bytes())
+                .collect();
+            let existing_values: Vec<Vec<u8>> = (0..existing_len)
+                .map(|i| format!("v{i:03}").into_bytes())
+                .collect();
+            let mut seed_flat = Vec::with_capacity(existing_len * 2);
+            for i in 0..existing_len {
+                seed_flat.push(existing_fields[i].as_slice());
+                seed_flat.push(existing_values[i].as_slice());
+            }
+
+            let mut baseline = Store::new();
+            let mut candidate = Store::new();
+            assert_eq!(
+                baseline.hset_borrowed_many(b"h", &seed_flat, 1).unwrap(),
+                existing_len
+            );
+            assert_eq!(
+                candidate.hset_borrowed_many(b"h", &seed_flat, 1).unwrap(),
+                existing_len
+            );
+
+            let mut update_fields: Vec<Vec<u8>> = Vec::with_capacity(update_len);
+            let mut update_values: Vec<Vec<u8>> = Vec::with_capacity(update_len);
+            for i in 0..update_len {
+                let field = match next() % 4 {
+                    0 | 1 => existing_fields[(next() as usize) % existing_fields.len()].clone(),
+                    2 if !update_fields.is_empty() => {
+                        update_fields[(next() as usize) % update_fields.len()].clone()
+                    }
+                    _ => format!("n{case:04}_{:03}", next() % 96).into_bytes(),
+                };
+                update_fields.push(field);
+                update_values.push(format!("u{i:03}_{:04x}", next() & 0xffff).into_bytes());
+            }
+
+            let mut update_flat = Vec::with_capacity(update_len * 2);
+            for i in 0..update_len {
+                update_flat.push(update_fields[i].as_slice());
+                update_flat.push(update_values[i].as_slice());
+            }
+
+            let mut expected_added = 0usize;
+            for pair in update_flat.chunks_exact(2) {
+                if baseline
+                    .hset_borrowed(b"h", pair[0], pair[1].to_vec(), 2)
+                    .unwrap()
+                {
+                    expected_added += 1;
+                }
+            }
+            let actual_added = candidate.hset_borrowed_many(b"h", &update_flat, 2).unwrap();
+
+            assert_eq!(actual_added, expected_added, "added mismatch case={case}");
+            assert_eq!(
+                candidate.hgetall(b"h", 3).unwrap(),
+                baseline.hgetall(b"h", 3).unwrap(),
+                "field/value order mismatch case={case}"
             );
         }
     }

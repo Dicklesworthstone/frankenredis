@@ -590,6 +590,84 @@ impl HashFieldMap {
         Some((HashFieldMap::Hash(h), added))
     }
 
+    /// Apply a borrowed flat HSET payload to an existing packed hash by building
+    /// a transient overlay of the command fields, then rebuilding the final
+    /// map once. This avoids K repeated listpack scans for variadic HSET against
+    /// small-but-nonempty hashes while preserving insertion order exactly:
+    /// existing fields keep their current slots, new fields append in first
+    /// command occurrence order, and duplicate command fields use the last value.
+    #[must_use]
+    pub fn try_update_existing_packed_borrowed(&mut self, flat: &[&[u8]]) -> Option<usize> {
+        let pair_count = flat.len() / 2;
+        let HashFieldMap::Packed(packed) = self else {
+            return None;
+        };
+        if packed.is_empty() || pair_count < 8 {
+            return None;
+        }
+        if packed
+            .iter()
+            .any(|(field, value)| field.len() > PACKED_MAX_VALUE || value.len() > PACKED_MAX_VALUE)
+            || flat
+                .chunks_exact(2)
+                .any(|pair| pair[0].len() > PACKED_MAX_VALUE || pair[1].len() > PACKED_MAX_VALUE)
+        {
+            return None;
+        }
+
+        struct Pending<'a> {
+            field: &'a [u8],
+            value: &'a [u8],
+            existed: bool,
+        }
+
+        let mut pending: Vec<Pending<'_>> = Vec::with_capacity(pair_count);
+        let mut field_to_pending: std::collections::HashMap<
+            &[u8],
+            usize,
+            foldhash::quality::RandomState,
+        > = std::collections::HashMap::with_capacity_and_hasher(
+            pair_count,
+            foldhash::quality::RandomState::default(),
+        );
+
+        for pair in flat.chunks_exact(2) {
+            if let Some(&idx) = field_to_pending.get(pair[0]) {
+                pending[idx].value = pair[1];
+            } else {
+                let idx = pending.len();
+                field_to_pending.insert(pair[0], idx);
+                pending.push(Pending {
+                    field: pair[0],
+                    value: pair[1],
+                    existed: false,
+                });
+            }
+        }
+
+        let mut added = 0_usize;
+        let rebuilt = {
+            let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(packed.len() + pending.len());
+            for (field, value) in packed.iter() {
+                if let Some(&idx) = field_to_pending.get(field) {
+                    pending[idx].existed = true;
+                    pairs.push((field, pending[idx].value));
+                } else {
+                    pairs.push((field, value));
+                }
+            }
+            for item in &pending {
+                if !item.existed {
+                    pairs.push((item.field, item.value));
+                    added += 1;
+                }
+            }
+            HashFieldMap::from_unique_pairs_borrowed(&pairs)
+        };
+        *self = rebuilt;
+        Some(added)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         match self {

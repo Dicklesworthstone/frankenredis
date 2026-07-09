@@ -4,6 +4,50 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CodexRedisDig/CrimsonHawk: KEEP — existing packed-HSET transient overlay rebuild — 6.06x vs ORIG (byte-identical)
+
+Negative-evidence pass first: did NOT retry the rejected byte-aligned BITFIELD command specialization,
+existing-key SADD packed rebuild, GEOHASH fast paths, LZF/list DUMP micro-tweaks, or low-precision GEODIST
+formatting. The live profile/ledger frontier pointed at packed hash listpack scans, but a persistent
+Swiss/hash side-index is explicitly rejected because it breaks the verified Redis-like RAM parity for small
+hashes. This lever is different: an ephemeral command-local overlay for `HSET key f v [f v ...]` against an
+already-existing packed hash. It hashes only the command's fields, scans the packed map once, rebuilds the
+final packed/hash map once, and then drops the overlay. No persistent RAM is added.
+
+Semantics preserved: existing fields keep their slots, new fields append in first command-occurrence order,
+duplicate command fields are last-wins with one added count, and oversized field/value cases fall back to
+the old loop so the current packed-vs-hash representation class is unchanged. The production path only
+fires for non-empty packed hashes with >=8 command pairs; fresh-key HSET keeps the already-proven bulk build.
+
+MEASURED ratio-vs-ORIG (short per-crate release Criterion A/B, `AGENT_NAME=CodexRedis`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`, `rch` remote `vmi1293453`):
+`cargo bench --profile release -p fr-store --bench store_read -- hset_existing_packed --noplot`
+reported ORIG pre-overlay existing loop `39.259 us` median vs overlay rebuild `6.4745 us` median =
+**6.06x faster** on a 96-field packed hash with 48 HSET pairs. An earlier same-filter local-fallback run
+reported `40.439 us` vs `6.1129 us` = 6.62x; the keep claim uses the stricter successful remote rerun.
+
+BYTE-EXACT / GREEN: `hset_existing_packed_bulk_rebuild_matches_individual_loop` passed 2000 randomized
+existing/new/duplicate-field cases against the per-field loop. `cargo fmt --check`, `git diff --check`,
+remote `cargo check --workspace --all-targets`, remote `cargo clippy --workspace --all-targets -- -D warnings`,
+and `cargo test -p fr-conformance -- --nocapture` all passed; conformance ended with 194/194 lib tests and
+99/99 smoke tests GREEN (live-oracle diagnostics remained non-strict known timing/order drift).
+
+## 2026-07-09 CodexRedis: NO-SHIP — listpack span exact-capacity prealloc regresses restore decode — 0.93x release; code reverted
+
+Profile pass first: `restore_quicklist_vs_redis/quicklist2_packed_restore` on remote `vmi1227854` showed the
+current RESTORE quicklist2 row still red versus Redis 7.2.4 (Redis median `35.026 us`, FrankenRedis median
+`65.532 us`). The attempted radical-but-small parser primitive was to extend the existing exact header-count
+preallocation from `decode_listpack` to `decode_value_spans` / all-string range decode, which are used by
+the retained quicklist2 RESTORE path.
+
+REJECTED: the byte output was identical, but the A/B lost. Focused debug smoke reported ORIG grow-from-empty
+`21.666 ms` vs exact-capacity `26.641 ms` over 2k decodes = **0.81x**. Release confirmation reported ORIG
+`142.927 ms` vs exact-capacity `154.145 ms` over 100k decodes = **0.93x**. The likely reason is that the
+single listpack node here has only 96 entries, so `Vec` growth is cheap and exact-capacity setup does not
+pay back in the parser loop. The code and proof test were reverted cleanly; do not retry fixed-capacity /
+exact-reserve tweaks for quicklist/listpack span decode unless a new profile shows allocation growth itself
+dominates.
+
 ## 2026-07-08 CodexRedis/CrimsonHawk: KEEP — bitfield_write byte-wise store replaces the per-bit loop — 5.99x on a u64 write (byte-identical)
 
 Follow-on to the landed `bitfield_read` byte-wise gather. The negative-evidence check matters here:

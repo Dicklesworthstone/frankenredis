@@ -250,6 +250,77 @@ fn bench_get(c: &mut Criterion) {
             criterion::BatchSize::SmallInput,
         )
     });
+
+    // Existing-key variadic HSET into a packed hash: ORIG is the old
+    // per-field packed-map insert loop (K repeated listpack scans). The
+    // candidate builds a transient borrowed overlay and rebuilds the packed map
+    // once, preserving existing-field order, new-field append order, and
+    // duplicate-field last-wins semantics.
+    let existing_hset_fields: Vec<Vec<u8>> = (0..96u32)
+        .map(|i| format!("hf{i:03}").into_bytes())
+        .collect();
+    let existing_hset_values: Vec<Vec<u8>> = (0..96u32)
+        .map(|i| format!("hv{i:03}").into_bytes())
+        .collect();
+    let mut existing_hset_seed = Vec::with_capacity(existing_hset_fields.len() * 2);
+    for (field, value) in existing_hset_fields.iter().zip(&existing_hset_values) {
+        existing_hset_seed.push(field.as_slice());
+        existing_hset_seed.push(value.as_slice());
+    }
+    let update_hset_fields: Vec<Vec<u8>> = (0..48u32)
+        .map(|i| match i % 4 {
+            0 => existing_hset_fields[((i * 7) as usize) % existing_hset_fields.len()].clone(),
+            1 => format!("hn{:03}", i % 18).into_bytes(),
+            2 => existing_hset_fields[((i * 13) as usize) % existing_hset_fields.len()].clone(),
+            _ => format!("hn{:03}", i % 18).into_bytes(),
+        })
+        .collect();
+    let update_hset_values: Vec<Vec<u8>> = (0..48u32)
+        .map(|i| format!("hu{i:03}").into_bytes())
+        .collect();
+    let mut existing_hset_update = Vec::with_capacity(update_hset_fields.len() * 2);
+    for (field, value) in update_hset_fields.iter().zip(&update_hset_values) {
+        existing_hset_update.push(field.as_slice());
+        existing_hset_update.push(value.as_slice());
+    }
+    let make_existing_hset_store = || {
+        let mut s = Store::new();
+        s.hset_borrowed_many(b"hhb", &existing_hset_seed, 1_000)
+            .unwrap();
+        s
+    };
+    g.bench_function("hset_existing_packed_orig_loop_96x48", |b| {
+        b.iter_batched(
+            make_existing_hset_store,
+            |mut s| {
+                std::hint::black_box(
+                    s.hset_borrowed_many_existing_loop_for_bench(
+                        std::hint::black_box(b"hhb"),
+                        std::hint::black_box(&existing_hset_update),
+                        2_000,
+                    )
+                    .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("hset_existing_packed_overlay_96x48", |b| {
+        b.iter_batched(
+            make_existing_hset_store,
+            |mut s| {
+                std::hint::black_box(
+                    s.hset_borrowed_many(
+                        std::hint::black_box(b"hhb"),
+                        std::hint::black_box(&existing_hset_update),
+                        2_000,
+                    )
+                    .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
     g.finish();
 }
 
