@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: SURFACE (blocker + roadmap) — non-store SUNION/SDIFF do TWO copies per member; both elision routes need a dedicated multi-piece effort
+
+Chased the flagged generic-set SUNION/SDIFF copy-elision to ground. The non-store path
+(`store.sunion`/`sdiff`, fr-store:15607) does **two** copies per unique member:
+  1. `sunion_value`/`sdiff_value` build a COMPACT result `SetValue` (CompactStrSet buffer) — copy #1 (source
+     → compact buffer, with dedup + the LFU/touch/WRONGTYPE/expiry preamble).
+  2. `result.iter().map(|m| m.into_owned())` — copy #2 (compact buffer → owned `Vec<Vec<u8>>`), then
+     `sort_unstable`.
+Copy #2 is inherent to the compact storage (members aren't separable `Vec`s → `GenericSet::into_iter` at
+packed_set.rs:452 also does `iter().map(to_vec)`; there is nothing to MOVE). So neither the trivial
+`into_iter` swap nor `each_member_bytes` (blocked by the byte-sort, see prior entry) helps.
+
+Two real elision routes, BOTH needing a dedicated pass (NOT a safe 60-min land with peers active):
+- **Route A (borrow-scan `_into`, ~1.3-1.5x, best):** encode the sorted `Vec<&[u8]>` refs straight into the
+  output buffer, no owned `Vec<Vec<u8>>`. Needs the full recipe like `smembers_borrow_scan` +
+  `execute_plain_smembers_borrowed_into` (fr-runtime:12005) — the delicate bookkeeping (packet_id, keyspace
+  stats, chained timing) is observable in FR-P2C log-contract goldens, and SUNION is MULTI-KEY so it needs
+  the borrowed multi-key dispatch (SUNIONSTORE already has `execute_plain_sunionstore_borrowed` at
+  fr-runtime:23625 — reuse its key-parse). ~100-150 lines / 3 crates.
+- **Route B (direct `HashSet<Vec<u8>>` build + drain, ~1.2-1.3x):** dedup into a drainable owned HashSet
+  (copy #1) then `into_iter` MOVE (no copy #2). But it must duplicate `sunion_value`'s intricate
+  LFU-bump/touch/WRONGTYPE/expiry preamble (also keyspace-stat/golden observable) or refactor `sunion_value`
+  to accept a sink — divergence risk vs the SUNIONSTORE caller.
+Intset arm is unavoidable in both (byte-sort of decimal reps needs materialization). Reward is generic-set
+only + moderate; recommend a dedicated coordinated turn, Route A, reusing the two cited existing functions.
+
+No code change (blocker surfaced with roadmap; no clean safe single-crate lever this round). Peer velocity
+high (CodexRedisDig lua-globals-overlay 493f7bbf4) — re-check origin first.
+
 ## 2026-07-08 CrimsonHawk: KEEP — KEYS reply uses sort_unstable instead of stable sort — 1.11x @10k keys (byte-identical)
 
 Follow-on from the SINTER/SUNION/SDIFF sort_unstable win, now on KEYS (`frankenredis-keysfast`): both glob
