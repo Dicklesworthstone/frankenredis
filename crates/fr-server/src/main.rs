@@ -12145,6 +12145,9 @@ enum BorrowedDispatchFloorClass {
     GetexExpire,
     GetexPersist,
     Hlen,
+    /// Variadic keyed-values write (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM) carrying the
+    /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
+    KeyedValuesWrite(usize),
     Llen,
     Pfcount,
     Scard,
@@ -12167,15 +12170,21 @@ enum BorrowedDispatchFloorCommand {
     BitfieldRo,
     Exists,
     Getex,
+    Hdel,
     Hlen,
     Llen,
+    Lpush,
     Pfcount,
+    Rpush,
+    Sadd,
     Scard,
+    Srem,
     Strlen,
     Type,
     Xlen,
     Zcard,
     Zcount,
+    Zrem,
     Zremrangebyrank,
 }
 
@@ -12197,12 +12206,18 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
             [b'L', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Llen),
+            [b'S', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Sadd),
+            [b'H', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Hdel),
+            [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
+            [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
+            [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
+            [b'R', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Rpush),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
@@ -12355,6 +12370,23 @@ fn classify_borrowed_dispatch_floor_packet(
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
+        // Variadic keyed-values writes at 5..=8 values (array_len 7..=10): LPUSH/RPUSH/
+        // SADD/HDEL/SREM/ZREM. These have borrowed fast paths but are stranded ~1350
+        // lines deep in the cascade (chain A ~5208, chain B ~10259) → +25-30% recover.
+        (array_len, cmd)
+            if (7..=10).contains(&array_len)
+                && matches!(
+                    cmd,
+                    BorrowedDispatchFloorCommand::Lpush
+                        | BorrowedDispatchFloorCommand::Rpush
+                        | BorrowedDispatchFloorCommand::Sadd
+                        | BorrowedDispatchFloorCommand::Hdel
+                        | BorrowedDispatchFloorCommand::Srem
+                        | BorrowedDispatchFloorCommand::Zrem
+                ) =>
+        {
+            Some(BorrowedDispatchFloorClass::KeyedValuesWrite(array_len - 2))
+        }
         _ => None,
     }
 }
@@ -12423,6 +12455,64 @@ fn dispatch_floor_fast_exists_into(
     }
 }
 
+/// Dispatch-floor fast path for the 5..=8-value keyed-values writes
+/// (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM). Reuses the EXACT cascade parsers +
+/// `execute_plain_keyed_values_write_borrowed` executor, so byte-identical to the
+/// stranded cascade arms — only the dispatch position changes. Returns the consumed
+/// byte count + the integer reply frame; None (missing/parse-fail/gate-reject) defers
+/// to the generic borrowed path exactly as the cascade arm does.
+fn dispatch_floor_keyed_values_write(
+    values: usize,
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    match values {
+        5 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values5_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        6 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values6_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        7 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values7_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        8 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values8_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        _ => None,
+    }
+}
+
 fn try_dispatch_floor_classified_action(
     unparsed: &[u8],
     parser_config: ParserConfig,
@@ -12433,6 +12523,22 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::KeyedValuesWrite(values) => {
+            if let Some((consumed, response)) =
+                dispatch_floor_keyed_values_write(values, unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::BitfieldGet(cmd) => {
             if let Some(packet) = parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 && packet.cmd == cmd
@@ -29870,6 +29976,45 @@ mod tests {
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*3\r\n$6\r\nSTRLEN\r\n$1\r\nk\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
+        // Variadic keyed-values writes: 5..=8 values (array_len 7..=10) recognized;
+        // command tokens LPUSH/RPUSH (len5) + SADD/HDEL/SREM/ZREM (len4).
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*7\r\n$5\r\nlPuSh\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(5))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*7\r\n$4\r\nsAdD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(5))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*10\r\n$4\r\nZREM\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(8))
+        );
+        // Arity guards: 4 values (array_len 6) stays on the early cascade cluster;
+        // 9 values (array_len 11) exceeds the floor window → generic.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*11\r\n$4\r\nSADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n",
                 &cfg,
             ),
             None

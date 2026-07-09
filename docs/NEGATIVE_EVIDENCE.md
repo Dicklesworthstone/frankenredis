@@ -4,6 +4,55 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 BlackThrush: KEEP — dispatch-floor now routes VARIADIC WRITES (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM at 5–8 values) — 1.49–1.86x vs ORIG, fixes the documented 5-8v cliff
+
+NEGATIVE-EVIDENCE CHECK: this is the CLEAN FIX for the cliff CrimsonHawk documented in
+38ab46966 and explicitly surfaced as preclassifier work: the variadic-write forms at 5–8
+values have borrowed fast paths but are stranded ~1350 lines deep in the cascade (chain A
+~5208, chain B ~10259), measuring +25–30% recoverable. CrimsonHawk REJECTED the cascade
+REORDER (net-negative: shifting 100 lines regressed the hot 4v arm's i-cache + taxed ~60
+downstream commons) and concluded "the clean fix is a FRONT-GATE preclassifier entry." No
+peer had claimed it. This is the FIRST time the dispatch floor routes *writes* (previously
+reads-only) — the floor's dispatch code lives in a separate function, so it adds the front
+gate WITHOUT moving the cascade (no i-cache regression, which is exactly why the reorder
+failed and the floor succeeds).
+
+IMPLEMENTED: `BorrowedDispatchFloorCommand::{Lpush,Rpush,Sadd,Hdel,Srem,Zrem}` +
+`BorrowedDispatchFloorClass::KeyedValuesWrite(usize)` (carries the value count 5..=8) + a
+`(7..=10, one-of-the-6-cmds)` classify guard + a `dispatch_floor_keyed_values_write` helper
+that reuses the EXACT cascade parsers (`parse_borrowed_plain_keyed_values{5,6,7,8}_packet`)
+and the shared `execute_plain_keyed_values_write_borrowed` executor. Byte-exact by
+construction: only the dispatch position changes; the gate/propagation/AOF/notification all
+live inside the unchanged executor, and the floor and cascade write-arm are at the same
+guard level (first branch of the `*` block). Non-matching arities (1v/4v cascade cluster,
+9v+ chain-B) return None from classify → generic path. Added 5 classifier unit assertions
+(incl 4v and 9v arity guards) + pointed the `keyed_write_vs_redis` bench group at
+`floor_engines` for the cand-vs-orig-vs-redis A/B.
+
+MEASURED A/B — same-process, same-machine (candidate + `frankenredis-orig` [HEAD, no
+keyed-values floor] + Redis 7.2.4, one bench process):
+
+| case | fr_orig µs | fr_cand µs | **cand/orig** | redis µs | orig fr/redis | cand fr/redis |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| LPUSH_5v | 108.24 | 62.97 | **1.719x** | 82.18 | 0.759 | **1.305** |
+| LPUSH_8v | 118.81 | 79.62 | **1.492x** | 103.14 | 0.868 | **1.295** |
+| RPUSH_5v | 112.45 | 74.42 | **1.511x** | 72.29 | 0.643 | **0.971** |
+| RPUSH_8v | 121.67 | 80.09 | **1.519x** | 80.64 | 0.663 | **1.007** |
+| SADD_5v | 88.54 | 50.27 | **1.761x** | 67.45 | 0.762 | **1.342** |
+| SADD_8v | 100.22 | 53.97 | **1.857x** | 87.18 | 0.870 | **1.615** |
+
+SANITY: in the SAME run the UNCHANGED arities are flat cand/orig — 1v 0.91–0.99, 4v
+0.95–1.04, 12v 0.91–1.04, 16v 0.91–1.02 (noise). Only the floored 5–8v forms move (1.49–
+1.86x), each flipping from a redis LOSS (0.64–0.87x) to a WIN/parity (0.97–1.62x). Byte-
+exact: fr-conformance GREEN + classifier unit tests green. (HDEL/SREM/ZREM at 5–8 values
+route the same way, covered by conformance.)
+
+FOLLOW-UP (surfaced, not done): the 9–16v forms still lose vs redis (0.45–0.73x) — those
+are the chain-B `keyed_values{9..18}` forms, a SEPARATE deeper cliff. Extending the floor to
+9..=16 values is the obvious next step (same recipe, mind the ~15-arm GET-regression
+ceiling — but these arms are in the separate floor function, so the ceiling is about the
+classifier's per-length token match, not process_buffered_frames).
+
 ## 2026-07-09 BlackThrush: KEEP — dispatch-floor preclassifier for cardinality cluster STRLEN/LLEN/SCARD/HLEN/ZCARD — 1.30–1.46x vs ORIG, flips all 5 from redis-loss to redis-win
 
 NEGATIVE-EVIDENCE CHECK: not a re-tried rejected lever. Extends the shared dispatch-floor

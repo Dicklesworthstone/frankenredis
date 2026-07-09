@@ -268,7 +268,9 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     for cmd in COMMANDS {
         for arity in ARITIES {
             let packet = pipelined_keyed_write_packet(cmd, arity, COMMANDS_PER_ITER);
-            for engine in engines {
+            // (BlackThrush) floor_engines adds the frankenredis-orig engine when present,
+            // so the LPUSH/RPUSH/SADD 5v/8v cliff can be A/B'd cand-vs-orig-vs-redis.
+            for engine in floor_engines.iter().copied() {
                 let id = BenchmarkId::new(format!("{cmd}_{arity}v"), engine.name);
                 group.bench_with_input(id, &engine, |b, engine| {
                     let mut client = Client::connect(engine.port);
