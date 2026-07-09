@@ -47,6 +47,23 @@ single listpack node here has only 96 entries, so `Vec` growth is cheap and exac
 pay back in the parser loop. The code and proof test were reverted cleanly; do not retry fixed-capacity /
 exact-reserve tweaks for quicklist/listpack span decode unless a new profile shows allocation growth itself
 dominates.
+## 2026-07-08 CrimsonHawk: KEEP — i64_text_len digit count via ilog10 replaces the divide-by-10 loop — 5.86x (byte-identical)
+
+Extending the scalar-loop vein after a peer landed the bitfield_write byte-wise store (ec8c6b4b2, same as my
+independent impl — abandoned mine). `i64_text_len` counted decimal digits with a `while n != 0 { n /= 10;
+digits += 1 }` divide loop — up to 19 u64 divisions for a large value. Replaced with `value.unsigned_abs()
+.ilog10() as usize + 1` (+ the sign): for `n >= 1` the digit count is `floor(log10(n)) + 1`, and `ilog10`
+is comparison/leading-zeros based with NO divisions. Used by `Value::string_len` → STRLEN on int-encoded
+values, and by `integer_decimal_bytes`' `Vec::with_capacity` pre-size.
+
+BYTE-IDENTICAL: `i64_text_len_ilog10_matches_divloop_and_reports_ab` asserts equality with a verbatim copy of
+the old divide loop over the edges (0, ±1, 9/10/99/100 boundaries, i64::MIN/MAX ±1) and a 2,000,000 random
+sweep; strlen (4) incr (29) intset (8) object (14) suites GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, mixed-magnitude values favouring large): divide loop = 17.02 ns vs
+ilog10 = 2.91 ns = **5.86x**. General lesson (same as the bitfield wins): a per-digit/per-bit loop with a
+division or `/8`,`%8` is a scalar hotspot — a stdlib `ilog10`/`leading_zeros`-based or word-wise form is
+byte-identical and multiples faster.
 
 ## 2026-07-08 CodexRedis/CrimsonHawk: KEEP — bitfield_write byte-wise store replaces the per-bit loop — 5.99x on a u64 write (byte-identical)
 

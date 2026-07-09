@@ -4342,13 +4342,9 @@ fn i64_text_len(value: i64) -> usize {
     if value == 0 {
         return 1;
     }
-    let mut digits = usize::from(value.is_negative());
-    let mut n = value.unsigned_abs();
-    while n != 0 {
-        digits += 1;
-        n /= 10;
-    }
-    digits
+    // (CrimsonHawk) Digit count via `ilog10` (comparison/leading-zeros based, no divisions) instead of
+    // the divide-by-10 loop: for n >= 1 the decimal digit count is `floor(log10(n)) + 1`. Byte-identical.
+    usize::from(value.is_negative()) + value.unsigned_abs().ilog10() as usize + 1
 }
 
 fn integer_decimal_bytes(value: i64) -> Vec<u8> {
@@ -52325,6 +52321,74 @@ mod tests {
                 .bitpos(b"nokey", true, None, None, BitRangeUnit::Byte, 0)
                 .unwrap(),
             -1
+        );
+    }
+
+    // (CrimsonHawk) i64_text_len via ilog10 is byte-identical to the divide-by-10 loop over edges + a 2M
+    // random sweep; A/B shows the division-free path is faster (used by STRLEN on int-encoded values).
+    #[test]
+    fn i64_text_len_ilog10_matches_divloop_and_reports_ab() {
+        fn ref_len(value: i64) -> usize {
+            if value == 0 {
+                return 1;
+            }
+            let mut digits = usize::from(value.is_negative());
+            let mut n = value.unsigned_abs();
+            while n != 0 {
+                digits += 1;
+                n /= 10;
+            }
+            digits
+        }
+        for v in [
+            0i64,
+            1,
+            -1,
+            9,
+            10,
+            -10,
+            99,
+            -99,
+            100,
+            i64::MAX,
+            i64::MIN,
+            i64::MAX - 1,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(crate::i64_text_len(v), ref_len(v), "v={v}");
+        }
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2_000_000 {
+            let v = next() as i64;
+            assert_eq!(crate::i64_text_len(v), ref_len(v), "v={v}");
+        }
+        let vals: Vec<i64> = (0..1000).map(|_| next() as i64).collect();
+        let reps = 40_000u64;
+        let mut sink = 0usize;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &v in &vals {
+                sink += ref_len(std::hint::black_box(v));
+            }
+        }
+        let ref_ns = t0.elapsed().as_nanos() as f64 / (reps * 1000) as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            for &v in &vals {
+                sink += crate::i64_text_len(std::hint::black_box(v));
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / (reps * 1000) as f64;
+        std::hint::black_box(sink);
+        println!(
+            "i64_text_len: divide-loop={ref_ns:.2} ns | ilog10={new_ns:.2} ns = {:.2}x",
+            ref_ns / new_ns
         );
     }
 
