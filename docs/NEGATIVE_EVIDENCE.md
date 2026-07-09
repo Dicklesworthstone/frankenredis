@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk/CodexRedisDig: KEEP — ohsk5 RESP command-token preclassifier for dispatch-floor XLEN/ZREMRANGEBYRANK — XLEN 1.89x, ZREMRANGEBYRANK-noop 3.68x vs ORIG
+
+NEGATIVE-EVIDENCE CHECK: did NOT retry the rejected "missing fast path" vein. The immediately preceding
+profile entry proved both target executors already engaged (`execute_plain_cardinality_borrowed(XLEN)` and
+`execute_plain_zremrangebyrank_borrowed`) while `process_buffered_frames` + failed parser/memcmp work dominated
+the tiny-command wall time. The new primitive is the smallest ohsk5 slice: classify only the canonical RESP
+array/cardinality tuple `(arr_len, cmd_bulk_len, cmd_token)` before the long parser cascade, then jump to the
+existing exact packet parser + executor. Malformed/noncanonical/ineligible input still falls through to the
+generic parser path.
+
+IMPLEMENTED: an early dispatch-floor classifier for `*2\r\n$4\r\nXLEN` and
+`*4\r\n$15\r\nZREMRANGEBYRANK`, plus focused exact-token/parser-limit unit tests and a targeted
+`fr-bench` Criterion group (`dispatch_floor_vs_redis`) so the same per-crate bench can keep measuring this
+structural dispatch tail.
+
+MEASURED A/B (same machine, release profile, exact `FR_SERVER_BIN="$CARGO_TARGET_DIR/release/frankenredis"`
+after building the candidate/control binary; Criterion `dispatch_floor_vs_redis` group against legacy Redis
+7.2.4):
+
+| row | ORIG fr median | candidate fr median | ratio vs ORIG | candidate Redis median | candidate fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `XLEN` | 88.203 us | 46.762 us | **1.89x** | 54.534 us | **1.17x** |
+| `ZREMRANGEBYRANK_noop` | 188.46 us | 51.249 us | **3.68x** | 61.291 us | **1.20x** |
+
+Candidate-only per-crate RCH pass (worker `vmi1293453`, release profile, same run against legacy Redis 7.2.4):
+
+`AGENT_NAME=CrimsonHawk CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec -- cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- dispatch_floor_vs_redis --noplot`
+
+| row | Redis 7.2.4 median | frankenredis median | fr/Redis throughput ratio |
+| --- | ---: | ---: | ---: |
+| `XLEN` | 35.043 us | 29.329 us | **1.195x** |
+| `ZREMRANGEBYRANK_noop` | 42.970 us | 31.437 us | **1.367x** |
+
+Routing evidence (not same-worker keep proof, but directionally useful): the pre-classifier control run on
+`ovh-a` measured `XLEN` 67.483 us Redis / 118.52 us fr = 0.569x and `ZREMRANGEBYRANK_noop` 72.638 us Redis /
+260.81 us fr = 0.278x. A noisy storage-pressure worker (`vmi1227854`, already flagged by `rch status`) produced
+pathological Redis timings and was not used for the keep decision.
+
+CORRECTNESS: focused classifier tests are green; full workspace check/clippy and byte-exact conformance were
+run for the landing commit (see commit message / session closeout for command lines).
+
 ## 2026-07-09 CrimsonHawk: SURFACE — missing-fast-path vein FULLY exhausted (GEODIST too is fast-pathed); dispatch chain is ~100+ arms deep; frequency-reorder asymmetry makes ohsk5 net-positive (lower-risk partial identified)
 
 Follow-up to the ohsk5-ROI entry. Confirmed the remaining candidates are all inherent dispatch-tail, not

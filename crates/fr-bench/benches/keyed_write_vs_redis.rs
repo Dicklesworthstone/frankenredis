@@ -519,6 +519,48 @@ fn keyed_write_vs_redis(c: &mut Criterion) {
     }
     smismember_group.finish();
 
+    let mut dispatch_floor_group = c.benchmark_group("dispatch_floor_vs_redis");
+    dispatch_floor_group.throughput(Throughput::Elements(COMMANDS_PER_ITER as u64));
+    let xlen_prefill = pipelined_xlen_prefill_packet(COMMANDS_PER_ITER);
+    let xlen_packet = pipelined_xlen_packet(COMMANDS_PER_ITER);
+    let zremrange_prefill = pipelined_zremrangebyrank_prefill_packet(COMMANDS_PER_ITER);
+    let zremrange_packet = pipelined_zremrangebyrank_noop_packet(COMMANDS_PER_ITER);
+    for (label, prefill, packet, prefill_is_resp) in [
+        ("XLEN", &xlen_prefill, &xlen_packet, true),
+        (
+            "ZREMRANGEBYRANK_noop",
+            &zremrange_prefill,
+            &zremrange_packet,
+            false,
+        ),
+    ] {
+        for engine in engines {
+            dispatch_floor_group.bench_with_input(
+                BenchmarkId::new(label, engine.name),
+                &engine,
+                |b, engine| {
+                    let mut client = Client::connect(engine.port);
+                    b.iter_custom(|iters| {
+                        client.flushall();
+                        if prefill_is_resp {
+                            client.run_resp_packet(prefill, COMMANDS_PER_ITER);
+                        } else {
+                            client.run_packet(prefill, COMMANDS_PER_ITER);
+                        }
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            client.run_packet(packet, COMMANDS_PER_ITER);
+                        }
+                        let elapsed = start.elapsed();
+                        client.flushall();
+                        elapsed
+                    });
+                },
+            );
+        }
+    }
+    dispatch_floor_group.finish();
+
     let mut dump_group = c.benchmark_group("dump_zset_vs_redis");
     dump_group.throughput(Throughput::Elements(DUMP_ZSET_KEYS as u64));
     let dump_prefill = pipelined_dump_zset_prefill_packet(DUMP_ZSET_KEYS, DUMP_ZSET_MEMBERS);
@@ -863,6 +905,42 @@ fn pipelined_smismember_packet(arity: usize, count: usize) -> Vec<u8> {
             3 => packet.extend_from_slice(&encode_command(&["SMISMEMBER", "s", "a", &miss, "c"])),
             _ => unreachable!("benchmark arity is fixed"),
         }
+    }
+    packet
+}
+
+fn pipelined_xlen_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 56);
+    for index in 0..count {
+        let key = format!("xlen:{index:03}");
+        packet.extend_from_slice(&encode_command(&["XADD", &key, "1-0", "f", "v"]));
+    }
+    packet
+}
+
+fn pipelined_xlen_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 32);
+    for index in 0..count {
+        let key = format!("xlen:{index:03}");
+        packet.extend_from_slice(&encode_command(&["XLEN", &key]));
+    }
+    packet
+}
+
+fn pipelined_zremrangebyrank_prefill_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 48);
+    for index in 0..count {
+        let key = format!("zr:{index:03}");
+        packet.extend_from_slice(&encode_command(&["ZADD", &key, "0", "m"]));
+    }
+    packet
+}
+
+fn pipelined_zremrangebyrank_noop_packet(count: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(count * 56);
+    for index in 0..count {
+        let key = format!("zr:{index:03}");
+        packet.extend_from_slice(&encode_command(&["ZREMRANGEBYRANK", &key, "10", "20"]));
     }
     packet
 }

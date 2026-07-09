@@ -15153,10 +15153,14 @@ impl Store {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         };
-        let Some(smallest) = self.entries.get(keys[min_idx]).and_then(|e| match &e.value {
-            Value::Set(s) => Some(s),
-            _ => None,
-        }) else {
+        let Some(smallest) = self
+            .entries
+            .get(keys[min_idx])
+            .and_then(|e| match &e.value {
+                Value::Set(s) => Some(s),
+                _ => None,
+            })
+        else {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         };
@@ -23230,7 +23234,7 @@ impl Store {
 
         let max_len = lens.iter().copied().max().unwrap_or(0);
 
-        let mut result = if eq_ascii_ci(op, b"NOT") {
+        let result = if eq_ascii_ci(op, b"NOT") {
             if keys.len() != 1 {
                 return Err(StoreError::WrongType);
             }
@@ -51631,7 +51635,11 @@ mod tests {
                 }
                 1 => {
                     store
-                        .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()], 0)
+                        .sadd(
+                            b"s1",
+                            &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()],
+                            0,
+                        )
                         .unwrap();
                     store.sadd(b"s2", &[b"3".to_vec()], 0).unwrap();
                 }
@@ -51671,7 +51679,11 @@ mod tests {
             match shape {
                 0 => {
                     store
-                        .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec(), b"z".to_vec(), b"q".to_vec()], 0)
+                        .sadd(
+                            b"s1",
+                            &[b"a".to_vec(), b"b".to_vec(), b"z".to_vec(), b"q".to_vec()],
+                            0,
+                        )
                         .unwrap();
                     store
                         .sadd(b"s2", &[b"b".to_vec(), b"z".to_vec(), b"c".to_vec()], 0)
@@ -51679,7 +51691,11 @@ mod tests {
                 }
                 1 => {
                     store
-                        .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()], 0)
+                        .sadd(
+                            b"s1",
+                            &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()],
+                            0,
+                        )
                         .unwrap();
                     store
                         .sadd(b"s2", &[b"2".to_vec(), b"3".to_vec(), b"10".to_vec()], 0)
@@ -51689,7 +51705,9 @@ mod tests {
                     store
                         .sadd(b"s1", &[b"1".to_vec(), b"x".to_vec(), b"y".to_vec()], 0)
                         .unwrap();
-                    store.sadd(b"s2", &[b"x".to_vec(), b"1".to_vec()], 0).unwrap();
+                    store
+                        .sadd(b"s2", &[b"x".to_vec(), b"1".to_vec()], 0)
+                        .unwrap();
                 }
                 3 => {
                     store.sadd(b"s1", &[b"a".to_vec()], 0).unwrap();
@@ -51724,8 +51742,12 @@ mod tests {
     #[test]
     fn sinter_borrow_scan_reports_ab() {
         let mut store = Store::new();
-        let s1: Vec<Vec<u8>> = (0..4000).map(|i| format!("member:{i:08}").into_bytes()).collect();
-        let s2: Vec<Vec<u8>> = (0..4000).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        let s1: Vec<Vec<u8>> = (0..4000)
+            .map(|i| format!("member:{i:08}").into_bytes())
+            .collect();
+        let s2: Vec<Vec<u8>> = (0..4000)
+            .map(|i| format!("member:{i:08}").into_bytes())
+            .collect();
         store.sadd(b"s1", &s1, 0).unwrap();
         store.sadd(b"s2", &s2, 0).unwrap();
         let keys: Vec<&[u8]> = vec![b"s1", b"s2"];
@@ -51774,10 +51796,14 @@ mod tests {
                     store
                         .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec()], 0)
                         .unwrap();
-                    store.sadd(b"s2", &[b"2".to_vec(), b"3".to_vec()], 0).unwrap();
+                    store
+                        .sadd(b"s2", &[b"2".to_vec(), b"3".to_vec()], 0)
+                        .unwrap();
                 }
                 2 => {
-                    store.sadd(b"s1", &[b"1".to_vec(), b"x".to_vec()], 0).unwrap();
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"x".to_vec()], 0)
+                        .unwrap();
                     store.sadd(b"s2", &[b"2".to_vec()], 0).unwrap();
                 }
                 3 => {}
@@ -51805,8 +51831,12 @@ mod tests {
     #[test]
     fn sunion_borrow_scan_reports_ab() {
         let mut store = Store::new();
-        let s1: Vec<Vec<u8>> = (0..3000).map(|i| format!("member:{i:08}").into_bytes()).collect();
-        let s2: Vec<Vec<u8>> = (1500..4500).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        let s1: Vec<Vec<u8>> = (0..3000)
+            .map(|i| format!("member:{i:08}").into_bytes())
+            .collect();
+        let s2: Vec<Vec<u8>> = (1500..4500)
+            .map(|i| format!("member:{i:08}").into_bytes())
+            .collect();
         store.sadd(b"s1", &s1, 0).unwrap();
         store.sadd(b"s2", &s2, 0).unwrap();
         let keys: Vec<&[u8]> = vec![b"s1", b"s2"];

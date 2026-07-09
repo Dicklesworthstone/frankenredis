@@ -86,6 +86,16 @@ struct PlainSubstrMetricsInput<'a> {
     failed: bool,
 }
 
+struct PlainZrankMetricsInput<'a> {
+    key: &'a [u8],
+    member: &'a [u8],
+    reverse: bool,
+    elapsed_us: u64,
+    now_ms: u64,
+    packet_id: u64,
+    failed: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppendFsyncMode {
     No,
@@ -9950,7 +9960,7 @@ impl Runtime {
                 Err(err) => error = Some(CommandError::Store(err).to_resp()),
             }
         } else {
-            for pair in pairs.chunks_exact(2) {
+            for pair in pairs.as_chunks::<2>().0 {
                 match self
                     .server
                     .store
@@ -10117,7 +10127,7 @@ impl Runtime {
                 error = Some(CommandError::Store(err).to_resp());
             }
         } else {
-            for pair in pairs.chunks_exact(2) {
+            for pair in pairs.as_chunks::<2>().0 {
                 match self
                     .server
                     .store
@@ -10251,7 +10261,7 @@ impl Runtime {
         // Parse every score BEFORE any state change; bail to the generic path
         // (which produces the exact error reply) on the first invalid score.
         let mut members: Vec<(f64, Vec<u8>)> = Vec::with_capacity(pairs.len() / 2);
-        for pair in pairs.chunks_exact(2) {
+        for pair in pairs.as_chunks::<2>().0 {
             let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
             members.push((score, pair[1].to_vec()));
         }
@@ -11445,7 +11455,7 @@ impl Runtime {
         // Parse every score BEFORE any state change; bail to the generic path on
         // the first invalid score (it produces the exact error reply).
         let mut members: Vec<(f64, Vec<u8>)> = Vec::with_capacity(pairs.len() / 2);
-        for pair in pairs.chunks_exact(2) {
+        for pair in pairs.as_chunks::<2>().0 {
             let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
             members.push((score, pair[1].to_vec()));
         }
@@ -12255,7 +12265,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.zrank_withscore(key, member, reverse, now_ms);
+        let result = self
+            .server
+            .store
+            .zrank_withscore(key, member, reverse, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         match result {
@@ -12298,9 +12311,15 @@ impl Runtime {
         }
         let failed = error_reply.is_some();
 
-        self.record_plain_zrank_borrowed_metrics(
-            key, member, reverse, elapsed_us, now_ms, packet_id, failed,
-        );
+        self.record_plain_zrank_borrowed_metrics(PlainZrankMetricsInput {
+            key,
+            member,
+            reverse,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        });
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -31741,16 +31760,16 @@ impl Runtime {
     }
 
     /// (CrimsonHawk) ZRANK WITHSCORE sibling of `record_plain_sunion_borrowed_metrics`.
-    fn record_plain_zrank_borrowed_metrics(
-        &mut self,
-        key: &[u8],
-        member: &[u8],
-        reverse: bool,
-        elapsed_us: u64,
-        now_ms: u64,
-        packet_id: u64,
-        failed: bool,
-    ) {
+    fn record_plain_zrank_borrowed_metrics(&mut self, input: PlainZrankMetricsInput<'_>) {
+        let PlainZrankMetricsInput {
+            key,
+            member,
+            reverse,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        } = input;
         let cmd_lower = if reverse { "zrevrank" } else { "zrank" };
         let cmd_upper = if reverse { "ZREVRANK" } else { "ZRANK" };
         let mut argv: Option<Vec<Vec<u8>>> = None;
@@ -36785,7 +36804,7 @@ impl Runtime {
         // is itself case-insensitive). (frankenredis-cfgdup)
         {
             let mut seen: Vec<String> = Vec::with_capacity(argv.len() / 2);
-            for pair in argv[2..].chunks_exact(2) {
+            for pair in argv[2..].as_chunks::<2>().0 {
                 let parameter = match std::str::from_utf8(&pair[0]) {
                     Ok(parameter) => parameter,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
@@ -36798,7 +36817,7 @@ impl Runtime {
             }
         }
 
-        for pair in argv[2..].chunks_exact(2) {
+        for pair in argv[2..].as_chunks::<2>().0 {
             let parameter = match std::str::from_utf8(&pair[0]) {
                 Ok(parameter) => parameter,
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),

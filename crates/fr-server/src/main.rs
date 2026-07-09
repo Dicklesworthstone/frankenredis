@@ -2671,7 +2671,16 @@ fn process_buffered_frames(
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = runtime.parser_config();
-                if let Some(consumed) =
+                if let Some(action) = try_dispatch_floor_classified_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    &mut conn.write_buf,
+                    &mut argv_scratch,
+                ) {
+                    action
+                } else if let Some(consumed) =
                     parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -12125,6 +12134,95 @@ enum BorrowedMultibulkAction {
     FastEncodedReply {
         consumed: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorrowedDispatchFloorClass {
+    Xlen,
+    Zremrangebyrank,
+}
+
+fn classify_borrowed_dispatch_floor_packet(
+    input: &[u8],
+    config: &ParserConfig,
+) -> Option<BorrowedDispatchFloorClass> {
+    if config.max_array_len >= 2
+        && config.max_bulk_len >= b"XLEN".len()
+        && input.get(..8)? == b"*2\r\n$4\r\n"
+        && input.get(8..12)?.eq_ignore_ascii_case(b"XLEN")
+        && input.get(12..14)? == b"\r\n"
+    {
+        return Some(BorrowedDispatchFloorClass::Xlen);
+    }
+    if config.max_array_len >= 4
+        && config.max_bulk_len >= b"ZREMRANGEBYRANK".len()
+        && input.get(..9)? == b"*4\r\n$15\r\n"
+        && input.get(9..24)?.eq_ignore_ascii_case(b"ZREMRANGEBYRANK")
+        && input.get(24..26)? == b"\r\n"
+    {
+        return Some(BorrowedDispatchFloorClass::Zremrangebyrank);
+    }
+    None
+}
+
+fn try_dispatch_floor_classified_action(
+    unparsed: &[u8],
+    parser_config: ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+    argv_scratch: &mut Vec<Vec<u8>>,
+) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
+    let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
+    Some(match class {
+        BorrowedDispatchFloorClass::Xlen => {
+            if let Some(packet) = parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                    PlainCardinalityCmd::Xlen,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zremrangebyrank => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$15\r\n",
+                b"ZREMRANGEBYRANK",
+            ) && let Some(response) =
+                runtime.execute_plain_zremrangebyrank_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+    })
 }
 
 struct BorrowedPlainGetPacket<'a> {
@@ -29051,6 +29149,67 @@ mod tests {
         assert_eq!(super::inline_plain_ping_noarg_consumed(b"PING\rX\n"), None);
         assert_eq!(
             super::inline_plain_ping_noarg_consumed(b"*1\r\n$4\r\nPING\r\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
+        let cfg = ParserConfig::default();
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nxLeN\r\n$1\r\ns\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Xlen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$15\r\nzReMrAnGeByRaNk\r\n$1\r\nz\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Zremrangebyrank)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*02\r\n$4\r\nXLEN\r\n$1\r\ns\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*4\r\n$15\r\nZREMRANGEBYRANK", &cfg,),
+            None
+        );
+    }
+
+    #[test]
+    fn dispatch_floor_classifier_honors_parser_limits() {
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nXLEN\r\n$1\r\ns\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$15\r\nZREMRANGEBYRANK\r\n$1\r\nz\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_bulk_len: 14,
+                    ..ParserConfig::default()
+                },
+            ),
             None
         );
     }
