@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — sparse-HLL encode scan 8-byte chunked run-skip — sparse PFADD 1.84x (byte-exact)
+
+Follow-up to the dense PFADD fix: SPARSE PFADD still re-encodes per add (`hll_encode(Sparse)` →
+`hll_sparse_opcodes`), which counted equal-byte runs ONE BYTE AT A TIME — O(16384) dominated by a sparse HLL's
+long ZERO runs. Replaced the scalar run-counter with a `u64` chunked skip (8 bytes/step, byte broadcast; scalar
+tail): `while next 8 bytes == value_broadcast { run_len += 8 }`. Byte-IDENTICAL `run_len` ⇒ identical opcodes.
+(LLVM did NOT already vectorize the scalar search loop — measured a real win, so the manual chunking earns its
+keep.)
+
+MEASURED (candidate vs baseline `112a2259b`, sparse HLL 500 fresh adds, min-of-21, pinned): **1.842x** (7.169ms →
+3.891ms). CONFORMANCE: candidate vs baseline **0 diffs / 18** AND candidate vs redis 7.2.4 **0 diffs / 18** — raw
+HLL GET byte-compares across sparse HLLs of 7 sizes (1…800), dense-build (sparse→dense), PFMERGE dest, + PFCOUNT.
+
+NOTE: this speeds the sparse RE-ENCODE but doesn't eliminate it (redis patches sparse opcodes in place, O(elements),
+no re-encode). Full sparse parity still needs an in-place `hllSparseSet` opcode-patch port (bigger; deferred). Also
+speeds every sparse encode (PFCOUNT-recompute size check `hll_sparse_storage_len`, PFMERGE).
+
 ## 2026-07-09 CrimsonHawk: KEEP — dense-HLL PFADD in-place register patch — 2.43–8.58x vs ORIG (byte-identical to current behavior)
 
 The per-crate `cargo bench` flagged PFADD losing 0.06–0.30x. Confirmed with FRESH unique elements (the real HLL

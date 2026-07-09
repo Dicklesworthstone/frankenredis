@@ -31571,6 +31571,19 @@ fn hll_sparse_opcodes(registers: &[u8]) -> Option<Vec<HllSparseOpcode>> {
     while index < registers.len() {
         let value = registers[index];
         let mut run_len = 1usize;
+        // (CrimsonHawk) Skip equal-byte runs 8 at a time — a sparse HLL is dominated
+        // by long ZERO runs, and the scalar loop below counts each byte individually
+        // (O(16384) per encode). Byte-identical run_len to the scalar loop.
+        let vb = u64::from(value) * 0x0101_0101_0101_0101_u64;
+        while index + run_len + 8 <= registers.len()
+            && u64::from_le_bytes(
+                registers[index + run_len..index + run_len + 8]
+                    .try_into()
+                    .expect("8-byte window"),
+            ) == vb
+        {
+            run_len += 8;
+        }
         while index + run_len < registers.len() && registers[index + run_len] == value {
             run_len += 1;
         }
