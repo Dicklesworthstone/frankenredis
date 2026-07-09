@@ -15615,6 +15615,44 @@ impl Store {
         Ok(v)
     }
 
+    /// (CrimsonHawk) Borrow-scan variant of `sunion` for the fast reply path: reuses `sunion_value` (so the
+    /// expiry/WRONGTYPE/LFU/touch preamble is IDENTICAL) but streams the sorted members through the sink
+    /// instead of collecting an owned `Vec<Vec<u8>>`. For the GENERIC-encoded result the members are sunk
+    /// BORROWED (`&[u8]` straight from the set buffer — no per-member `to_vec`), halving the copies the plain
+    /// `sunion` pays (build-set + into_owned). The intset arm still materializes: the reply is byte-sorted on
+    /// decimal reps, whose order differs from ascending-value, so it can't be sunk in-place. Byte-identical
+    /// event stream to `sunion` + encode.
+    pub fn sunion_borrow_scan(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        let Some(result) = self.sunion_value(keys, now_ms)? else {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        };
+        match &result {
+            SetValue::Generic(g) => {
+                let mut refs: Vec<&[u8]> = g.iter().collect();
+                refs.sort_unstable();
+                sink(SmembersScanEvent::Len(refs.len()));
+                for r in refs {
+                    sink(SmembersScanEvent::Member(r));
+                }
+            }
+            SetValue::Int(_) => {
+                let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
+                v.sort_unstable();
+                sink(SmembersScanEvent::Len(v.len()));
+                for m in &v {
+                    sink(SmembersScanEvent::Member(m));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// (frankenredis-sunionstore-direct) Build the SUNION result as a `SetValue`
     /// without flattening to a sorted `Vec<Vec<u8>>`, so SUNIONSTORE can store it
     /// directly instead of round-tripping the membership through a sorted Vec and
@@ -51435,6 +51473,87 @@ mod tests {
             .unwrap();
         let result = store.sunion(&[b"s1", b"s2"], 0).unwrap();
         assert_eq!(result, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    // (CrimsonHawk) sunion_borrow_scan streams the SAME sorted members as plain sunion across generic /
+    // intset (byte-order != value-order) / mixed / missing / single-set shapes.
+    #[test]
+    fn sunion_borrow_scan_matches_plain_sunion() {
+        for shape in 0..5 {
+            let mut store = Store::new();
+            match shape {
+                0 => {
+                    store
+                        .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec(), b"z".to_vec()], 0)
+                        .unwrap();
+                    store
+                        .sadd(b"s2", &[b"b".to_vec(), b"c".to_vec()], 0)
+                        .unwrap();
+                }
+                1 => {
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec()], 0)
+                        .unwrap();
+                    store.sadd(b"s2", &[b"2".to_vec(), b"3".to_vec()], 0).unwrap();
+                }
+                2 => {
+                    store.sadd(b"s1", &[b"1".to_vec(), b"x".to_vec()], 0).unwrap();
+                    store.sadd(b"s2", &[b"2".to_vec()], 0).unwrap();
+                }
+                3 => {}
+                _ => {
+                    store.sadd(b"s1", &[b"only".to_vec()], 0).unwrap();
+                }
+            }
+            let keys: Vec<&[u8]> = vec![b"s1", b"s2", b"s3"];
+            let mut sink_members: Vec<Vec<u8>> = Vec::new();
+            let mut sink_len = None;
+            store
+                .sunion_borrow_scan(&keys, 0, |ev| match ev {
+                    crate::SmembersScanEvent::Len(n) => sink_len = Some(n),
+                    crate::SmembersScanEvent::Member(m) => sink_members.push(m.to_vec()),
+                })
+                .unwrap();
+            let plain = store.sunion(&keys, 0).unwrap();
+            assert_eq!(sink_members, plain, "shape {shape} members");
+            assert_eq!(sink_len, Some(plain.len()), "shape {shape} len");
+        }
+    }
+
+    // (CrimsonHawk) Store-level A/B: borrow-scan (sink members, no owned collect) vs plain sunion (owned
+    // Vec<Vec<u8>> + sort) on a large GENERIC union — quantifies the copy-#2 elision.
+    #[test]
+    fn sunion_borrow_scan_reports_ab() {
+        let mut store = Store::new();
+        let s1: Vec<Vec<u8>> = (0..3000).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        let s2: Vec<Vec<u8>> = (1500..4500).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        store.sadd(b"s1", &s1, 0).unwrap();
+        store.sadd(b"s2", &s2, 0).unwrap();
+        let keys: Vec<&[u8]> = vec![b"s1", b"s2"];
+        let reps = 3000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let v = store.sunion(&keys, 0).unwrap();
+            std::hint::black_box(v.len());
+        }
+        let plain_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut n = 0usize;
+            store
+                .sunion_borrow_scan(&keys, 0, |ev| {
+                    if let crate::SmembersScanEvent::Member(_) = ev {
+                        n += 1;
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(n);
+        }
+        let scan_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "sunion (4500-member generic union): plain(owned+sort)={plain_ns:.0} ns | borrow_scan={scan_ns:.0} ns = {:.2}x",
+            plain_ns / scan_ns
+        );
     }
 
     #[test]

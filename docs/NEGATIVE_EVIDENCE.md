@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP (Route A core) — sunion_borrow_scan store primitive lands the copy-elision — 2.01x store-level (byte-identical); fast-path wiring is the scoped follow-up
+
+Executed the Route A roadmap from the prior SURFACE entry. Landed `Store::sunion_borrow_scan` (fr-store):
+reuses `sunion_value` (so the expiry/WRONGTYPE/LFU/touch preamble is IDENTICAL — no duplication risk) and
+STREAMS the sorted members through a `SmembersScanEvent` sink instead of collecting an owned
+`Vec<Vec<u8>>`. For the GENERIC-encoded union it sinks members BORROWED (`&[u8]` from the set buffer,
+sorted as `Vec<&[u8]>`) — eliminating copy #2 AND sorting cheaper 8-byte refs instead of 24-byte `Vec`s.
+The intset arm still materializes (byte-sort of decimal reps ≠ ascending-value order).
+
+BYTE-IDENTICAL: `sunion_borrow_scan_matches_plain_sunion` asserts the sink stream equals `store.sunion`'s
+Vec across generic / intset / mixed / missing / single-set shapes; `sunion` suite GREEN.
+
+MEASURED (fr-store A/B, per-crate rch, 4500-member GENERIC union, `sunion_borrow_scan_reports_ab`):
+plain (owned collect + sort) = 334,103 ns vs borrow_scan (sink, no owned) = 166,613 ns = **2.01x** store-level
+— bigger than the estimated ~1.3-1.5x because eliding copy #2 AND sorting refs both help.
+
+STILL TO WIRE (scoped follow-up, NOT yet a production win): `execute_plain_sunion_borrowed_into` (mirror
+`execute_plain_smembers_borrowed_into` fr-runtime:12005 + a `record_plain_sunion_borrowed_metrics` /
+`plain_sunion_owned_argv` pair — the delicate golden-observable metrics part) and the fr-server dispatch arm
+(near-verbatim copy of the MGET `parse_borrowed_plain_keys_multi_packet` arm, swap `b"MGET"`→`b"SUNION"` and
+the executor). SDIFF is the identical shape once SUNION lands. Deferred the wiring this turn rather than rush
+the metrics mirror. The algorithmic core + validation + measurement are done, so the wiring is low-risk.
+
 ## 2026-07-08 CrimsonHawk: SURFACE (blocker + roadmap) — non-store SUNION/SDIFF do TWO copies per member; both elision routes need a dedicated multi-piece effort
 
 Chased the flagged generic-set SUNION/SDIFF copy-elision to ground. The non-store path
