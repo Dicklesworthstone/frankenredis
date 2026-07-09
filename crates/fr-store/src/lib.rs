@@ -3931,18 +3931,11 @@ fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
 /// (frankenredis-notifyfmt) Append `n` as decimal ASCII to `buf` without the
 /// `core::fmt` machinery (hot keyspace-notification channel path).
 fn push_usize_decimal(buf: &mut Vec<u8>, n: usize) {
-    let mut tmp = [0u8; 20];
-    let mut i = tmp.len();
-    let mut v = n;
-    loop {
-        i -= 1;
-        tmp[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    buf.extend_from_slice(&tmp[i..]);
+    // (CrimsonHawk) Reuse the shared two-digit-LUT itoa (`write_u64_digits`, 2 digits/step) instead of a
+    // per-digit `% 10 / /= 10` divide loop. Byte-identical digits.
+    let mut scratch = [0u8; 20];
+    let start = fr_protocol::write_u64_digits(&mut scratch, 20, n as u64);
+    buf.extend_from_slice(&scratch[start..]);
 }
 
 fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
@@ -52322,6 +52315,73 @@ mod tests {
                 .unwrap(),
             -1
         );
+    }
+
+    // (CrimsonHawk) push_usize_decimal (LUT) is byte-identical to the divide loop; A/B over the realistic
+    // db range (0..16, the only caller) + a large-value case to judge whether the swap actually pays off.
+    #[test]
+    fn push_usize_decimal_lut_matches_divloop_and_reports_ab() {
+        fn ref_push(buf: &mut Vec<u8>, n: usize) {
+            let mut tmp = [0u8; 20];
+            let mut i = tmp.len();
+            let mut v = n;
+            loop {
+                i -= 1;
+                tmp[i] = b'0' + (v % 10) as u8;
+                v /= 10;
+                if v == 0 {
+                    break;
+                }
+            }
+            buf.extend_from_slice(&tmp[i..]);
+        }
+        let mut seed = 0xabcdef12u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for n in (0..200_000usize).chain((0..50_000).map(|_| next() as usize)) {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            ref_push(&mut a, n);
+            crate::push_usize_decimal(&mut b, n);
+            assert_eq!(a, b, "n={n}");
+        }
+        let reps = 20_000_000u64;
+        // Realistic caller: db in 0..16.
+        for label in ["db 0..16", "large"] {
+            let mut sink = 0u8;
+            let t0 = std::time::Instant::now();
+            for i in 0..reps {
+                let n = if label == "db 0..16" {
+                    (i % 16) as usize
+                } else {
+                    (i as usize).wrapping_mul(2_654_435_761)
+                };
+                let mut buf = Vec::with_capacity(20);
+                ref_push(&mut buf, std::hint::black_box(n));
+                sink ^= buf[0];
+            }
+            let ref_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+            let t1 = std::time::Instant::now();
+            for i in 0..reps {
+                let n = if label == "db 0..16" {
+                    (i % 16) as usize
+                } else {
+                    (i as usize).wrapping_mul(2_654_435_761)
+                };
+                let mut buf = Vec::with_capacity(20);
+                crate::push_usize_decimal(&mut buf, std::hint::black_box(n));
+                sink ^= buf[0];
+            }
+            let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+            std::hint::black_box(sink);
+            println!(
+                "push_usize_decimal [{label}]: divide-loop={ref_ns:.2} ns | LUT={new_ns:.2} ns = {:.2}x",
+                ref_ns / new_ns
+            );
+        }
     }
 
     // (CrimsonHawk) i64_text_len via ilog10 is byte-identical to the divide-by-10 loop over edges + a 2M

@@ -4,6 +4,19 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP — push_usize_decimal reuses the two-digit-LUT itoa instead of a divide loop — 1.14x db / 1.50x large (byte-identical)
+
+Continuing the scalar-loop vein (after a peer independently landed my bitfield_write byte-wise store — I
+abandoned that dup). `push_usize_decimal` (the keyspace-notification channel formatter, `__keyspace@<db>__:`
+/ `__keyevent@<db>__:`) formatted the number with a per-digit `% 10` / `/= 10` divide loop; now it reuses
+the shared `fr_protocol::write_u64_digits` two-digit LUT already used by `integer_decimal_bytes`.
+Byte-identical digits. Modest by design (the only caller passes the small `db` 0..16) but a MEASURED win:
+`push_usize_decimal_lut_matches_divloop_and_reports_ab` verifies byte-identity over 250k values and A/Bs:
+db-0..16 divide-loop 14.17 ns vs LUT 12.40 ns = **1.14x**, large-value 25.18 vs 16.75 = **1.50x**. Fires on
+every write under `notify-keyspace-events`. VEIN STATUS (checked-and-done this round, skip): fr-protocol itoa
+(two-digit LUT), HLL dense pack (batched 4→3 regs), HLL register access (byte-cache O(1)), MurmurHash tail
+(from_le_bytes), list LPOS/LREM scan (iter yields borrowed `&[u8]`, the 0.75x was load noise) all optimal.
+
 ## 2026-07-09 CodexRedisDig/CrimsonHawk: KEEP — existing packed-HSET transient overlay rebuild — 6.06x vs ORIG (byte-identical)
 
 Negative-evidence pass first: did NOT retry the rejected byte-aligned BITFIELD command specialization,
