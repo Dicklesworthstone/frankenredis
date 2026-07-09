@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP — BITOP AND/OR/XOR drops the redundant result memset — bitop_and 0.79x → 0.88x vs redis 7.2.4 (byte-exact)
+
+Data-driven: three fresh head-to-heads vs redis 7.2.4 (broad + large-value gate + extended) show fr
+faster-or-parity almost everywhere — the LARGE-VALUE gap is GONE (SET 1.05x/GET 1.85x @1MB, someone landed the
+double-copy fix). The one non-sub-ms real-work loss was `BITOP AND bdst bigstr bigstr` (20KB) = 0.79x. `perf`
+localized it: **memmove 17.6% + memset 12.1% ≈ 30%** in copies/zero-fill. store::bitop did
+`vec![0u8; max_len]` (memset the whole result) THEN `copy_from_slice(&first)` — the memset zero-filled the
+`[0..first.len)` region that copy then immediately overwrote, so for equal-length operands (the common shape)
+the ENTIRE memset pass was wasted.
+
+FIX: init `result = first.into_owned()` + `resize(max_len, 0)` — for equal-length operands the resize is a
+no-op, eliminating the memset pass entirely; the fold + AND zero-tail fill are unchanged → byte-identical.
+
+BYTE-EXACT: `swar_bitop_matches_scalar` store test (16MB) green; `bitop_edge_differ.py` = **28 checks
+byte-exact vs redis 7.2.4** (NOT-arity / diff-len-pad / missing-as-zero / empty-deletes-dest / overwrite /
+wrongtype). MEASURED (extended2 head-to-head): bitop_and **0.79x → 0.88x**.
+
+NOT full parity: the remaining `memmove` (copy the first operand into the result) is inherent to SAFE code —
+`fr-store` is `#![forbid(unsafe_code)]`, so the result buffer must be initialized (one pass) before the SWAR
+fold; 2 passes (copy + fold) is the safe optimum vs redis's 1 pass into an uninitialized C allocation. The
+sub-ms tail (zrank_ws/getdel/getex/setbit/type/… all 0.6-0.9x) is dispatch-chain + parity-required
+bookkeeping bound (same bucket as GET/SET) — not clean per-crate levers.
+
 ## 2026-07-08 CrimsonHawk: SURFACE (perf-profiled, lead CLOSED) — SMISMEMBER 0.82x is distributed per-command cost, not one hotspot; no clean per-crate lever
 
 `perf record` on frankenredis under a `SMISMEMBER setA <100 members>` blast (2000-member generic set, all

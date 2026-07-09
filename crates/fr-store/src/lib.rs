@@ -23229,24 +23229,32 @@ impl Store {
         }
 
         let max_len = lens.iter().copied().max().unwrap_or(0);
-        let mut result = vec![0u8; max_len];
 
-        if eq_ascii_ci(op, b"NOT") {
+        let mut result = if eq_ascii_ci(op, b"NOT") {
             if keys.len() != 1 {
                 return Err(StoreError::WrongType);
             }
+            let mut result = vec![0u8; max_len];
             // `result` is `max_len == values[0].len()` zeros; NOT every byte.
             if let Some(v) = operand!(keys[0]) {
                 Self::swar_not_into(&mut result, &v);
             }
+            result
         } else {
-            // Initialize with the first value (shorter operands zero-extend, and
-            // `result` is already zeroed beyond `first.len()`).
-            if let Some(&first_key) = keys.first()
-                && let Some(first) = operand!(first_key)
-            {
-                result[..first.len()].copy_from_slice(&first);
-            }
+            // (CrimsonHawk) Initialize `result` = first operand + zero-tail DIRECTLY, instead of the old
+            // `vec![0; max_len]` (a full memset) followed by `copy_from_slice(&first)` (which zero-filled the
+            // `[0..first.len)` region it then immediately overwrote). For equal-length operands — the common
+            // BITOP shape — `resize` is a no-op, so the entire redundant memset pass is eliminated (perf: it
+            // was ~12% of BITOP AND on a 20KB string). The fold + AND zero-tail fill below are unchanged, so
+            // the result is byte-identical (result still = [first bytes][zeros to max_len] before the fold).
+            let mut result = match keys.first().and_then(|&k| operand!(k)) {
+                Some(first) => {
+                    let mut r = first.into_owned();
+                    r.resize(max_len, 0);
+                    r
+                }
+                None => vec![0u8; max_len],
+            };
 
             let is_and = eq_ascii_ci(op, b"AND");
             let is_or = eq_ascii_ci(op, b"OR");
@@ -23268,7 +23276,8 @@ impl Store {
                     Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
                 }
             }
-        }
+            result
+        };
 
         let len = result.len();
         self.stream_groups.remove(dest);
