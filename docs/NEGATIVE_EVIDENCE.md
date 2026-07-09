@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — ZRANK … WITHSCORE borrowed fast path — 0.56x → 1.02x vs redis 7.2.4 (byte-exact); CORRECTS the stale "treap-structural" conclusion
+
+`perf` OVERTURNED the long-standing memory analysis that ZRANK WITHSCORE's ~0.58x was "treap-vs-skiplist
+descent" (constant-factor structural). Under a ZRANK WITHSCORE blast the actual rank query
+(`ZRankTreap::rank_of`) was only **2.6%** — the cost was **~90% DISPATCH**: `process_buffered_frames` 40.9%
+(25% self), memcmp 17.8% (command-name matching), failed borrowed parses (arg1/arg2/arg3 ~12%), and the
+GENERIC path (`execute_frame_internal` + `command_table_index` + `parse_command_args` + RespFrame build).
+ROOT CAUSE: the `*4` `ZRANK key member WITHSCORE` form had NO borrowed fast path (plain `*3` ZRANK does), so
+it fell to the slow generic dispatch. The store method `zrank_withscore` is already fused (one lookup + one
+traversal → rank AND score).
+
+FIX (borrowed-fast-path recipe, same as SUNION/SDIFF/SINTER): reuse `parse_borrowed_plain_key_arg2_packet`
+(prefix `*4\r\n$5\r\n`, `ZRANK`) + a `WITHSCORE` check → new fr-runtime `execute_plain_zrank_withscore_borrowed_into`
+(+ `record_plain_zrank_borrowed_metrics` / `plain_zrank_owned_argv`) that calls `store.zrank_withscore` and
+encodes `Array([Integer(rank), <score>])` (score via `encode_redis_double` = RESP3 Double / RESP2 bulk) or a
+nil array (`*-1` / `_`), same conservative `plain_borrowed_default_key_read_allows` gate. Any non-WITHSCORE
+4th arg falls through to generic.
+
+BYTE-EXACT: raw-socket differential vs redis 7.2.4 across present / absent-member / missing-key / WRONGTYPE in
+RESP2 AND RESP3 = ALL byte-exact. MEASURED (extended2 head-to-head): zrank_ws **0.56x → 1.02x** (parity+).
+LESSON: perf-profile the sub-ms "structural" losses before trusting old estimates — some are a MISSING FAST
+PATH (dispatch), not the data structure. The `*4`-option-form-lacks-a-fast-path pattern may hit other commands
+(e.g. other `... WITHSCORE`/option variants that fall to generic).
+
 ## 2026-07-09 CrimsonHawk: REJECT (negligible) — CompactFieldMap short-key final-compare micro-lever; the set/hash membership hot path is optimal
 
 Chased the last SMISMEMBER perf line item — `CompactFieldMap::lookup_slot_prehashed` (12.1% self, on the

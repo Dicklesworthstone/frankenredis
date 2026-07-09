@@ -376,6 +376,15 @@ fn plain_sunion_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
     argv
 }
 
+fn plain_zrank_owned_argv(key: &[u8], member: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"ZRANK".to_vec(),
+        key.to_vec(),
+        member.to_vec(),
+        b"WITHSCORE".to_vec(),
+    ]
+}
+
 fn plain_sdiff_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
     let mut argv = Vec::with_capacity(keys.len() + 1);
     argv.push(b"SDIFF".to_vec());
@@ -12171,6 +12180,115 @@ impl Runtime {
         let failed = error_reply.is_some();
 
         self.record_plain_sunion_borrowed_metrics(keys, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
+    /// (CrimsonHawk) ZRANK key member WITHSCORE fast reply path. perf showed this `*4` form had NO borrowed
+    /// fast path (plain `*3` ZRANK does) so it fell to the generic dispatch (execute_frame_internal +
+    /// command_table_index + parse_command_args + RespFrame build) — ~90% dispatch overhead for a query whose
+    /// actual work (`ZRankTreap::rank_of`) is ~2.6%. The store method `zrank_withscore` is already fused
+    /// (one lookup + one traversal returns both rank and score). Reply is byte-identical to fr-command
+    /// `zrank_generic`'s: `Array([Integer(rank), <score>])` (score = RESP3 Double / RESP2 bulk via
+    /// `encode_redis_double`) when the member ranks, else a nil array (`*-1` / `_`). Same conservative gate
+    /// as the other plain read fast paths.
+    pub fn execute_plain_zrank_withscore_borrowed_into(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"ZRANK".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zrank");
+        self.session.last_argv_len_sum =
+            b"ZRANK".len() + key.len() + member.len() + b"WITHSCORE".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.zrank_withscore(key, member, false, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(opt) => {
+                if !suppress_reply {
+                    match opt {
+                        Some((rank, score)) => {
+                            // Array [Integer(rank), score]; the array header is `*2` in BOTH protocols
+                            // (only the score element differs). Byte-identical to RespFrame::Array(Some[..]).
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                            let mut scratch = [0u8; 20];
+                            let s = fr_protocol::write_u64_digits(&mut scratch, 20, rank as u64);
+                            out.push(b':');
+                            out.extend_from_slice(&scratch[s..]);
+                            out.extend_from_slice(b"\r\n");
+                            fr_protocol::encode_redis_double(score, resp3, out);
+                        }
+                        None => {
+                            // nil array — RespFrame::Array(None): `*-1\r\n` (RESP2) / `_\r\n` (RESP3).
+                            if resp3 {
+                                out.extend_from_slice(b"_\r\n");
+                            } else {
+                                out.extend_from_slice(b"*-1\r\n");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_zrank_borrowed_metrics(key, member, elapsed_us, now_ms, packet_id, failed);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -31602,6 +31720,63 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'SUNION' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// (CrimsonHawk) ZRANK WITHSCORE sibling of `record_plain_sunion_borrowed_metrics`.
+    fn record_plain_zrank_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_zrank_owned_argv(key, member));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_zrank_owned_argv(key, member));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("zrank", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_zrank_owned_argv(key, member));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ZRANK' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),

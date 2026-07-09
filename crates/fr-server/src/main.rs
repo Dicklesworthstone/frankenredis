@@ -3357,6 +3357,50 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$5\r\n",
+                    b"ZRANK",
+                ) {
+                    // (CrimsonHawk) ZRANK key member WITHSCORE — the *4 form had no borrowed fast path (fell
+                    // to the generic dispatch, ~90% overhead for a ~2.6% query). Only the WITHSCORE option is
+                    // fast-pathed; any other 4th arg falls through to the generic (syntax-error) path.
+                    if packet.b.eq_ignore_ascii_case(b"WITHSCORE") {
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        if runtime
+                            .execute_plain_zrank_withscore_borrowed_into(
+                                packet.key,
+                                packet.a,
+                                ts,
+                                client_resp3,
+                                &mut conn.write_buf,
+                            )
+                            .is_some()
+                        {
+                            Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                consumed: packet.consumed,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SUNION")
                 {
