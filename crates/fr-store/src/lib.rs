@@ -15138,6 +15138,78 @@ impl Store {
         Ok(out)
     }
 
+    /// (CrimsonHawk) Borrow-scan variant of `sinter` for the fast reply path. Same `sinter_prepare` preamble
+    /// and survivor walk as `sinter`, but for a GENERIC smallest set it collects the survivors as BORROWED
+    /// `&[u8]` refs (no `member.to_vec()` — SINTER's only copy) straight from the base set, sorts the refs,
+    /// and streams them. The intset/single arm materializes (byte-sort of decimal reps != value order).
+    /// Byte-identical event stream to `sinter` + encode.
+    pub fn sinter_borrow_scan(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        };
+        let Some(smallest) = self.entries.get(keys[min_idx]).and_then(|e| match &e.value {
+            Value::Set(s) => Some(s),
+            _ => None,
+        }) else {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        };
+        match smallest.as_generic() {
+            Some(base) if keys.len() >= 2 => {
+                let other_sets: Vec<&SetValue> = keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != min_idx)
+                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                        Value::Set(s) => Some(s.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut survivors: Vec<&[u8]> = Vec::with_capacity(base.len());
+                'member: for member in base.iter() {
+                    for other in &other_sets {
+                        if !other.contains(member) {
+                            continue 'member;
+                        }
+                    }
+                    survivors.push(member);
+                }
+                survivors.sort_unstable();
+                sink(SmembersScanEvent::Len(survivors.len()));
+                for m in survivors {
+                    sink(SmembersScanEvent::Member(m));
+                }
+            }
+            _ => {
+                let mut res = smallest.as_ref().clone();
+                for (i, key) in keys.iter().enumerate() {
+                    if i == min_idx || res.is_empty() {
+                        continue;
+                    }
+                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                        Value::Set(s) => Some(s),
+                        _ => None,
+                    }) {
+                        res.retain_intersect(s);
+                    }
+                }
+                let mut v: Vec<Vec<u8>> = res.iter().map(|m| m.into_owned()).collect();
+                v.sort_unstable();
+                sink(SmembersScanEvent::Len(v.len()));
+                for m in &v {
+                    sink(SmembersScanEvent::Member(m));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Shared SINTER/SINTERSTORE preamble: expire every source key, type-check,
     /// find the smallest set, and apply the LFU-bump/touch side-effects in the
     /// exact draw order the prior inline body used (smallest first, then the
@@ -51554,6 +51626,99 @@ mod tests {
             assert_eq!(sink_members, plain, "shape {shape} members");
             assert_eq!(sink_len, Some(plain.len()), "shape {shape} len");
         }
+    }
+
+    // (CrimsonHawk) sinter_borrow_scan streams the SAME sorted members as plain sinter across generic /
+    // intset / mixed / missing / single-key shapes.
+    #[test]
+    fn sinter_borrow_scan_matches_plain_sinter() {
+        for shape in 0..5 {
+            let mut store = Store::new();
+            match shape {
+                0 => {
+                    store
+                        .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec(), b"z".to_vec(), b"q".to_vec()], 0)
+                        .unwrap();
+                    store
+                        .sadd(b"s2", &[b"b".to_vec(), b"z".to_vec(), b"c".to_vec()], 0)
+                        .unwrap();
+                }
+                1 => {
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"3".to_vec(), b"10".to_vec(), b"2".to_vec()], 0)
+                        .unwrap();
+                    store
+                        .sadd(b"s2", &[b"2".to_vec(), b"3".to_vec(), b"10".to_vec()], 0)
+                        .unwrap();
+                }
+                2 => {
+                    store
+                        .sadd(b"s1", &[b"1".to_vec(), b"x".to_vec(), b"y".to_vec()], 0)
+                        .unwrap();
+                    store.sadd(b"s2", &[b"x".to_vec(), b"1".to_vec()], 0).unwrap();
+                }
+                3 => {
+                    store.sadd(b"s1", &[b"a".to_vec()], 0).unwrap();
+                }
+                _ => {
+                    store
+                        .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
+                        .unwrap();
+                }
+            }
+            let keys: Vec<&[u8]> = if shape == 4 {
+                vec![b"s1"]
+            } else {
+                vec![b"s1", b"s2"]
+            };
+            let mut sink_members: Vec<Vec<u8>> = Vec::new();
+            let mut sink_len = None;
+            store
+                .sinter_borrow_scan(&keys, 0, |ev| match ev {
+                    crate::SmembersScanEvent::Len(n) => sink_len = Some(n),
+                    crate::SmembersScanEvent::Member(m) => sink_members.push(m.to_vec()),
+                })
+                .unwrap();
+            let plain = store.sinter(&keys, 0).unwrap();
+            assert_eq!(sink_members, plain, "shape {shape} members");
+            assert_eq!(sink_len, Some(plain.len()), "shape {shape} len");
+        }
+    }
+
+    // (CrimsonHawk) Store-level A/B: sinter borrow-scan (sink refs, no survivor to_vec) vs plain sinter
+    // (Vec<Vec<u8>> survivor copies + sort) on a large GENERIC intersection.
+    #[test]
+    fn sinter_borrow_scan_reports_ab() {
+        let mut store = Store::new();
+        let s1: Vec<Vec<u8>> = (0..4000).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        let s2: Vec<Vec<u8>> = (0..4000).map(|i| format!("member:{i:08}").into_bytes()).collect();
+        store.sadd(b"s1", &s1, 0).unwrap();
+        store.sadd(b"s2", &s2, 0).unwrap();
+        let keys: Vec<&[u8]> = vec![b"s1", b"s2"];
+        let reps = 3000u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let v = store.sinter(&keys, 0).unwrap();
+            std::hint::black_box(v.len());
+        }
+        let plain_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut n = 0usize;
+            store
+                .sinter_borrow_scan(&keys, 0, |ev| {
+                    if let crate::SmembersScanEvent::Member(_) = ev {
+                        n += 1;
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(n);
+        }
+        let scan_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "sinter (4000-member generic intersection): plain(owned+sort)={plain_ns:.0} ns | borrow_scan={scan_ns:.0} ns = {:.2}x",
+            plain_ns / scan_ns
+        );
     }
 
     // (CrimsonHawk) sunion_borrow_scan streams the SAME sorted members as plain sunion across generic /

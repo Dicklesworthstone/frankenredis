@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP (Route A — SINTER) — SINTER borrow-scan fast path — 2.43x store-level, byte-exact vs redis 7.2.4
+
+Completed the set-algebra trio. SINTER was already "direct-Vec" (1 copy, not 2 like SUNION/SDIFF had), so I
+overturned the prior "intset-heavy, low-value" deferral: for a GENERIC smallest set the survivors are filtered
+straight from the base set, so the borrow-scan sinks them BORROWED and eliminates SINTER's ONLY copy (1→0) +
+sorts `&[u8]` refs — a BIGGER relative win than SUNION.
+- fr-store `Store::sinter_borrow_scan` — reuses `sinter_prepare` (identical LFU/touch/type preamble) + the
+  same survivor walk, but collects `Vec<&[u8]>` survivors (no `member.to_vec()`) for a generic base; intset/
+  single-key arm materializes (byte-sort of decimal reps != value order).
+- fr-runtime `execute_plain_sinter_borrowed_into` + `record_plain_sinter_borrowed_metrics` +
+  `plain_sinter_owned_argv`; fr-server dispatch arm — all verbatim `sunion`→`sinter` mirrors, same
+  conservative `plain_borrowed_default_key_read_allows` gate (no ACL/gate bypass).
+
+BYTE-IDENTICAL: `sinter_borrow_scan_matches_plain_sinter` (generic/intset/mixed/missing/single-key) GREEN.
+CONFORMANCE: `algebra_resp3_differ.py` vs redis 7.2.4 = **1600 iters BYTE-EXACT** (resp2/resp3 + typed).
+RATIO: store-level A/B (4000-member generic intersection) plain 185,770 ns vs borrow_scan 76,509 ns = **2.43x**.
+
+**Set-algebra borrow-scan vein COMPLETE: SUNION + SDIFF + SINTER all stream their reply with no owned
+`Vec<Vec<u8>>`, byte-exact vs redis 7.2.4.** Next: apply the recipe to a non-algebra owned-collect reply
+(KEYS builds Vec<Vec<u8>> of matching keys + sorts — borrow-scannable) or a new primitive class.
+
 ## 2026-07-08 CrimsonHawk: KEEP (Route A — SDIFF) — SDIFF borrow-scan fast path, byte-exact vs redis 7.2.4
 
 The SDIFF twin of the SUNION fast path (same session), completed with the proven recipe:
