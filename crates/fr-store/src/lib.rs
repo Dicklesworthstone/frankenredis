@@ -15426,8 +15426,17 @@ impl Store {
         if keys.is_empty() {
             return Ok(0);
         }
-        for key in keys {
-            self.drop_if_expired(key, now_ms);
+        // (CrimsonHawk) Guard the bare per-key drop loop. drop_if_expired does 2 map
+        // lookups per key even when nothing is expired; when no key in the DB has a
+        // TTL (expires_count == 0) skipping the loop is byte-identical. Measured a
+        // consistent ~+3-4% on SINTERCARD (min ratio 1.039x) because its LIMIT
+        // early-stop keeps command work small so the drop-loop is a real fraction.
+        // Verified 0-gain (min ~parity) for full-scan SINTER/SUNION/SDIFF where the
+        // O(n) set-algebra dwarfs the O(k) drop-loop, so those are NOT guarded.
+        if self.expires_count != 0 {
+            for key in keys {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;

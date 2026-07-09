@@ -4,6 +4,24 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP SINTERCARD drop-loop guard (+3.5–5.9%); REJECT the same guard on full-scan SINTER/SUNION/SDIFF (0-gain)
+
+Probed extending the single-key-write `drop_if_expired`-guard vein to the bare `for key in keys { drop_if_expired }`
+loops in the multi-key SET reads (`sinter/sunion/sdiff_borrow_scan` + `sintercard`). `drop_if_expired` does 2 map
+lookups per key even when nothing is expired; guarding the loop with `if self.expires_count != 0` skips it when no
+key in the DB has a TTL (byte-identical — nothing can be expired).
+
+MEASURED (candidate vs original `f58426a97` binary, interleaved TCP A/B, min-of-61-trials to strip noise; pinned):
+- **SINTERCARD-5 min 1.055x / median 1.059x; SINTERCARD-3 min 1.048x / median 1.035x → KEEP.**
+- SINTER-5 min 0.997x; SINTER/SUNION/SDIFF-3 min ~parity → **0-GAIN, REVERTED (not guarded).**
+- Byte-exact: SINTERCARD differential vs redis 7.2.4, 7 cases (LIMIT 0/1, TTL'd key, expired key) = 0 diffs.
+
+WHY THE SPLIT (reusable): SINTERCARD's LIMIT early-stop keeps command work small, so the O(k) drop-loop is a real
+fraction (+3–6%). SINTER/SUNION/SDIFF do the full O(n) intersection/union which dwarfs the O(k) drop-loop → the guard
+is unmeasurable. **The drop-guard vein does NOT generalize to full-scan multi-key reads; only cheap / early-stop
+commands benefit.** (`perf stat -e instructions:u` is restricted in this env — `<not counted>` — so this used
+min-of-trials wall-clock, not instruction count.)
+
 ## 2026-07-09 CrimsonHawk: KEEP — ZCOUNT added to the dispatch-floor preclassifier — 2.00x vs ORIG, 0.46x→0.95x vs redis 7.2.4 (byte-exact)
 
 NEGATIVE-EVIDENCE CHECK: not a re-tried rejected lever. Extends CodexRedisDig's landed preclassifier
