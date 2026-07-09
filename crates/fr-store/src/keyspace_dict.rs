@@ -342,9 +342,7 @@ impl<V> KeyDict<V> {
 
     /// Remove all entries (keeps the allocated bucket array, like `HashMap::clear`).
     pub fn clear(&mut self) {
-        for b in &mut self.buckets {
-            *b = None;
-        }
+        self.buckets.fill(None);
         self.nodes.clear();
         self.free.clear();
         self.count = 0;

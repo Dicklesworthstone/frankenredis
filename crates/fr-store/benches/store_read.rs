@@ -6,7 +6,7 @@
 //! branch in `get_string_bytes` off (`if false`) to measure the baseline.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use fr_store::Store;
+use fr_store::{MaxmemoryPolicy, Store};
 
 fn bench_get(c: &mut Criterion) {
     let mut store = Store::new();
@@ -308,6 +308,46 @@ fn bench_get(c: &mut Criterion) {
     g.bench_function("hset_existing_packed_overlay_96x48", |b| {
         b.iter_batched(
             make_existing_hset_store,
+            |mut s| {
+                std::hint::black_box(
+                    s.hset_borrowed_many(
+                        std::hint::black_box(b"hhb"),
+                        std::hint::black_box(&existing_hset_update),
+                        2_000,
+                    )
+                    .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    let make_existing_hset_lfu_store = || {
+        let mut s = Store::new();
+        s.hset_borrowed_many(b"hhb", &existing_hset_seed, 1_000)
+            .unwrap();
+        s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        s.lfu_decay_time = 0;
+        s
+    };
+    g.bench_function("hset_lfu_existing_packed_orig_loop_96x48", |b| {
+        b.iter_batched(
+            make_existing_hset_lfu_store,
+            |mut s| {
+                std::hint::black_box(
+                    s.hset_borrowed_many_existing_loop_for_bench(
+                        std::hint::black_box(b"hhb"),
+                        std::hint::black_box(&existing_hset_update),
+                        2_000,
+                    )
+                    .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("hset_lfu_existing_packed_batch_96x48", |b| {
+        b.iter_batched(
+            make_existing_hset_lfu_store,
             |mut s| {
                 std::hint::black_box(
                     s.hset_borrowed_many(

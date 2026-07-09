@@ -4,6 +4,62 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CodexRedisDig: KEEP — shared Lua globals template plus write overlay skips per-EVAL stdlib clone — 1.75x vs ORIG (byte-identical)
+
+Negative-evidence pass first: did NOT retry rejected BITFIELD u8 command specialization, fixed-capacity
+listpack span decode, persistent Swiss/hash side indexes, Lua itoa/format repeats, or the broad
+`LuaValue::Str -> Rc<[u8]>` enum shrink already marked as its own structural cycle. The fresh profile target
+was Lua setup after numeric-for closed forms: even tiny cached chunks still cloned the full standard globals
+map for every EVAL before binding `KEYS` / `ARGV`.
+
+Primitive: store the immutable standard Lua globals template in an `Rc` and give each `LuaState` a small
+write overlay for per-script additions and mutations (`KEYS`, `ARGV`, `coroutine`, `_G`, sandbox writes).
+Lookups check overlay first, then the shared base; iteration emits overlay entries plus non-shadowed base
+entries, so `_G` materialization and table traversal keep Redis-observable behavior while the common read-only
+stdlib path avoids the per-EVAL HashMap clone.
+
+MEASURED ratio-vs-ORIG (short per-crate release Criterion A/B, `AGENT_NAME=CodexRedisDig`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`, `rch` remote `vmi1293453`):
+`cargo bench --profile release -p fr-command --bench lua_eval -- return_one --noplot`
+reported ORIG cloned-globals setup `3.3814 us` median vs overlay globals `1.9357 us` median =
+**1.75x faster** on a cached `return 1` script where setup dominates.
+
+BYTE-EXACT / GREEN: `cargo test --profile release -p fr-command lua_eval --lib -- --nocapture` passed
+206/206 lua_eval tests on the current tree. Full gates passed after the current-tree clippy lint conversions:
+`cargo fmt --check`, `git diff --check`, remote `cargo check --workspace --all-targets`, remote
+`cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test -p fr-conformance -- --nocapture`
+GREEN with 194/194 lib tests and 99/99 smoke tests.
+
+## 2026-07-09 CodexRedis: KEEP — LFU variadic HSET replays LFU bumps once, then batch-mutates the packed hash — 10.33x vs ORIG (byte-identical)
+
+Negative-evidence pass first: did NOT retry listpack exact-capacity prealloc, byte-aligned BITFIELD command
+specialization, existing-key SADD packed rebuild, persistent Swiss/hash side-indexes for small hashes,
+SMISMEMBER argv/hasher work, PFMERGE missing-source no-reencode, or dispatch-order hoists. The new target
+came from the existing packed-HSET follow-on note: LFU-enabled `hset_borrowed_many` still skipped the bulk
+path and executed the old per-field `hset_borrowed` loop, so an existing packed hash paid K repeated key
+lookups plus K packed scans.
+
+Primitive: split LFU side effects from hash mutation. For an existing LFU hash, draw and apply exactly K LFU
+random bump samples up front; for a fresh hash, draw K-1 samples, matching the old first-field create/no-bump
+behavior. Then run the same bulk hash mutation primitive once. WRONGTYPE stays on the old per-field fallback
+to preserve error and dirty/stat side effects exactly. This is a deterministic side-effect ledger/replay, not
+a single LFU bump approximation.
+
+MEASURED ratio-vs-ORIG (short per-crate release Criterion A/B, `AGENT_NAME=CodexRedis`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod`, `rch` remote `vmi1293453`):
+`cargo bench --profile release -p fr-store --bench store_read -- hset_lfu_existing_packed --noplot`
+reported ORIG LFU per-field loop `75.319 us` median vs batched LFU path `7.2943 us` median =
+**10.33x faster** on a 96-field packed hash with 48 HSET pairs. An earlier same-row remote run reported
+`151.15 us` vs `13.155 us` = 11.49x; the keep claim uses the stricter final current-tree rerun.
+
+BYTE-EXACT / GREEN: `hset_borrowed_many_lfu_batch_matches_field_loop` passed 1000 randomized fresh/existing
+hash cases against the old per-field loop, checking added count, final HGETALL order/values, LFU frequency,
+RNG stream, dirty count, and modification count. `cargo fmt --check`, `git diff --check`, remote
+`cargo check --workspace --all-targets`, remote `cargo clippy --workspace --all-targets -- -D warnings`,
+remote focused fr-store proof, and `cargo test -p fr-conformance -- --nocapture` passed; conformance ended
+with 194/194 lib tests and 99/99 smoke tests GREEN. Current-toolchain `chunks_exact_to_as_chunks` /
+`manual_slice_fill` style lints in fr-store were mechanically converted on the way to the final clippy pass.
+
 ## 2026-07-08 CrimsonHawk: NO-SHIP (profiling sweep) — each_member_bytes can't extend to SINTER/SUNION/SDIFF (byte-sort blocks borrow-scan); benched read ops + packed contains verified optimal
 
 Pivoted off the mined scalar/itoa/bit veins to a profiling-oriented sweep of the benched store hot ops

@@ -582,7 +582,8 @@ impl HashFieldMap {
         let bytes: usize = flat.iter().map(|s| s.len() + 5).sum();
         let mut h = CompactFieldMap::with_capacity(npairs, bytes);
         let mut added = 0_usize;
-        for p in flat.chunks_exact(2) {
+        let (pairs, _) = flat.as_chunks::<2>();
+        for p in pairs {
             if h.insert(p[0], p[1]).is_none() {
                 added += 1;
             }
@@ -609,7 +610,9 @@ impl HashFieldMap {
             .iter()
             .any(|(field, value)| field.len() > PACKED_MAX_VALUE || value.len() > PACKED_MAX_VALUE)
             || flat
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|pair| pair[0].len() > PACKED_MAX_VALUE || pair[1].len() > PACKED_MAX_VALUE)
         {
             return None;
@@ -631,7 +634,8 @@ impl HashFieldMap {
             foldhash::quality::RandomState::default(),
         );
 
-        for pair in flat.chunks_exact(2) {
+        let (pairs, _) = flat.as_chunks::<2>();
+        for pair in pairs {
             if let Some(&idx) = field_to_pending.get(pair[0]) {
                 pending[idx].value = pair[1];
             } else {

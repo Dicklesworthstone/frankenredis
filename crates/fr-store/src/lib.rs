@@ -9160,13 +9160,13 @@ impl Store {
     /// and per-byte bounds checks for BITCOUNT over large bitmaps.
     #[inline]
     fn popcount_bytes(bytes: &[u8]) -> usize {
-        let mut chunks = bytes.chunks_exact(8);
+        let (chunks, remainder) = bytes.as_chunks::<8>();
         let mut count: usize = 0;
-        for chunk in &mut chunks {
-            let word = u64::from_ne_bytes(chunk.try_into().expect("chunk length is 8"));
+        for chunk in chunks {
+            let word = u64::from_ne_bytes(*chunk);
             count += word.count_ones() as usize;
         }
-        for &b in chunks.remainder() {
+        for &b in remainder {
             count += b.count_ones() as usize;
         }
         count
@@ -9190,12 +9190,10 @@ impl Store {
 
     #[inline]
     fn bitpos_full_bytes(bytes: &[u8], bit: bool, base_byte: usize) -> Option<i64> {
-        let mut chunks = bytes.chunks_exact(8);
+        let (chunks, remainder) = bytes.as_chunks::<8>();
         let mut byte_offset = base_byte;
-        for chunk in &mut chunks {
-            let word = u64::from_ne_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]);
+        for chunk in chunks {
+            let word = u64::from_ne_bytes(*chunk);
             let has_candidate = if bit { word != 0 } else { word != u64::MAX };
             if has_candidate {
                 for (i, &raw) in chunk.iter().enumerate() {
@@ -9206,7 +9204,7 @@ impl Store {
             }
             byte_offset += 8;
         }
-        for &raw in chunks.remainder() {
+        for &raw in remainder {
             if let Some(bit_in_byte) = Self::bitpos_masked_byte(raw, bit, 0xFF) {
                 return Some((byte_offset * 8 + bit_in_byte) as i64);
             }
@@ -11634,13 +11632,7 @@ impl Store {
             return Ok(0);
         }
         if self.lfu_tracking_enabled() {
-            let mut added = 0_usize;
-            for pair in pairs.chunks_exact(2) {
-                if self.hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)? {
-                    added += 1;
-                }
-            }
-            return Ok(added);
+            return self.hset_borrowed_many_lfu_batched(key, pairs, now_ms);
         }
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (internal_entry below re-probes). Byte-identical; return value unused. See append.
@@ -11656,46 +11648,101 @@ impl Store {
         let Value::Hash(m) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        let added: usize;
+        let added = Self::hset_borrowed_many_apply_map(m, pairs, count);
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(added)
+    }
+
+    fn hset_borrowed_many_apply_map(m: &mut HashFieldMap, pairs: &[&[u8]], count: u64) -> usize {
+        let (pair_chunks, _) = pairs.as_chunks::<2>();
         if m.is_empty() {
             if let Some((map, hadded)) = HashFieldMap::try_from_flat_pairs_hash_dedup(pairs) {
-                **m = map;
-                added = hadded;
+                *m = map;
+                hadded
             } else {
                 let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
                     std::collections::HashSet::with_capacity_and_hasher(
                         count as usize,
                         foldhash::quality::RandomState::default(),
                     );
-                let unique = pairs.chunks_exact(2).all(|p| seen.insert(p[0]));
+                let unique = pair_chunks.iter().all(|pair| seen.insert(pair[0]));
                 drop(seen);
                 if unique {
                     let borrowed: Vec<(&[u8], &[u8])> =
-                        pairs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-                    **m = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
-                    added = count as usize;
+                        pair_chunks.iter().map(|pair| (pair[0], pair[1])).collect();
+                    *m = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
+                    count as usize
                 } else {
                     let mut a = 0_usize;
-                    for p in pairs.chunks_exact(2) {
-                        if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
+                    for pair in pair_chunks {
+                        if m.insert(pair[0].to_vec(), pair[1].to_vec()).is_none() {
                             a += 1;
                         }
                     }
-                    added = a;
+                    a
                 }
             }
         } else if let Some(hadded) = m.try_update_existing_packed_borrowed(pairs) {
-            added = hadded;
+            hadded
         } else {
             let mut a = 0_usize;
-            for p in pairs.chunks_exact(2) {
-                if m.insert(p[0].to_vec(), p[1].to_vec()).is_none() {
+            for pair in pair_chunks {
+                if m.insert(pair[0].to_vec(), pair[1].to_vec()).is_none() {
                     a += 1;
                 }
             }
-            added = a;
+            a
         }
-        entry.touch_lru(now_ms);
+    }
+
+    fn hset_borrowed_many_lfu_batched(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let key_state = self.entries.get(key).map(|entry| match entry.value {
+            Value::Hash(_) => Ok(()),
+            _ => Err(StoreError::WrongType),
+        });
+        let (pair_chunks, _) = pairs.as_chunks::<2>();
+        if matches!(key_state, Some(Err(_))) {
+            let mut added = 0_usize;
+            for pair in pair_chunks {
+                if self.hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)? {
+                    added += 1;
+                }
+            }
+            return Ok(added);
+        }
+
+        let count = (pairs.len() / 2) as u64;
+        let bump_count = if key_state.is_some() {
+            count as usize
+        } else {
+            count.saturating_sub(1) as usize
+        };
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_samples: Vec<u64> = (0..bump_count).map(|_| self.next_rand()).collect();
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        for rand_sample in rand_samples {
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let added = Self::hset_borrowed_many_apply_map(m, pairs, count);
+        entry.touch(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
         Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -11719,7 +11766,8 @@ impl Store {
         }
         if self.lfu_tracking_enabled() {
             let mut added = 0_usize;
-            for pair in pairs.chunks_exact(2) {
+            let (pair_chunks, _) = pairs.as_chunks::<2>();
+            for pair in pair_chunks {
                 if self.hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)? {
                     added += 1;
                 }
@@ -11737,7 +11785,8 @@ impl Store {
             return Err(StoreError::WrongType);
         };
         let mut added = 0_usize;
-        for pair in pairs.chunks_exact(2) {
+        let (pair_chunks, _) = pairs.as_chunks::<2>();
+        for pair in pair_chunks {
             if m.insert(pair[0].to_vec(), pair[1].to_vec()).is_none() {
                 added += 1;
             }
@@ -22931,15 +22980,13 @@ impl Store {
         byte_op: impl Fn(u8, u8) -> u8,
     ) {
         let n = dst.len().min(src.len());
-        let mut dchunks = dst[..n].chunks_exact_mut(8);
-        let mut schunks = src[..n].chunks_exact(8);
-        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
-            let a = u64::from_ne_bytes(dc.try_into().unwrap());
-            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+        let (dchunks, drem) = dst[..n].as_chunks_mut::<8>();
+        let (schunks, srem) = src[..n].as_chunks::<8>();
+        for (dc, sc) in dchunks.iter_mut().zip(schunks.iter()) {
+            let a = u64::from_ne_bytes(*dc);
+            let b = u64::from_ne_bytes(*sc);
             dc.copy_from_slice(&word_op(a, b).to_ne_bytes());
         }
-        let drem = dchunks.into_remainder();
-        let srem = schunks.remainder();
         for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
             *db = byte_op(*db, sb);
         }
@@ -22950,14 +22997,12 @@ impl Store {
     #[inline]
     fn swar_not_into(dst: &mut [u8], src: &[u8]) {
         let n = dst.len().min(src.len());
-        let mut dchunks = dst[..n].chunks_exact_mut(8);
-        let mut schunks = src[..n].chunks_exact(8);
-        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
-            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+        let (dchunks, drem) = dst[..n].as_chunks_mut::<8>();
+        let (schunks, srem) = src[..n].as_chunks::<8>();
+        for (dc, sc) in dchunks.iter_mut().zip(schunks.iter()) {
+            let b = u64::from_ne_bytes(*sc);
             dc.copy_from_slice(&(!b).to_ne_bytes());
         }
-        let drem = dchunks.into_remainder();
-        let srem = schunks.remainder();
         for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
             *db = !sb;
         }
@@ -28229,7 +28274,8 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError>
     }
     let refs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(listpack)).collect();
     let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(refs.len() / 2);
-    for pair in refs.chunks_exact(2) {
+    let (ref_pairs, _) = refs.as_chunks::<2>();
+    for pair in ref_pairs {
         pairs.push((pair[0], pair[1]));
     }
     let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
@@ -28245,8 +28291,8 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError>
 }
 
 fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError> {
-    let mut chunks = entries.chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = entries.as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err(StoreError::InvalidDumpPayload);
     }
     // Collect (member, score) once, then BULK-build the zset rather than calling
@@ -28258,7 +28304,7 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     // the pairs one at a time; SortedSet::insert uses the SAME default packed
     // limits, so the chosen encoding (packed vs full) is unchanged.
     let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(entries.len() / 2);
-    for pair in &mut chunks {
+    for pair in chunks {
         let score = std::str::from_utf8(&pair[1])
             .ok()
             .and_then(|raw| raw.parse::<f64>().ok())
@@ -28296,7 +28342,8 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<SortedSet, StoreError> {
     }
 
     let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(spans.len() / 2);
-    for pair in spans.chunks_exact(2) {
+    let (span_pairs, _) = spans.as_chunks::<2>();
+    for pair in span_pairs {
         let member = pair[0].as_bytes(listpack);
         let score = std::str::from_utf8(pair[1].as_bytes(listpack))
             .ok()
@@ -28798,7 +28845,8 @@ fn sha1_hex(data: &[u8]) -> String {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    let (chunks, _) = msg.as_chunks::<64>();
+    for chunk in chunks {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -30880,11 +30928,9 @@ fn hll_hash(data: &[u8]) -> u64 {
     let len = data.len() as u64;
     let mut h = 0xadc8_3b19_u64 ^ len.wrapping_mul(M);
 
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut k_bytes = [0u8; 8];
-        k_bytes.copy_from_slice(chunk);
-        let mut k = u64::from_le_bytes(k_bytes);
+    let (chunks, tail) = data.as_chunks::<8>();
+    for chunk in chunks {
+        let mut k = u64::from_le_bytes(*chunk);
         k = k.wrapping_mul(M);
         k ^= k >> R;
         k = k.wrapping_mul(M);
@@ -30893,7 +30939,6 @@ fn hll_hash(data: &[u8]) -> u64 {
         h = h.wrapping_mul(M);
     }
 
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         let mut remaining = 0_u64;
         for (shift, byte) in tail.iter().enumerate() {
@@ -31046,9 +31091,11 @@ fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
 // bit/8, bit%8, and masked-OR byte loads/stores. (frankenredis-kgsni)
 fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
     let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
-    for (regs, bytes) in registers
-        .chunks_exact(4)
-        .zip(payload.chunks_exact_mut(3))
+    let (register_chunks, _) = registers.as_chunks::<4>();
+    let (payload_chunks, _) = payload.as_chunks_mut::<3>();
+    for (regs, bytes) in register_chunks
+        .iter()
+        .zip(payload_chunks.iter_mut())
         .take(HLL_REGISTERS / 4)
     {
         let w = (u32::from(regs[0] & 0x3f))
@@ -31067,7 +31114,9 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         return Err(StoreError::InvalidHllValue);
     }
     let mut registers = vec![0u8; HLL_REGISTERS];
-    for (regs, bytes) in registers.chunks_exact_mut(4).zip(payload.chunks_exact(3)) {
+    let (register_chunks, _) = registers.as_chunks_mut::<4>();
+    let (payload_chunks, _) = payload.as_chunks::<3>();
+    for (regs, bytes) in register_chunks.iter_mut().zip(payload_chunks.iter()) {
         let w = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
         regs[0] = (w & 0x3f) as u8;
         regs[1] = ((w >> 6) & 0x3f) as u8;
@@ -31368,14 +31417,14 @@ fn hll_estimate(registers: &[u8]) -> u64 {
     // histogram (isolated A/B) — the PFCOUNT estimate loop, not memory-bound as it
     // appeared but dependency-bound.
     let mut banks = [[0_i64; 64]; 4];
-    let mut chunks = registers.chunks_exact(4);
-    for c in &mut chunks {
+    let (chunks, remainder) = registers.as_chunks::<4>();
+    for c in chunks {
         banks[0][(c[0] as usize) & 63] += 1;
         banks[1][(c[1] as usize) & 63] += 1;
         banks[2][(c[2] as usize) & 63] += 1;
         banks[3][(c[3] as usize) & 63] += 1;
     }
-    for &reg in chunks.remainder() {
+    for &reg in remainder {
         banks[0][(reg as usize) & 63] += 1;
     }
     let mut reghisto = [0_i64; 64];
@@ -43526,7 +43575,8 @@ mod tests {
             }
 
             let mut expected_added = 0usize;
-            for pair in update_flat.chunks_exact(2) {
+            let (update_pairs, _) = update_flat.as_chunks::<2>();
+            for pair in update_pairs {
                 if baseline
                     .hset_borrowed(b"h", pair[0], pair[1].to_vec(), 2)
                     .unwrap()
@@ -43537,6 +43587,116 @@ mod tests {
             let actual_added = candidate.hset_borrowed_many(b"h", &update_flat, 2).unwrap();
 
             assert_eq!(actual_added, expected_added, "added mismatch case={case}");
+            assert_eq!(
+                candidate.hgetall(b"h", 3).unwrap(),
+                baseline.hgetall(b"h", 3).unwrap(),
+                "field/value order mismatch case={case}"
+            );
+        }
+    }
+
+    #[test]
+    fn hset_borrowed_many_lfu_batch_matches_field_loop() {
+        let mut seed = 0xbb67_ae85_84ca_a73bu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for case in 0..1000usize {
+            let existing_len = if case % 2 == 0 {
+                0
+            } else {
+                16 + (next() % 80) as usize
+            };
+            let update_len = 8 + (next() % 56) as usize;
+            let existing_fields: Vec<Vec<u8>> = (0..existing_len)
+                .map(|i| format!("f{i:03}").into_bytes())
+                .collect();
+            let existing_values: Vec<Vec<u8>> = (0..existing_len)
+                .map(|i| format!("v{i:03}").into_bytes())
+                .collect();
+            let mut seed_flat = Vec::with_capacity(existing_len * 2);
+            for i in 0..existing_len {
+                seed_flat.push(existing_fields[i].as_slice());
+                seed_flat.push(existing_values[i].as_slice());
+            }
+
+            let mut update_fields: Vec<Vec<u8>> = Vec::with_capacity(update_len);
+            let mut update_values: Vec<Vec<u8>> = Vec::with_capacity(update_len);
+            for i in 0..update_len {
+                let field = if existing_fields.is_empty() {
+                    match next() % 3 {
+                        0 if !update_fields.is_empty() => {
+                            update_fields[(next() as usize) % update_fields.len()].clone()
+                        }
+                        _ => format!("n{case:04}_{:03}", next() % 96).into_bytes(),
+                    }
+                } else {
+                    match next() % 4 {
+                        0 | 1 => existing_fields[(next() as usize) % existing_fields.len()].clone(),
+                        2 if !update_fields.is_empty() => {
+                            update_fields[(next() as usize) % update_fields.len()].clone()
+                        }
+                        _ => format!("n{case:04}_{:03}", next() % 96).into_bytes(),
+                    }
+                };
+                update_fields.push(field);
+                update_values.push(format!("u{i:03}_{:04x}", next() & 0xffff).into_bytes());
+            }
+
+            let mut update_flat = Vec::with_capacity(update_len * 2);
+            for i in 0..update_len {
+                update_flat.push(update_fields[i].as_slice());
+                update_flat.push(update_values[i].as_slice());
+            }
+
+            let mut baseline = Store::new();
+            let mut candidate = Store::new();
+            if !seed_flat.is_empty() {
+                baseline.hset_borrowed_many(b"h", &seed_flat, 1).unwrap();
+                candidate.hset_borrowed_many(b"h", &seed_flat, 1).unwrap();
+            }
+            baseline.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            candidate.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            baseline.lfu_decay_time = 0;
+            candidate.lfu_decay_time = 0;
+
+            let expected_added = baseline
+                .hset_borrowed_many_existing_loop_for_bench(b"h", &update_flat, 2)
+                .unwrap();
+            let actual_added = candidate.hset_borrowed_many(b"h", &update_flat, 2).unwrap();
+
+            assert_eq!(actual_added, expected_added, "added mismatch case={case}");
+            assert_eq!(
+                candidate.object_freq(b"h", 2),
+                baseline.object_freq(b"h", 2),
+                "LFU frequency mismatch case={case}"
+            );
+            assert_eq!(
+                candidate.rng_seed, baseline.rng_seed,
+                "RNG stream mismatch case={case}"
+            );
+            assert_eq!(
+                candidate.dirty, baseline.dirty,
+                "dirty mismatch case={case}"
+            );
+            assert_eq!(
+                candidate
+                    .entries
+                    .get(b"h".as_slice())
+                    .map(|entry| entry.modification_count),
+                baseline
+                    .entries
+                    .get(b"h".as_slice())
+                    .map(|entry| entry.modification_count),
+                "modification count mismatch case={case}"
+            );
+
+            baseline.maxmemory_policy = MaxmemoryPolicy::Noeviction;
+            candidate.maxmemory_policy = MaxmemoryPolicy::Noeviction;
             assert_eq!(
                 candidate.hgetall(b"h", 3).unwrap(),
                 baseline.hgetall(b"h", 3).unwrap(),
@@ -59396,7 +59556,8 @@ mod tests {
                         "PEXPIREAT replay must target an existing key"
                     );
                 } else if eq_ascii_ci(command, b"HSET") || eq_ascii_ci(command, b"HMSET") {
-                    for pair in argv[2..].chunks_exact(2) {
+                    let (pairs, _) = argv[2..].as_chunks::<2>();
+                    for pair in pairs {
                         store
                             .hset(&key, pair[0].clone(), pair[1].clone(), METAMORPHIC_NOW_MS)
                             .expect("hash replay must stay valid");
@@ -59410,8 +59571,9 @@ mod tests {
                         .sadd(&key, &argv[2..], METAMORPHIC_NOW_MS)
                         .expect("SADD replay must stay valid");
                 } else if eq_ascii_ci(command, b"ZADD") {
-                    let entries: Vec<(f64, Vec<u8>)> = argv[2..]
-                        .chunks_exact(2)
+                    let (pairs, _) = argv[2..].as_chunks::<2>();
+                    let entries: Vec<(f64, Vec<u8>)> = pairs
+                        .iter()
                         .map(|pair| (parse_f64_arg(&pair[0]), pair[1].clone()))
                         .collect();
                     store
@@ -59429,8 +59591,9 @@ mod tests {
                             _ => (&[][..], &[][..], None),
                         };
                     let id = parse_stream_id_arg(id_arg);
-                    let fields: Vec<(Vec<u8>, Vec<u8>)> = field_args
-                        .chunks_exact(2)
+                    let (pairs, _) = field_args.as_chunks::<2>();
+                    let fields: Vec<(Vec<u8>, Vec<u8>)> = pairs
+                        .iter()
                         .map(|pair| (pair[0].clone(), pair[1].clone()))
                         .collect();
                     store
