@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CodexRedisDig: REJECT — GEOHASH multi-member direct wire/streaming encoder — no stable gain vs ORIG
+
+NEGATIVE-EVIDENCE CHECK: consulted this ledger first and did not retry the already-landed GEOHASH variadic parser
+fast path, the exhausted clean dispatch/option/arity vein, the rejected dispatch cascade reorder, or the SORT/ChunkedList
+dead end. The current post-BITFIELD profile still leaves `GEOHASH_1`/`GEOHASH_4` as visible sub-ms residuals, so this
+turn tested a different primitive on the same hot command: keep the existing borrowed parser/semantics, but avoid
+multi-member response materialization by directly encoding the aggregate reply into the connection buffer; a companion
+variant also tested inline member storage and `zmscore` streaming without collecting `Vec<Option<f64>>`.
+
+MEASURED A/B VS LEGACY ORIGINAL: first ran the requested short RCH command
+`AGENT_NAME=CodexRedisDig CARGO_TARGET_DIR=/data/projects/.rch-targets/redis-cod rch exec -- cargo bench --profile release -p fr-bench --bench geo_vs_redis -- GEOHASH --noplot`
+on worker `vmi1227854`; it completed, but `geo_vs_redis` only built `fr-bench` and used whatever
+`target/release/frankenredis` already existed on the worker, so that row was treated as harness/staleness evidence only.
+Then built explicit fresh release server binaries from ORIG `12b2aa5b9` and the candidate checkout in sibling target dirs
+`/data/projects/.rch-targets/redis-cod-geohash-orig` and
+`/data/projects/.rch-targets/redis-cod-geohash-candidate`, with `FR_SERVER_BIN` pointed at each binary and the vendored
+Redis 7.2.4 oracle.
+
+| row | ORIG fr median | candidate fr median | ratio vs ORIG | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `GEOHASH_1` | 212.45 us | 210.18 us | 1.01x | not target / noise |
+| `GEOHASH_4` | 317.96 us | 319.03 us | 0.997x | no gain |
+| `GEOHASH_4` repeat | 347.83 us | 344.81 us | 1.009x | no significant gain |
+
+REJECTED: the direct multi-member encoder, inline member array, and `zmscore_each` streaming helper did not produce a
+stable measured win. Criterion reported no significant candidate-side `GEOHASH_4` movement on the repeat, and the two
+fresh explicit A/B runs bracketed neutral. Source hunks were reverted; only this ledger entry remains. Do not retry
+"directly encode multi-member GEOHASH into `write_buf`", "inline up to 8 GEOHASH members in the parser", or "stream
+`zmscore` callback results for GEOHASH" without a fresh profile that names allocation/materialization as a real dominant
+frame instead of network/server-loop noise.
+
 ## 2026-07-09 CodexRedisDig: KEEP — packed command-token dispatch floor for BITFIELD single-op + cardinality cluster — BITFIELD 2.45–2.56x vs ORIG
 
 NEGATIVE-EVIDENCE CHECK: consulted this ledger first and did NOT retry the exhausted missing-fast-path vein, the
