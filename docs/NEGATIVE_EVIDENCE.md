@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 CrimsonHawk: KEEP — ZREVRANK … WITHSCORE borrowed fast path (ZRANK-WITHSCORE twin) — zrevrank_ws ~0.56x → 0.95x vs redis 7.2.4 (byte-exact)
+
+The direct twin of yesterday's ZRANK WITHSCORE win, same root cause (the `*4` option-form lacked a borrowed
+fast path → generic dispatch). Refactored `execute_plain_zrank_withscore_borrowed_into` +
+`record_plain_zrank_borrowed_metrics` + `plain_zrank_owned_argv` to take a `reverse: bool` (deriving
+`zrank`/`zrevrank` command name + stats; `store.zrank_withscore` already takes `reverse`), and added the
+fr-server ZREVRANK dispatch arm (`parse_borrowed_plain_key_arg2_packet` prefix `*4\r\n$8\r\n` / `ZREVRANK` +
+WITHSCORE check). One executor now serves both; the ZRANK arm passes `false`, ZREVRANK passes `true`.
+
+BYTE-EXACT: raw-socket differential vs redis 7.2.4 across present / absent-member / missing-key / WRONGTYPE in
+RESP2 AND RESP3 for BOTH ZRANK and ZREVRANK WITHSCORE = all byte-exact (the refactor preserved ZRANK).
+MEASURED: zrevrank_ws **0.95x** (parity, was ~0.56x), zrank_ws still **1.02x**.
+
+The "option-form-lacks-a-fast-path" hunt continues to pay off — both ZRANK/ZREVRANK WITHSCORE now at parity.
+NEXT candidates in the same pattern: other `*4`/option variants that fall to generic (per the sub-ms sweep
+losses — e.g. GETEX-option/SET-option forms), profile-then-fast-path.
+
 ## 2026-07-09 CrimsonHawk: KEEP — ZRANK … WITHSCORE borrowed fast path — 0.56x → 1.02x vs redis 7.2.4 (byte-exact); CORRECTS the stale "treap-structural" conclusion
 
 `perf` OVERTURNED the long-standing memory analysis that ZRANK WITHSCORE's ~0.58x was "treap-vs-skiplist
