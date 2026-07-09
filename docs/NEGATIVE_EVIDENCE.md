@@ -4,6 +4,59 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 BlackThrush: KEEP — dispatch-floor preclassifier for cardinality cluster STRLEN/LLEN/SCARD/HLEN/ZCARD — 1.30–1.46x vs ORIG, flips all 5 from redis-loss to redis-win
+
+NEGATIVE-EVIDENCE CHECK: not a re-tried rejected lever. Extends the shared dispatch-floor
+preclassifier vein (CodexRedisDig EXISTS/GETEX/TYPE/PFCOUNT, CrimsonHawk XLEN/ZCOUNT/
+ZREMRANGEBYRANK) with the single-key **cardinality cluster** — the five `*2`-arity O(1)
+length/cardinality reads that no peer had claimed. Before this, they reached their borrowed
+fast paths only after the `frankenredis-cardinalityhoist` cascade arm (~line 4163, well past
+GET at ~2725), measuring a documented sub-ms loss vs redis 7.2.4.
+
+IMPLEMENTED: `BorrowedDispatchFloorCommand::{Hlen,Llen,Scard,Strlen,Zcard}` +
+`BorrowedDispatchFloorClass::{Strlen,Llen,Scard,Hlen,Zcard}`, packed-token recognition
+(HLEN/LLEN len-4, SCARD/ZCARD len-5, STRLEN len-6), a `(2, cmd)` arity gate in
+`classify_borrowed_dispatch_floor_packet`, and five `try_dispatch_floor_classified_action`
+arms that reuse the ALREADY-SHIPPED borrowed parsers (`parse_borrowed_plain_{strlen,llen,
+scard,hlen,zcard}_packet`) + executors (`execute_plain_{strlen,llen,scard}_borrowed`,
+`execute_plain_cardinality_borrowed{Hlen,Zcard}`). Byte-exact by construction: the classifier
+only reroutes exact-token `*2` frames to the same executor the cascade already used;
+malformed / wrong-arity / parser-limit frames still fall through to the generic borrowed
+path (`STRLEN key extra` → `None` → generic arity error). Added five classifier unit
+assertions (+ a `*3` STRLEN arity-guard negative case) and STRLEN/LLEN/SCARD/HLEN/ZCARD
+rows to the `dispatch_floor_vs_redis` Criterion group.
+
+MEASURED A/B — **gold-standard same-process, same-machine** (the honest control for the
+multi-agent rch fleet, where per-worker speed varies ~2.5x and cross-run comparison is
+invalid): one bench process, three engines — candidate (cardinality floor), `frankenredis-
+orig` (committed `46c970e47`, no cardinality floor), and Redis 7.2.4. Added a
+`frankenredis-orig` engine to `keyed_write_vs_redis` (spawns a second fr from
+FR_SERVER_ORIG_BIN / a synced path) so the floor group measures all three under identical
+load.
+
+| cmd | fr_orig µs | fr_cand µs | **cand/orig** | redis µs | orig fr/redis | cand fr/redis |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| STRLEN | 62.04 | 47.54 | **1.305x** | 54.29 | 0.875 (loss) | **1.142 (win)** |
+| LLEN   | 63.40 | 46.47 | **1.364x** | 54.17 | 0.854 (loss) | **1.166 (win)** |
+| SCARD  | 64.16 | 46.51 | **1.380x** | 56.43 | 0.880 (loss) | **1.214 (win)** |
+| HLEN   | 63.07 | 47.23 | **1.336x** | 54.72 | 0.868 (loss) | **1.159 (win)** |
+| ZCARD  | 64.08 | 43.79 | **1.463x** | 54.77 | 0.855 (loss) | **1.251 (win)** |
+
+SANITY: in the SAME run, the unchanged floor commands (in the floor for BOTH binaries) sit
+at cand/orig 0.92–1.15 (XLEN 1.145, ZCOUNT 1.001, TYPE 0.971, PFCOUNT 0.915, ZREMRANGEBYRANK
+0.941) — a ±15% noise band. All five cardinality commands (1.30–1.46x) are cleanly above it,
+and each flips from a redis LOSS (0.85–0.88x) to a redis WIN (1.14–1.25x). Method note: rch
+does NOT forward custom env vars and remaps CARGO_TARGET_DIR per-worker, so cross-run/cross-
+worker A/B is unreliable (an early attempt read a 2.5x-slower worker as a bogus 4.6x ZCOUNT
+delta). Only the single-process, all-engines-at-once local run controls for this.
+
+LANDED: the code shipped in `12b2aa5b9` (a peer's `git commit -a` swept the uncommitted
+cardinality main.rs + bench edits into their concurrent bitfield-classifier commit on the
+shared working tree). Classifier unit tests green (2 passed incl the new cardinality +
+arity-guard cases). CAVEAT for the endgame: each added floor arm runs BEFORE GET's cascade
+arm, so the classifier front-cost grows with arm count — the cluster is worth it (5 flips)
+but the ~15-arm GET-regression ceiling still applies.
+
 ## 2026-07-09 CodexRedisDig: REJECT — GEOHASH multi-member direct wire/streaming encoder — no stable gain vs ORIG
 
 NEGATIVE-EVIDENCE CHECK: consulted this ledger first and did not retry the already-landed GEOHASH variadic parser
