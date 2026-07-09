@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-08 CrimsonHawk: KEEP (Route A WIRED) — SUNION fast path now streams the borrowed union reply — 2.01x store-level, byte-exact vs redis 7.2.4
+
+Completed the Route A wiring flagged in the prior entry. `Store::sunion_borrow_scan` (2.01x store-level, was
+landed but unwired) is now reachable in production via a full borrow-scan fast path:
+- fr-runtime `execute_plain_sunion_borrowed_into` (mirrors `execute_plain_smembers_borrowed_into` multi-key)
+  streams the RESP3 Set `~N` / RESP2 array `*N` reply straight into the write buffer with
+  `encode_aggregate_header` + `encode_bulk_string_slice` — no owned `Vec<Vec<u8>>`. Same conservative
+  `plain_borrowed_default_key_read_allows` gate as SMEMBERS (bails to generic under ANY ACL key restriction /
+  db!=0 / repl / notify / tracking / txn / monitor / script), so no fast-path ACL/gate bypass.
+- `record_plain_sunion_borrowed_metrics` + `plain_sunion_owned_argv` mirror the SMEMBERS metrics verbatim
+  (slowlog / latency / `sunion` commandstats histogram / threat budget) with the multi-key argv.
+- fr-server dispatch: near-verbatim copy of the MGET `parse_borrowed_plain_keys_multi_packet` arm
+  (`b"MGET"`→`b"SUNION"`, executor swapped), returning `FastEncodedReply`.
+
+CONFORMANCE: `scripts/algebra_resp3_differ.py` against MY build vs redis 7.2.4 — **1600 iters BYTE-EXACT**
+across resp2-algebra, resp3-algebra, resp3-typed (SDIFF/SINTER/SUNION(+STORE)/SMISMEMBER). Store byte-identity
+test (`sunion_borrow_scan_matches_plain_sunion`) already GREEN. fr-server builds clean (rch, legacy un-ignored).
+
+RATIO: the store-level A/B stands at **2.01x** (4500-member generic union: 334k→167k ns) for the reply
+materialization the fast path replaces — now a REAL production win on generic-set SUNION (intset arm still
+materializes to byte-sort). SDIFF is the identical shape (add `sdiff_borrow_scan` + mirror) — next.
+
 ## 2026-07-08 CrimsonHawk: KEEP (Route A core) — sunion_borrow_scan store primitive lands the copy-elision — 2.01x store-level (byte-identical); fast-path wiring is the scoped follow-up
 
 Executed the Route A roadmap from the prior SURFACE entry. Landed `Store::sunion_borrow_scan` (fr-store):
