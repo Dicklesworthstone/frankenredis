@@ -20,3 +20,7 @@ harness = false
 [[bench]]
 name = "common_prefix"
 harness = false
+
+[[bench]]
+name = "crc64"
+harness = false

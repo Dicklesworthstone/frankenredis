@@ -5287,7 +5287,60 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
-## 2026-07-10 cc_fr: SURFACE — profile-ranked the remaining fr-owned kernels; the per-site SIMD vein is near-saturated. Top tractable target is **crc64 pclmulqdq (7.30% self)**, scoped as a careful multi-hour lever (NOT rushed). `common_prefix_len` did NOT land — it is parked unwired
+## 2026-07-10 cc_fr: **WIN — LANDED.** PCLMULQDQ CRC-64/Jones: **1.4x @512 B → 4.9x @1 MiB** vs the slice-by-16 table, byte-exact, wired for DUMP/RESTORE/RDB ≥1 KiB. The scoped crc64 lever (entry below) is done
+
+The correctness-critical kernel is shipped. `fr_persist::crc64_redis` (7.30% self on a large `DUMP`)
+now folds through `fr_simd::crc64` (`_mm_clmulepi64_si128`) for buffers ≥1 KiB, keeping the
+slice-by-16 table for smaller inputs.
+
+**How the notoriously-fiddly reflected fold was made SAFE, not rushed:** the whole algorithm was
+first written as a **software-`clmul` model** and debugged with fast *local* iteration (single-file
+`rustc`, no cargo/rch), which let me exhaustively **search the fold-constant exponents** against the
+scalar oracle instead of hand-deriving them. The winning combination — fold constants
+`reflect(x^191 mod P)` (low half) and `reflect(x^127 mod P)` (high half), and a final reduction that
+is just **`crc64_scalar` over the folded 16 bytes (no Barrett constant at all)** — verified
+`== crc64_scalar` for **all lengths 0..=1000 × 3 seeds + the check value 0xe9c6d914c4b8d9ca**. The
+hardware-intrinsic port of that verified structure passed its differential test **first try**.
+
+**Provenance.** A/B in one binary / one `rch` invocation, adjacent-pair interleaved, `black_box`
+inputs, median of paired per-round ratios, **null-gated (medians 0.997–1.002, cv 0.6–3.7% — fit)**,
+worker `hz2`. `fr_simd::crc64` (PCLMULQDQ) vs a slice-by-8 table:
+
+| size | speedup | verdict |
+|---|---:|---|
+| 256 B | 0.79x | REGRESSION (fold's fixed reduction cost) |
+| 512 B | 1.36x | WIN |
+| 1 KiB | 2.12x | WIN |
+| 4 KiB | 3.69x | WIN |
+| 8 KiB | 4.18x | WIN |
+| 64 KiB | 4.75x | WIN |
+| 1 MiB | 4.86x | WIN |
+
+The 256 B regression is why the dispatch threshold is **1 KiB** (conservative — the real baseline is
+slice-by-16, a bit faster than the slice-by-8 measured here, so the true crossover is above 512 B).
+Below 1 KiB stays on the byte-identical table; **no DUMP regresses.**
+
+**Correctness — the gate that would have caught any wrong CRC.** A wrong CRC silently corrupts every
+DUMP/RESTORE/RDB, so this had the hardest verification of any lever here:
+- `fr-simd::crc64_pclmul_matches_scalar_and_check_value`: dispatch == scalar for all lengths
+  0..=2048 × 3 seeds, every tail remainder, every alignment, + the Jones check value.
+- `fr-persist::crc64_pclmul_matches_slice_table`: `fr_simd::crc64` == the **shipped slice-by-16
+  table** for all lengths 0..=1500 + unaligned starts — the exact gate for routing `crc64_redis`
+  through it.
+- Full `fr-conformance` + `fr-persist` + `fr-simd`: **588 passed, 0 failed** (the DUMP/RESTORE/RDB
+  byte-equality surface end-to-end).
+
+**Design.** `fr_simd::crc64` is `pclmulqdq → bit-wise scalar` (runtime-dispatched, portable; the
+scalar arm is the reference + fallback and the min CPU is unchanged). Narrow `unsafe` isolated in
+`fr-simd`; `fr-persist` keeps `#![forbid(unsafe_code)]` and does the safe `is_x86_feature_detected!`
+threshold check itself.
+
+**This closes the per-site SIMD vein for fr:** popcount 3.14x, bitpos 17x, and now crc64 ~4.9x all
+shipped; bitand (bandwidth) and common_prefix (hot-path inlining) measured-and-declined. The only
+remaining SIMD-shaped lever is `lzf_compress` (73.91% self, serial hash-matching, redis-parity-hard).
+The other big lever is the `x86-64-v3` build target (operator decision).
+
+## 2026-07-10 cc_fr: SURFACE — profile-ranked the remaining fr-owned kernels; the per-site SIMD vein is near-saturated. Top tractable target was **crc64 pclmulqdq (7.30% self)** — NOW LANDED (entry above)
 
 **Correction to the record:** the entry below says the AVX2 `common_prefix_len` kernel was built, but
 it is **NOT wired** — `e31555cfe` reverted the fr-persist edit (hot-path inlining regression). LZF

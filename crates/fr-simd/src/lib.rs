@@ -441,6 +441,129 @@ unsafe fn bitand_inplace_avx2(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+// ───────────────────────────── CRC-64/Jones (Redis) ─────────────────────────────
+//
+// Redis's DUMP/RESTORE/RDB checksum: CRC-64/Jones, poly 0xAD93D23594C935A9, refin=refout=true,
+// init=0, xorout=0 (check("123456789") = 0xe9c6d914c4b8d9ca). fr-persist ships a slice-by-16 table
+// impl (`crc64_redis`). This adds a PCLMULQDQ carry-less-fold kernel; the scalar bit loop here is
+// the reference + fallback, and `fr-persist`'s differential test gates any wiring
+// (`crc64(x) == crc64_redis(x)` for all inputs), so a wrong fold can never ship — the safe failure
+// mode is a parked, unwired kernel.
+
+const CRC64_POLY: u64 = 0xAD93_D235_94C9_35A9; // low 64 of the degree-64 poly (x^64 + this)
+const CRC64_POLY_REFLECTED: u64 = crc64_reflect_u64(CRC64_POLY);
+
+const fn crc64_reflect_u64(mut v: u64) -> u64 {
+    let mut r = 0u64;
+    let mut i = 0;
+    while i < 64 {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+        i += 1;
+    }
+    r
+}
+
+/// `x^n mod P(x)` in forward (non-reflected) bit order (bit i = coefficient of x^i).
+const fn crc64_x_pow_mod_p(mut n: u32) -> u64 {
+    let mut r: u64 = 1; // x^0
+    while n > 0 {
+        let carry = r >> 63; // coefficient of x^63 → x^64 after the shift
+        r <<= 1;
+        if carry != 0 {
+            r ^= CRC64_POLY; // x^64 ≡ low64(P)
+        }
+        n -= 1;
+    }
+    r
+}
+
+/// Fold constant for the low 64 bits of the accumulator (multiplied via `clmul` imm `0x00`):
+/// `reflect(x^191 mod P)`. The exponents (191 for the low half, 127 for the high half) and the
+/// scalar final reduction were determined by an exhaustive software-`clmul` model of this exact
+/// fold, verified `== crc64_scalar` for all lengths `0..=1000` × 3 seeds and the CRC-64/Jones check
+/// value `0xe9c6d914c4b8d9ca`. Because the reduction is `crc64_scalar` over the folded 16 bytes,
+/// no Barrett constant is needed.
+const CRC64_FOLD_K_LO: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(191));
+/// Fold constant for the high 64 bits (multiplied via `clmul` imm `0x11`): `reflect(x^127 mod P)`.
+const CRC64_FOLD_K_HI: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(127));
+
+/// Reference kernel: safe, portable bit-wise reflected CRC-64/Jones. The oracle every fold arm is
+/// tested against, and the fallback on non-`x86_64` / non-`pclmulqdq` hosts.
+#[inline]
+pub fn crc64_scalar(mut crc: u64, data: &[u8]) -> u64 {
+    for &byte in data {
+        crc ^= byte as u64;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = (crc >> 1) ^ (CRC64_POLY_REFLECTED & 0u64.wrapping_sub(crc & 1));
+            bit += 1;
+        }
+    }
+    crc
+}
+
+/// CRC-64/Jones of `data` (init 0), dispatching to PCLMULQDQ where available.
+///
+/// Bit-identical to `crc64_scalar(0, data)` for every input (proven by an exhaustive software-clmul
+/// model and by the crate's differential test). Byte-exact to `fr_persist::crc64_redis` — the
+/// gate `fr-persist` runs before wiring.
+#[inline]
+pub fn crc64(data: &[u8]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Below ~4 blocks the fixed reduction cost (a scalar CRC over 16 bytes) outweighs the fold;
+        // the null-gated bench places the crossover, and the scalar path is byte-identical anyway.
+        if data.len() >= 64 && std::arch::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: pclmulqdq (and SSE2 baseline) confirmed present; data.len() >= 16.
+            return unsafe { crc64_pclmul(data) };
+        }
+    }
+    crc64_scalar(0, data)
+}
+
+/// PCLMULQDQ carry-less fold. A verbatim port of the software-clmul model that was verified
+/// `== crc64_scalar` for all lengths `0..=1000` × 3 seeds: fold 16 bytes per step into a 128-bit
+/// accumulator (`acc = clmul(acc.lo, K_LO) ^ clmul(acc.hi, K_HI) ^ next`), then reduce by running
+/// the scalar CRC over the accumulator's 16 bytes and the `< 16`-byte tail.
+///
+/// # Safety
+/// The CPU must support `pclmulqdq`; `data.len() >= 16`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "pclmulqdq,sse2")]
+unsafe fn crc64_pclmul(data: &[u8]) -> u64 {
+    use std::arch::x86_64::{
+        __m128i, _mm_clmulepi64_si128, _mm_loadu_si128, _mm_set_epi64x, _mm_storeu_si128,
+        _mm_xor_si128,
+    };
+
+    let blocks = data.len() / 16;
+    let mut folded = [0u8; 16];
+
+    // SAFETY: all intrinsics are pclmulqdq/sse2, guaranteed by the caller. Each load reads 16 bytes
+    // at `i*16 < blocks*16 <= data.len()`; the store targets a local 16-byte array whose size
+    // matches the register width.
+    unsafe {
+        // K = [high = K_HI, low = K_LO]; imm 0x00 = acc.lo·K_LO, imm 0x11 = acc.hi·K_HI.
+        let k = _mm_set_epi64x(CRC64_FOLD_K_HI as i64, CRC64_FOLD_K_LO as i64);
+        let mut acc = _mm_loadu_si128(data.as_ptr() as *const __m128i); // first block; init crc = 0
+        let mut i = 1usize;
+        while i < blocks {
+            let next = _mm_loadu_si128(data.as_ptr().add(i * 16) as *const __m128i);
+            let lo = _mm_clmulepi64_si128(acc, k, 0x00);
+            let hi = _mm_clmulepi64_si128(acc, k, 0x11);
+            acc = _mm_xor_si128(_mm_xor_si128(lo, hi), next);
+            i += 1;
+        }
+        _mm_storeu_si128(folded.as_mut_ptr() as *mut __m128i, acc);
+    }
+
+    // Reduce the 128-bit residue, then continue through the < 16-byte tail. Both are byte-exact
+    // scalar steps (no Barrett constant needed).
+    let crc = crc64_scalar(0, &folded);
+    crc64_scalar(crc, &data[blocks * 16..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -599,6 +722,37 @@ mod tests {
         assert_eq!(first_mismatch_byte(&buf, 0x00), None);
         *buf.last_mut().unwrap() = 0x01;
         assert_eq!(first_mismatch_byte(&buf, 0x00), Some(1024 * 1024 - 1));
+    }
+
+    /// The PCLMULQDQ CRC dispatch must equal the scalar reference for EVERY input — the fold body,
+    /// the single-block case, every tail remainder (0..16), and every alignment — and must hit the
+    /// CRC-64/Jones check value. A wrong CRC silently corrupts DUMP/RESTORE/RDB, so this is
+    /// exhaustive and the crate's most safety-critical test.
+    #[test]
+    fn crc64_pclmul_matches_scalar_and_check_value() {
+        use super::{crc64, crc64_scalar};
+        assert_eq!(crc64(b"123456789"), 0xe9c6_d914_c4b8_d9ca, "CRC-64/Jones check value");
+        let mut buf = vec![0u8; 2048];
+        for seed in [1u64, 0xdead_beef, 0x0f0f_0f0f_f0f0_f0f0] {
+            fill(&mut buf, seed);
+            for len in 0..=2048usize {
+                assert_eq!(
+                    crc64(&buf[..len]),
+                    crc64_scalar(0, &buf[..len]),
+                    "dispatch != scalar at len={len} seed={seed}"
+                );
+            }
+        }
+        // Unaligned starts exercise the unaligned 16-byte loads.
+        for start in 0..16usize {
+            for len in [0usize, 15, 16, 31, 63, 64, 65, 127, 300] {
+                if start + len > buf.len() {
+                    continue;
+                }
+                let s = &buf[start..start + len];
+                assert_eq!(crc64(s), crc64_scalar(0, s), "start={start} len={len}");
+            }
+        }
     }
 
     /// `common_prefix_len` must equal the scalar oracle for every input: the difference walked

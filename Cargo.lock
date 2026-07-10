@@ -410,6 +410,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "fr-protocol",
+ "fr-simd",
  "proptest",
 ]
 

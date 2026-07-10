@@ -12,6 +12,7 @@ upstream-stream-rdb = []
 
 [dependencies]
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
+fr-simd = { version = "0.1.0", path = "../fr-simd" }
 
 [dev-dependencies]
 proptest.workspace = true
