@@ -150,10 +150,16 @@ unsafe fn popcount_avx2(bytes: &[u8]) -> usize {
 /// run (`value = 0x00`); to find the first clear bit it skips the leading all-`0xFF` run
 /// (`value = 0xFF`). The first mismatching byte is guaranteed to contain the answer bit, so the
 /// caller finishes with a single per-byte `leading_zeros`. `bitpos_full_bytes` is
-/// **97.94–98.36% of `BITPOS`'s flat self-time** on a sparse bitmap, and (like popcount) the
-/// baseline build emits an SSE2/scalar word loop for it. Dispatches `avx2 → scalar`.
+/// **97.94–98.36% of `BITPOS`'s flat self-time** on a sparse bitmap.
 ///
-/// Bit-identical to `bytes.iter().position(|&b| b != value)` for every input.
+/// Dispatches `avx2 → sse2 → scalar`. The SSE2 tier is load-bearing for portability, NOT
+/// redundant: unlike `popcount_scalar` (whose word loop LLVM auto-vectorizes to SSE2 SWAR at
+/// baseline `x86-64`, verified — 42 xmm instructions), the `position()` scalar loop does **not**
+/// auto-vectorize (0 xmm instructions), so without an explicit SSE2 kernel a non-AVX2 x86-64 host
+/// would fall all the way to a byte-at-a-time scan. `SSE2` is part of the `x86_64` ABI baseline, so
+/// that tier always applies when AVX2 is absent.
+///
+/// Bit-identical to `bytes.iter().position(|&b| b != value)` for every input, on every tier.
 #[inline]
 pub fn first_mismatch_byte(bytes: &[u8], value: u8) -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
@@ -163,14 +169,62 @@ pub fn first_mismatch_byte(bytes: &[u8], value: u8) -> Option<usize> {
             // `first_mismatch_byte_avx2`.
             return unsafe { first_mismatch_byte_avx2(bytes, value) };
         }
+        if std::arch::is_x86_feature_detected!("sse2") {
+            // SAFETY: `is_x86_feature_detected!("sse2")` returned true — the precondition of
+            // `first_mismatch_byte_sse2`. (Always true on x86_64, but detected for uniformity.)
+            return unsafe { first_mismatch_byte_sse2(bytes, value) };
+        }
     }
     first_mismatch_byte_scalar(bytes, value)
 }
 
-/// Reference kernel: safe, portable, and the oracle the AVX2 arm is tested against.
+/// Reference kernel: safe, portable, and the oracle every SIMD arm is tested against.
 #[inline]
 pub fn first_mismatch_byte_scalar(bytes: &[u8], value: u8) -> Option<usize> {
     bytes.iter().position(|&b| b != value)
+}
+
+/// SSE2 fallback tier. `pub` + `#[doc(hidden)]` so the bench can measure it directly on an AVX2
+/// host (where the dispatcher would otherwise mask it).
+///
+/// # Safety
+/// The CPU must support `sse2`. Callers must check `is_x86_feature_detected!("sse2")` — trivially
+/// true on `x86_64`, where SSE2 is baseline.
+#[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
+#[target_feature(enable = "sse2")]
+pub unsafe fn first_mismatch_byte_sse2(bytes: &[u8], value: u8) -> Option<usize> {
+    use std::arch::x86_64::{
+        __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+    };
+
+    const LANE: usize = 16;
+    let full = bytes.len() / LANE * LANE;
+
+    // SAFETY: SSE2 is guaranteed by the caller. Each `_mm_loadu_si128` is an unaligned 16-byte
+    // read; `offset + LANE <= full <= bytes.len()` keeps every read inside the slice.
+    let found = unsafe {
+        let needle = _mm_set1_epi8(value as i8);
+        let mut offset = 0usize;
+        let mut hit: Option<usize> = None;
+        while offset < full {
+            let chunk = _mm_loadu_si128(bytes.as_ptr().add(offset) as *const __m128i);
+            // `_mm_movemask_epi8` fills the low 16 bits: 1 = byte equals `value`. A zero among them
+            // marks the first mismatch. Mask to 16 bits before inverting so the high bits stay set.
+            let eq_mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, needle)) as u32 & 0xFFFF;
+            if eq_mask != 0xFFFF {
+                hit = Some(offset + (!eq_mask & 0xFFFF).trailing_zeros() as usize);
+                break;
+            }
+            offset += LANE;
+        }
+        hit
+    };
+
+    match found {
+        Some(index) => Some(index),
+        None => first_mismatch_byte_scalar(&bytes[full..], value).map(|i| full + i),
+    }
 }
 
 /// # Safety
@@ -311,6 +365,31 @@ mod tests {
                         "skip={skip:#04x} len={len} pos={pos}"
                     );
                     assert_eq!(super::first_mismatch_byte(&buf, skip), first_mismatch_byte_scalar(&buf, skip));
+                }
+            }
+        }
+    }
+
+    /// The SSE2 fallback tier must equal the oracle for every mismatch position, independently of
+    /// the AVX2 tier — an AVX2 host would otherwise never execute it, so the dispatcher's tests
+    /// give it no coverage. Walks the single mismatch across the 16-byte lane boundary and tail.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn sse2_first_mismatch_matches_oracle_for_all_positions() {
+        if !std::arch::is_x86_feature_detected!("sse2") {
+            return; // unreachable on x86_64 (sse2 is baseline), but keep the guard honest
+        }
+        for &skip in &[0x00u8, 0xffu8, 0x55u8] {
+            let other = !skip;
+            for len in 0..=200usize {
+                // SAFETY: sse2 confirmed present above.
+                assert_eq!(unsafe { super::first_mismatch_byte_sse2(&vec![skip; len], skip) }, None);
+                for pos in 0..len {
+                    let mut buf = vec![skip; len];
+                    buf[pos] = other;
+                    // SAFETY: sse2 confirmed present above.
+                    let got = unsafe { super::first_mismatch_byte_sse2(&buf, skip) };
+                    assert_eq!(got, Some(pos), "sse2 skip={skip:#04x} len={len} pos={pos}");
                 }
             }
         }
