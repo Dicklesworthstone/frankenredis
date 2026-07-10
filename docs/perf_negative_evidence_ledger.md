@@ -5287,6 +5287,38 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`7730e95c1`).** Elide the owned-key clone on no-TTL inserts — **1.14x** SET overwrite (conservative) — STRUCTURAL (data-layout/allocation) on the shared insert path, 16 callers
+
+The shared insert `internal_entries_insert_with_expiry` (16 callers: SET/MSET/GETSET/COPY/
+RENAME/RESTORE/MOVE/… and the live plain SET via `internal_entries_insert` → `_with_expiry(None)`)
+computed `expiry_key` — a `StoreKey` (`Box<[u8]>`) clone of the key, PLUS a `get_key_value`
+lookup on an OVERWRITE — UNCONDITIONALLY. But `expiry_key` is consumed only by
+`expiry_deadlines.insert`, i.e. only when the write sets a TTL. A SET without a TTL (the common
+case) cloned the key (and re-looked-it-up on overwrite) and dropped it unused. Gated the clone on
+`new_expiry.is_some()`. Threaded via a `const GATE: bool` (production `true` monomorphizes to the
+guarded form, NO runtime branch; bench `set_orig` `false` keeps the clone). Byte-identical: the
+no-TTL branch still clears any prior deadline via `expiry_deadlines.remove(key.as_slice())`.
+
+**A/B** — same-binary null-gated (set_no_ttl_insert bench, worker `ovh-a`), always-clone orig vs
+gated, overwriting an existing key with no TTL:
+
+| op | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| set_overwrite_no_ttl | **1.141x** | 1.000 | [0.959, 1.008] | 3.0% | WIN |
+
+**CONSERVATIVE** — measured via `set` (owned `Vec<u8>` args), so BOTH arms pay two per-call arg
+allocations the live BORROWED SET path (`set_plain_borrowed`) does not, diluting the ratio; the
+isolated saving is a `get_key_value` lookup + a `Box<[u8]>` clone per no-TTL insert.
+
+**Byte-exact, gates green:** `set_gated_expiry_key_matches_orig` (new/overwrite × with/without TTL,
++ an overwrite that clears a prior TTL — value + pttl + expires_count all match the always-clone
+baseline); 757 fr-store lib tests; full fr-conformance green (347 passed, 0 failed, incl. the
+194-case live-redis differential + 99-case suites).
+
+**Vein:** 3rd store-write win. The pattern — per-write work that clones/hashes/looks-up the key for
+a path only needed in the uncommon case (TTL set, notify on, populated cache) — keeps yielding. Next:
+the `logical_key = to_vec` for notify (GETEX/LTRIM/hash-TTL sites), and a fresh store_read re-rank.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`3c0af1aad`).** `is_empty()`-guard the per-write side-cache invalidation — **12.95x** on the isolated helper (~11ns/write) — a STRUCTURAL dict/hash-internals lever hitting EVERY scalar write
 
 Structural primitive (dict/hash internals). EVERY scalar write — SET/INCR insert
