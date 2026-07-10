@@ -4,6 +4,86 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: REJECT (premise) — current P16 small-reply path is NOT writev-starved; do not retry wrappers over `write_buf`
+
+Directive was to reopen the README-named `writev` / scatter-gather workstream for
+`frankenredis-ohsk5`. Ledger-grep first found the prior rejection condition: the server
+already coalesces small pipelined replies into one contiguous `conn.write_buf` per readable
+batch, and previous `write_vectored` response-segment / writer-owned-outbox attempts
+regressed by 7-8%. Fresh profiling on current `main` revalidates that rejection rather than
+the stale README premise.
+
+Build/profiling setup:
+  * current `main` release-perf `fr-server` built with frame pointers; sha256
+    `9211846117c4d563b73238bea4c22227774123c38ed2d8856d88f39e18ae4398`
+  * vendored Redis 7.2.4 `redis-server` sha256
+    `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  * same host, server pinned to core 2, `redis-benchmark` client pinned to cores 6,7,
+    `-c 50 -P 16 -n 1,000,000`, `perf stat -e instructions:u -p <server_pid>`
+  * artifacts:
+    `artifacts/optimization/frankenredis-ohsk5-writev-output/20260710T0219Z/`
+
+Same-worker server-side perf-stat:
+
+| row | FrankenRedis | Redis 7.2.4 | fr/redis |
+| --- | ---: | ---: | ---: |
+| GET throughput | 1,046,025 req/s | 1,038,422 req/s | 1.007x |
+| GET instructions:u | 1.393B | 2.986B | 0.47x |
+| SET throughput | 907,441 req/s | 514,668 req/s | 1.76x |
+| SET instructions:u | 2.811B | 5.904B | 0.48x |
+
+RANKED HOTSPOT TABLE (current `frankenredis`, P16/C50, `perf record -g -F 999`):
+
+GET flat self%:
+
+| rank | symbol | self% |
+| ---: | --- | ---: |
+| 1 | `Runtime::execute_plain_get_borrowed_into_with_default_read_gate` | 2.34 |
+| 2 | `frankenredis::process_buffered_frames` | 2.15 |
+| 3 | `frankenredis::main` | 0.63 |
+| 4 | `drain_pending_pubsub_to_connection` | 0.52 |
+| 5 | `try_dispatch_floor_classified_action` | 0.51 |
+| 6 | `Runtime::is_pubsub_client` | 0.50 |
+| 7 | `ServerState::run_active_expire_cycle` | 0.49 |
+| 8 | `RandomState::hash_one::<Token>` | 0.48 |
+| 9 | `CommandHistogramTracker::record_canonical_with_kind` | 0.41 |
+
+GET `try_flush` was only 0.13% self / 4.50% inclusive; `__send` 4.37% inclusive.
+
+SET flat self%:
+
+| rank | symbol | self% |
+| ---: | --- | ---: |
+| 1 | `fr_store::canonical_string_value_from_slice` | 9.25 |
+| 2 | `fr_store::parse_i64` | 5.86 |
+| 3 | `frankenredis::process_buffered_frames` | 3.09 |
+| 4 | `[u8]::hash::<foldhash::quality::FoldHasher>` | 2.62 |
+| 5 | `HashMap::get_mut::<[u8]>` | 2.17 |
+| 6 | `Store::set_plain_borrowed` | 1.79 |
+| 7 | `estimate_value_memory_usage_bytes` | 1.66 |
+| 8 | `Runtime::execute_plain_set_borrowed_with_default_write_gate` | 1.24 |
+| 9 | `HashMap::contains_key::<[u8]>` | 0.96 |
+| 10 | `parse_borrowed_plain_set_bulk` | 0.94 |
+
+SET `try_flush` was only 0.18% self / 4.05% inclusive; `__send` 3.91% inclusive.
+The top rows are store/parser/key-hash work, not reply flushing.
+
+Criterion sanity check (same local binary, `keyed_write_vs_redis`, 16-value rows):
+`LPUSH_16v` fr mean `118.92us` vs Redis `160.31us` (fr 1.35x faster),
+`RPUSH_16v` fr `120.94us` vs Redis `114.55us` (fr 0.95x, small list residual),
+`SADD_16v` fr `99.069us` vs Redis `164.84us` (fr 1.66x faster). This does not
+select a broad writev lever; the one residual row is list/storage shaped, while the
+fresh SET/GET server profile says reply flush is not dominant.
+
+Decision: **REJECT the current small-reply `writev` / scatter-gather lever; no source
+hunk kept.** Do not retry `write_vectored` wrappers over the already-coalesced
+`write_buf`, static `+OK` response segments, writer queue topology, writer-owned outbox,
+or cursor/drain micro-variants. Retry condition: only reopen the output lane with a fresh
+profile where output copy or flush is a material top-ranked self-cost, and the candidate is
+a structurally different persistent fragment/value-borrow model (for example Arc-backed
+bulk payloads plus an `IoSlice` queue) with a live-socket A/B; otherwise route residuals to
+the ranked store/parser rows.
+
 ## 2026-07-09 cc_fr: REJECT (premise) — the RESTORE gap is NOT "solely the owned-argv large-payload copy"; it is a listpack RE-WALK that redis does not do
 
 CORRECTS a prior `DEFINITIVE` claim. `docs/perf_negative_evidence_ledger.md`
