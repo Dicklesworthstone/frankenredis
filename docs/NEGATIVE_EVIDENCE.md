@@ -4,6 +4,58 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: FINAL KEEP — exact LPOS dispatch floor uses 54.747% fewer instructions
+
+NEGATIVE-EVIDENCE CHECK: writev remains VALIDLY rejected and is unrelated to this frame. The prior
+blanket uppercase/matcher closure is inadmissible because it has no current binary SHA,
+changed-function self-time, worker, or per-function null. A fresh P16/C50 `LPOS l a` profile
+against vendored Redis 7.2.4 selected the open dispatch/parser family. FrankenRedis averaged
+**5,315,138,271.0** `instructions:u` versus Redis **4,181,753,722.4** (**1.271030918x**; CV
+**0.019120% / 0.061165%**). `process_buffered_frames` was **25.11% self** versus Redis
+`processMultibulkBuffer` **3.77%** and explains approximately **1,176,979,104.5 excess
+instructions / 103.85% of the net gap**. The total exceeds 100% because Redis pays larger
+allocator, vDSO, and wrapper costs. Complete `>=0.1%` tables (**108** FrankenRedis and **129**
+Redis frames, zero lost) are in
+`tests/artifacts/perf/run_20260710T155919Z_lpos_p16_attribution/`.
+
+The selected frame is Rust dispatch, not an ISA defect: the second FrankenRedis frame is already
+AVX2 `memcmp` at 7.80%. It is not owner-blocked store work: `Store::lpos_full` is only 1.86% self.
+It is not writev: no flush frame clears 0.1% and replies remain coalesced.
+
+ONE LEVER: recognize only exact three-argument `LPOS key member` at the existing borrowed dispatch
+floor, reusing `parse_borrowed_plain_lpos_packet` and `execute_plain_lpos_borrowed`. Option-bearing,
+wrong-arity, and malformed LPOS forms retain the previous cascade and fallback.
+
+Substrate v2 proof used one release-perf binary, one fail-closed RCH invocation, and one worker
+(`hz1`, hostname `hetzner1`). Null, ORIG, and candidate share SHA-256
+**`e7989e1517c1f9e0205141da76b20e68cd6e25d9237716095eb9073439f1f20d`**. Each sample
+interleaved both arms inside one routine with OCCO/COOC position balancing, black-boxed packets and
+complete replies, P16/C50, three-second quiescence, and 750 ms perf attach. The profile gate had
+zero lost samples and proved exact-current ORIG `process_buffered_frames` live at **24.30% self**
+and exact candidate `dispatch_floor_fast_lpos` live at **1.30% self**.
+
+The mandatory base/base null ran first. Its ratio median was **0.999992628**, p05
+**0.999967529**, p95 **1.000031352**, and informational ratio CV **0.002371%**. Across ten A/B
+samples, means were ORIG **1,361,576,450.4** and candidate **616,122,577.0** instructions. The
+decisive candidate/ORIG median was **0.452530113** (p05 **0.452337579**, p95
+**0.452667121**), or **54.746989% fewer / approximately 2.2098x reduction**. Informational CV was
+**0.021426% ORIG**, **0.014112% candidate**, and **0.028306% paired ratio**. The candidate median
+is outside the complete null spread and clears the 1% keep ratchet by 53.747 percentage points.
+
+Behavior and quality proof: the exact mixed-case/wrong-arity classifier gate passed remotely in
+both the LPOS-only and combined OBJECT/LPOS feature builds; full
+`fr-conformance` passed **194/194** library tests, every auxiliary/doc target, **99/99** smoke
+tests, the **4,975-case** differential fixture matrix, and **116/116** live OBJECT cases. Workspace
+all-target check passed on remote worker `ovh-b`; feature-enabled `fr-server` all-target clippy with
+`-D warnings` passed on `hz1`, and combined OBJECT/LPOS measurement-feature clippy passed on
+`ovh-b`. Workspace clippy reached only the filed, cc-owned `fr-persist` excessive-precision
+baseline (`frankenredis-u0x5d`). UBS ran with Cargo-backed categories disabled and found no new
+production defect; its nonzero output was existing whole-file inventory plus intentional
+fail-closed harness panics/bounded indexes. Verdict: **FINAL KEEP.**
+
+Direct Rust 2024 rustfmt and source/doc diff checks passed. The two raw `perf report` tables retain
+the profiler's tool-emitted column padding.
+
 ## 2026-07-10 cod_fr: FINAL KEEP — exact OBJECT IDLETIME dispatch floor uses 56.999% fewer instructions
 
 NEGATIVE-EVIDENCE CHECK: writev remains VALIDLY rejected and is unrelated to this frame. The prior

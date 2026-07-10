@@ -33,3 +33,5 @@ mimalloc = ["dep:mimalloc"]
 # Measurement-only control arm for the one-binary OBJECT IDLETIME floor A/B.
 # Production builds do not compile the environment-controlled bypass.
 perf-ab-object-idletime-floor = []
+# Measurement-only control arm for the one-binary LPOS floor A/B.
+perf-ab-lpos-floor = []

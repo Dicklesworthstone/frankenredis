@@ -5919,3 +5919,112 @@ Behavior parity and quality gates:
   disk constraint.
 
 Verdict: **FINAL KEEP**. The source change is the single exact dispatch-floor lever above.
+
+## 2026-07-10 cod_fr: FINAL KEEP — profile-selected LPOS dispatch floor, median 0.452530113x instructions
+
+Ledger-first audit kept writev closed on the user's valid-evidence override but found no admissible
+closure for the broader dispatch/parser family. The old uppercase/matcher experiment has no current
+binary SHA, exact changed-function self-time, worker identity, CV, or per-function null. A fresh
+P16/C50 `LPOS l a` attribution used a symbolized release-perf FrankenRedis snapshot (SHA-256
+`84090b5959b2396569f74343dee5542174afc881c1a97b40856958ae52147679`) and vendored Redis
+7.2.4 (SHA-256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`). Across five
+one-million-command trials, FrankenRedis averaged **5,315,138,271.0** `instructions:u` at
+**0.019120% CV**; Redis averaged **4,181,753,722.4** at **0.061165% CV**. Ratio was
+**1.271030918x**, gap **1,133,384,548.6 instructions**.
+
+Both complete no-children `>=0.1%` tables had zero lost samples. FrankenRedis's top frames were
+`process_buffered_frames` **25.11%**, AVX2 `memcmp` **7.80%**, store-entry `HashMap::get_mut`
+**3.03%**, vDSO time **2.63%**, the unchanged LPOS executor **2.56%**, and its packet parser
+**2.55%**. Redis's corresponding parser frame `processMultibulkBuffer` was **3.77%** and
+`memcmp` **0.23%**. Applying self shares to the trial means attributes approximately
+**1,176,979,104.5 excess instructions / 103.85% of the net gap** to buffered dispatch/parser.
+The share exceeds 100% because Redis pays larger allocator, vDSO, and wrapper costs that offset
+part of FrankenRedis's dispatch excess. Full evidence is in
+`tests/artifacts/perf/run_20260710T155919Z_lpos_p16_attribution/`: **108** FrankenRedis and
+**129** Redis frames at or above 0.1%.
+
+The selected top frame is open and is not an SSE2-on-AVX2 build defect: FrankenRedis's second frame
+is already `__memcmp_avx2_movbe`, while the top frame is Rust dispatch. It is not writev: replies
+are coalesced and no flush frame reaches 0.1%. It is not owner-blocked store work:
+`Store::lpos_full` is only 1.86% self.
+
+ONE LEVER: exact three-argument `LPOS key member` classification at the existing borrowed dispatch
+floor, reusing the current packet parser and executor. `RANK`, `COUNT`, `MAXLEN`, wrong-arity, and
+malformed forms remain on the prior cascade/fallback.
+
+Substrate v2 proof was one binary, one invocation, one worker, release-perf, and interleaving within
+every measured routine. Command:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test --profile release-perf -j 2 -p fr-server --features perf-ab-lpos-floor --test object_idletime_floor_ab -- --ignored --nocapture lpos_floor_same_binary_null_then_interleaved_instruction_ab`
+
+RCH worker **hz1**, worker hostname **hetzner1**, client CPU 0, server CPU 7, allowed set 0-7.
+Null A, null B, ORIG, and candidate shared binary SHA-256
+**`e7989e1517c1f9e0205141da76b20e68cd6e25d9237716095eb9073439f1f20d`**; ORIG selected a
+feature-only exact pre-LPOS-floor classifier monomorph. Packets and complete replies crossed
+symmetric `black_box` barriers. Every sample used OCCO/COOC position balancing, P16/C50,
+three-second post-seed quiescence, and 750 ms perf attach.
+
+Ledger-integrity reachability: both profiles had zero lost samples; exact-current ORIG
+`process_buffered_frames` was **24.30% self**, and the exact changed candidate function
+`dispatch_floor_fast_lpos` was **1.30% self**. The benchmark therefore executes the lever.
+
+The mandatory paired base/base null ran before the candidate:
+
+| null sample | base/base ratio |
+|---:|---:|
+| 1 | 0.999995338 |
+| 2 | 1.000037216 |
+| 3 | 0.999980873 |
+| 4 | 0.999980748 |
+| 5 | 1.000010338 |
+| 6 | 0.999977530 |
+| 7 | 0.999989917 |
+| 8 | 0.999959346 |
+| 9 | 1.000009478 |
+| 10 | 1.000024186 |
+
+Null median **0.999992628**, p05 **0.999967529**, p95 **1.000031352**. Informational CV was
+**0.006655%** left, **0.008195%** right, and **0.002371%** for the paired null ratio.
+
+| sample | ORIG instructions | candidate instructions | candidate/ORIG |
+|---:|---:|---:|---:|
+| 1 | 1,361,886,471 | 616,052,578 | 0.452352374 |
+| 2 | 1,361,877,628 | 616,011,944 | 0.452325474 |
+| 3 | 1,361,915,679 | 616,069,197 | 0.452354875 |
+| 4 | 1,361,273,909 | 616,270,507 | 0.452716021 |
+| 5 | 1,361,551,100 | 616,207,913 | 0.452577882 |
+| 6 | 1,361,318,663 | 616,142,838 | 0.452607354 |
+| 7 | 1,361,075,554 | 616,004,621 | 0.452586647 |
+| 8 | 1,361,460,259 | 616,133,082 | 0.452553116 |
+| 9 | 1,361,770,425 | 616,183,655 | 0.452487177 |
+| 10 | 1,361,634,816 | 616,149,435 | 0.452507110 |
+
+Means: ORIG **1,361,576,450.4**, candidate **616,122,577.0** instructions. The keep metric is
+the candidate/ORIG median: **0.452530113**, with p05 **0.452337579** and p95
+**0.452667121**. That is **54.746989% fewer instructions / approximately 2.2098x reduction**.
+Informational CV was **0.021426% ORIG**, **0.014112% candidate**, and **0.028306%** for the paired
+ratio. The candidate median lies far below the entire measured null spread and clears the 1% keep
+ratchet by 53.747 percentage points.
+
+Behavior parity and quality gates:
+
+- exact mixed-case/wrong-arity classifier gate: **1/1 passed** on remote worker `ovh-a`;
+- the same classifier gate with both measurement controls enabled: **1/1 passed** on remote worker
+  `hz2` after making the controls composable;
+- full `fr-conformance` passed **194/194** library tests, every auxiliary/doc target, **99/99**
+  smoke tests, the **4,975-case** differential fixture matrix, and **116/116** live OBJECT cases on
+  remote worker `ovh-a`;
+- workspace all-target check passed on remote worker `ovh-b`;
+- feature-enabled `fr-server` all-target clippy with `-D warnings` passed on remote worker `hz1`;
+- combined OBJECT-IDLETIME/LPOS measurement-feature all-target clippy with `-D warnings` passed on
+  remote worker `ovh-b`, proving the one-binary controls compose;
+- workspace-wide clippy reached only the filed, cc-owned `fr-persist` excessive-precision baseline
+  (`frankenredis-u0x5d`), with no `fr-server` finding;
+- UBS ran on the changed Cargo/server/harness files with Cargo-backed categories 12-14 disabled so
+  no local Cargo could run. Its nonzero output was existing whole-file inventory plus intentional
+  fail-closed harness panics, bounded slices, and quantile indexes; no new production defect was
+  identified;
+- direct Rust 2024 rustfmt and source/doc diff checks passed. The two raw `perf report` tables
+  intentionally preserve the profiler's tool-emitted column padding.
+
+Verdict: **FINAL KEEP**. The source change is the single exact dispatch-floor lever above.

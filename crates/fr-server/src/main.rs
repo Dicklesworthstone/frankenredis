@@ -12149,6 +12149,7 @@ enum BorrowedDispatchFloorClass {
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
     Llen,
+    Lpos,
     MemoryUsage,
     ObjectIdletime,
     Pfcount,
@@ -12178,6 +12179,7 @@ enum BorrowedDispatchFloorCommand {
     Hdel,
     Hlen,
     Llen,
+    Lpos,
     Lpush,
     Memory,
     Object,
@@ -12218,6 +12220,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
             [b'L', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Llen),
+            [b'L', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Lpos),
             [b'S', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Sadd),
             [b'H', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Hdel),
             [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
@@ -12295,7 +12298,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
 
 #[cfg(feature = "perf-ab-object-idletime-floor")]
 #[inline]
-fn borrowed_dispatch_floor_command_orig(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
+fn borrowed_dispatch_floor_command_pre_object_idletime(
+    token: &[u8],
+) -> Option<BorrowedDispatchFloorCommand> {
     if token.len() != 6 {
         return borrowed_dispatch_floor_command(token);
     }
@@ -12309,13 +12314,39 @@ fn borrowed_dispatch_floor_command_orig(token: &[u8]) -> Option<BorrowedDispatch
     }
 }
 
+#[cfg(feature = "perf-ab-lpos-floor")]
 #[inline]
-fn borrowed_dispatch_floor_command_for<const OBJECT_IDLETIME_FLOOR: bool>(
+fn borrowed_dispatch_floor_command_pre_lpos(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
+    if token.len() != 4 {
+        return borrowed_dispatch_floor_command(token);
+    }
+    match uppercase_ascii_token::<4>(token)? {
+        [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
+        [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
+        [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
+        [b'L', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Llen),
+        [b'S', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Sadd),
+        [b'H', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Hdel),
+        [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
+        [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
+        _ => None,
+    }
+}
+
+#[inline]
+fn borrowed_dispatch_floor_command_for<
+    const OBJECT_IDLETIME_FLOOR: bool,
+    const LPOS_FLOOR: bool,
+>(
     token: &[u8],
 ) -> Option<BorrowedDispatchFloorCommand> {
     #[cfg(feature = "perf-ab-object-idletime-floor")]
-    if !OBJECT_IDLETIME_FLOOR {
-        return borrowed_dispatch_floor_command_orig(token);
+    if !OBJECT_IDLETIME_FLOOR && token.len() == 6 {
+        return borrowed_dispatch_floor_command_pre_object_idletime(token);
+    }
+    #[cfg(feature = "perf-ab-lpos-floor")]
+    if !LPOS_FLOOR && token.len() == 4 {
+        return borrowed_dispatch_floor_command_pre_lpos(token);
     }
     borrowed_dispatch_floor_command(token)
 }
@@ -12441,12 +12472,16 @@ fn borrowed_dispatch_floor_object_idletime(
 }
 
 #[inline]
-fn classify_borrowed_dispatch_floor_packet_impl<const OBJECT_IDLETIME_FLOOR: bool>(
+fn classify_borrowed_dispatch_floor_packet_impl<
+    const OBJECT_IDLETIME_FLOOR: bool,
+    const LPOS_FLOOR: bool,
+>(
     input: &[u8],
     config: &ParserConfig,
 ) -> Option<BorrowedDispatchFloorClass> {
     let token = borrowed_dispatch_floor_token_for::<OBJECT_IDLETIME_FLOOR>(input, config)?;
-    let command = borrowed_dispatch_floor_command_for::<OBJECT_IDLETIME_FLOOR>(token.command)?;
+    let command =
+        borrowed_dispatch_floor_command_for::<OBJECT_IDLETIME_FLOOR, LPOS_FLOOR>(token.command)?;
     match (token.array_len, command) {
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
@@ -12466,6 +12501,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<const OBJECT_IDLETIME_FLOOR: boo
         (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
         (2, BorrowedDispatchFloorCommand::Strlen) => Some(BorrowedDispatchFloorClass::Strlen),
         (2, BorrowedDispatchFloorCommand::Llen) => Some(BorrowedDispatchFloorClass::Llen),
+        (3, BorrowedDispatchFloorCommand::Lpos) if LPOS_FLOOR => {
+            Some(BorrowedDispatchFloorClass::Lpos)
+        }
         (2, BorrowedDispatchFloorCommand::Scard) => Some(BorrowedDispatchFloorClass::Scard),
         (2, BorrowedDispatchFloorCommand::Hlen) => Some(BorrowedDispatchFloorClass::Hlen),
         (2, BorrowedDispatchFloorCommand::Zcard) => Some(BorrowedDispatchFloorClass::Zcard),
@@ -12523,15 +12561,72 @@ fn object_idletime_floor_orig_enabled() -> bool {
     )
 }
 
+#[cfg(feature = "perf-ab-lpos-floor")]
+#[inline]
+fn lpos_floor_orig_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_LPOS_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
 fn classify_borrowed_dispatch_floor_packet(
     input: &[u8],
     config: &ParserConfig,
 ) -> Option<BorrowedDispatchFloorClass> {
-    #[cfg(feature = "perf-ab-object-idletime-floor")]
-    if object_idletime_floor_orig_enabled() {
-        return classify_borrowed_dispatch_floor_packet_impl::<false>(input, config);
+    #[cfg(all(
+        feature = "perf-ab-object-idletime-floor",
+        feature = "perf-ab-lpos-floor"
+    ))]
+    {
+        match (
+            !object_idletime_floor_orig_enabled(),
+            !lpos_floor_orig_enabled(),
+        ) {
+            (false, false) => {
+                classify_borrowed_dispatch_floor_packet_impl::<false, false>(input, config)
+            }
+            (false, true) => {
+                classify_borrowed_dispatch_floor_packet_impl::<false, true>(input, config)
+            }
+            (true, false) => {
+                classify_borrowed_dispatch_floor_packet_impl::<true, false>(input, config)
+            }
+            (true, true) => {
+                classify_borrowed_dispatch_floor_packet_impl::<true, true>(input, config)
+            }
+        }
     }
-    classify_borrowed_dispatch_floor_packet_impl::<true>(input, config)
+    #[cfg(all(
+        feature = "perf-ab-object-idletime-floor",
+        not(feature = "perf-ab-lpos-floor")
+    ))]
+    {
+        if object_idletime_floor_orig_enabled() {
+            classify_borrowed_dispatch_floor_packet_impl::<false, true>(input, config)
+        } else {
+            classify_borrowed_dispatch_floor_packet_impl::<true, true>(input, config)
+        }
+    }
+    #[cfg(all(
+        feature = "perf-ab-lpos-floor",
+        not(feature = "perf-ab-object-idletime-floor")
+    ))]
+    {
+        if lpos_floor_orig_enabled() {
+            classify_borrowed_dispatch_floor_packet_impl::<true, false>(input, config)
+        } else {
+            classify_borrowed_dispatch_floor_packet_impl::<true, true>(input, config)
+        }
+    }
+    #[cfg(not(any(
+        feature = "perf-ab-object-idletime-floor",
+        feature = "perf-ab-lpos-floor"
+    )))]
+    {
+        classify_borrowed_dispatch_floor_packet_impl::<true, true>(input, config)
+    }
 }
 
 #[cfg_attr(feature = "perf-ab-object-idletime-floor", inline(never))]
@@ -12547,6 +12642,19 @@ fn dispatch_floor_fast_object_idletime(
         return None;
     }
     let response = runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts)?;
+    Some((packet.consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-lpos-floor"), inline)]
+fn dispatch_floor_fast_lpos(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet = parse_borrowed_plain_lpos_packet(unparsed, parser_config)?;
+    let response = runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts)?;
     Some((packet.consumed, response))
 }
 
@@ -13024,6 +13132,22 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::ObjectIdletime => {
             if let Some((consumed, response)) =
                 dispatch_floor_fast_object_idletime(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Lpos => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_lpos(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -30292,6 +30416,20 @@ mod tests {
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::ObjectIdletime)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nLpOs\r\n$1\r\nl\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Lpos)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\na\r\n$4\r\nRANK\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            None
         );
         // The floor lever is deliberately IDLETIME-only. Sibling OBJECT commands
         // retain their unchanged borrowed-cascade route.

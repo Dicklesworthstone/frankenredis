@@ -1,0 +1,145 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'instructions:u'
+# Event count (approx.): 8370692410
+#
+# Overhead  Symbol                                     Shared Object     IPC   [IPC Coverage]
+# ........  .........................................  ................  ....................
+#
+    11.11%  [.] je_malloc_usable_size                  redis-server      -      -            
+     8.78%  [.] 0x0000000000000ebc                     [vdso]            -      -            
+     6.58%  [.] __strcasecmp_l_avx2                    libc.so.6         -      -            
+     5.54%  [.] call                                   redis-server      -      -            
+     4.63%  [.] __strchr_avx2                          libc.so.6         -      -            
+     3.77%  [.] processMultibulkBuffer                 redis-server      -      -            
+     3.37%  [.] je_free                                redis-server      -      -            
+     3.12%  [.] zmalloc                                redis-server      -      -            
+     2.56%  [.] je_malloc                              redis-server      -      -            
+     1.98%  [.] zfree                                  redis-server      -      -            
+     1.70%  [.] resetClient                            redis-server      -      -            
+     1.69%  [.] decrRefCount.part.0                    redis-server      -      -            
+     1.69%  [.] createEmbeddedStringObject             redis-server      -      -            
+     1.34%  [.] siphash_nocase                         redis-server      -      -            
+     1.23%  [.] dictFind                               redis-server      -      -            
+     1.23%  [.] listTypeEqual                          redis-server      -      -            
+     1.11%  [.] lposCommand                            redis-server      -      -            
+     1.05%  [.] processCommand                         redis-server      -      -            
+     0.88%  [.] 0x0000000000000986                     [vdso]            -      -            
+     0.82%  [.] hdr_record_values                      redis-server      -      -            
+     0.81%  [.] processInputBuffer                     redis-server      -      -            
+     0.76%  [.] string2ll.part.0                       redis-server      -      -            
+     0.75%  [.] dictSdsKeyCaseCompare                  redis-server      -      -            
+     0.70%  [.] ACLCheckAllUserCommandPerm             redis-server      -      -            
+     0.64%  [.] afterCommand                           redis-server      -      -            
+     0.64%  [.] siphash                                redis-server      -      -            
+     0.64%  [.] listTypeNext                           redis-server      -      -            
+     0.58%  [.] counts_index_for                       redis-server      -      -            
+     0.53%  [.] dictSdsKeyCompare                      redis-server      -      -            
+     0.52%  [.] sdsrange.constprop.0                   redis-server      -      -            
+     0.52%  [.] lpValidateNext                         redis-server      -      -            
+     0.52%  [.] get_bucket_index                       redis-server      -      -            
+     0.52%  [.] connSocketEventHandler                 redis-server      -      -            
+     0.52%  [.] aeMain                                 redis-server      -      -            
+     0.47%  [.] sdssubstr                              redis-server      -      -            
+     0.46%  [.] 0x0000000000000eeb                     [vdso]            -      -            
+     0.41%  [.] 0x0000000000000f23                     [vdso]            -      -            
+     0.41%  [.] listTypeInitIterator                   redis-server      -      -            
+     0.41%  [.] __memmove_avx_unaligned_erms           libc.so.6         -      -            
+     0.40%  [.] 0x0000000000000f27                     [vdso]            -      -            
+     0.40%  [.] lpNext                                 redis-server      -      -            
+     0.35%  [.] 0x0000000000000eca                     [vdso]            -      -            
+     0.35%  [k] 0xffffffffaf704104                     [unknown]         -      -            
+     0.35%  [.] _addReplyToBufferOrList                redis-server      -      -            
+     0.35%  [k] 0xffffffffaf923441                     [unknown]         -      -            
+     0.35%  [.] 0x0000000000000ec2                     [vdso]            -      -            
+     0.35%  [.] dictSdsCaseHash                        redis-server      -      -            
+     0.35%  [.] listTypeReleaseIterator                redis-server      -      -            
+     0.35%  [.] lookupKey                              redis-server      -      -            
+     0.29%  [k] 0xffffffffaf987bc3                     [unknown]         -      -            
+     0.29%  [k] 0xffffffffafeb1b3e                     [unknown]         -      -            
+     0.29%  [.] trackingHandlePendingKeyInvalidations  redis-server      -      -            
+     0.29%  [.] getMonotonicUs_posix.lto_priv.0        redis-server      -      -            
+     0.29%  [.] listTypeLength                         redis-server      -      -            
+     0.29%  [.] addReply                               redis-server      -      -            
+     0.29%  [k] 0xffffffffaf60008b                     [unknown]         -      -            
+     0.24%  [k] 0xffffffffb011783c                     [unknown]         -      -            
+     0.23%  [.] 0x0000000000000f39                     [vdso]            -      -            
+     0.23%  [k] 0xffffffffb08ff21a                     [unknown]         -      -            
+     0.23%  [.] moduleCallCommandFilters               redis-server      -      -            
+     0.23%  [k] 0xffffffffb0a3ca8f                     [unknown]         -      -            
+     0.23%  [.] __memcmp_avx2_movbe                    libc.so.6         -      -            
+     0.23%  [k] 0xffffffffb0c20708                     [unknown]         -      -            
+     0.23%  [k] 0xffffffffb0117a75                     [unknown]         -      -            
+     0.23%  [k] 0xffffffffaf600005                     [unknown]         -      -            
+     0.23%  [.] lpGetWithSize.constprop.0              redis-server      -      -            
+     0.23%  [k] 0xffffffffb08ff1ba                     [unknown]         -      -            
+     0.20%  [.] firePostExecutionUnitJobs              redis-server      -      -            
+     0.18%  [k] 0xffffffffb0236091                     [unknown]         -      -            
+     0.18%  [.] 0x0000000000000f00                     [vdso]            -      -            
+     0.18%  [k] 0xffffffffb0a31a2e                     [unknown]         -      -            
+     0.18%  [k] 0xffffffffb012a65e                     [unknown]         -      -            
+     0.18%  [k] 0xffffffffb0a3caad                     [unknown]         -      -            
+     0.18%  [k] 0xffffffffafe7f29f                     [unknown]         -      -            
+     0.18%  [.] __strcasecmp_avx2                      libc.so.6         -      -            
+     0.18%  [k] 0xffffffffb08f6bc1                     [unknown]         -      -            
+     0.18%  [k] 0xffffffffafeb1bfb                     [unknown]         -      -            
+     0.18%  [.] commandProcessed.part.0                redis-server      -      -            
+     0.17%  [k] 0xffffffffafe53cce                     [unknown]         -      -            
+     0.17%  [.] readQueryFromClient                    redis-server      -      -            
+     0.17%  [.] 0x0000000000000ec5                     [vdso]            -      -            
+     0.17%  [k] 0xffffffffafe53d9f                     [unknown]         -      -            
+     0.17%  [.] dictSdsHash                            redis-server      -      -            
+     0.17%  [k] 0xffffffffb0a735d4                     [unknown]         -      -            
+     0.17%  [k] 0xffffffffb0a24b25                     [unknown]         -      -            
+     0.17%  [k] 0xffffffffafeb1c1d                     [unknown]         -      -            
+     0.17%  [k] 0xffffffffb08ff259                     [unknown]         -      -            
+     0.17%  [k] 0xffffffffafba298f                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb011787c                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0a23c07                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffafb24b38                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0c20527                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0a25ad2                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffafba2a67                     [unknown]         -      -            
+     0.12%  [.] lpSeek                                 redis-server      -      -            
+     0.12%  [.] prepareClientToWrite                   redis-server      -      -            
+     0.12%  [.] getExpire                              redis-server      -      -            
+     0.12%  [k] 0xffffffffafe7f2d8                     [unknown]         -      -            
+     0.12%  [.] getCommandFlags                        redis-server      -      -            
+     0.12%  [.] 0x00000000000009d4                     [vdso]            -      -            
+     0.12%  [k] 0xffffffffafba2b91                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0117880                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb08ecd95                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb012a661                     [unknown]         -      -            
+     0.12%  [.] 0x0000000000000ed6                     [vdso]            -      -            
+     0.12%  [k] 0xffffffffb0c3a3cb                     [unknown]         -      -            
+     0.12%  [.] updateClientMemUsageAndBucket          redis-server      -      -            
+     0.12%  [k] 0xffffffffb0112c51                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffaf600121                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0c1f96b                     [unknown]         -      -            
+     0.12%  [.] 0x0000000000000eee                     [vdso]            -      -            
+     0.12%  [k] 0xffffffffafe598c1                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb012a649                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb009f8bb                     [unknown]         -      -            
+     0.12%  [.] lpFirst                                redis-server      -      -            
+     0.12%  [.] clock_gettime@@GLIBC_2.17              libc.so.6         -      -            
+     0.12%  [k] 0xffffffffafdf128c                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb08f6ba6                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffb0a735e9                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffafe59947                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffafba2980                     [unknown]         -      -            
+     0.12%  [k] 0xffffffffafba29cb                     [unknown]         -      -            
+     0.12%  [.] beforeSleep                            redis-server      -      -            
+     0.12%  [k] 0xffffffffafdf152c                     [unknown]         -      -            
+     0.12%  [.] expireIfNeeded                         redis-server      -      -            
+     0.11%  [k] 0xffffffffb0a2391c                     [unknown]         -      -            
+     0.11%  [k] 0xffffffffafefe60c                     [unknown]         -      -            
+     0.11%  [.] lookupCommandLogic                     redis-server      -      -            
+     0.11%  [k] 0xffffffffb0c204ea                     [unknown]         -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

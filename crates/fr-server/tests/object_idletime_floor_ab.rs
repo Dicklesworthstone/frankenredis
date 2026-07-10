@@ -1,15 +1,23 @@
 #![forbid(unsafe_code)]
 // The fail-closed stub remains runnable without the measurement feature, while
 // the worker-only harness helpers are intentionally dormant in that build.
-#![cfg_attr(not(feature = "perf-ab-object-idletime-floor"), allow(dead_code))]
+#![cfg_attr(
+    not(any(
+        feature = "perf-ab-object-idletime-floor",
+        feature = "perf-ab-lpos-floor"
+    )),
+    allow(dead_code)
+)]
 
-//! One-binary, one-invocation, interleaved P16/C50 instruction A/B for the
-//! `OBJECT IDLETIME` dispatch-floor route.
+//! One-binary, one-invocation, interleaved P16/C50 instruction A/B for exact
+//! dispatch-floor routes. Each new target calibrates a same-function A/A null
+//! before trusting its A/B median.
 //!
 //! Run only through strict remote RCH:
 //! `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test --profile
-//! release-perf -p fr-server --features perf-ab-object-idletime-floor --test
-//! object_idletime_floor_ab -- --ignored --nocapture`
+//! release-perf -p fr-server --features perf-ab-lpos-floor --test
+//! object_idletime_floor_ab -- --ignored --nocapture
+//! lpos_floor_same_binary_null_then_interleaved_instruction_ab`
 
 use std::fs;
 use std::hint::black_box;
@@ -22,15 +30,31 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENTS: usize = 50;
 const PIPELINE: usize = 16;
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const GUARD_SAMPLES: usize = 4;
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const STAT_SAMPLES: usize = 8;
+#[cfg(feature = "perf-ab-lpos-floor")]
+const LPOS_NULL_SAMPLES: usize = 10;
+#[cfg(feature = "perf-ab-lpos-floor")]
+const LPOS_STAT_SAMPLES: usize = 10;
 const STAT_ROUNDS: usize = 160;
 const PROFILE_ROUNDS: usize = 1_000;
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const MAX_CV_PCT: f64 = 5.0;
 const KEEP_GATE_RATIO: f64 = 0.99;
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const GUARD_RATIO_TOLERANCE: f64 = 0.01;
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const REQUEST: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n";
+#[cfg(feature = "perf-ab-object-idletime-floor")]
 const GUARD_REQUEST: &[u8] = b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n";
+#[cfg(feature = "perf-ab-lpos-floor")]
+const LPOS_REQUEST: &[u8] = b"*3\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\na\r\n";
+#[cfg(feature = "perf-ab-lpos-floor")]
+const LPOS_SETUP: &[u8] = b"*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n";
+#[cfg(feature = "perf-ab-lpos-floor")]
+const LPOS_SETUP_REPLY: &[u8] = b":1\r\n";
 const SETUP: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 
@@ -66,6 +90,10 @@ impl Server {
             .args(["--bind", "127.0.0.1", "--port", &port.to_string()])
             .env(
                 "FR_PERF_AB_OBJECT_IDLETIME_FLOOR_ORIG",
+                if matches!(arm, Arm::Orig) { "1" } else { "0" },
+            )
+            .env(
+                "FR_PERF_AB_LPOS_FLOOR_ORIG",
                 if matches!(arm, Arm::Orig) { "1" } else { "0" },
             )
             .current_dir(runtime_dir)
@@ -178,7 +206,7 @@ fn exchange_group(clients: &mut [TcpStream], packet: &[u8]) {
             reply
                 .split_inclusive(|&byte| byte == b'\n')
                 .all(|line| line.starts_with(b":") && line.ends_with(b"\r\n")),
-            "OBJECT IDLETIME returned a non-integer reply: {reply:?}"
+            "dispatch-floor target returned a non-integer reply: {reply:?}"
         );
         black_box(reply);
     }
@@ -256,6 +284,28 @@ fn mean_cv(samples: &[f64]) -> (f64, f64) {
     (mean, variance.sqrt() / mean * 100.0)
 }
 
+#[cfg(feature = "perf-ab-lpos-floor")]
+fn quantile(samples: &[f64], q: f64) -> f64 {
+    assert!(!samples.is_empty(), "quantile requires samples");
+    assert!((0.0..=1.0).contains(&q), "quantile must be in [0, 1]");
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let position = q * (sorted.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let fraction = position - lower as f64;
+        sorted[lower] + (sorted[upper] - sorted[lower]) * fraction
+    }
+}
+
+#[cfg(feature = "perf-ab-lpos-floor")]
+fn median(samples: &[f64]) -> f64 {
+    quantile(samples, 0.5)
+}
+
 fn pin_client_and_select_server_core() -> usize {
     let status = fs::read_to_string("/proc/self/status").expect("read process CPU allowance");
     let allowed = status
@@ -308,15 +358,26 @@ fn unique_root() -> PathBuf {
     root
 }
 
-fn profile_arm(binary: &Path, arm: Arm, root: &Path, server_core: usize) -> String {
+fn profile_arm(
+    binary: &Path,
+    arm: Arm,
+    root: &Path,
+    server_core: usize,
+    label: &str,
+    request: &[u8],
+    extra_setup: Option<(&[u8], &[u8])>,
+) -> String {
     let mut server = Server::spawn(
         binary,
         arm,
-        &root.join(format!("profile_{}", arm.name())),
+        &root.join(format!("profile_{label}_{}", arm.name())),
         server_core,
     );
+    if let Some((setup, expected)) = extra_setup {
+        exchange_one(server.port, setup, expected);
+    }
     thread::sleep(Duration::from_secs(3));
-    let data = root.join(format!("profile_{}.data", arm.name()));
+    let data = root.join(format!("profile_{label}_{}.data", arm.name()));
     assert!(!data.exists(), "refusing to overwrite {}", data.display());
     let mut perf = Command::new("perf")
         .env("LC_ALL", "C")
@@ -344,7 +405,7 @@ fn profile_arm(binary: &Path, arm: Arm, root: &Path, server_core: usize) -> Stri
         perf.try_wait().expect("poll perf record").is_none(),
         "perf record exited before workload"
     );
-    run_single(&mut server, PROFILE_ROUNDS, REQUEST);
+    run_single(&mut server, PROFILE_ROUNDS, request);
     server.shutdown();
     let perf_output = perf.wait_with_output().expect("wait for perf record");
     assert!(
@@ -407,30 +468,49 @@ struct InstructionSamples {
     ratio: Vec<f64>,
 }
 
+struct InterleavedMeasurement<'a> {
+    label: &'a str,
+    request: &'a [u8],
+    samples: usize,
+    left_mode: Arm,
+    right_mode: Arm,
+    extra_setup: Option<(&'a [u8], &'a [u8])>,
+}
+
 fn measure_interleaved(
     binary: &Path,
     root: &Path,
     server_core: usize,
-    label: &str,
-    request: &[u8],
-    samples: usize,
+    measurement: InterleavedMeasurement<'_>,
 ) -> InstructionSamples {
+    let InterleavedMeasurement {
+        label,
+        request,
+        samples,
+        left_mode,
+        right_mode,
+        extra_setup,
+    } = measurement;
     let mut orig_samples = Vec::with_capacity(samples);
     let mut candidate_samples = Vec::with_capacity(samples);
     let mut ratio_samples = Vec::with_capacity(samples);
     for sample in 0..samples {
         let reverse = sample % 2 == 1;
-        let orig_dir = root.join(format!("{label}_{sample}_orig"));
-        let candidate_dir = root.join(format!("{label}_{sample}_candidate"));
+        let orig_dir = root.join(format!("{label}_{sample}_left"));
+        let candidate_dir = root.join(format!("{label}_{sample}_right"));
         let (mut orig, mut candidate) = if reverse {
-            let candidate = Server::spawn(binary, Arm::Candidate, &candidate_dir, server_core);
-            let orig = Server::spawn(binary, Arm::Orig, &orig_dir, server_core);
+            let candidate = Server::spawn(binary, right_mode, &candidate_dir, server_core);
+            let orig = Server::spawn(binary, left_mode, &orig_dir, server_core);
             (orig, candidate)
         } else {
-            let orig = Server::spawn(binary, Arm::Orig, &orig_dir, server_core);
-            let candidate = Server::spawn(binary, Arm::Candidate, &candidate_dir, server_core);
+            let orig = Server::spawn(binary, left_mode, &orig_dir, server_core);
+            let candidate = Server::spawn(binary, right_mode, &candidate_dir, server_core);
             (orig, candidate)
         };
+        if let Some((setup, expected)) = extra_setup {
+            exchange_one(orig.port, setup, expected);
+            exchange_one(candidate.port, setup, expected);
+        }
         thread::sleep(Duration::from_secs(3));
         let (orig_perf, candidate_perf) = if reverse {
             let candidate_perf = perf_stat(candidate.pid());
@@ -458,10 +538,12 @@ fn measure_interleaved(
         );
         let ratio = candidate_count as f64 / orig_count as f64;
         println!(
-            "INSTRUCTIONS label={label} sample={} order={} orig={} candidate={} \
-candidate_over_orig={ratio:.9}",
+            "INSTRUCTIONS label={label} sample={} order={} left_mode={} right_mode={} left={} \
+right={} right_over_left={ratio:.9}",
             sample + 1,
             if reverse { "COOC" } else { "OCCO" },
+            left_mode.name(),
+            right_mode.name(),
             orig_count,
             candidate_count,
         );
@@ -520,8 +602,24 @@ fn object_idletime_floor_same_binary_interleaved_instruction_ab() {
     let root = unique_root();
     let server_core = pin_client_and_select_server_core();
 
-    let orig_profile = profile_arm(&binary, Arm::Orig, &root, server_core);
-    let candidate_profile = profile_arm(&binary, Arm::Candidate, &root, server_core);
+    let orig_profile = profile_arm(
+        &binary,
+        Arm::Orig,
+        &root,
+        server_core,
+        "object_idletime",
+        REQUEST,
+        None,
+    );
+    let candidate_profile = profile_arm(
+        &binary,
+        Arm::Candidate,
+        &root,
+        server_core,
+        "object_idletime",
+        REQUEST,
+        None,
+    );
     println!("ORIG_PROFILE_TABLE_BEGIN\n{orig_profile}\nORIG_PROFILE_TABLE_END");
     println!("CANDIDATE_PROFILE_TABLE_BEGIN\n{candidate_profile}\nCANDIDATE_PROFILE_TABLE_END");
     let orig_process_self = self_pct(&orig_profile, "frankenredis::process_buffered_frames");
@@ -540,9 +638,14 @@ candidate_object_idletime_floor_self_pct={candidate_floor_self:.4}"
         &binary,
         &root,
         server_core,
-        "guard_getbit",
-        GUARD_REQUEST,
-        GUARD_SAMPLES,
+        InterleavedMeasurement {
+            label: "guard_getbit",
+            request: GUARD_REQUEST,
+            samples: GUARD_SAMPLES,
+            left_mode: Arm::Orig,
+            right_mode: Arm::Candidate,
+            extra_setup: None,
+        },
     );
     let (guard_orig_mean, guard_orig_cv_pct) = mean_cv(&guard.orig);
     let (guard_candidate_mean, guard_candidate_cv_pct) = mean_cv(&guard.candidate);
@@ -571,9 +674,14 @@ ratio_cv_pct={guard_ratio_cv_pct:.6}"
         &binary,
         &root,
         server_core,
-        "object_idletime",
-        REQUEST,
-        STAT_SAMPLES,
+        InterleavedMeasurement {
+            label: "object_idletime",
+            request: REQUEST,
+            samples: STAT_SAMPLES,
+            left_mode: Arm::Orig,
+            right_mode: Arm::Candidate,
+            extra_setup: None,
+        },
     );
     let (orig_mean, orig_cv_pct) = mean_cv(&target.orig);
     let (candidate_mean, candidate_cv_pct) = mean_cv(&target.candidate);
@@ -590,5 +698,147 @@ ratio_cv_pct={ratio_cv_pct:.6}"
     assert!(
         ratio_mean < KEEP_GATE_RATIO,
         "1% instruction keep gate failed: {ratio_mean:.9}"
+    );
+}
+
+#[cfg(not(feature = "perf-ab-lpos-floor"))]
+#[test]
+#[ignore = "requires --features perf-ab-lpos-floor"]
+fn lpos_floor_same_binary_null_then_interleaved_instruction_ab() {
+    panic!("A/B requires the same-binary LPOS control feature");
+}
+
+#[cfg(feature = "perf-ab-lpos-floor")]
+#[test]
+#[ignore = "strict-remote perf gate; run explicitly with the LPOS measurement feature"]
+fn lpos_floor_same_binary_null_then_interleaved_instruction_ab() {
+    let perf_version = Command::new("perf")
+        .arg("--version")
+        .output()
+        .expect("worker must provide perf");
+    assert!(
+        perf_version.status.success(),
+        "worker perf preflight failed"
+    );
+
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_frankenredis"));
+    let hash = Command::new("sha256sum")
+        .arg(&binary)
+        .output()
+        .expect("hash same-binary server");
+    assert!(hash.status.success(), "sha256sum failed");
+    let hash_output = String::from_utf8(hash.stdout).expect("sha256sum output is UTF-8");
+    let binary_sha256 = hash_output
+        .split_whitespace()
+        .next()
+        .expect("sha256sum emitted a digest");
+    println!("BINARY_SHA256 arms=null_a,null_b,orig,candidate sha256={binary_sha256}");
+    let hostname = Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    println!("WORKER_ID {hostname}");
+
+    let root = unique_root();
+    let server_core = pin_client_and_select_server_core();
+    let setup = Some((LPOS_SETUP, LPOS_SETUP_REPLY));
+
+    let orig_profile = profile_arm(
+        &binary,
+        Arm::Orig,
+        &root,
+        server_core,
+        "lpos",
+        LPOS_REQUEST,
+        setup,
+    );
+    let candidate_profile = profile_arm(
+        &binary,
+        Arm::Candidate,
+        &root,
+        server_core,
+        "lpos",
+        LPOS_REQUEST,
+        setup,
+    );
+    println!("ORIG_PROFILE_TABLE_BEGIN\n{orig_profile}\nORIG_PROFILE_TABLE_END");
+    println!("CANDIDATE_PROFILE_TABLE_BEGIN\n{candidate_profile}\nCANDIDATE_PROFILE_TABLE_END");
+    let orig_process_self = self_pct(&orig_profile, "frankenredis::process_buffered_frames");
+    let candidate_floor_self =
+        self_pct(&candidate_profile, "frankenredis::dispatch_floor_fast_lpos");
+    assert!(orig_process_self > 0.0);
+    assert!(candidate_floor_self > 0.0);
+    println!(
+        "PROFILE_REACHABILITY orig_process_buffered_frames_self_pct={orig_process_self:.4} \
+candidate_lpos_floor_self_pct={candidate_floor_self:.4}"
+    );
+
+    // Per-function null comes first: both servers select the exact pre-LPOS-floor monomorph.
+    let null = measure_interleaved(
+        &binary,
+        &root,
+        server_core,
+        InterleavedMeasurement {
+            label: "lpos_null",
+            request: LPOS_REQUEST,
+            samples: LPOS_NULL_SAMPLES,
+            left_mode: Arm::Orig,
+            right_mode: Arm::Orig,
+            extra_setup: setup,
+        },
+    );
+    let null_median = median(&null.ratio);
+    let null_p05 = quantile(&null.ratio, 0.05);
+    let null_p95 = quantile(&null.ratio, 0.95);
+    let (_, null_left_cv_pct) = mean_cv(&null.orig);
+    let (_, null_right_cv_pct) = mean_cv(&null.candidate);
+    let (_, null_ratio_cv_pct) = mean_cv(&null.ratio);
+    println!(
+        "NULL_SUMMARY label=lpos median={null_median:.9} p05={null_p05:.9} \
+p95={null_p95:.9} left_cv_pct={null_left_cv_pct:.6} \
+right_cv_pct={null_right_cv_pct:.6} ratio_cv_pct={null_ratio_cv_pct:.6}"
+    );
+    assert!(
+        (null_median - 1.0).abs() < 0.02,
+        "LPOS null median exposes a harness bias: {null_median:.9}"
+    );
+
+    let target = measure_interleaved(
+        &binary,
+        &root,
+        server_core,
+        InterleavedMeasurement {
+            label: "lpos_target",
+            request: LPOS_REQUEST,
+            samples: LPOS_STAT_SAMPLES,
+            left_mode: Arm::Orig,
+            right_mode: Arm::Candidate,
+            extra_setup: setup,
+        },
+    );
+    let candidate_median = median(&target.ratio);
+    let candidate_p05 = quantile(&target.ratio, 0.05);
+    let candidate_p95 = quantile(&target.ratio, 0.95);
+    let (orig_mean, orig_cv_pct) = mean_cv(&target.orig);
+    let (candidate_mean, candidate_cv_pct) = mean_cv(&target.candidate);
+    let (ratio_mean, ratio_cv_pct) = mean_cv(&target.ratio);
+    println!(
+        "INSTRUCTIONS_SUMMARY label=lpos orig_mean={orig_mean:.3} \
+orig_cv_pct={orig_cv_pct:.6} candidate_mean={candidate_mean:.3} \
+candidate_cv_pct={candidate_cv_pct:.6} ratio_mean={ratio_mean:.9} \
+ratio_cv_pct={ratio_cv_pct:.6} candidate_median={candidate_median:.9} \
+candidate_p05={candidate_p05:.9} candidate_p95={candidate_p95:.9} \
+null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9}"
+    );
+    assert!(
+        candidate_median < null_p05,
+        "candidate median {candidate_median:.9} does not clear null floor {null_p05:.9}"
+    );
+    assert!(
+        candidate_median < KEEP_GATE_RATIO,
+        "1% instruction keep gate failed: {candidate_median:.9}"
     );
 }
