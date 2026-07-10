@@ -4,6 +4,67 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 cod_fr: KEEP — dispatch-floor routes VARIADIC WRITES at 9-18 values — 1.75-2.84x vs HEAD control on the 12/16v cliff
+
+NEGATIVE-EVIDENCE CHECK: grepped this file and `docs/perf_negative_evidence_ledger.md`
+before touching the lane. This is not a retry of the rejected cascade reorder, write-gate
+cache, per-command packet-id laziness, list batch-helper, or storage micro-lever attempts.
+It is the exact follow-up BlackThrush surfaced in the 5-8v dispatch-floor keep above:
+9-18 value `LPUSH`/`RPUSH`/`SADD`/`HDEL`/`SREM`/`ZREM` packets already had borrowed
+parsers and the shared borrowed executor, but were reached only in the deep chain-B
+cascade while chain A dropped them to the generic path.
+
+IMPLEMENTED: widened the front-gate keyed-values-write classifier from array lengths
+7..=10 to 7..=20 and extended `dispatch_floor_keyed_values_write` to call the existing
+`parse_borrowed_plain_keyed_values{9..18}_packet` parsers plus the unchanged
+`Runtime::execute_plain_keyed_values_write_borrowed` executor. Byte identity is by
+construction: parsing, command execution, AOF/notification/dirty/stat behavior, and reply
+encoding all stay in the existing parser/executor family; only dispatch position changes.
+The 19-value arity still falls through to generic. Source landed concurrently in
+`88e66d569` while this proof bundle was running; this entry records cod_fr's independent
+same-machine measurement and closeout artifacts.
+
+MEASURED A/B: same-machine, same-process Criterion with three engines in one run:
+candidate `38a60f64ef6b7a959747f16ad339e29e31ea0d388f69df14baae8f26856364d1`,
+control HEAD `337e11df547679aa146ce7b4fcb81e09d2e06df51720039404d2aa3f9d6b4b1a`,
+and vendored Redis 7.2.4 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+RCH was attempted first; the candidate remote build completed, but RCH retrieved only
+metadata, and the detached control build hit the known `.rchignore`/`legacy_redis_code`
+build-script gap, so the final A/B used fresh local release-perf binaries.
+
+| row | redis us | control us | candidate us | cand/control throughput | cand/redis throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| LPUSH_12v | 130.03 | 229.04 | 101.04 | **2.27x** | **1.29x** |
+| LPUSH_16v | 153.42 | 250.00 | 128.43 | **1.95x** | **1.19x** |
+| RPUSH_12v | 102.22 | 248.62 | 105.58 | **2.36x** | 0.97x |
+| RPUSH_16v | 134.82 | 246.60 | 141.09 | **1.75x** | 0.96x |
+| SADD_12v | 120.83 | 194.82 | 68.536 | **2.84x** | **1.76x** |
+| SADD_16v | 168.55 | 211.70 | 85.422 | **2.48x** | **1.97x** |
+
+GUARDS: the previously kept 5-8v floor stays flat-to-positive in the same broad run
+except one noisy `RPUSH_5v` row; focused repeat measured `RPUSH_5v` candidate `67.686 us`
+vs control `70.966 us` and Redis `74.417 us` (`1.05x` vs control, `1.10x` vs Redis).
+SADD/LPUSH 5-8v were also positive in the broad run (`1.04-1.09x` vs control). HDEL/SREM/
+ZREM use the same parser/executor shape and are covered by conformance rather than a
+separate Criterion row.
+
+PROFILE / HOTSPOT TABLE: `perf stat` on `SADD_12v` measured candidate `94.988 us`,
+control `269.53 us`, Redis `150.80 us` in the perf-wrapped run (`2.84x` candidate/control,
+`1.59x` candidate/Redis), with 35.69B instructions, 24.38B cycles, 1.46 IPC, 2.03%
+branch misses for the full bench process. The flamegraph/perf-report artifact shows the
+post-keep residual is no longer a clean 9-18 dispatch cliff; top samples are harness
+formatting (`core::fmt::write` 9.02%), libc memmove (7.75%), Redis memory/cron/startup,
+and FrankenRedis socket/write/startup frames (`try_flush`/send path around 3.8%). Artifacts:
+`artifacts/optimization/frankenredis-ohsk5-dispatch-floor-9-18/20260710T0145Z/`.
+
+DECISION: KEEP. This decisively closes the 9-18 dispatch-position cliff for variadic
+writes. Do not retry cascade reordering for this family. Residual `RPUSH_12v`/`RPUSH_16v`
+versus Redis remains real and should be routed to list/storage/output work under a fresh
+profile, not another dispatch-floor arity extension unless new parsers for 19+ values are
+added and measured. The source commit's separate harness also covered HDEL/SREM/ZREM; this
+cod_fr run measured LPUSH/RPUSH/SADD directly and used conformance for the shared executor
+surface.
+
 ## 2026-07-09 BlackThrush: KEEP — dispatch-floor now routes VARIADIC WRITES (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM at 5–8 values) — 1.49–1.86x vs ORIG, fixes the documented 5-8v cliff
 
 NEGATIVE-EVIDENCE CHECK: this is the CLEAN FIX for the cliff CrimsonHawk documented in

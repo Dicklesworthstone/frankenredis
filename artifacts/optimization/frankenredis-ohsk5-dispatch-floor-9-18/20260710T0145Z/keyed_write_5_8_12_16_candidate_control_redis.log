@@ -1,0 +1,354 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling memchr v2.8.0
+   Compiling zerocopy v0.8.48
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling crc32fast v1.5.0
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+   Compiling simd-adler32 v0.3.9
+   Compiling rayon-core v1.13.0
+   Compiling adler2 v2.0.1
+   Compiling either v1.16.0
+   Compiling itoa v1.0.18
+   Compiling minimal-lexical v0.2.1
+   Compiling regex-syntax v0.8.10
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling byteorder v1.5.0
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling base64 v0.21.7
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling once_cell v1.21.4
+   Compiling walkdir v2.5.0
+   Compiling miniz_oxide v0.8.9
+   Compiling clap_builder v4.6.0
+   Compiling itertools v0.10.5
+   Compiling num-traits v0.2.19
+   Compiling plotters-svg v0.3.7
+   Compiling nom v7.1.3
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-channel v0.5.15
+   Compiling syn v2.0.117
+   Compiling crossbeam-deque v0.8.6
+   Compiling plotters v0.3.7
+   Compiling is-terminal v0.4.17
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling clap v4.6.1
+   Compiling hdrhistogram v7.5.4
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.48
+   Compiling tinytemplate v1.2.1
+   Compiling fr-bench v0.1.0 (/data/projects/frankenredis/crates/fr-bench)
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.5.1
+    Finished `release` profile [optimized] target(s) in 11.37s
+     Running benches/keyed_write_vs_redis.rs (/data/projects/.local-targets/frankenredis-cod-fr-bench/release/deps/keyed_write_vs_redis-06ec506255897477)
+Gnuplot not found, using plotters backend
+Benchmarking keyed_write_vs_redis/LPUSH_5v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/LPUSH_5v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_5v/redis-7.2.4: Collecting 10 samples in estimated 1.0015 s (11k iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_5v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/LPUSH_5v/redis-7.2.4
+                        time:   [80.865 µs 83.106 µs 84.752 µs]
+                        thrpt:  [755.14 Kelem/s 770.10 Kelem/s 791.45 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis: Collecting 10 samples in estimated 1.0005 s (15k iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis: Analyzing
+keyed_write_vs_redis/LPUSH_5v/frankenredis
+                        time:   [65.660 µs 69.035 µs 71.569 µs]
+                        thrpt:  [894.24 Kelem/s 927.06 Kelem/s 974.72 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis-orig: Collecting 10 samples in estimated 1.0022 s (14k iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_5v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/LPUSH_5v/frankenredis-orig
+                        time:   [69.935 µs 72.695 µs 75.606 µs]
+                        thrpt:  [846.50 Kelem/s 880.39 Kelem/s 915.13 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking keyed_write_vs_redis/LPUSH_8v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/LPUSH_8v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_8v/redis-7.2.4: Collecting 10 samples in estimated 1.0016 s (9515 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_8v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/LPUSH_8v/redis-7.2.4
+                        time:   [106.08 µs 109.90 µs 112.94 µs]
+                        thrpt:  [566.69 Kelem/s 582.35 Kelem/s 603.29 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis: Collecting 10 samples in estimated 1.0027 s (11k iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis: Analyzing
+keyed_write_vs_redis/LPUSH_8v/frankenredis
+                        time:   [79.409 µs 81.478 µs 82.927 µs]
+                        thrpt:  [771.77 Kelem/s 785.49 Kelem/s 805.95 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis-orig: Collecting 10 samples in estimated 1.0024 s (12k iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_8v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/LPUSH_8v/frankenredis-orig
+                        time:   [84.776 µs 88.972 µs 94.305 µs]
+                        thrpt:  [678.65 Kelem/s 719.33 Kelem/s 754.93 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_12v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/LPUSH_12v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_12v/redis-7.2.4: Collecting 10 samples in estimated 1.0003 s (7425 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_12v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/LPUSH_12v/redis-7.2.4
+                        time:   [125.56 µs 130.03 µs 135.18 µs]
+                        thrpt:  [473.44 Kelem/s 492.18 Kelem/s 509.70 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis: Collecting 10 samples in estimated 1.0054 s (9350 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis: Analyzing
+keyed_write_vs_redis/LPUSH_12v/frankenredis
+                        time:   [98.122 µs 101.04 µs 104.02 µs]
+                        thrpt:  [615.28 Kelem/s 633.38 Kelem/s 652.25 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis-orig: Collecting 10 samples in estimated 1.0027 s (4290 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_12v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/LPUSH_12v/frankenredis-orig
+                        time:   [218.97 µs 229.04 µs 240.61 µs]
+                        thrpt:  [265.99 Kelem/s 279.43 Kelem/s 292.27 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/LPUSH_16v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/LPUSH_16v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_16v/redis-7.2.4: Collecting 10 samples in estimated 1.0054 s (6435 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_16v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/LPUSH_16v/redis-7.2.4
+                        time:   [149.06 µs 153.42 µs 161.68 µs]
+                        thrpt:  [395.84 Kelem/s 417.16 Kelem/s 429.36 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis: Collecting 10 samples in estimated 1.0051 s (8140 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis: Analyzing
+keyed_write_vs_redis/LPUSH_16v/frankenredis
+                        time:   [121.30 µs 128.43 µs 132.52 µs]
+                        thrpt:  [482.96 Kelem/s 498.34 Kelem/s 527.61 Kelem/s]
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis-orig: Collecting 10 samples in estimated 1.0005 s (4290 iterations)
+Benchmarking keyed_write_vs_redis/LPUSH_16v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/LPUSH_16v/frankenredis-orig
+                        time:   [241.72 µs 250.00 µs 258.90 µs]
+                        thrpt:  [247.20 Kelem/s 256.00 Kelem/s 264.77 Kelem/s]
+Found 4 outliers among 10 measurements (40.00%)
+  2 (20.00%) low mild
+  2 (20.00%) high mild
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Collecting 10 samples in estimated 1.0023 s (13k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/RPUSH_5v/redis-7.2.4
+                        time:   [74.642 µs 76.809 µs 79.113 µs]
+                        thrpt:  [808.97 Kelem/s 833.24 Kelem/s 857.43 Kelem/s]
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Collecting 10 samples in estimated 1.0039 s (13k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Analyzing
+keyed_write_vs_redis/RPUSH_5v/frankenredis
+                        time:   [68.283 µs 78.365 µs 86.805 µs]
+                        thrpt:  [737.29 Kelem/s 816.70 Kelem/s 937.27 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Collecting 10 samples in estimated 1.0051 s (7810 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/RPUSH_5v/frankenredis-orig
+                        time:   [72.400 µs 75.472 µs 77.389 µs]
+                        thrpt:  [826.99 Kelem/s 848.00 Kelem/s 883.98 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/RPUSH_8v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/RPUSH_8v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_8v/redis-7.2.4: Collecting 10 samples in estimated 1.0015 s (11k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_8v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/RPUSH_8v/redis-7.2.4
+                        time:   [89.334 µs 90.732 µs 92.155 µs]
+                        thrpt:  [694.48 Kelem/s 705.38 Kelem/s 716.42 Kelem/s]
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis: Collecting 10 samples in estimated 1.0012 s (11k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis: Analyzing
+keyed_write_vs_redis/RPUSH_8v/frankenredis
+                        time:   [84.200 µs 87.629 µs 92.054 µs]
+                        thrpt:  [695.24 Kelem/s 730.35 Kelem/s 760.09 Kelem/s]
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis-orig: Collecting 10 samples in estimated 1.0043 s (9735 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_8v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/RPUSH_8v/frankenredis-orig
+                        time:   [90.144 µs 92.693 µs 95.563 µs]
+                        thrpt:  [669.72 Kelem/s 690.45 Kelem/s 709.98 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking keyed_write_vs_redis/RPUSH_12v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/RPUSH_12v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_12v/redis-7.2.4: Collecting 10 samples in estimated 1.0003 s (9515 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_12v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/RPUSH_12v/redis-7.2.4
+                        time:   [98.983 µs 102.22 µs 105.97 µs]
+                        thrpt:  [603.96 Kelem/s 626.12 Kelem/s 646.57 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis: Collecting 10 samples in estimated 1.0059 s (8855 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis: Analyzing
+keyed_write_vs_redis/RPUSH_12v/frankenredis
+                        time:   [98.340 µs 105.58 µs 109.91 µs]
+                        thrpt:  [582.28 Kelem/s 606.16 Kelem/s 650.80 Kelem/s]
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis-orig: Collecting 10 samples in estimated 1.0026 s (4015 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_12v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/RPUSH_12v/frankenredis-orig
+                        time:   [242.19 µs 248.62 µs 254.76 µs]
+                        thrpt:  [251.21 Kelem/s 257.43 Kelem/s 264.26 Kelem/s]
+Benchmarking keyed_write_vs_redis/RPUSH_16v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/RPUSH_16v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_16v/redis-7.2.4: Collecting 10 samples in estimated 1.0036 s (8360 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_16v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/RPUSH_16v/redis-7.2.4
+                        time:   [116.65 µs 134.82 µs 148.16 µs]
+                        thrpt:  [431.97 Kelem/s 474.70 Kelem/s 548.65 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis: Collecting 10 samples in estimated 1.0013 s (7645 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis: Analyzing
+keyed_write_vs_redis/RPUSH_16v/frankenredis
+                        time:   [119.78 µs 141.09 µs 163.46 µs]
+                        thrpt:  [391.54 Kelem/s 453.60 Kelem/s 534.33 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis-orig: Collecting 10 samples in estimated 1.0116 s (3960 iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_16v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/RPUSH_16v/frankenredis-orig
+                        time:   [230.45 µs 246.60 µs 263.20 µs]
+                        thrpt:  [243.16 Kelem/s 259.53 Kelem/s 277.71 Kelem/s]
+Benchmarking keyed_write_vs_redis/SADD_5v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/SADD_5v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_5v/redis-7.2.4: Collecting 10 samples in estimated 1.0012 s (14k iterations)
+Benchmarking keyed_write_vs_redis/SADD_5v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/SADD_5v/redis-7.2.4
+                        time:   [68.054 µs 69.947 µs 72.067 µs]
+                        thrpt:  [888.06 Kelem/s 914.98 Kelem/s 940.43 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis: Collecting 10 samples in estimated 1.0013 s (19k iterations)
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis: Analyzing
+keyed_write_vs_redis/SADD_5v/frankenredis
+                        time:   [47.257 µs 49.144 µs 50.512 µs]
+                        thrpt:  [1.2670 Melem/s 1.3023 Melem/s 1.3543 Melem/s]
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis-orig: Collecting 10 samples in estimated 1.0029 s (19k iterations)
+Benchmarking keyed_write_vs_redis/SADD_5v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/SADD_5v/frankenredis-orig
+                        time:   [49.516 µs 51.240 µs 52.529 µs]
+                        thrpt:  [1.2184 Melem/s 1.2490 Melem/s 1.2925 Melem/s]
+Benchmarking keyed_write_vs_redis/SADD_8v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/SADD_8v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_8v/redis-7.2.4: Collecting 10 samples in estimated 1.0021 s (12k iterations)
+Benchmarking keyed_write_vs_redis/SADD_8v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/SADD_8v/redis-7.2.4
+                        time:   [87.720 µs 90.292 µs 92.927 µs]
+                        thrpt:  [688.71 Kelem/s 708.81 Kelem/s 729.59 Kelem/s]
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis: Collecting 10 samples in estimated 1.0027 s (17k iterations)
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis: Analyzing
+keyed_write_vs_redis/SADD_8v/frankenredis
+                        time:   [57.157 µs 58.765 µs 59.981 µs]
+                        thrpt:  [1.0670 Melem/s 1.0891 Melem/s 1.1197 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis-orig: Collecting 10 samples in estimated 1.0019 s (16k iterations)
+Benchmarking keyed_write_vs_redis/SADD_8v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/SADD_8v/frankenredis-orig
+                        time:   [59.937 µs 61.472 µs 62.977 µs]
+                        thrpt:  [1.0162 Melem/s 1.0411 Melem/s 1.0678 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Collecting 10 samples in estimated 1.0057 s (8360 iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/SADD_12v/redis-7.2.4
+                        time:   [117.87 µs 120.83 µs 124.32 µs]
+                        thrpt:  [514.78 Kelem/s 529.69 Kelem/s 542.98 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Collecting 10 samples in estimated 1.0001 s (14k iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Analyzing
+keyed_write_vs_redis/SADD_12v/frankenredis
+                        time:   [65.871 µs 68.536 µs 70.673 µs]
+                        thrpt:  [905.58 Kelem/s 933.81 Kelem/s 971.60 Kelem/s]
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Collecting 10 samples in estimated 1.0031 s (5390 iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/SADD_12v/frankenredis-orig
+                        time:   [183.22 µs 194.82 µs 205.82 µs]
+                        thrpt:  [310.96 Kelem/s 328.51 Kelem/s 349.31 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/SADD_16v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/SADD_16v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_16v/redis-7.2.4: Collecting 10 samples in estimated 1.0026 s (6050 iterations)
+Benchmarking keyed_write_vs_redis/SADD_16v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/SADD_16v/redis-7.2.4
+                        time:   [163.64 µs 168.55 µs 174.52 µs]
+                        thrpt:  [366.73 Kelem/s 379.70 Kelem/s 391.10 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis: Collecting 10 samples in estimated 1.0037 s (11k iterations)
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis: Analyzing
+keyed_write_vs_redis/SADD_16v/frankenredis
+                        time:   [83.293 µs 85.422 µs 87.691 µs]
+                        thrpt:  [729.84 Kelem/s 749.22 Kelem/s 768.38 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis-orig: Collecting 10 samples in estimated 1.0111 s (4675 iterations)
+Benchmarking keyed_write_vs_redis/SADD_16v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/SADD_16v/frankenredis-orig
+                        time:   [194.12 µs 211.70 µs 225.43 µs]
+                        thrpt:  [283.91 Kelem/s 302.32 Kelem/s 329.70 Kelem/s]

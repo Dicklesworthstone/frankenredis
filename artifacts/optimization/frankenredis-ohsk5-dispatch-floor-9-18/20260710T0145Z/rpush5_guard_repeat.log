@@ -1,0 +1,40 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running benches/keyed_write_vs_redis.rs (/data/projects/.local-targets/frankenredis-cod-fr-bench/release/deps/keyed_write_vs_redis-06ec506255897477)
+Gnuplot not found, using plotters backend
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Collecting 10 samples in estimated 1.0013 s (13k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/RPUSH_5v/redis-7.2.4
+                        time:   [73.377 µs 74.417 µs 75.662 µs]
+                        thrpt:  [845.86 Kelem/s 860.02 Kelem/s 872.21 Kelem/s]
+                 change:
+                        time:   [-6.0039% -1.6242% +3.1791%] (p = 0.52 > 0.05)
+                        thrpt:  [-3.0811% +1.6510% +6.3874%]
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Collecting 10 samples in estimated 1.0020 s (14k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis: Analyzing
+keyed_write_vs_redis/RPUSH_5v/frankenredis
+                        time:   [66.416 µs 67.686 µs 69.165 µs]
+                        thrpt:  [925.33 Kelem/s 945.54 Kelem/s 963.62 Kelem/s]
+                 change:
+                        time:   [-14.972% -8.7039% -2.9343%] (p = 0.02 < 0.05)
+                        thrpt:  [+3.0230% +9.5337% +17.608%]
+                        Performance has improved.
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Collecting 10 samples in estimated 1.0034 s (14k iterations)
+Benchmarking keyed_write_vs_redis/RPUSH_5v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/RPUSH_5v/frankenredis-orig
+                        time:   [69.160 µs 70.966 µs 73.592 µs]
+                        thrpt:  [869.66 Kelem/s 901.84 Kelem/s 925.39 Kelem/s]
+                 change:
+                        time:   [-13.278% -8.6272% -4.2109%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.3960% +9.4417% +15.311%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild

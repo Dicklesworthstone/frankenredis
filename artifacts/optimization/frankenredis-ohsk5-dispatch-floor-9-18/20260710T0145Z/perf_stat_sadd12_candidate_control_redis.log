@@ -1,0 +1,57 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running benches/keyed_write_vs_redis.rs (/data/projects/.local-targets/frankenredis-cod-fr-bench/release/deps/keyed_write_vs_redis-06ec506255897477)
+Gnuplot not found, using plotters backend
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Collecting 10 samples in estimated 1.0018 s (7370 iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/redis-7.2.4: Analyzing
+keyed_write_vs_redis/SADD_12v/redis-7.2.4
+                        time:   [148.30 µs 150.80 µs 153.26 µs]
+                        thrpt:  [417.60 Kelem/s 424.40 Kelem/s 431.56 Kelem/s]
+                 change:
+                        time:   [+14.977% +21.698% +28.527%] (p = 0.00 < 0.05)
+                        thrpt:  [-22.195% -17.830% -13.026%]
+                        Performance has regressed.
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Collecting 10 samples in estimated 1.0001 s (11k iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis: Analyzing
+keyed_write_vs_redis/SADD_12v/frankenredis
+                        time:   [90.842 µs 94.988 µs 97.401 µs]
+                        thrpt:  [657.08 Kelem/s 673.77 Kelem/s 704.52 Kelem/s]
+                 change:
+                        time:   [+28.609% +34.207% +39.990%] (p = 0.00 < 0.05)
+                        thrpt:  [-28.566% -25.488% -22.245%]
+                        Performance has regressed.
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Warming up for 300.00 ms
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Collecting 10 samples in estimated 1.0099 s (3960 iterations)
+Benchmarking keyed_write_vs_redis/SADD_12v/frankenredis-orig: Analyzing
+keyed_write_vs_redis/SADD_12v/frankenredis-orig
+                        time:   [263.16 µs 269.53 µs 274.17 µs]
+                        thrpt:  [233.43 Kelem/s 237.45 Kelem/s 243.20 Kelem/s]
+                 change:
+                        time:   [+25.881% +31.866% +38.637%] (p = 0.00 < 0.05)
+                        thrpt:  [-27.869% -24.165% -20.560%]
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+
+
+ Performance counter stats for 'cargo bench --profile release -p fr-bench --bench keyed_write_vs_redis -- keyed_write_vs_redis/SADD_12v --noplot':
+
+        7612562863      task-clock                       #    1.511 CPUs utilized
+            152060      context-switches                 #   19.975 K/sec
+             20383      cpu-migrations                   #    2.678 K/sec
+             31817      page-faults                      #    4.180 K/sec
+       35688429281      instructions                     #    1.46  insn per cycle
+                                                  #    0.15  stalled cycles per insn
+       24377389165      cycles                           #    3.202 GHz
+        5358056742      stalled-cycles-frontend          #   21.98% frontend cycles idle
+        7898226491      branches                         #    1.038 G/sec
+         160252973      branch-misses                    #    2.03% of all branches
+
+       5.039516378 seconds time elapsed
+
+       4.544334000 seconds user
+       3.046764000 seconds sys

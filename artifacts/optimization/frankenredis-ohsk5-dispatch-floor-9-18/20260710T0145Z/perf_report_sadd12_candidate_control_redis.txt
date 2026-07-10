@@ -1,0 +1,471 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+Warning:
+Processed 486 events and lost 1 chunks!
+
+Check IO/CPU overload!
+
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+#
+# Total Lost Samples: 2
+#
+# Samples: 166  of event 'cycles:P'
+# Event count (approx.): 58510408
+#
+# Overhead  Command          Shared Object                          Symbol                                                                                        IPC   [IPC Coverage]
+# ........  ...............  .....................................  ............................................................................................  ....................
+#
+     9.02%  keyed_write_vs_  keyed_write_vs_redis-06ec506255897477  [.] core::fmt::write                                                                          -      -
+            |
+            ---core::fmt::write
+               |
+               |--4.31%--alloc::fmt::format::format_inner
+               |          keyed_write_vs_redis::encode_command
+               |          0x4f
+               |
+                --1.82%--keyed_write_vs_redis::encode_command
+                          0x11f
+
+     7.75%  keyed_write_vs_  libc.so.6                              [.] __memmove_avx_unaligned_erms                                                              -      -
+            |
+            |--4.05%--0xffffffffb0c1b2b7
+            |          0xffffffffafddc709
+            |          0xffffffffafdddad0
+            |          0xffffffffafe1aa28
+            |          0xffffffffafe1df5b
+            |          0xffffffffafda3412
+            |          0xffffffffafda382a
+            |          0xffffffffafda4e27
+            |          0xffffffffafda53ed
+            |          0xffffffffafda5667
+            |          0xffffffffaf9eb96b
+            |          0xffffffffb0c2811f
+            |          0xffffffffaf600bb7
+            |
+             --3.70%--__memcpy_avx_unaligned_erms (inlined)
+
+     4.84%  redis-server     redis-server                           [.] ctl_refresh                                                                               -      -
+            |
+            ---arenas_i2a_impl (inlined)
+               arenas_i_impl (inlined)
+               arenas_i (inlined)
+               ctl_refresh
+               epoch_ctl
+               je_ctl_byname
+               zmalloc_get_allocator_info (inlined)
+               cronUpdateMemoryStats
+               cronUpdateMemoryStats
+               serverCron
+               serverCron
+               processTimeEvents
+               aeProcessEvents (inlined)
+               aeMain
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     4.78%  keyed_write_vs_  libc.so.6                              [.] __memcmp_avx2_movbe                                                                       -      -
+            |
+            ---__memcmp_avx2_movbe
+               <clap_builder::parser::parser::Parser>::add_defaults
+
+     4.74%  redis-server     [unknown]                              [k] 0xffffffffafe77845                                                                        -      -
+            |
+            ---0xffffffffb0115e75
+               0xffffffffb013e61b
+               0xffffffffb009af69
+               0xffffffffafe92a6e
+               0xffffffffafe98ed3
+               0xffffffffafe99134
+               0xffffffffafe7a447
+               0xffffffffafe7a97f
+               0xffffffffaf925032
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch (inlined)
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               __GI__IO_file_open (inlined)
+               _IO_new_file_fopen (inlined)
+               __fopen_internal (inlined)
+               _IO_new_fopen (inlined)
+               aofLoadManifestFromFile
+               aofLoadManifestFromDisk
+               aofLoadManifestFromDisk
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     4.57%  keyed_write_vs_  keyed_write_vs_redis-06ec506255897477  [.] <core::fmt::Formatter>::pad_integral::write_prefix                                        -      -
+            |
+            ---<core::fmt::Formatter>::pad_integral::write_prefix
+               keyed_write_vs_redis::keyed_write_vs_redis
+               keyed_write_vs_redis::main
+               0x612d6e697574613c
+
+     4.51%  redis-server     [unknown]                              [k] 0xffffffffafacbdcf                                                                        -      -
+            |
+            ---0xffffffffafd0e017
+               0xffffffffafd0e31c
+               0xffffffffafd0e577
+               0xffffffffafd18bca
+               0xffffffffafa1581b
+               0xffffffffafa16836
+               0xffffffffafa16f97
+               0xffffffffafa17006
+               0xffffffffaf92553c
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __GI___clone3
+               create_thread
+               __pthread_create_2_1 (inlined)
+               bioInit
+               InitServerLast
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     4.41%  keyed_write_vs_  [unknown]                              [k] 0xffffffffb0c1b2b7                                                                        -      -
+            |
+             --4.19%--0xffffffffafe52e14
+                       0xffffffffafdb9690
+                       0xffffffffafdbb616
+                       0xffffffffafd9d93c
+                       0xffffffffafd9dfb2
+                       0xffffffffafda4e34
+                       0xffffffffafda53ed
+                       0xffffffffafda5667
+                       0xffffffffaf9eb96b
+                       0xffffffffb0c2811f
+                       0xffffffffaf600bb7
+                       elf_machine_rela_relative (inlined)
+                       elf_dynamic_do_Rela (inlined)
+                       _dl_relocate_object_no_relro
+                       _dl_relocate_object
+                       dl_main
+                       _dl_sysdep_start
+                       _dl_start_final (inlined)
+                       _dl_start
+                       _start
+
+     4.26%  frankenredis     [unknown]                              [k] 0xffffffffb0c1b2b7                                                                        -      -
+            |
+             --4.24%--0xffffffffaf601199
+
+     4.23%  redis-server     [unknown]                              [k] 0xffffffffaf6001bd                                                                        -      -
+            |
+             --4.18%--initServer
+                       main
+                       __libc_start_call_main
+                       __libc_start_main_impl (inlined)
+                       _start
+
+     3.81%  frankenredis     [unknown]                              [k] 0xffffffffafda4d6e                                                                        -      -
+            |
+            ---0xffffffffb0c182c9
+               0xffffffffafd2efd9
+               0xffffffffafd2f4e8
+               0xffffffffafd9f332
+               0xffffffffafd9f7c5
+               0xffffffffafda4d91
+               0xffffffffafda53ed
+               0xffffffffafda5667
+               0xffffffffaf9eb96b
+               0xffffffffb0c2811f
+               0xffffffffaf600bb7
+               frankenredis::drain_writer_completions
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> (inlined)
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+
+     3.81%  frankenredis     [unknown]                              [k] 0xffffffffb0a22dd6                                                                        -      -
+            |
+            ---0xffffffffb0a3d973
+               0xffffffffb0a3fb52
+               0xffffffffb0a40479
+               0xffffffffb0a2305d
+               0xffffffffb0a23e63
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08efb7a
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch (inlined)
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_send (inlined)
+               <std::sys::net::connection::socket::TcpStream>::write (inlined)
+               <&std::net::tcp::TcpStream as std::io::Write>::write (inlined)
+               {closure#0} (inlined)
+               do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> (inlined)
+               do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> (inlined)
+               write (inlined)
+               try_flush (inlined)
+
+     3.75%  redis-server     redis-server                           [.] zrealloc                                                                                  -      -
+            |
+            ---ztryrealloc_usable_internal (inlined)
+               zrealloc
+               0xa
+
+     3.51%  keyed_write_vs_  keyed_write_vs_redis-06ec506255897477  [.] <usize as core::fmt::Display>::fmt                                                        -      -
+            |
+            ---<usize as core::fmt::Display>::fmt
+               0x8b48fb894820ec82
+
+     3.38%  frankenredis     [unknown]                              [k] 0xffffffffafdf0a3c                                                                        -      -
+            |
+            ---0xffffffffb0c29e6b
+               0xffffffffaff6df89
+               0xffffffffafe77a93
+               0xffffffffafe79e1c
+               0xffffffffafe92af8
+               0xffffffffafe98ed3
+               0xffffffffafe99134
+               0xffffffffafe7a447
+               0xffffffffafe7a8cd
+               0xffffffffaf924a83
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               syscall
+               mi_prim_open (inlined)
+               unix_detect_thp (inlined)
+               _mi_prim_mem_init
+               mi_process_init_once (inlined)
+               mi_process_init
+               mi_process_init
+               _mi_auto_process_init
+
+     3.29%  redis-server     [unknown]                              [k] 0xffffffffaf70410b                                                                        -      -
+            |
+            ---0xffffffffafea7d1c
+               0xffffffffafe9259c
+               0xffffffffafe96776
+               0xffffffffafe96a4f
+               0xffffffffafe98e57
+               0xffffffffafe99134
+               0xffffffffafe7a447
+               0xffffffffafe7a8cd
+               0xffffffffaf924a83
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               syscall
+               init_thp_state (inlined)
+               je_pages_boot
+               malloc_init_hard_a0_locked
+               malloc_init_hard
+               call_init (inlined)
+               __libc_start_main_impl (inlined)
+               _start
+
+     2.76%  keyed_write_vs_  libc.so.6                              [.] cfree@GLIBC_2.2.5                                                                         -      -
+            |
+            ---__GI___libc_free (inlined)
+               <alloc::raw_vec::RawVecInner>::finish_grow
+               0x4
+
+     2.60%  keyed_write_vs_  keyed_write_vs_redis-06ec506255897477  [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>  -      -
+            |
+            ---<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+               alloc::fmt::format::format_inner
+               keyed_write_vs_redis::encode_command_vecs
+               0x56
+
+     2.57%  frankenredis     [unknown]                              [k] 0xffffffffafd0e13f                                                                        -      -
+            |
+            ---0xffffffffb0c3a55e
+               0xffffffffafd04422
+               0xffffffffafd0e07f
+               0xffffffffafd0e31c
+               0xffffffffafd0e577
+               0xffffffffafd18bca
+               0xffffffffafa1581b
+               0xffffffffafa16836
+               0xffffffffafa16f97
+               0xffffffffafa17006
+               0xffffffffaf92553c
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __GI___clone3
+               create_thread
+               __pthread_create_2_1 (inlined)
+               <std::sys::thread::unix::Thread>::new
+               <frankenredis::WriterPool>::new
+               spawn_unchecked<frankenredis::{impl#6}::new::{closure_env#0}, ()> (inlined)
+               spawn<frankenredis::{impl#6}::new::{closure_env#0}, ()> (inlined)
+               new (inlined)
+               0xf
+
+     2.47%  redis-server     [unknown]                              [k] 0xffffffffb0c1b866                                                                        -      -
+            |
+            ---0xffffffffaf601199
+
+     2.11%  keyed_write_vs_  [unknown]                              [k] 0xffffffffafe52406                                                                        -      -
+            |
+            ---0xffffffffb0c1c69a
+               0xffffffffafd26809
+               0xffffffffafd26b78
+               0xffffffffafb24196
+               0xffffffffb0c20691
+               0xffffffffaf60012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_recv
+               <std::net::tcp::TcpStream as std::io::Read>::read
+               <keyed_write_vs_redis::Client>::run_packet
+
+     1.82%  keyed_write_vs_  keyed_write_vs_redis-06ec506255897477  [.] <core::fmt::Formatter>::pad_integral                                                      -      -
+            |
+            ---<core::fmt::Formatter>::pad_integral
+               <usize as core::fmt::Display>::fmt
+               core::fmt::write
+               alloc::fmt::format::format_inner
+               keyed_write_vs_redis::encode_command
+               0x11f
+
+     1.80%  redis-server     ld-linux-x86-64.so.2                   [.] _dl_map_object_from_fd                                                                    -      -
+            |
+            ---0xffffffffafb04b74
+               0xffffffffafd2f34a
+               0xffffffffafd9f332
+               0xffffffffafd9f7c5
+               0xffffffffafda4d91
+               0xffffffffafda53ed
+               0xffffffffafda5667
+               0xffffffffaf9eb96b
+               0xffffffffb0c2811f
+               0xffffffffaf600bb7
+
+     1.65%  keyed_write_vs_  [unknown]                              [k] 0xffffffffb0c29e6b                                                                        -      -
+            |
+             --1.46%--0xffffffffb01174b7
+                       0xffffffffb00a24c0
+                       0xffffffffb08f1cdc
+                       0xffffffffb08f4d51
+                       0xffffffffb0a71e49
+                       0xffffffffb0a722fc
+                       0xffffffffb08eb02b
+                       0xffffffffb08ee809
+                       0xffffffffb08ee8a7
+                       0xffffffffaf924d80
+                       0xffffffffb0c20551
+                       0xffffffffaf60012b
+                       __GI_socket (inlined)
+                       <std::sys::net::connection::socket::TcpStream>::connect::inner
+                       std::sys::net::connection::each_addr::<(&str, u16), <std::sys::net::connection::socket::TcpStream>::connect::inner, std::sys::net::connection::socket::TcpStream>
+                       0x1
+
+     1.05%  redis-server     [unknown]                              [k] 0xffffffffafe52cbf                                                                        -      -
+            |
+            ---0xffffffffafda576b
+               0xffffffffaf9eb89e
+               0xffffffffb0c2811f
+               0xffffffffaf600bb7
+               0xffffffffb0c1f93d
+               0xffffffffaff29913
+               0xffffffffafe89c2c
+               0xffffffffafe89f6c
+               0xffffffffafe8a07a
+               0xffffffffafe8bc37
+               0xffffffffafe8bee9
+               0xffffffffaf925398
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+
+     1.00%  frankenredis     [unknown]                              [k] 0xffffffffafe52e29                                                                        -      -
+            |
+            ---0xffffffffafd2f011
+               0xffffffffafd2f4e8
+               0xffffffffafd9f332
+               0xffffffffafd9f7c5
+               0xffffffffafda4d91
+               0xffffffffafda53ed
+               0xffffffffafda5667
+               0xffffffffaf9eb96b
+               0xffffffffb0c2811f
+               0xffffffffaf600bb7
+               <fr_runtime::Runtime>::reject_stale_replica_read_request
+
+     0.54%  bio_close_file   [unknown]                              [k] 0xffffffffb0c251fb                                                                        -      -
+            |
+            ---0xffffffffafd05767
+               0xffffffffafd0d585
+               0xffffffffafd149e2
+               0xffffffffafa69ca8
+               0xffffffffb0c2f38a
+               0xffffffffb0c2f947
+               0xffffffffb0c3762f
+               0xffffffffb0c30842
+               0xffffffffafa445e9
+               0xffffffffafa44781
+               0xffffffffafd40e77
+               0xffffffffafd44870
+               0xffffffffafd39c28
+               0xffffffffafd39d92
+               0xffffffffafd39e8c
+               0xffffffffaf92535c
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __GI___posix_fadvise64_l64 (inlined)
+               reclaimFilePageCache (inlined)
+               bioProcessBackgroundJobs
+               start_thread
+               __GI___clone3
+
+     0.54%  bio_close_file   [unknown]                              [k] 0xffffffffaf600005                                                                        -      -
+            |
+            ---0xffffffffafe52d0a
+               0xffffffffafe58fde
+               0xffffffffafda342c
+               0xffffffffafda382a
+               0xffffffffafda4e27
+               0xffffffffafda53ed
+               0xffffffffafda5667
+               0xffffffffaf9eb96b
+               0xffffffffb0c2811f
+               0xffffffffaf600bb7
+               memset (inlined)
+               je_decay_reinit (inlined)
+               je_decay_init
+               je_pac_init
+               je_pa_shard_init
+               je_arena_new
+               arena_init_locked (inlined)
+               je_arena_choose_hard
+               arena_choose_impl (inlined)
+               arena_choose (inlined)
+               je_tsd_tcache_data_init
+               je_tsd_tcache_enabled_data_init
+               tsd_data_init (inlined)
+               je_tsd_fetch_slow
+               tsd_fetch_impl (inlined)
+               tsdn_fetch (inlined)
+               je_malloc_usable_size_impl (inlined)
+               je_malloc_usable_size
+               zfree (inlined)
+               zfree (inlined)
+               bioProcessBackgroundJobs
+               start_thread
+               __GI___clone3
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
