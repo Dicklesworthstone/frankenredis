@@ -5285,3 +5285,43 @@ Same magnitude + scaling as HGET (the eliminated O(elem) copy). Byte-exact: ctrl
 on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONGTYPE, binary,
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
+
+## 2026-07-10 cc_fr: CLOSES the line directly above — GETSET `_into` is SHIPPED, GETDEL `_into` is a REJECT, both now PROFILE-VERIFIED (they were prose)
+
+The `NEXT … GETSET, GETDEL` note above is what keeps getting re-issued as a lane ("the never-built
+zero-copy `_into` variants"). **GETSET `_into` was built and shipped on 2026-07-04; GETDEL cannot
+win.** Both rows were previously argued from code reading, with no profile and no self-time — which
+the ledger-integrity rule makes inadmissible. Profiled both.
+
+Method: existing symbol-verified `release-perf` binary (no cargo — profiling needs none), server
+pinned to core 2, seeded then **quiesced 3 s before `perf record` attached** (the first window after a
+seed otherwise charges ~130 M instructions of rehash/cron with zero commands issued), heavily
+pipelined client. `perf report --no-children`, flat self%.
+
+**GETSET** — `SET gs <4096B>` then blast `GETSET gs <4096B>` (key persists, old value returned):
+`__memmove_avx_unaligned_erms` **6.12%**, `__memset_avx2_unaligned_erms` 3.75%,
+`Runtime::plain_borrowed_default_key_write_allows` 2.87%, `process_buffered_frames` 2.81%.
+`Store::getset_with` does not clear 1% and **no clone frame appears at all**. The `_into` path
+(`Store::getset_with` `fr-store:8395` + `Runtime::execute_plain_getset_borrowed_into`
+`fr-runtime:18961`) is already lean; the residual is the unavoidable 4096-byte copy into `write_buf`
+plus dispatch. **Shipped, not unbuilt. Nothing left to elide.**
+
+**GETDEL** — 40k keys × 4096 B, each `GETDEL`ed exactly once (cold; the value is removed):
+`process_buffered_frames` **10.15%**, `__memmove_avx_unaligned_erms` **8.22%**,
+`Store::internal_entries_remove` **6.28%**, `Store::hash_field_ttl_clear_for_key` 1.95%,
+`RespFrame::encode_into` 1.95%.
+
+That settles encode-before-mutate **empirically**: `internal_entries_remove` (6.28% self) **moves**
+the value out of the entry, and **no clone frame exists in the profile**. The lone `memmove` (8.22%)
+is the single copy of the payload into the reply buffer — which an encode-before-mutate path would
+pay *identically*. There is no clone to elide, so the lever cannot win. **REJECT confirmed with
+self-time. Do not retry.** GETDEL's real residual is dispatch (`process_buffered_frames` 10.15%),
+owned by `cod_fr`.
+
+**NEW LEVER, named and unclaimed:** `Store::hash_field_ttl_clear_for_key` burns **1.95% self on every
+GETDEL** against a keyspace holding **zero hash-field TTLs** — an unconditional probe of an empty
+side map. This is the `empty-sidemap alloc fast-exit` vein: an `O(1)` `is_empty()` guard before the
+probe. The same shape likely recurs on other delete/overwrite paths (`DEL`, `SET` overwrite). Not
+taken this turn: no A/B substrate is available — `rch` reports
+`no admissible workers: insufficient_slots=10, active_project_exclusion=1`, and a worker that *is*
+assigned runs `perf_event_paranoid=4`. Profiling works; ratios do not.
