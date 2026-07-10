@@ -5287,6 +5287,57 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: SURFACE — profile-ranked the remaining fr-owned kernels; the per-site SIMD vein is near-saturated. Top tractable target is **crc64 pclmulqdq (7.30% self)**, scoped as a careful multi-hour lever (NOT rushed). `common_prefix_len` did NOT land — it is parked unwired
+
+**Correction to the record:** the entry below says the AVX2 `common_prefix_len` kernel was built, but
+it is **NOT wired** — `e31555cfe` reverted the fr-persist edit (hot-path inlining regression). LZF
+still uses the inline word loop. Nothing in production uses the kernel; it is parked evidence.
+
+Profile-first ranking of fr-owned hot loops (2 MiB **incompressible** string `DUMP`, `fr-cand3`
+`sha256 ad6506c4…`, host `thinkstation1`, `perf record -F 997`, flat self%):
+
+| frame | self% | SIMD verdict |
+|---|---:|---|
+| `fr_persist::lzf_compress` | **73.91%** | serial hash-chain match-finding; **redis emits scalar too** and is parity-hard. The match-extension inner loop (`common_prefix_len`) was the only SIMD-able part, and it does not wire (above). Not a clean lever. |
+| `fr_persist::crc64_redis` | **7.30%** | **the top tractable remaining SIMD kernel** — a whole-buffer streaming reduction (wires cleanly, unlike the inner-call `common_prefix_len`) |
+
+**State of the per-site SIMD vein (fr-simd):** popcount **3.14x** and bitpos **17x** SHIPPED (compute-
+bound reduces where the kernel *is* the whole hot loop); bitand (bandwidth-bound) and common_prefix
+(hot-path inlining loss) MEASURED and correctly NOT wired. The clean, low-risk byte-slice kernels are
+done. **crc64 is the last substantial site, and it is high-risk.**
+
+### crc64 pclmulqdq — SCOPED, not taken this turn (correctness-critical, multi-hour)
+
+`crc64_redis` (fr-persist:1350) is a **reflected** CRC64 (`(crc >> 1) ^ CRC64_REDIS_REFLECTED_POLY`;
+Redis's Jones poly `0xad93d23594c935a9`), currently **slice-by-16** (16 tables, 16 B/iter) — already
+beating redis's slice-by-8. The next tier is `PCLMULQDQ` carry-less-multiply folding (~10x the table
+throughput); at 7.30% self a 10x kernel is ~6.6% end-to-end on a large `DUMP`/`BGSAVE` checksum.
+
+**Why I did not rush it in this hour, and why that is the right call:** a wrong CRC **silently
+corrupts every DUMP/RESTORE/RDB** — the worst bug class here. pclmul folding needs polynomial-specific
+fold constants (x^128, x^192 mod P in reflected form) and the reflected bit-ordering is exactly where
+subtle bugs live. This is a genuine multi-hour implementation; rushing it in the remaining budget most
+likely ends in a failing differential test being debugged, not a ship. Correctness-critical
+persistence code is the wrong place to rush.
+
+**Safe plan for whoever takes it (an hour is not enough; budget the real time):**
+1. `fr_simd::crc64_reflected(data) -> u64`, AVX2/PCLMULQDQ (`_mm_clmulepi64_si128`) folding, with the
+   **existing `crc64_redis` table impl as the safe scalar fallback** and runtime dispatch on
+   `is_x86_feature_detected!("pclmulqdq")`.
+2. Compute the fold constants **programmatically** from `CRC64_REDIS_REFLECTED_POLY` (a `const fn` bit
+   loop computing `x^k mod P`), so no hand-derived constant can be wrong.
+3. **Differential test is the gate:** `crc64_reflected(x) == crc64_redis(x)` for every length `0..=512`
+   and thousands of random large inputs. Do NOT wire fr-persist until it passes — a parked unwired
+   kernel is the safe failure mode.
+4. Then wire `fr_persist::crc64_redis`, verify the RDB/DUMP byte-equality gate, null-gated bench on a
+   large buffer (this kernel *is* the whole loop, so it wires without common_prefix's inlining issue).
+
+**Broader frontier:** the two remaining big levers are (a) this crc64 pclmul done carefully, and
+(b) the `target-cpu=x86-64-v3` build target (bit-identical for fr — proven — and it lifts *every*
+integer loop at once with no cross-crate-inlining cost, but raises the min CPU: an operator decision).
+Both are scoped calls, not rushed hours. The user has favored the runtime-dispatch/fallback path
+(keep portability), which points at (a).
+
 ## 2026-07-10 cc_fr: NOT WIRED (revert-on-loss) — AVX2 `common_prefix_len` kernel wins 1.5–1.8x on ≥128 B in isolation, but routing LZF's hot path through it adds cross-crate call overhead on the frequent SHORT-match case; end-to-end LZF net unproven
 
 Took `common_prefix_len` — LZF's match-extension inner loop (`lzf_compress`, fr-persist), profiled at
