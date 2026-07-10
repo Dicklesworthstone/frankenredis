@@ -48,3 +48,9 @@ harness = false
 [[bench]]
 name = "write_cache_invalidation"
 harness = false
+
+# (cc_fr) Same-binary null-gated A/B for a no-TTL SET overwrite: always-clone owned key
+# (GATE=false) vs clone elided without a TTL (GATE=true).
+[[bench]]
+name = "set_no_ttl_insert"
+harness = false

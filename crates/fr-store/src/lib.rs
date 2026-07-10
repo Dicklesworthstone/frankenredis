@@ -7614,6 +7614,25 @@ impl Store {
     }
 
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
+        self.set_impl::<true>(key, value, px_ttl_ms, now_ms);
+    }
+
+    /// Bench-only baseline: `set` routed through the pre-elision insert (`GATE = false`,
+    /// always cloning the owned key for `expiry_deadlines` even without a TTL). Byte-
+    /// identical effect to `set`; exists only so a same-binary A/B can isolate the no-TTL
+    /// key-clone elision. Not on any production path.
+    #[doc(hidden)]
+    pub fn set_orig(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
+        self.set_impl::<false>(key, value, px_ttl_ms, now_ms);
+    }
+
+    fn set_impl<const GATE: bool>(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        px_ttl_ms: Option<u64>,
+        now_ms: u64,
+    ) {
         self.drop_if_expired(key.as_slice(), now_ms);
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
@@ -7641,7 +7660,7 @@ impl Store {
         if lfu_tracking_enabled {
             entry.mark_redis_lfu_clock_field();
         }
-        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry_impl::<GATE>(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -10673,6 +10692,20 @@ impl Store {
     fn internal_entries_insert_with_expiry(
         &mut self,
         key: Vec<u8>,
+        entry: Entry,
+        expires_at_ms: Option<u64>,
+    ) -> Option<Entry> {
+        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms)
+    }
+
+    /// `internal_entries_insert_with_expiry` with a `const GATE` selecting whether the
+    /// owned-key clone for `expiry_deadlines` is elided when the write sets NO TTL (the
+    /// production form, `GATE = true`) or always taken (the pre-elision baseline,
+    /// `GATE = false`, reached only via the bench `set_orig`). `GATE` is const, so each
+    /// form monomorphizes with no runtime branch.
+    fn internal_entries_insert_with_expiry_impl<const GATE: bool>(
+        &mut self,
+        key: Vec<u8>,
         mut entry: Entry,
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
@@ -10707,14 +10740,24 @@ impl Store {
         } else {
             None
         };
-        let expiry_key = canonical_key.as_ref().map_or_else(
-            || {
-                self.entries
-                    .get_key_value(key.as_slice())
-                    .map(|(key, _)| key.clone())
-            },
-            |canonical_key| Some(canonical_key.clone()),
-        );
+        // (cc_fr) The cloned owned key is consumed ONLY by the `expiry_deadlines.insert`
+        // below — i.e. only when this write sets a TTL. A SET without a TTL (the common
+        // case) took a `StoreKey` (`Box<[u8]>`) clone here, plus a `get_key_value` lookup
+        // on an overwrite, that was then dropped unused. Skip it entirely when there is no
+        // new TTL. `GATE` is const: production (`true`) monomorphizes to the guarded form;
+        // the bench baseline (`false`) keeps the unconditional clone.
+        let expiry_key: Option<StoreKey> = if !GATE || new_expiry.is_some() {
+            canonical_key.as_ref().map_or_else(
+                || {
+                    self.entries
+                        .get_key_value(key.as_slice())
+                        .map(|(key, _)| key.clone())
+                },
+                |canonical_key| Some(canonical_key.clone()),
+            )
+        } else {
+            None
+        };
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
         // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
@@ -10734,10 +10777,17 @@ impl Store {
                 .get_mut(key.as_slice())
                 .map(|slot| std::mem::replace(slot, entry)),
         };
-        if let Some(expiry_key) = expiry_key {
-            if let Some(deadline) = new_expiry {
-                self.expiry_deadlines.insert(expiry_key, deadline);
-            } else {
+        match new_expiry {
+            Some(deadline) => {
+                if let Some(expiry_key) = expiry_key {
+                    self.expiry_deadlines.insert(expiry_key, deadline);
+                }
+            }
+            None => {
+                // A SET without a new TTL clears any prior deadline. The original ran this
+                // remove whenever `expiry_key` was `Some` — which it always is for an
+                // existing/created key — and a remove on an absent key is a no-op, so an
+                // unconditional remove here is byte-identical.
                 self.expiry_deadlines.remove(key.as_slice());
             }
         }
@@ -39884,6 +39934,51 @@ mod tests {
             so.mem_estimate_cache.borrow().get(b"other".as_slice()).copied()
         );
         assert!(sn.mem_estimate_cache.borrow().get(b"other".as_slice()).is_some());
+    }
+
+    #[test]
+    fn set_gated_expiry_key_matches_orig() {
+        // (cc_fr) `set` (GATE=true, eliding the owned-key clone when no TTL) MUST leave the
+        // IDENTICAL observable state as `set_orig` (GATE=false, always cloning) for every
+        // shape: new/overwrite × with/without TTL, and an overwrite that clears a prior TTL.
+        // Compare value, pttl, and expires_count on parallel stores.
+        type Case = (&'static [u8], &'static [u8], Option<u64>, bool);
+        let cases: &[Case] = &[
+            (b"fresh", b"v1", None, false),      // new, no TTL
+            (b"fresh", b"v2", Some(5_000), false), // new, with TTL
+            (b"seed", b"v3", None, true),        // overwrite (had no TTL), no TTL
+            (b"seed", b"v4", Some(7_000), true), // overwrite, add TTL
+            (b"seedttl", b"v5", None, true),     // overwrite that CLEARS a prior TTL
+        ];
+        for &(key, val, ttl, prior) in cases {
+            let build = || {
+                let mut s = Store::new();
+                if prior {
+                    s.set(key.to_vec(), b"old".to_vec(), None, 1_000);
+                    if key == b"seedttl" {
+                        s.expire_milliseconds(key, 50_000, 1_000);
+                    }
+                }
+                s
+            };
+            let mut s_new = build();
+            let mut s_orig = build();
+            s_new.set(key.to_vec(), val.to_vec(), ttl, 2_000);
+            s_orig.set_orig(key.to_vec(), val.to_vec(), ttl, 2_000);
+            assert_eq!(
+                s_new.get(key, 2_000).unwrap(),
+                s_orig.get(key, 2_000).unwrap(),
+                "value for {:?}",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                s_new.pttl(key, 2_000),
+                s_orig.pttl(key, 2_000),
+                "pttl for {:?}",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(s_new.expires_count, s_orig.expires_count, "expires_count");
+        }
     }
 
     #[test]
