@@ -12370,11 +12370,13 @@ fn classify_borrowed_dispatch_floor_packet(
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
-        // Variadic keyed-values writes at 5..=8 values (array_len 7..=10): LPUSH/RPUSH/
-        // SADD/HDEL/SREM/ZREM. These have borrowed fast paths but are stranded ~1350
-        // lines deep in the cascade (chain A ~5208, chain B ~10259) → +25-30% recover.
+        // Variadic keyed-values writes at 5..=18 values (array_len 7..=20): LPUSH/RPUSH/
+        // SADD/HDEL/SREM/ZREM. These have borrowed fast paths but are stranded deep in
+        // the cascade: 5..=8 sit ~1350 lines down (chain A ~5208, chain B ~10259), and
+        // 9..=18 exist ONLY in chain B (~9993..10233) — chain A drops them to the
+        // generic path entirely. Routing the whole range here recovers both cliffs.
         (array_len, cmd)
-            if (7..=10).contains(&array_len)
+            if (7..=20).contains(&array_len)
                 && matches!(
                     cmd,
                     BorrowedDispatchFloorCommand::Lpush
@@ -12455,7 +12457,7 @@ fn dispatch_floor_fast_exists_into(
     }
 }
 
-/// Dispatch-floor fast path for the 5..=8-value keyed-values writes
+/// Dispatch-floor fast path for the 5..=18-value keyed-values writes
 /// (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM). Reuses the EXACT cascade parsers +
 /// `execute_plain_keyed_values_write_borrowed` executor, so byte-identical to the
 /// stranded cascade arms — only the dispatch position changes. Returns the consumed
@@ -12505,6 +12507,128 @@ fn dispatch_floor_keyed_values_write(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        9 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values9_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        10 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values10_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        11 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values11_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        12 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values12_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        13 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values13_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        14 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values14_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13, p.v14,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        15 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values15_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13, p.v14, p.v15,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        16 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values16_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13, p.v14, p.v15, p.v16,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        17 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values17_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13, p.v14, p.v15, p.v16, p.v17,
+                ],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        18 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values18_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[
+                    p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
+                    p.v13, p.v14, p.v15, p.v16, p.v17, p.v18,
+                ],
                 ts,
             )?;
             Some((p.consumed, response))
@@ -29980,7 +30104,7 @@ mod tests {
             ),
             None
         );
-        // Variadic keyed-values writes: 5..=8 values (array_len 7..=10) recognized;
+        // Variadic keyed-values writes: 5..=18 values (array_len 7..=20) recognized;
         // command tokens LPUSH/RPUSH (len5) + SADD/HDEL/SREM/ZREM (len4).
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
@@ -30003,8 +30127,23 @@ mod tests {
             ),
             Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(8))
         );
+        // 9 values (array_len 11) exists only in chain B; the floor now routes it.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*11\r\n$4\r\nSADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(9))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*20\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n$1\r\nq\r\n$1\r\nr\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(18))
+        );
         // Arity guards: 4 values (array_len 6) stays on the early cascade cluster;
-        // 9 values (array_len 11) exceeds the floor window → generic.
+        // 19 values (array_len 21) has no borrowed parser → generic.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*6\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
@@ -30014,7 +30153,7 @@ mod tests {
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
-                b"*11\r\n$4\r\nSADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n",
+                b"*21\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n$1\r\nj\r\n$1\r\nk\r\n$1\r\nl\r\n$1\r\nm\r\n$1\r\nn\r\n$1\r\no\r\n$1\r\np\r\n$1\r\nq\r\n$1\r\nr\r\n$1\r\ns\r\n",
                 &cfg,
             ),
             None
