@@ -5287,6 +5287,47 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`79c6a4eee`).** Listpack per-entry backlen decode — single-byte fast path — **1.30x int / 1.05x str** on the isolated primitive, byte-exact (RESTORE/RDB-load decode)
+
+**Profile-first:** baselined the `rdb_codec` criterion bench (worker hz2) — `decode_rdb`
+**12.3ms** vs `encode_rdb` **5.0ms**, decode 2.5x slower on the same mixed small-collection
+data. Diagnosis: the 2.5x is mostly STRUCTURAL — decode must build N owned `Vec<u8>` (one
+per member/field) while encode appends to one pre-sized blob; mimalloc serves those small
+allocs, so it is not a clean per-turn lever (would need a borrowed/Arc `RdbValue`). But one
+NON-structural component: every entry's backlen was re-decoded by a reverse-7-bit varint
+loop that validates it re-encodes `data_len`. Upstream's forward decode never re-decodes the
+backlen (derives the byte count from `data_len` and skips); fr keeps the VALIDATION (RESTORE
+must reject corrupt payloads to match redis) but collapses the loop to ONE compare for the
+single-byte case (`data_len <= 127` — every int entry, every string <= ~126 bytes).
+
+Byte-identical: for a 1-byte backlen the loop's `terminated && decoded == data_len` gate is
+`byte & 0x80 == 0 && byte & 0x7F == data_len`, and `data_len <= 127` ⇒ high bit clear ⇒
+`byte == data_len as u8`. Multi-byte backlens keep the loop (`validate_multibyte_backlen`).
+
+**A/B** — same-binary null-gated (listpack_backlen bench, worker `hz2`), original loop vs fast
+path, isolated via `bench_backlen_walk` (identical `entry_data_len` per arm):
+
+| listpack shape | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| int_set (512, 5-byte int entries) | **1.301x** | 0.998 | [0.807, 1.011] | 8.6% | WIN |
+| string_set (256, ~13-byte entries) | **1.047x** | 1.000 | [0.983, 1.023] | 4.6% | WIN |
+| hash (128 field/value pairs) | 1.059x | 1.009 | [0.968, 1.084] | 5.3% | indistinguishable (no regression) |
+
+Int entries are shortest ⇒ backlen is the largest share of the walk ⇒ biggest win. This is the
+ISOLATED backlen primitive; end-to-end `decode_listpack` also pays value-decode + per-element
+alloc, so its share of that is smaller. The fast path never regresses.
+
+**Byte-exact, gates green:** `backlen_fast_path_matches_loop_for_every_data_len` (1-byte range,
+the 127/128 `backlen_len` 1→2 boundary, 2-byte range, and corrupt-backlen rejection all agree
+with the original loop); 205 fr-persist lib tests green; full fr-conformance green (347 passed,
+0 failed, incl. the 194-case live-redis differential + 99-case suites).
+
+**Lane status:** persist decode is otherwise structural (owned-alloc) and encode is LZF-bound
+(frozen); intset membership search is already branchless-optimal (CrimsonHawk monobound cmov —
+a SIMD linear scan would LOSE vs O(log n) branchless), so that SIMD idea is DEAD. Next real
+persist win is the structural borrowed/Arc `RdbValue` decode (kills the per-element alloc), or
+server-level command profiling cc still cannot run (no linked binary / no redis-benchmark).
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`6ddda27f3`).** KEYS MATCH glob classified ONCE per scan, not per key — **2.54x prefix / 2.15x suffix / 1.09x general** — CLOSES the glob classify-once vein across ALL live command paths
 
 The last live command path still re-classifying the pattern per key. `keys_matching`
