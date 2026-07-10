@@ -5287,6 +5287,42 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`b280b3b70`).** Quicklist2 list encode: memoize per-item listpack lengths — **1.12x integer lists** — byte-exact. PARTIALLY CORRECTS the "encode_quicklist is LZF-bound / listpack saturated" claim in the HOLD entry below
+
+Re-profiled the `rdb_codec` baseline (which had `encode_quicklist` **21.3ms** — the slowest
+op) instead of taking the prior turn's "all LZF" dismissal on faith. Found a real O(N)
+redundancy: `encode_compact_list_quicklist2` computed each item's listpack-encoded length
+TWICE — the `quicklist2_node_count` pre-walk (the node count must precede the node bytes in
+the RDB stream) called `listpack_entry_encoded_len` per item (which parses each as a candidate
+integer via `parse_listpack_integer`), then the pack loop recomputed the SAME length again.
+Memoized into one `lens[]` and fed both the count (`quicklist2_node_count_with_lens`) and the
+pack loop → N computations, not 2N.
+
+The dismissal was HALF right: for LONG-STRING lists the parse rejects on `len >= 21` so it IS
+a wash (LZF-bound). But for INTEGER lists the parse does real work and, per node (~2000 small
+ints ≈ comparable to the LZF of that node), the duplicated pass is a measurable chunk. Common
+real workload (lists of IDs / counters / offsets).
+
+**A/B** — same-binary null-gated (quicklist_encode bench, worker `hz2`), two-walk orig vs
+memoized; both emit byte-identical RDB so LZF is identical and the ratio isolates the
+duplicated length pass:
+
+| workload | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| int_9000 | **1.123x** | 0.996 | [0.982, 1.013] | 3.2% | WIN |
+| short_str_9000 | 1.027x | 1.001 | [0.945, 1.078] | 5.4% | indistinguishable |
+| long_str_4000 | 0.986x | 1.005 | [0.951, 1.136] | 5.6% | indistinguishable (NO regression) |
+
+**Byte-exact, gates green:** `quicklist2_memoized_matches_two_walk_orig_byte_for_byte` (int /
+short-string / long-string / mixed / empty / single / over-budget-node lists all agree
+byte-for-byte with the two-walk original); 207 fr-persist lib tests; full fr-conformance green
+(347 passed, 0 failed, incl. the 194-case live-redis differential + 99-case suites).
+
+**Method note:** the HOLD below said the veins were exhausted; this WIN shows "profile-first,
+re-verify the dismissal" still finds levers — the `encode_quicklist` op was dismissed as LZF-bound
+without measuring its non-LZF component. The listpack DECODE/int-parse/backlen primitives remain
+saturated; this was the list-ENCODE structural-walk redundancy, a different frame.
+
 ## 2026-07-10 cc_fr: **FRONTIER SUMMARY + HOLD** — the clean per-turn SIMD/dispatch/store/persist/listpack/glob-classify levers available to cc are EXHAUSTED. Remaining work is structural, cod's lane, or blocked on a server-profiling channel cc lacks
 
 Session shipped 6 measured byte-exact wins (glob classify-once ×3: SCAN `f7474e040` /
