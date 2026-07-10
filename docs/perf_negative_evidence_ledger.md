@@ -5287,6 +5287,46 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: SURFACE / not-a-clean-lever — SINTERSTORE's `CompactFieldMap::rehash` (8.09% self) is **redis-PARITY** (redis grows its dst dict incrementally too); presizing beats redis on speed but REGRESSES RAM vs redis's incremental growth. Also: post-crc64 the DUMP path is `lzf`-dominated (frozen)
+
+Profiled fresh after the crc64 win. Two rankings, `fr-cand3` `sha256 ad6506c4…`, host `thinkstation1`,
+`perf record -F 997`:
+
+**Realistic compressible DUMP** (2000-field hashes / 3000-element lists / zsets / sets): `lzf_compress`
+47.37%, `crc64_redis` 16.97% (**now ~5x lower — pclmul landed for ≥1 KiB**), `encode_rdb_string` 6.28%,
+`encode_length` 2.97%, `dump_key` 2.60%. After crc64, the path is dominated by `lzf_compress`, which is
+serial hash-chain matching **and byte-frozen** (fr's LZF output must stay byte-identical to redis for
+the DUMP gate), so it is not a lever. The rest are small.
+
+**SINTERSTORE** of two 5000-member string sets (50% overlap): `CompactFieldMap::lookup_slot_prehashed`
+26.56%, `foldhash` 11.06%, `insert` 10.90%, **`rehash` 8.09%**, `append_entry` 7.31%.
+
+Chased the `rehash` (8.09%). Root cause is real: `GenericSet::with_capacity_and_hasher(n)` **ignores
+`n` for large sets** — it returns `CompactStrSet::new()` (empty) instead of reserving, so every
+large set-algebra `*STORE` destination rehashes O(log n) times building the result. `CompactStrSet::
+with_capacity` exists (`frankenredis-cfm-presize`), so honoring the hint is a one-line change.
+
+**BUT it is not a clean win — do not naively presize.** Checked vendored redis `t_set.c
+::sinterGenericCommand`: redis creates `dstset` and grows it **incrementally** via `setTypeAddAux`
+(no `dictExpand` presize for the HT case; it only `lpShrinkToFit`s a listpack dst). So fr's
+incremental rehash is **redis-PARITY, not a gap**. Presizing to `base.len()` would make fr *faster*
+than redis on the build, but the stored result keeps `next_pow2(base.len())` slots while redis's
+incrementally-grown dict ends near the actual result size `R` — a **RAM regression vs redis** whenever
+`R << base.len()` (low overlap): ~60 KB per stored set at 50% overlap here. The campaign weighs RAM
+parity, so a bare presize trades a redis-parity speed frame for a redis-negative RAM frame.
+
+The only RAM-neutral form is **presize + `shrink_to_fit`** (build without incremental rehash, then one
+rebuild at `R`) — but that adds a `shrink_to_fit` to `CompactFieldMap` and nets only ~4% (it swaps
+`~2R` of incremental-rehash work for `~R` of shrink-rehash), for a moderate multi-edit change needing
+BOTH speed and `used_memory` measured. Low priority. **Surfaced, not taken:** it is redis-parity, and
+the clean version's EV (~4%, RAM-neutral) does not justify a rushed RAM-affecting change.
+
+**Frontier note:** the measurable-by-me lib-crate SIMD/persist vein is now saturated — popcount 3.14x,
+bitpos 17x, crc64 ~4.9x shipped; bitand/common_prefix measured-declined; lzf frozen; crc64 done. The
+remaining substantial levers are the binary-crate dispatch floors (cod's `ohsk5`, not `cargo bench`-able
+by me — ZSCORE ranked next at 28.97% cascade) and the `x86-64-v3` build target (operator min-CPU
+decision). Both are handoffs, not rushed hours.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED.** PCLMULQDQ CRC-64/Jones: **1.4x @512 B → 4.9x @1 MiB** vs the slice-by-16 table, byte-exact, wired for DUMP/RESTORE/RDB ≥1 KiB. The scoped crc64 lever (entry below) is done
 
 The correctness-critical kernel is shipped. `fr_persist::crc64_redis` (7.30% self on a large `DUMP`)
