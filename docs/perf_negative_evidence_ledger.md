@@ -5287,6 +5287,47 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`6ddda27f3`).** KEYS MATCH glob classified ONCE per scan, not per key — **2.54x prefix / 2.15x suffix / 1.09x general** — CLOSES the glob classify-once vein across ALL live command paths
+
+The last live command path still re-classifying the pattern per key. `keys_matching`
+(the `KEYS` handler) and the full-DB-scan arm of `keys_matching_in_db` (via
+`push_logical_key_if_match`) both called `glob_match(pattern, key)` per candidate,
+re-running `literal_glob_shape` every call. Hoisted `glob_prepare(pattern)` once above
+each per-key loop; `push_logical_key_if_match` now takes `&PreparedGlob` and its `is_star`
+allkeys short-circuit is preserved exactly. Byte-identical (`PreparedGlob::matches ≡
+glob_match`).
+
+**Where it bites:** `keys_matching` range-prunes prefix patterns (BTreeSet range), so glob
+is hot only for **non-prefix** patterns (`KEYS *abc`, `KEYS *mid*`, `KEYS ?x`) — those
+have no literal prefix, so the whole keyspace is globbed (the same `glob_match` self-frame
+as SCAN). Prefix `KEYS user:*` is already narrowed to few candidates, so the hoist is a
+no-op there.
+
+**A/B — classify-once vs per-call** (glob_scan bench, worker `ovh-a`, 20k keys, null-gated,
+tighter cv than the vmi run):
+
+| pattern shape | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| prefix `key:0001*` | **2.544x** | 1.010 | [0.922, 1.083] | 5.1% | WIN |
+| suffix `*:tag` | **2.146x** | 1.069 | [0.963, 1.104] | 5.0% | WIN |
+| general `key:*5:tag` | **1.091x** | 1.001 | [0.981, 1.024] | 2.4% | WIN (cleared its tight null p95 this run) |
+
+**Byte-exact, gates green:** `PreparedGlob::matches == glob_match` (prepared_glob_matches_
+glob_match_for_every_pattern_and_string); **55 fr-store KEYS unit tests** green (incl.
+`keys_matching_range_and_escape_contract_matches_redis`, `keys_matching_with_glob`,
+`keys_matching_skips_expired_entries`, `keys_matching_prefix_prune_isomorphic_and_faster_
+kprfx`); **full fr-conformance green** (248 passed, 0 failed, incl. the 194-case live-redis
+differential suite, 200.6s).
+
+**Vein status:** glob classify-once is now DONE on every live path — SCAN (`scan_in_db`,
+`f7474e040`), SSCAN (`455c77c91`), KEYS (this). `scan_walk` (24127) is dead on the command
+path (legacy reference impl behind `scan_in_db_isomorphic_and_faster_scandb` only) —
+verified NOT worth hoisting. HSCAN/ZSCAN are cod's hash/sorted-set lane. **Next frontier is
+NOT more glob:** it's the structural set/list/zset WRITE gaps (SADD 0.73x etc.), which need a
+server-level A/B — no linked binary / no `redis-benchmark` available to cc this turn (rch
+returns no linked binary), so a fresh command-rank profile is SURFACE-blocked until that
+tooling is available.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`455c77c91`).** SSCAN MATCH glob classified ONCE per scan, not per member — same primitive as the keyspace-SCAN hoist below, applied to a **hotter** frame (**10.81% self** vs 7.32%), byte-identical
 
 The keyspace-SCAN entry below noted `PreparedGlob`/`glob_prepare` are `pub` so `SSCAN` can adopt the
