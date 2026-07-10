@@ -8,3 +8,7 @@ edition = "2024"
 [[bench]]
 name = "popcount"
 harness = false
+
+[[bench]]
+name = "first_mismatch"
+harness = false
