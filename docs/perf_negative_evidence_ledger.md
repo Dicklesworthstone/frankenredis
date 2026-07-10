@@ -5287,6 +5287,70 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: ROW #1 UPGRADED — BITCOUNT's 97.94%-self frame is an **SSE2 software popcount**; the build emits ZERO `popcnt` instructions. REJECT's conclusion CONFIRMED, its mechanism REFUTED, the real lever named for the first time
+
+Took the top of the ranked worklist: `2026-06-28 CrimsonHawk: REJECT BITCOUNT popcount
+multi-accumulator (+6-8%)`. It gates `Store::bitcount`, the hottest single function measured anywhere
+in this codebase, and it carried no sha256, no self-time, no worker, no cv. It now has all four.
+
+**Mandatory fields.** Binary `sha256 = ad6506c45b4c326ccbeba024dc8a14662a250104a1cc20c06d19c022464170f2`
+(`fr-cand3`, symbol-verified). Host `thinkstation1`, `perf_event_paranoid=1`, server pinned to core 2,
+seeded then quiesced 3 s before `perf` attached. Self-time of the function under test:
+**`Store::bitcount` 97.94% flat self** on `BITCOUNT bm` over a 1 MiB bitmap. 5 trials + discarded
+warm-up:
+
+| metric | median | cv |
+|---|---:|---:|
+| instructions per 8-byte word | **8.777** | **0.00%** |
+| IPC | 4.613 | 1.03% |
+| scan rate | 16.01 GiB/s | 1.23% |
+| **LLC-load-misses per word** | **0.000000** | — |
+
+**MECHANISM REFUTED.** The row blamed "popcnt throughput / memory bandwidth" and concluded
+"multi-bank only wins for MEMORY-RAW loops". The memory half is wrong: **`LLC-load-misses = 0`** — the
+1 MiB bitmap is cache-resident and the loop never reaches DRAM. Nor is it at popcnt throughput,
+because **the binary contains no `popcnt` instruction at all** (`objdump -d | grep -c popcnt` ⇒ **1**,
+in an unrelated function; **0** inside `Store::bitcount`). `perf annotate` shows the hot loop is an
+**SSE2 SWAR popcount** LLVM auto-vectorized: `psrlw` 5.81%, `movdqa` 5.17%, `psrlw` 5.05%, `paddb`
+5.04%, `paddq` 4.60%, `psadbw` 4.51%, `pand` 3.90/3.44/3.20%. Cause: the release profile sets **no
+`target-cpu` / `target-feature`**, so codegen targets baseline `x86-64`, which excludes `POPCNT`
+(SSE4.2) — even though `/proc/cpuinfo` reports `popcnt` on this machine.
+
+**CONCLUSION CONFIRMED, and now explained.** At 8.777 instr/word with **IPC 4.613**, the loop is
+**front-end / issue bound**, not latency bound. Extra accumulators add instructions to a loop already
+saturating issue width — exactly why the row measured `+5.5% (4 KB) / +7.9% (1 MB)` *slower*.
+**Do not retry multi-accumulator.** Its refined rule ("multi-bank only helps a memory read-after-write
+chain") gives the right answer for the wrong reason: the true discriminator is *issue-bound vs
+latency-bound*, not *register vs memory*.
+
+**THE REAL LEVER, never named until now: enable `POPCNT` in codegen.** Hardware `popcnt` retires one
+64-bit population count per instruction; the SSE2 SWAR spends ~8.8. Validated with a one-binary,
+one-invocation, AB/BA-interleaved microbench, result consumed through a `volatile` sink so neither arm
+can be eliminated, arms **verified to differ in machine code** (`pc_hw` contains a `popcnt`; the
+baseline arm does not), min-of-N over 21 rounds:
+
+| arm | rate |
+|---|---:|
+| scalar baseline (no `popcnt`) | 4.53 GiB/s |
+| hardware `POPCNT` | **31.29 GiB/s** |
+
+⚠️ **That microbench's 6.90x internal ratio is NOT fr's expected win and must not be quoted as such.**
+Its baseline arm is *scalar*; fr's loop is *SSE2-vectorized* SWAR already running at 16.01 GiB/s. The
+defensible estimate is the absolute-rate comparison, **31.29 / 16.01 ≈ 1.95x on the kernel** — and even
+that is a cross-binary estimate (fr server vs C microbench), **not a certified A/B**. It is a
+hypothesis with a mechanism, not a measured lever.
+
+**Scope.** A *build-configuration* lever, not a source lever, and it touches every `count_ones()` in
+the tree: BITCOUNT, BITPOS, and the HLL kernels (`PFADD`/`PFCOUNT`/`PFMERGE`). `target-cpu=x86-64-v2`
+(POPCNT + SSE4.2; Nehalem 2008 / Bulldozer 2011) is the conservative floor; `x86-64-v3` also unlocks
+AVX2. **This raises the binary's minimum CPU requirement, so it is an operator decision, not an
+agent's.**
+
+**Blocked from certification.** A real A/B needs two `fr-server` binaries (baseline vs `+popcnt`) under
+`perf stat`. `rch` returns no linked binary and a local build is forbidden. Profiling, disassembly and
+the C microbench needed neither. Unblock = binary retrieval, authorization for one local
+`release-perf` build, or a decision to set `target-cpu` and measure in CI.
+
 ## 2026-07-10 cc_fr: SELF-CORRECTION + RANKED WORKLIST — the EXISTS lever needs no landing: the bad REJECT hid it for two weeks, then it was re-derived independently and measured at **11.4% SET@1** (`bd358b400`). Next target by gated-frame size is **`Store::bitcount` at 97.94% self**
 
 **I was about to re-implement a lever that already exists. Correcting my own entry below.**
