@@ -5287,6 +5287,54 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: THE THREE-WAY ISA ANSWER — **there is NO comparator build gap.** redis 7.2.4 emits *scalar* SWAR; fr emits *SSE2-vectorized* SWAR. fr is already one ISA tier ahead. The gap is against the HARDWARE, not against redis
+
+The question posed was: *"if the build emits SSE2 SWAR where AVX2 popcnt is available, the lever is a
+target-feature dispatch, not an algorithm — a comparator that has AVX2 while we run SWAR is a build
+gap."* **The comparator half of that premise is false.** Measured by disassembly, not assumption:
+
+| | `popcnt` | AVX2 (`%ymm`) | popcount kernel actually emitted |
+|---|:--:|:--:|---|
+| **host** `thinkstation1` | ✓ | ✓ (also sse4_2, bmi1, bmi2; no avx512f) | — |
+| **frankenredis** `Store::bitcount` | **0 in the entire binary** | **0 ymm in the loop** | SSE2 SWAR: `psrlw` `pand` `paddb` `psadbw` `paddq` |
+| **redis 7.2.4** `redisPopcount` | **0 in the entire binary** | **0 ymm in the entire binary** | **pure scalar** SWAR: `mov`×32 `and`×28 `add`×27 `shr`×22 `movzbl`×4 |
+
+Redis has **no SIMD and no `popcnt` at all** on this path. fr is *ahead* of it by one ISA tier — LLVM
+auto-vectorized fr's word loop to 128-bit SSE2 while redis's C compiles to a scalar bit-trick. That is
+exactly why fr already wins `BITCOUNT_1MB` **3.35x**. So this is **not** a build gap versus the
+comparator; it is unclaimed headroom against the **hardware ceiling** (POPCNT and AVX2 both present,
+both unused by our kernel).
+
+**Where fr's AVX2 actually comes from.** The binary does contain 125 `%ymm` uses and 3 `vpsadbw` — but
+every one of them is inside the **`memchr` crate's** runtime-dispatched `find_avx2`. None is fr's own
+code, and `Store::bitcount` uses zero `ymm`. So the tree already *depends on* runtime SIMD dispatch; it
+does not *practise* it.
+
+**What one flag would lift.** `count_ones()` appears at **5 sites in `fr-store`** (`popcount_bytes`,
+`bitpos_full_bytes`, `bitpos_masked_byte`, and the HLL register paths) and **3 in `fr-command`** —
+i.e. `BITCOUNT`, `BITPOS`, `PFADD`, `PFCOUNT`, `PFMERGE` all ride the same lowering. There is **no
+`target-cpu` / `target-feature` anywhere** in `Cargo.toml` or `.cargo/`, so all of them compile to
+baseline `x86-64`.
+
+**Two ways to capture it, and both are policy calls, not perf calls:**
+
+1. `target-cpu=x86-64-v2` (POPCNT + SSE4.2; Nehalem 2008 / Bulldozer 2011) or `v3` (AVX2, 2013+) in
+   the release profile. Lifts all eight sites at once. **Raises the binary's minimum CPU.**
+2. Runtime dispatch, exactly as `memchr` does it (`#[target_feature(enable = "popcnt")]` behind
+   `is_x86_feature_detected!`). Keeps baseline portability — but `fr-store` opens with
+   **`#![forbid(unsafe_code)]` (line 1)**, and calling a `#[target_feature]` function from a
+   non-feature context requires `unsafe`. So option 2 costs the crate's unsafe-free guarantee, or
+   pulls in a vetted wrapper (`multiversion` / `safe_arch`).
+
+Neither is an agent's decision. Recommended: `x86-64-v2` as the floor — it is a 2008-era baseline,
+lifts every `count_ones()` site, and preserves `forbid(unsafe_code)`.
+
+**Estimated size, stated honestly.** fr's kernel runs at 16.01 GiB/s (8.777 instr/word, IPC 4.613,
+LLC-load-misses 0 ⇒ issue-bound). A hardware-`POPCNT` loop measured 31.29 GiB/s on this host in the
+one-binary interleaved microbench below. **≈1.95x on the kernel** — a cross-binary estimate, **not a
+certified A/B**. Certification needs two `fr-server` binaries under `perf stat`; `rch` returns no
+linked binary and a local build is forbidden.
+
 ## 2026-07-10 cc_fr: ROW #1 UPGRADED — BITCOUNT's 97.94%-self frame is an **SSE2 software popcount**; the build emits ZERO `popcnt` instructions. REJECT's conclusion CONFIRMED, its mechanism REFUTED, the real lever named for the first time
 
 Took the top of the ranked worklist: `2026-06-28 CrimsonHawk: REJECT BITCOUNT popcount
