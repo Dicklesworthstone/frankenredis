@@ -4,6 +4,105 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT #2 — the four sweeping do-not-retry families, profile-verified. **SORT REOPENED**: its REJECT row had NO profile, and 35.43% of SORT ALPHA's self-time is a discarded `from_utf8`
+
+Applied the ledger-integrity rule (a row is inadmissible unless a profile shows the function under
+test executing, with its self-time recorded) to the four families named as closed: SORT structural
+decomposition, the sub-ms dispatch-position losses (EXISTS/BITFIELD/GEOHASH/SINTERCARD),
+SMISMEMBER 0.82x, and the short-key-compare micro-lever.
+
+Method: `perf record -F 997 -g` on the running server (`fr-cand3`, symbol-verified), pinned to core 2,
+seeded then **quiesced 3 s before attach**, driven by a heavily pipelined client. That last detail is
+why the SORT row's author reported "`perf record -p` returned no samples" — a single unpipelined
+python client cannot saturate fr. Flat self%, `--no-children`.
+
+### VERDICTS
+
+| # | family | function under test | self% on the bench input | verdict |
+|---|---|---|---:|---|
+| A | **SORT** reply-clone / "cost is the comparison" | `sort_alpha_compare` + reply clone | see below | **REJECT stands for the clone; ROOT CAUSE REFUTED; SORT REOPENED** |
+| B | short-key-compare micro-lever | `CompactFieldMap::lookup_slot_prehashed` | **5.81%** (row claimed 12.1% on its shape); final `memcmp` **< 0.5%** | **VALID — confirmed** |
+| C | sub-ms dispatch-position | `process_buffered_frames` | **splits — see table** | **PARTIALLY SUPERSEDED** |
+| D | GEOHASH direct multi-member encoder | `RespFrame::encode_into` | **3.22%** | **VALID — the ~1.00x ratio is exactly the ceiling** |
+
+### [A] SORT — REOPENED (the row admits it had no profile)
+
+The row says outright: *"REMAINING (deferred — needs a profile I couldn't get … `perf record -p`
+returned no samples)"*, then asserts the cost is "the sort COMPARISON path … and/or the C1
+collect-from-ChunkedList". That hypothesis was never measured. `SORT L ALPHA STORE D`, 1000-element
+list, flat self%:
+
+| frame | self% |
+|---|---:|
+| **`core::str::converts::from_utf8`** | **35.43%** |
+| `fr_command::sort_generic::{closure#11}` (the comparator) | 16.26% |
+| `__memcmp_avx2_movbe` (the `left.cmp(right)` fallback) | 8.16% |
+| `quicksort::<(usize, &[u8]), …>` | 5.87% |
+| `__memmove_avx_unaligned_erms` | 2.92% |
+| `mi_theap_malloc_aligned` | 2.43% |
+
+The reply-clone (C3) the row A/B'd does not appear at all ⇒ its `1.02x / 1.06x` 0-gain result is
+**correct and now explained**. But the top frame is one nobody named. `sort_alpha_compare`
+(`fr-command/src/lib.rs:27354`) is:
+
+```rust
+match (collator, std::str::from_utf8(left), std::str::from_utf8(right)) {
+    (Some(collator), Ok(left), Ok(right)) if !left.contains('\0') && … => collator.compare(left, right),
+    _ => left.cmp(right),
+}
+```
+
+Rust builds the **tuple before matching**, so both `from_utf8` calls run *unconditionally* — including
+when `collator` is `None`, where the result is thrown away and the arm falls through to
+`left.cmp(right)`. That is two full UTF-8 validations of every element, on every one of the
+`n log n` comparisons, discarded. The profile proves `collator` was `None` here: the fallback shows
+up as `__memcmp_avx2_movbe` (8.16%), and no ICU collation frame appears.
+
+⇒ **SORT is reopened with a named, bounded lever**: short-circuit on `collator` before validating.
+Byte-identical by construction (with `collator == None` the current code *always* takes
+`_ => left.cmp(right)`; the `Some` path is untouched). SORT ALPHA-STORE is a real `0.54–0.58x`
+executor loss vs redis, so this is the largest live single-crate lever on that command.
+**Ratio not yet measured — blocked, see below. Do not record a KEEP for it without one.**
+
+### [C] sub-ms dispatch-position — the sweeping claim no longer holds for two of its four commands
+
+The row asserts *"these are NOT executor levers — they're the dispatch tail"* for
+EXISTS/BITFIELD/GEOHASH/SINTERCARD, on **behavioural** evidence (cost ∝ cascade arm index) with no
+executor self-time. Measured on the current binary:
+
+| command | `process_buffered_frames` self% | dominant frames | dispatch claim? |
+|---|---:|---|---|
+| `EXISTS k0..k15` | **absent from the top-9 (<0.5%)** | `execute_plain_exists_borrowed_into` **18.66%**, `contains_key` **14.58%**, `plain_borrowed_default_key_read_allows` 9.42%, `drop_if_expired` 7.82% | **NO — executor + keyspace ≈ 50%** |
+| `BITFIELD bm GET u8 0` | **6.14%** | `contains_key` **12.79%**, `try_dispatch_floor_classified_action` 7.37%, `parse_borrowed_dispatch_floor_decimal` 5.20%, `bitfield_get_no_stat` 3.88% | **NO — keyspace dominates** |
+| `GEOHASH g m0..m3` | **22.74%** | `PackedZSet::locate` 5.67%, `execute_plain_geohash_borrowed` 4.51% | **YES** |
+| `SINTERCARD 2 s1 s2 LIMIT 10` | **18.91%** | `lookup_slot_prehashed` 8.94%, `Store::sintercard` 7.71% | **YES** |
+
+**Honest scoping:** EXISTS and BITFIELD have since been given front-gate dispatch paths
+(`execute_plain_exists_borrowed_into` / `parse_borrowed_plain_keys_multi_packet`;
+`try_dispatch_floor_classified_action`), so the row was probably true when written and is now
+**superseded**, not fabricated. Either way its *forward* implication — "do not chase executor levers
+on these" — is **no longer supported for EXISTS and BITFIELD**, whose residual is now executor +
+keyspace probe (note `drop_if_expired` at 7.82% on a keyspace with **no TTLs at all**). It still
+holds for GEOHASH and SINTERCARD. Re-verify before quoting this family again.
+
+### [B] and [D] — valid, and now carry their numbers
+
+`CompactFieldMap::lookup_slot_prehashed` executes at **5.81%** self on a SMISMEMBER blast (the row's
+own 12.1% was a different shape), and the final `memcmp` it proposed to hand-roll does not clear
+0.5% — so `4.7% × (1 − 1/1.18) ≈ 0.7%` was the right call. **REJECT confirmed, not dead code.**
+GEOHASH's reply materialization (`RespFrame::encode_into`) executes at **3.22%** self, which bounds
+the direct-encoder lever at ~3% — exactly why its A/B bracketed `1.01 / 0.997 / 1.009`.
+**REJECT confirmed, not dead code.**
+
+### BLOCKER (unchanged)
+
+`rch exec -- cargo build --profile release-perf -p fr-server` returns `2 files, 769 bytes` — **no
+linked binary** — and the disk constraint forbids a local build, so no end-to-end A/B can be run for
+the reopened SORT lever. Profiling works (it needs only an existing binary), which is how this audit
+was produced. The valid substrate for measuring the comparator is a single criterion group in ONE
+`rch` invocation with the pre-fix `sort_alpha_compare` kept as a bench-only reference fn; that needs
+`sort_alpha_compare` reachable from a bench (it is private to `fr-command` today).
+
 ## 2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT — manifest levers #2 and #3 were ranked on an input where their function NEVER EXECUTES; rows INVALID, reopened, re-measured on the real bulk-save path
 
 Triggered by the frankenmermaid `evidence/layout 5feb977` alert (a REJECT measured on dead code).
@@ -1013,6 +1112,12 @@ but the ~15-arm GET-regression ceiling still applies.
 
 ## 2026-07-09 CodexRedisDig: REJECT — GEOHASH multi-member direct wire/streaming encoder — no stable gain vs ORIG
 
+> **✅ PROFILE-VERIFIED VALID 2026-07-10 (cc_fr).** The changed code did run: on a `GEOHASH g m0..m3`
+> blast, `RespFrame::encode_into` (the reply materialization this lever removed) is **3.22% self**,
+> `execute_plain_geohash_borrowed` **4.51%**. A ~3% ceiling is exactly why the A/B bracketed
+> `1.01x / 0.997x / 1.009x`. Not a dead-code REJECT. The command's real cost is dispatch:
+> `process_buffered_frames` **22.74% self**.
+
 NEGATIVE-EVIDENCE CHECK: consulted this ledger first and did not retry the already-landed GEOHASH variadic parser
 fast path, the exhausted clean dispatch/option/arity vein, the rejected dispatch cascade reorder, or the SORT/ChunkedList
 dead end. The current post-BITFIELD profile still leaves `GEOHASH_1`/`GEOHASH_4` as visible sub-ms residuals, so this
@@ -1139,6 +1244,18 @@ use STORE for a `:N` reply, and remember STORE contaminates with the ChunkedList
 
 ## 2026-07-09 CrimsonHawk: REJECT (0-gain) + SURFACE — SORT is a real EXECUTOR loss (ALPHA 0.58x vs redis) but the reply-clone (into_iter) lever is 0-gain; cost is the sort comparison / collect+reorder clones
 
+> **⚠️ ROOT CAUSE REFUTED — SORT REOPENED 2026-07-10 (cc_fr).** This row's 0-gain REJECT of the C3
+> reply clone is **correct** (the clone does not appear in a profile at all). But its *hypothesis*
+> about where the cost lives was never measured — the row says so: "needs a profile I couldn't get …
+> `perf record -p` returned no samples" (the client wasn't pipelined enough to saturate fr; quiesce +
+> heavy pipelining fixes it). Profiled `SORT L ALPHA STORE D` over a 1000-element list, flat self%:
+> **`core::str::converts::from_utf8` 35.43%**, comparator closure 16.26%, `__memcmp` 8.16%,
+> quicksort 5.87%. `sort_alpha_compare` evaluates `from_utf8(left)` and `from_utf8(right)` inside a
+> **tuple**, so both run unconditionally — even when `collator` is `None`, where the arm falls through
+> to `left.cmp(right)` and the results are discarded. Two full UTF-8 validations per comparison,
+> `n log n` times, thrown away. Short-circuit on `collator` first; byte-identical by construction.
+> See the LEDGER-INTEGRITY AUDIT #2 entry at the top of this file.
+
 Hunting for another EXECUTOR lever (fr does more CPU than redis, cost scales with work — the PFADD sweet spot), I
 measured executor-heavy commands cleanly (STORE/single-line replies to avoid the multi-element reply-drain bug).
 fr WINS the big ones: **PFMERGE_4dense 3.60x** (my HLL fixes paid off), **BITCOUNT_1MB 3.35x, BITOP_AND 1.72x**.
@@ -1161,6 +1278,15 @@ tiebreak for ALPHA-no-BY full sorts; collect owned indices then `mem::take` (dro
 borrow); a faster f64 parse for numeric. Not a clean bounded win this turn.
 
 ## 2026-07-09 CrimsonHawk: SURFACE — the remaining sub-ms bench losses are ALL dispatch-POSITION-bound (cost ∝ cascade arm index); EXISTS multi-key is the #1 preclassifier target
+
+> **⚠️ PARTIALLY SUPERSEDED 2026-07-10 (cc_fr).** The word "ALL" no longer holds. This row argued
+> from *behavioural* evidence (cost ∝ arm index) without any executor self-time. Profiled today:
+> `EXISTS k0..k15` — `process_buffered_frames` is **below 0.5%** while `execute_plain_exists_borrowed_into`
+> is **18.66%**, `contains_key` **14.58%**, `drop_if_expired` **7.82%** (on a keyspace with no TTLs);
+> `BITFIELD bm GET u8 0` — `process_buffered_frames` **6.14%** vs `contains_key` **12.79%**. Both have
+> since received front-gate dispatch paths, so the row was likely true when written. It still holds for
+> `GEOHASH` (`process_buffered_frames` **22.74%**) and `SINTERCARD LIMIT` (**18.91%**). **Do not quote
+> "not executor levers" for EXISTS or BITFIELD** — their residual is now executor + keyspace probe.
 
 Ran the un-examined per-crate benches (set_algebra / bitfield / exists / geo). fr WINS big on real-work
 (SUNIONSTORE 12.9x, SINTERSTORE/SDIFFSTORE 1.8-2.1x); the losses are all sub-ms: **EXISTS-N 0.26–0.62x,
@@ -1506,6 +1632,11 @@ PATH (dispatch), not the data structure. The `*4`-option-form-lacks-a-fast-path 
 (e.g. other `... WITHSCORE`/option variants that fall to generic).
 
 ## 2026-07-09 CrimsonHawk: REJECT (negligible) — CompactFieldMap short-key final-compare micro-lever; the set/hash membership hot path is optimal
+
+> **✅ PROFILE-VERIFIED VALID 2026-07-10 (cc_fr).** Re-profiled a SMISMEMBER blast (1000-member set):
+> the function under test, `CompactFieldMap::lookup_slot_prehashed`, executes at **5.81% self**, and
+> the final `memcmp` it proposed to hand-roll does not clear **0.5%**. Non-zero, correctly attributed
+> ⇒ this is not a dead-code REJECT, and the `4.7% × (1 − 1/1.18) ≈ 0.7%` arithmetic was the right call.
 
 Chased the last SMISMEMBER perf line item — `CompactFieldMap::lookup_slot_prehashed` (12.1% self, on the
 all-set/hash-lookups path), specifically the final `&self.buf[fr] == field` compare (memcmp, ~4.7% self).
