@@ -24,3 +24,9 @@ criterion = "0.5"
 [[bench]]
 name = "rdb_codec"
 harness = false
+
+# (cc_fr) Same-binary null-gated A/B for the listpack per-entry backlen decode: original
+# reverse-7-bit loop vs the single-byte fast path. main() prints a verdict and exits 0.
+[[bench]]
+name = "listpack_backlen"
+harness = false

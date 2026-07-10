@@ -342,6 +342,35 @@ fn entry_len_with_backlen(
         return Err(ListpackError::TruncatedEntry);
     }
 
+    // (cc_fr) Fast path for the single-byte backlen — `data_len <= 127`, i.e. EVERY
+    // integer entry and every string <= ~126 bytes, the overwhelming majority of
+    // listpack entries (hash fields, set/zset members, small list items). Upstream's
+    // forward decode never re-decodes the backlen (it derives the byte count from
+    // `data_len` via `lpEncodeBacklen` and skips); this keeps fr's per-entry backlen
+    // VALIDATION but collapses the general reverse-7-bit varint loop to one compare.
+    // Byte-identical: for `backlen_len == 1` the loop's `terminated && decoded ==
+    // data_len` gate is exactly `byte & 0x80 == 0 && byte & 0x7F == data_len`, and
+    // since `data_len <= 127` the high bit is clear, so that is `byte == data_len as
+    // u8`. Same `InvalidBacklen` on mismatch; multi-byte backlens keep the loop.
+    if backlen_len == 1 {
+        if data[backlen_start] != data_len as u8 {
+            return Err(ListpackError::InvalidBacklen);
+        }
+        return Ok(data_len + 1);
+    }
+    validate_multibyte_backlen(data, backlen_start, backlen_end, data_len)?;
+    Ok(data_len + backlen_len)
+}
+
+/// Decode+validate a multi-byte listpack backlen (the little-endian 7-bit varint,
+/// read in reverse) and confirm it re-encodes exactly `data_len`. Shared by the
+/// production decoder (multi-byte arm) and the bench-only original walker.
+fn validate_multibyte_backlen(
+    data: &[u8],
+    backlen_start: usize,
+    backlen_end: usize,
+    data_len: usize,
+) -> Result<(), ListpackError> {
     let mut decoded = 0usize;
     let mut shift = 0u32;
     let mut terminated = false;
@@ -366,7 +395,98 @@ fn entry_len_with_backlen(
     if !terminated || decoded != data_len {
         return Err(ListpackError::InvalidBacklen);
     }
+    Ok(())
+}
+
+/// Bench-only baseline: the pre-fast-path `entry_len_with_backlen`, always running
+/// the reverse-7-bit backlen decode loop (no single-byte shortcut). Byte-identical
+/// result to `entry_len_with_backlen`; exists only so a same-binary A/B can isolate
+/// the fast path. Not on any production path.
+#[doc(hidden)]
+pub fn entry_len_with_backlen_orig(
+    data: &[u8],
+    cursor: usize,
+    data_len: usize,
+) -> Result<usize, ListpackError> {
+    let backlen_len = backlen_byte_count(data_len);
+    let backlen_start = cursor
+        .checked_add(data_len)
+        .ok_or(ListpackError::TruncatedEntry)?;
+    let backlen_end = backlen_start
+        .checked_add(backlen_len)
+        .ok_or(ListpackError::TruncatedEntry)?;
+    if backlen_end > data.len() {
+        return Err(ListpackError::TruncatedEntry);
+    }
+    validate_multibyte_backlen(data, backlen_start, backlen_end, data_len)?;
     Ok(data_len + backlen_len)
+}
+
+/// The encoding+payload byte count of the entry at `cursor` (no backlen, no value
+/// materialization) — mirrors `decode_entry`'s `data_len` for each encoding. Used
+/// by the bench walker to feed both backlen decoders identical `data_len` inputs.
+#[doc(hidden)]
+pub fn entry_data_len(data: &[u8], cursor: usize) -> Result<usize, ListpackError> {
+    let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
+    let data_len = if first & 0x80 == 0 {
+        1
+    } else if first & 0xC0 == 0x80 {
+        1 + (first & 0x3F) as usize
+    } else if first & 0xE0 == 0xC0 {
+        2
+    } else if first & 0xF0 == 0xE0 {
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+        2 + (((u32::from(first & 0x0F) << 8) | u32::from(second)) as usize)
+    } else {
+        match first {
+            0xF0 => {
+                if cursor + 5 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let slen = u32::from_le_bytes([
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                    data[cursor + 4],
+                ]) as usize;
+                5 + slen
+            }
+            0xF1 => 3,
+            0xF2 => 4,
+            0xF3 => 5,
+            0xF4 => 9,
+            _ => return Err(ListpackError::InvalidEncoding(first)),
+        }
+    };
+    Ok(data_len)
+}
+
+/// Bench-only: walk every entry of `data`, summing `entry_len_with_backlen`
+/// (`orig=false`) vs `entry_len_with_backlen_orig` (`orig=true`). `entry_data_len`
+/// (identical for both arms) supplies `data_len`, so the timing difference isolates
+/// the backlen fast path. Returns the summed entry lengths (a `black_box` sink).
+#[doc(hidden)]
+pub fn bench_backlen_walk(data: &[u8], orig: bool) -> Result<usize, ListpackError> {
+    let (total_bytes, _) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut sum = 0usize;
+    while cursor < end {
+        let data_len = entry_data_len(data, cursor)?;
+        let consumed = if orig {
+            entry_len_with_backlen_orig(data, cursor, data_len)?
+        } else {
+            entry_len_with_backlen(data, cursor, data_len)?
+        };
+        sum = sum.wrapping_add(consumed);
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+    }
+    Ok(sum)
 }
 
 /// How many backlen bytes follow an entry whose encoding+data occupies
@@ -811,6 +931,72 @@ mod tests {
         let (total, n) = parse_header(&lp).unwrap();
         assert_eq!(total, lp.len() as u32);
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn backlen_fast_path_matches_loop_for_every_data_len() {
+        // (cc_fr) The single-byte-backlen fast path in `entry_len_with_backlen` MUST be
+        // byte-identical to the original reverse-7-bit loop for every `data_len` — a
+        // divergence would change RESTORE's accept/reject on corrupt listpacks. Cover the
+        // 1-byte range, the 127/128 boundary where `backlen_len` flips 1→2, and the 2-byte
+        // range. For each `data_len`, synthesize a well-formed entry (payload bytes + the
+        // canonical backlen) and assert both decoders agree; then corrupt the terminating
+        // backlen byte and assert both still agree (both reject).
+        fn encode_backlen(data_len: usize) -> Vec<u8> {
+            // Mirror upstream lpEncodeBacklen (only the widths this test exercises).
+            if data_len <= 127 {
+                vec![data_len as u8]
+            } else {
+                // 2-byte: buf[0] = l>>7, buf[1] = (l&127)|128; decoder reads in reverse.
+                vec![(data_len >> 7) as u8, ((data_len & 127) | 128) as u8]
+            }
+        }
+        for data_len in [1usize, 2, 5, 63, 64, 126, 127, 128, 129, 200, 500, 1000] {
+            let mut buf = vec![0xEEu8; data_len]; // opaque payload; backlen fn ignores it
+            buf.extend_from_slice(&encode_backlen(data_len));
+            assert_eq!(
+                entry_len_with_backlen(&buf, 0, data_len),
+                entry_len_with_backlen_orig(&buf, 0, data_len),
+                "well-formed data_len={data_len}"
+            );
+
+            // Corrupt the terminating (lowest-address) backlen byte so it no longer
+            // encodes data_len; both paths must reject identically.
+            let mut bad = buf.clone();
+            let backlen_start = data_len;
+            bad[backlen_start] ^= 0x01;
+            assert_eq!(
+                entry_len_with_backlen(&bad, 0, data_len),
+                entry_len_with_backlen_orig(&bad, 0, data_len),
+                "corrupt data_len={data_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn bench_backlen_walk_orig_and_new_agree_on_real_listpack() {
+        // The bench's two arms must sum to the identical total on a mixed listpack
+        // (short strings = 1-byte backlen, a 200-byte string = 2-byte backlen).
+        let long = vec![b'x'; 200];
+        let mut long_entry = Vec::new();
+        // 12-bit str: 1110xxxx + 1 byte len, then payload; data_len = 2 + 200 = 202.
+        long_entry.push(0xE0 | ((200u16 >> 8) as u8 & 0x0F));
+        long_entry.push((200u16 & 0xFF) as u8);
+        long_entry.extend_from_slice(&long);
+        long_entry.push((202usize >> 7) as u8);
+        long_entry.push(((202usize & 127) | 128) as u8);
+        let lp = assemble(&[
+            &entry_7bit_uint(7),
+            &entry_6bit_str(b"hello"),
+            &long_entry,
+            &entry_32bit_int(-12345),
+        ]);
+        assert_eq!(
+            bench_backlen_walk(&lp, true).unwrap(),
+            bench_backlen_walk(&lp, false).unwrap()
+        );
+        // And the production decoder still round-trips the same listpack.
+        assert_eq!(decode_listpack(&lp).unwrap().len(), 4);
     }
 
     #[test]
