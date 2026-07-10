@@ -2047,19 +2047,27 @@ fn encode_compact_list_quicklist2(
     // Upstream lists are ALWAYS quicklist-encoded (RDB_TYPE_LIST_QUICKLIST_2):
     // items are split into PACKED listpack nodes each bounded by
     // list_max_listpack_size (default 8192 B), with an over-budget single item
-    // emitted as a PLAIN node (container=1). The previous form only handled the
-    // single-node case and returned None for a large all-small-item list,
-    // forcing the caller onto the legacy RDB_TYPE_LIST (type 1) — which redis
-    // 7.2 never emits. Build the multi-node form, tracking each node's listpack
-    // byte size incrementally (listpack_entry_encoded_len is O(1)) so packing
-    // stays O(n) and the node boundaries match the DUMP encoder
-    // (encode_dump_quicklist2 / frankenredis-list-dump-quicklist-reencode-q5ody).
+    // emitted as a PLAIN node (container=1). Build the multi-node form, tracking
+    // each node's listpack byte size incrementally so packing stays O(n) and the
+    // node boundaries match the DUMP encoder (encode_dump_quicklist2 /
+    // frankenredis-list-dump-quicklist-reencode-q5ody).
     if items.is_empty() {
         return None;
     }
     let budget = thresholds.list_max_listpack_size;
+    // (cc_fr) Compute each item's listpack-encoded length ONCE. The node count must
+    // precede the node bytes in the RDB stream, so the count is needed up front — but
+    // the pre-count walk previously recomputed `listpack_entry_encoded_len` for every
+    // item (which parses each as a candidate integer via `parse_listpack_integer`),
+    // then the pack loop recomputed the SAME length again: 2N length computations.
+    // Memoize into `lens` and feed both the count and the pack loop — N computations.
+    // Byte-identical: the same per-item lengths produce the same node boundaries. The
+    // saving is real when the parse is non-trivial (integer / short-string items,
+    // where the length is a comparable cost to LZF per node); long-string items reject
+    // in `parse_listpack_integer` on `len >= 21` so it is a wash for them, never worse.
+    let lens: Vec<usize> = items.iter().map(|it| listpack_entry_encoded_len(it)).collect();
     let mut buf = Vec::new();
-    rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
+    rdb_encode_length(&mut buf, quicklist2_node_count_with_lens(items, &lens, budget));
     // Keep a borrowed slice roster for each PACKED node and let the shared
     // listpack encoder build the node payload. A direct streaming encoder was
     // measured slower on the focused quicklist RDB gate, so the buffered path
@@ -2077,7 +2085,7 @@ fn encode_compact_list_quicklist2(
         Some(())
     };
     const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
-    for item in items {
+    for (i, item) in items.iter().enumerate() {
         if item.len() >= QUICKLIST_PACKED_THRESHOLD {
             // (frankenredis-1z4ba) Upstream marks a node PLAIN only when
             // isLargeElement(sz) = sz >= packed_threshold (1<<30, 1 GiB). A merely
@@ -2092,6 +2100,85 @@ fn encode_compact_list_quicklist2(
             rdb_encode_string(&mut buf, item);
             continue;
         }
+        let entry_bytes = lens[i];
+        if !packed.is_empty() && packed_bytes + entry_bytes > budget {
+            flush(&mut packed, &mut buf)?;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+        }
+        packed.push(item.as_slice());
+        packed_bytes += entry_bytes;
+    }
+    flush(&mut packed, &mut buf)?;
+    Some(buf)
+}
+
+/// [`quicklist2_node_count`] but reading pre-memoized per-item listpack lengths from
+/// `lens` (`lens[i] == listpack_entry_encoded_len(items[i])`) instead of recomputing
+/// them. Same node-boundary logic; byte-identical count.
+fn quicklist2_node_count_with_lens(items: &[Vec<u8>], lens: &[usize], budget: usize) -> usize {
+    let mut node_count = 0;
+    let mut packed_has_items = false;
+    let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
+    for (i, item) in items.iter().enumerate() {
+        if item.len() > budget {
+            if packed_has_items {
+                node_count += 1;
+                packed_has_items = false;
+                packed_bytes = LISTPACK_BLOB_OVERHEAD;
+            }
+            node_count += 1;
+            continue;
+        }
+        let entry_bytes = lens[i];
+        if packed_has_items && packed_bytes + entry_bytes > budget {
+            node_count += 1;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+        }
+        packed_has_items = true;
+        packed_bytes += entry_bytes;
+    }
+    if packed_has_items {
+        node_count += 1;
+    }
+    node_count
+}
+
+/// Bench-only baseline: the pre-memoization `encode_compact_list_quicklist2` that
+/// pre-walks `quicklist2_node_count` (recomputing `listpack_entry_encoded_len` per
+/// item) and then recomputes the same length again in the pack loop — 2N length
+/// computations. Byte-identical output to `encode_compact_list_quicklist2`; exists
+/// only so a same-binary A/B can isolate the memoization. Not on any production path.
+#[doc(hidden)]
+pub fn encode_compact_list_quicklist2_orig(
+    items: &[Vec<u8>],
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>> {
+    if items.is_empty() {
+        return None;
+    }
+    let budget = thresholds.list_max_listpack_size;
+    let mut buf = Vec::new();
+    rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
+    let mut packed: Vec<&[u8]> = Vec::new();
+    let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
+    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>| -> Option<()> {
+        if !packed.is_empty() {
+            let lp = encode_listpack_strings_blob(packed)?;
+            rdb_encode_length(buf, 2);
+            rdb_encode_string(buf, &lp);
+            packed.clear();
+        }
+        Some(())
+    };
+    const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
+    for item in items {
+        if item.len() >= QUICKLIST_PACKED_THRESHOLD {
+            flush(&mut packed, &mut buf)?;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+            rdb_encode_length(&mut buf, 1);
+            rdb_encode_string(&mut buf, item);
+            continue;
+        }
         let entry_bytes = listpack_entry_encoded_len(item);
         if !packed.is_empty() && packed_bytes + entry_bytes > budget {
             flush(&mut packed, &mut buf)?;
@@ -2102,6 +2189,15 @@ fn encode_compact_list_quicklist2(
     }
     flush(&mut packed, &mut buf)?;
     Some(buf)
+}
+
+/// Bench-only shim exposing the production memoized `encode_compact_list_quicklist2`.
+#[doc(hidden)]
+pub fn encode_compact_list_quicklist2_new(
+    items: &[Vec<u8>],
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>> {
+    encode_compact_list_quicklist2(items, thresholds)
 }
 
 fn quicklist2_node_count(items: &[Vec<u8>], budget: usize) -> usize {
@@ -5469,6 +5565,49 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(strip_stream_metadata(decoded), entries);
+    }
+
+    #[test]
+    fn quicklist2_memoized_matches_two_walk_orig_byte_for_byte() {
+        // (cc_fr) The memoized `encode_compact_list_quicklist2` (one length pass) MUST emit
+        // the EXACT bytes the two-walk original did — a divergence would corrupt DUMP/RDB
+        // list payloads. Cover the shapes that drive the node-boundary + PLAIN/PACKED logic:
+        // integer items (parse succeeds), short strings, long strings (parse rejects on
+        // len>=21), an empty list (None), a single item, exactly-at-budget splits, and an
+        // over-budget (>list_max_listpack_size, <1 GiB) item that must become its own node.
+        use super::{
+            CompactRdbThresholds, encode_compact_list_quicklist2_new,
+            encode_compact_list_quicklist2_orig,
+        };
+        let th = CompactRdbThresholds::default();
+        let ints: Vec<Vec<u8>> = (0..5000).map(|i| (i * 37 - 9000).to_string().into_bytes()).collect();
+        let shorts: Vec<Vec<u8>> = (0..5000).map(|i| format!("e{i}").into_bytes()).collect();
+        let longs: Vec<Vec<u8>> = (0..400).map(|i| vec![b'a' + (i % 26) as u8; 50 + (i % 40)]).collect();
+        let mixed: Vec<Vec<u8>> = (0..3000)
+            .map(|i| if i % 2 == 0 { i.to_string().into_bytes() } else { format!("member:{i:04}").into_bytes() })
+            .collect();
+        let over_budget = vec![
+            b"small".to_vec(),
+            vec![b'Z'; th.list_max_listpack_size + 500], // > budget, < 1 GiB
+            b"tail".to_vec(),
+        ];
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            Vec::new(),
+            vec![b"solo".to_vec()],
+            ints,
+            shorts,
+            longs,
+            mixed,
+            over_budget,
+        ];
+        for items in &cases {
+            assert_eq!(
+                encode_compact_list_quicklist2_new(items, &th),
+                encode_compact_list_quicklist2_orig(items, &th),
+                "quicklist2 memoized vs orig diverged for {}-item list",
+                items.len()
+            );
+        }
     }
 
     #[test]

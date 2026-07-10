@@ -36,3 +36,9 @@ harness = false
 [[bench]]
 name = "listpack_int_parse"
 harness = false
+
+# (cc_fr) Same-binary null-gated A/B for the quicklist2 list RDB encode: two-walk
+# (node-count pre-walk + pack) vs memoized single length pass.
+[[bench]]
+name = "quicklist_encode"
+harness = false
