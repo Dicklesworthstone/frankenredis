@@ -30,3 +30,9 @@ harness = false
 [[bench]]
 name = "listpack_backlen"
 harness = false
+
+# (cc_fr) Same-binary null-gated A/B for parse_listpack_integer (DUMP int-encode gate):
+# two-pass canonical-scan+accumulate vs the single-pass fused parse.
+[[bench]]
+name = "listpack_int_parse"
+harness = false

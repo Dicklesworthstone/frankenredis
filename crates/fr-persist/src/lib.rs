@@ -2432,18 +2432,49 @@ fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
     }
     // Accept only the CANONICAL decimal form (exactly what the prior
     // `value.to_string() == entry` round-trip accepted), but WITHOUT allocating a
-    // String per element — this runs once per element on every listpack RDB
-    // encode, so the per-int allocation showed up as wall-clock cost on
-    // integer-heavy collections. Canonical = optional leading '-', no '+', no
-    // redundant leading zero, and not "-0".
+    // String per element — this runs once per element on every listpack RDB encode.
+    // Canonical = optional leading '-', no '+', no redundant leading zero, not "-0".
+    let (neg, digits): (bool, &[u8]) = match entry.first() {
+        Some(b'-') => (true, &entry[1..]),
+        _ => (false, entry),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    // (cc_fr) Fuse the canonical check into the single accumulate pass instead of
+    // scanning the digits twice (previously: `listpack_int_bytes_are_canonical` ran
+    // `all(is_ascii_digit)` + the canonical predicates, THEN this loop re-scanned to
+    // accumulate). The leading-zero / "-0" rejections need only the first digit:
+    // "007"/"00" are non-canonical (redundant leading zero), and "-0" is too
+    // (`to_string(0)` == "0"). Only "0" itself may begin with '0'. Byte-identical
+    // acceptance and the same `checked_*` out-of-range rejection; the per-digit
+    // `is_ascii_digit` gate below replaces the old `all(...)` scan. Build in the
+    // NEGATIVE direction so `i64::MIN` fits.
+    if digits[0] == b'0' && (digits.len() > 1 || neg) {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
+    }
+    if neg { Some(acc) } else { acc.checked_neg() }
+}
+
+/// Bench-only baseline: the pre-fuse two-pass `parse_listpack_integer` (canonical
+/// check scan + accumulate scan). Byte-identical result to `parse_listpack_integer`;
+/// exists only so a same-binary A/B can isolate the single-pass fusion. Not on any
+/// production path.
+#[doc(hidden)]
+pub fn parse_listpack_integer_orig(entry: &[u8]) -> Option<i64> {
+    if entry.is_empty() || entry.len() >= 21 {
+        return None;
+    }
     if !listpack_int_bytes_are_canonical(entry) {
         return None;
     }
-    // Bytes are already verified canonical ASCII `[-]?[0-9]+`, so skip the
-    // redundant `from_utf8` validation pass (it showed up at ~19% of listpack RDB
-    // encode on integer-heavy collections) and accumulate the i64 directly. Build
-    // in the NEGATIVE direction so i64::MIN fits; `checked_*` rejects out-of-range
-    // exactly as `str::parse::<i64>()` did (e.g. "9223372036854775808" -> None).
     let (neg, digits): (bool, &[u8]) = match entry.first() {
         Some(b'-') => (true, &entry[1..]),
         _ => (false, entry),
@@ -2453,6 +2484,12 @@ fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
         acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
     }
     if neg { Some(acc) } else { acc.checked_neg() }
+}
+
+/// Bench-only shim exposing the production single-pass parser.
+#[doc(hidden)]
+pub fn parse_listpack_integer_new(entry: &[u8]) -> Option<i64> {
+    parse_listpack_integer(entry)
 }
 
 /// True iff `entry` is the canonical base-10 text of some integer — i.e. equal to
@@ -4256,6 +4293,45 @@ mod tests {
                 oracle(entry),
                 "mismatch for {entry:?}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_listpack_integer_fused_matches_two_pass_orig() {
+        // (cc_fr) The single-pass fused parser MUST accept/reject and return EXACTLY what
+        // the pre-fuse two-pass version did for every input — a divergence would change
+        // which listpack entries are int-encoded on DUMP/RDB-save (a wire-format change).
+        // Hand cases cover the canonical boundaries; the sweep fuzzes short byte strings
+        // over the ASCII range that exercises digits, sign, and non-digit bytes.
+        let hand: &[&[u8]] = &[
+            b"", b"-", b"0", b"-0", b"00", b"007", b"-00", b"-07", b"+7", b"7", b"-7", b"10",
+            b"-10", b"9223372036854775807", b"-9223372036854775808", b"9223372036854775808",
+            b"99999999999999999999", b" 7", b"7 ", b"1.0", b"0x10", b"1e3", b"\xff", b"-x", b"x",
+        ];
+        for entry in hand {
+            assert_eq!(
+                super::parse_listpack_integer_new(entry),
+                super::parse_listpack_integer_orig(entry),
+                "hand case {entry:?}"
+            );
+        }
+        // Exhaustive 1-3 byte sweep over a discriminating alphabet.
+        let alpha: &[u8] = b"-+0129x ";
+        let mut buf = Vec::new();
+        for a in alpha {
+            for b in alpha {
+                for c in alpha {
+                    for combo in [&[*a][..], &[*a, *b], &[*a, *b, *c]] {
+                        buf.clear();
+                        buf.extend_from_slice(combo);
+                        assert_eq!(
+                            super::parse_listpack_integer_new(&buf),
+                            super::parse_listpack_integer_orig(&buf),
+                            "sweep {buf:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
