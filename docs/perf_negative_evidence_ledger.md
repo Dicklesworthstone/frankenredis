@@ -5739,3 +5739,78 @@ probe. The same shape likely recurs on other delete/overwrite paths (`DEL`, `SET
 taken this turn: no A/B substrate is available — `rch` reports
 `no admissible workers: insufficient_slots=10, active_project_exclusion=1`, and a worker that *is*
 assigned runs `perf_event_paranoid=4`. Profiling works; ratios do not.
+
+## 2026-07-10 cod_fr: FINAL KEEP — profile-selected OBJECT IDLETIME dispatch floor, 0.430010670x instructions
+
+Ledger-first audit left writev closed on valid evidence but voided the blanket uppercase/matcher
+closure: it has no binary SHA, changed-function self-time, worker, or CV. A fresh P16/C50
+`OBJECT IDLETIME k` attribution used a symbolized release-perf FrankenRedis snapshot (SHA-256
+`84090b5959b2396569f74343dee5542174afc881c1a97b40856958ae52147679`) and vendored Redis 7.2.4
+(SHA-256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`). Across five
+one-million-command trials, FrankenRedis averaged **6,172,038,196.2** `instructions:u` at
+**0.027295% CV**; Redis averaged **4,162,585,480.4** at **0.513643% CV**. Ratio was
+**1.482741490x**, gap **2,009,452,715.8** instructions.
+
+Both complete no-children `>=0.1%` frame tables had zero lost samples. FrankenRedis's top frames
+were `process_buffered_frames` **27.68%**, `memcmp` **7.17%**, store `contains_key` **3.89%**, and
+the unchanged OBJECT executor **2.88%**. Redis's corresponding parser frame
+`processMultibulkBuffer` was **5.71%** and `memcmp` **0.18%**. Applying self shares to the trial
+means attributes **1,470,736,542 excess instructions / 73.19% of the gap** to buffered
+dispatch/parser, and dispatch plus `memcmp` explains **1,905,779,027 / 94.84%**. The store
+`object_idletime` frame was only **0.17%**, so the old store-lookup family was not selected. Full
+evidence is in `tests/artifacts/perf/run_20260710T143901Z_getbit_p16_attribution/`.
+
+ONE LEVER: exact three-argument `OBJECT IDLETIME` classification at the existing dispatch floor,
+reusing the current packet parser and executor. Sibling OBJECT subcommands stay on the prior
+borrowed cascade.
+
+Substrate v2 proof was one binary, one invocation, one worker, release-perf, and interleaving within
+every measured routine. Command:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test --profile release-perf -p fr-server --features perf-ab-object-idletime-floor --test object_idletime_floor_ab -- --ignored --nocapture`
+
+Worker **vmi1167313**, client CPU 0, both server arms CPU 5, allowed set 0-5. Both arms shared binary
+SHA-256 **`90cf326cbf9e5d08cbc6c8deb59f0ce852aeca1b9808a9519ef9ad17ee4a0845`**; ORIG selected a
+feature-only exact pre-lever classifier monomorph. Packets and complete replies crossed symmetric
+`black_box` barriers. Each of eight samples used OCCO/COOC alternation, P16/C50, 256,000 commands
+per arm, three-second quiescence, and 750 ms perf attach.
+
+Ledger-integrity reachability: both profiles had zero lost samples; ORIG
+`process_buffered_frames` was **23.82% self**, and the exact changed candidate function
+`dispatch_floor_fast_object_idletime` was **1.93% self**. Therefore the benchmark executes the
+lever.
+
+| sample | order | ORIG instructions | candidate instructions | candidate/ORIG |
+|---:|:---:|---:|---:|---:|
+| 1 | OCCO | 1,565,175,048 | 673,035,742 | 0.430006690 |
+| 2 | COOC | 1,565,169,336 | 673,050,280 | 0.430017548 |
+| 3 | OCCO | 1,565,060,523 | 672,953,046 | 0.429985318 |
+| 4 | COOC | 1,565,168,023 | 673,037,340 | 0.430009641 |
+| 5 | OCCO | 1,565,210,985 | 673,045,139 | 0.430002821 |
+| 6 | COOC | 1,565,229,552 | 673,090,852 | 0.430026926 |
+| 7 | OCCO | 1,565,190,494 | 673,091,337 | 0.430037966 |
+| 8 | COOC | 1,565,202,740 | 673,034,748 | 0.429998447 |
+
+Means: ORIG **1,565,175,837.625**, candidate **673,042,310.500**. Candidate/ORIG
+**0.430010670**, **56.998933% fewer instructions / 2.325524x reduction**. CV:
+**0.003281% ORIG**, **0.006384% candidate**, **0.003859% paired ratio**. The unchanged GETBIT guard
+was **1.003397047x** with **0.003304% / 0.003974% / 0.003664%** ORIG, candidate, and ratio CV.
+This clears the 1% keep gate by 55.999 percentage points.
+
+Behavior parity and quality gates:
+
+- the exact mixed-case/sibling/arity classifier test passed on remote worker `hz1`;
+- the full `fr-conformance` package passed **194/194** library tests, all auxiliary and doc-test
+  targets, **99/99** smoke cases, the **4,975-case** differential fixture harness, and **116/116**
+  live OBJECT cases on remote worker `ovh-b`;
+- workspace all-target check passed on `hz1`, as did feature-enabled `fr-server` all-target clippy
+  with `-D warnings`;
+- direct rustfmt and source/doc diff checks passed; the two raw `perf report` frame tables
+  intentionally preserve perf's tool-emitted column padding;
+- workspace-wide clippy reached only the already-filed `fr-persist` excessive-precision baseline
+  (`frankenredis-u0x5d`) and concurrently owned `fr-store` test constants; neither was changed;
+- UBS found no new production defect in the lever, but its scanner unexpectedly launched a local
+  Cargo shadow-worktree check. That output was discarded and UBS was not rerun under the active
+  disk constraint.
+
+Verdict: **FINAL KEEP**. The source change is the single exact dispatch-floor lever above.

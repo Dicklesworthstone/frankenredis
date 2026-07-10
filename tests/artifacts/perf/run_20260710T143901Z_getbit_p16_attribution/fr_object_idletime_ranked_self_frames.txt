@@ -1,0 +1,1878 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'instructions:u'
+# Event count (approx.): 12340492072
+#
+# Overhead  Symbol                                                                                                                                        Shared Object     IPC   [IPC Coverage]
+# ........  ............................................................................................................................................  ................  ....................
+#
+    27.68%  [.] frankenredis::process_buffered_frames                                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     7.17%  [.] __memcmp_avx2_movbe                                                                                                                       libc.so.6         -      -            
+            |
+            ---__memcmp_avx2_movbe
+               |          
+               |--5.50%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+               |--0.96%--<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+               |--0.35%--<fr_store::Store>::object_idletime
+               |          <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.26%--<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+                          <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     3.89%  [.] <hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::contains_key::<[u8]>                 frankenredis      -      -            
+            |
+            ---<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::contains_key::<[u8]>
+               |          
+               |--2.10%--<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --1.79%--<fr_store::Store>::object_idletime
+                          <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     2.88%  [.] <fr_runtime::Runtime>::execute_plain_object_stat_borrowed                                                                                 frankenredis      -      -            
+            |
+            ---<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          
+                --2.83%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     2.79%  [.] 0x0000000000000986                                                                                                                        [vdso]            -      -            
+            |
+            ---0x743c37ff6986
+               clock_gettime@@GLIBC_2.17
+               <std::sys::pal::unix::time::Timespec>::now
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     2.25%  [.] frankenredis::parse_borrowed_plain_keys_multi_packet                                                                                      frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keys_multi_packet
+               |          
+               |--2.03%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.22%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     2.24%  [.] frankenredis::parse_borrowed_plain_object_stat_packet                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_object_stat_packet
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.93%  [.] frankenredis::parse_borrowed_plain_key_arg2_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_key_arg2_packet
+               |          
+               |--1.75%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.18%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.86%  [.] frankenredis::try_dispatch_floor_classified_action                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::try_dispatch_floor_classified_action
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.40%  [.] frankenredis::parse_borrowed_plain_mset_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mset_packet
+               |          
+                --1.35%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.36%  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows                                                                             frankenredis      -      -            
+            |
+            ---<fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.36%  [.] frankenredis::parse_borrowed_plain_hmset_packet                                                                                           frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_hmset_packet
+               |          
+                --1.27%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.31%  [.] frankenredis::parse_borrowed_plain_hset_multi_packet                                                                                      frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_hset_multi_packet
+               |          
+                --1.27%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.18%  [.] <[u8] as core::hash::Hash>::hash::<foldhash::quality::FoldHasher>                                                                         frankenredis      -      -            
+            |
+            ---<[u8] as core::hash::Hash>::hash::<foldhash::quality::FoldHasher>
+               |          
+               |--1.01%--<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::contains_key::<[u8]>
+               |          |          
+               |          |--0.75%--<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          |          frankenredis::process_buffered_frames
+               |          |          frankenredis::handle_readable
+               |          |          frankenredis::main
+               |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          |          std::rt::lang_start_internal
+               |          |          main
+               |          |          __libc_start_call_main
+               |          |          __libc_start_main@@GLIBC_2.34
+               |          |          _start
+               |          |          
+               |           --0.26%--<fr_store::Store>::object_idletime
+               |                     <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |                     frankenredis::process_buffered_frames
+               |                     frankenredis::handle_readable
+               |                     frankenredis::main
+               |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |                     std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |                     std::rt::lang_start_internal
+               |                     main
+               |                     __libc_start_call_main
+               |                     __libc_start_main@@GLIBC_2.34
+               |                     _start
+               |          
+                --0.13%--<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get::<[u8]>
+                          <fr_store::Store>::object_idletime
+                          <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.18%  [.] frankenredis::parse_borrowed_plain_object_encoding_packet                                                                                 frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_object_encoding_packet
+               |          
+               |--0.92%--frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.26%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.14%  [.] <hashbrown::map::HashMap<alloc::string::String, fr_store::CommandHistogram, foldhash::quality::RandomState>>::get_mut::<str>              frankenredis      -      -            
+            |
+            ---<hashbrown::map::HashMap<alloc::string::String, fr_store::CommandHistogram, foldhash::quality::RandomState>>::get_mut::<str>
+               |          
+                --1.09%--<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+                          <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.14%  [.] __memmove_avx_unaligned_erms                                                                                                              libc.so.6         -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--0.74%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+               |--0.22%--frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.17%--frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     1.00%  [.] frankenredis::parse_borrowed_plain_keyed_values1_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keyed_values1_packet
+               |          
+               |--0.87%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.13%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.96%  [.] frankenredis::parse_borrowed_plain_object_refcount_packet                                                                                 frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_object_refcount_packet
+               |          
+               |--0.57%--frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.39%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.96%  [.] frankenredis::parse_borrowed_plain_zmscore_multi_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zmscore_multi_packet
+               |          
+               |--0.61%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.35%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.92%  [.] <fr_runtime::Runtime>::drain_pending_pubsub                                                                                               frankenredis      -      -            
+            |
+            ---<fr_runtime::Runtime>::drain_pending_pubsub
+               |          
+               |--0.62%--frankenredis::drain_pending_pubsub_to_connection
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.31%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.87%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                                                                   frankenredis      -      -            
+            |
+            ---<fr_runtime::Runtime>::is_pubsub_client
+               |          
+               |--0.52%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.35%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.87%  [.] <fr_protocol::RespFrame>::encode_into                                                                                                     frankenredis      -      -            
+            |
+            ---<fr_protocol::RespFrame>::encode_into
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.79%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                                        frankenredis      -      -            
+            |
+            ---<fr_runtime::ServerState>::run_active_expire_cycle
+               |          
+               |--0.57%--<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.22%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.74%  [.] frankenredis::parse_borrowed_plain_key_only_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_key_only_packet
+               |          
+               |--0.61%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.13%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.69%  [.] frankenredis::parse_borrowed_dispatch_floor_decimal                                                                                       frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_dispatch_floor_decimal
+               |          
+               |--0.43%--frankenredis::try_dispatch_floor_classified_action
+               |          frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.26%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.61%  [.] frankenredis::parse_borrowed_plain_keyed_values2_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keyed_values2_packet
+               |          
+               |--0.44%--frankenredis::process_buffered_frames
+               |          frankenredis::handle_readable
+               |          frankenredis::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               |          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main@@GLIBC_2.34
+               |          _start
+               |          
+                --0.18%--frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.61%  [.] frankenredis::drain_pending_pubsub_to_connection                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::drain_pending_pubsub_to_connection
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.57%  [.] frankenredis::parse_borrowed_plain_key_arg1_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_key_arg1_packet
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.57%  [.] <hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get::<[u8]>                          frankenredis      -      -            
+            |
+            ---<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get::<[u8]>
+               <fr_store::Store>::object_idletime
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.48%  [.] frankenredis::parse_borrowed_plain_append_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_append_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.44%  [.] core::ptr::drop_glue::<fr_protocol::RespFrame>                                                                                            frankenredis      -      -            
+            |
+            ---core::ptr::drop_glue::<fr_protocol::RespFrame>
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.44%  [.] frankenredis::parse_borrowed_plain_smismember_multi_packet                                                                                frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_smismember_multi_packet
+               |          
+                --0.39%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.43%  [.] frankenredis::parse_borrowed_plain_keyed_pop_packet                                                                                       frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keyed_pop_packet
+               |          
+                --0.35%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.40%  [.] frankenredis::parse_borrowed_plain_pexpire_packet                                                                                         frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_pexpire_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.39%  [.] frankenredis::parse_borrowed_plain_bitcount_range_packet                                                                                  frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitcount_range_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.39%  [.] frankenredis::parse_borrowed_plain_keyed_values3_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keyed_values3_packet
+               |          
+                --0.35%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.39%  [.] <fr_store::Store>::drop_if_expired                                                                                                        frankenredis      -      -            
+            |
+            ---<fr_store::Store>::drop_if_expired
+               |          
+                --0.26%--<fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.35%  [.] frankenredis::parse_borrowed_plain_zincrby_packet                                                                                         frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zincrby_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.35%  [.] frankenredis::parse_borrowed_plain_substr_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_substr_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.35%  [.] <alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert                                                        frankenredis      -      -            
+            |
+            ---<alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.35%  [.] frankenredis::parse_borrowed_plain_hlen_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_hlen_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.35%  [.] frankenredis::parse_borrowed_plain_incrby_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_incrby_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.31%  [.] frankenredis::parse_borrowed_plain_keyed_values4_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_keyed_values4_packet
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.31%  [.] frankenredis::parse_borrowed_plain_set_bulk                                                                                               frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_bulk
+               |          
+                --0.26%--frankenredis::parse_borrowed_plain_object_stat_packet
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.31%  [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                                       frankenredis      -      -            
+            |
+            ---<std::sys::pal::unix::time::Timespec>::sub_timespec
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.31%  [k] 0xffffffffafdf1236                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffafdf1236
+               0xffffffffb08ff2eb
+               0xffffffffb0a230da
+               0xffffffffb0a23c3b
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08efb7a
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.31%  [.] frankenredis::parse_borrowed_plain_bitpos_start_packet                                                                                    frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitpos_start_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.30%  [.] frankenredis::parse_borrowed_plain_zadd2_packet                                                                                           frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zadd2_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.26%  [.] frankenredis::parse_borrowed_plain_smismember2_packet                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_smismember2_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.26%  [.] <fr_runtime::ClientSession as core::clone::Clone>::clone                                                                                  frankenredis      -      -            
+            |
+            ---<fr_runtime::ClientSession as core::clone::Clone>::clone
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.26%  [.] frankenredis::parse_borrowed_plain_lrange_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_lrange_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.26%  [.] frankenredis::parse_borrowed_plain_getset_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_getset_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.26%  [.] frankenredis::parse_borrowed_plain_set_absexpire_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_absexpire_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.25%  [.] _mi_page_malloc_zero                                                                                                                      frankenredis      -      -            
+            |
+            ---_mi_page_malloc_zero
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.25%  [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert                                                  frankenredis      -      -            
+            |
+            ---<hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.25%  [.] frankenredis::parse_borrowed_plain_type_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_type_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::record_deferred_buffered_token                                                                                              frankenredis      -      -            
+            |
+            ---frankenredis::record_deferred_buffered_token
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_set_cond_relexpire_packet                                                                              frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_cond_relexpire_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_set_opt_get_packet                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_opt_get_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_bitpos_range_packet                                                                                    frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitpos_range_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_set_xx_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_xx_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_zmscore2_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zmscore2_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_decrby_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_decrby_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_mget_two_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_two_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [k] 0xffffffffb0c29e6b                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb0c29e6b
+               |          
+                --0.13%--0xffffffffb08fbd39
+                          0xffffffffb08ff217
+                          0xffffffffb0a230da
+                          0xffffffffb0a23c3b
+                          0xffffffffb0a24b30
+                          0xffffffffb0a735f6
+                          0xffffffffb08efb7a
+                          0xffffffffb08efbe4
+                          0xffffffffaf924d8f
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __send
+                          <frankenredis::ClientConnection>::try_flush
+                          frankenredis::drive_client_output
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.22%  [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind                                                                           frankenredis      -      -            
+            |
+            ---<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+               |          
+                --0.13%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_mget_six_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_six_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_set_relexpire_packet                                                                                   frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_relexpire_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.22%  [.] frankenredis::parse_borrowed_plain_getrange_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_getrange_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.21%  [k] 0xffffffffaf704104                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffaf704104
+               |          
+                --0.13%--0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __send
+                          <frankenredis::ClientConnection>::try_flush
+                          frankenredis::drive_client_output
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.21%  [.] fr_protocol::write_u64_digits                                                                                                             frankenredis      -      -            
+            |
+            ---fr_protocol::write_u64_digits
+               |          
+                --0.16%--<fr_protocol::RespFrame>::encode_into
+                          frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.20%  [.] frankenredis::parse_borrowed_plain_getbit_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_getbit_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.20%  [.] frankenredis::parse_borrowed_plain_lpos_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_lpos_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_set_packet                                                                                             frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_expire_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_expire_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [k] 0xffffffffb08f7f82                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb08f7f82
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08efdd3
+               0xffffffffb08efeb4
+               0xffffffffaf925587
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __libc_recv
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [k] 0xffffffffaf60008b                                                                                                                        [unknown]         -      -            
+     0.18%  [.] frankenredis::parse_borrowed_plain_xlen_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_xlen_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_lindex_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_lindex_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_hset_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_hset_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_strlen_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_strlen_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_scard_packet                                                                                           frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_scard_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.18%  [.] frankenredis::parse_borrowed_plain_mget_four_packet                                                                                       frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_four_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_llen_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_llen_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] <fr_runtime::ServerState>::propagate_expired_key_deletions                                                                                frankenredis      -      -            
+            |
+            ---<fr_runtime::ServerState>::propagate_expired_key_deletions
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_set_relexpire_get_packet                                                                               frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_set_relexpire_get_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_expireat_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_expireat_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_hstrlen_packet                                                                                         frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_hstrlen_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] <fr_store::Store>::object_idletime                                                                                                        frankenredis      -      -            
+            |
+            ---<fr_store::Store>::object_idletime
+               |          
+                --0.13%--frankenredis::process_buffered_frames
+                          frankenredis::handle_readable
+                          frankenredis::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                          std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main@@GLIBC_2.34
+                          _start
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_zadd_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zadd_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.17%  [.] frankenredis::parse_borrowed_plain_pexpireat_packet                                                                                       frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_pexpireat_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [k] 0xffffffffb01292a3                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb01292a3
+               0xffffffffb012a67d
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08efa9b
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_dump_packet                                                                                            frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_dump_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] 0x00000000000009bf                                                                                                                        [vdso]            -      -            
+            |
+            ---0x743c37ff69bf
+               clock_gettime@@GLIBC_2.17
+               <std::sys::pal::unix::time::Timespec>::now
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_bitcount_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitcount_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_mget_eight_packet                                                                                      frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_eight_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [k] 0xffffffffb012a649                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb012a649
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08efa9b
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_mget_three_packet                                                                                      frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_three_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>                                               frankenredis      -      -            
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>
+               frankenredis::record_deferred_buffered_token
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_zrevrank_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_zrevrank_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [k] 0xffffffffb0c3a4c3                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb0c3a4c3
+               0xffffffffb08f6bc0
+               0xffffffffb0a24b21
+               0xffffffffb0a735f6
+               0xffffffffb08efb7a
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_mget_seven_packet                                                                                      frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_mget_seven_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_bitpos_unit_packet                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitpos_unit_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [k] 0xffffffffb012a661                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb012a661
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08efa9b
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] mi_free                                                                                                                                   frankenredis      -      -            
+            |
+            ---mi_free
+
+     0.13%  [.] 0x000000000000098c                                                                                                                        [vdso]            -      -            
+            |
+            ---0x743c37ff698c
+               clock_gettime@@GLIBC_2.17
+               <std::sys::pal::unix::time::Timespec>::now
+               <fr_runtime::Runtime>::execute_plain_object_stat_borrowed
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [k] 0xffffffffb0a3ca8f                                                                                                                        [unknown]         -      -            
+            |
+            ---0xffffffffb0a3ca8f
+               0xffffffffb0a2323c
+               0xffffffffb0a23947
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08efb7a
+               0xffffffffb08efbe4
+               0xffffffffaf924d8f
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               frankenredis::drive_client_output
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_smismember3_packet                                                                                     frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_smismember3_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::handle_readable                                                                                                             frankenredis      -      -            
+            |
+            ---frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_bitpos_packet                                                                                          frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_bitpos_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_setrange_packet                                                                                        frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_setrange_packet
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.13%  [.] frankenredis::parse_borrowed_plain_randomkey_packet                                                                                       frankenredis      -      -            
+            |
+            ---frankenredis::parse_borrowed_plain_randomkey_packet
+               frankenredis::process_buffered_frames
+               frankenredis::handle_readable
+               frankenredis::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+               std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -4,6 +4,50 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: FINAL KEEP — exact OBJECT IDLETIME dispatch floor uses 56.999% fewer instructions
+
+NEGATIVE-EVIDENCE CHECK: writev remains VALIDLY rejected and is unrelated to this frame. The prior
+blanket uppercase/matcher closure is inadmissible: it records no binary SHA, changed-function
+self-time, worker, or CV. A fresh P16/C50 `OBJECT IDLETIME k` profile against vendored Redis 7.2.4
+selected the open dispatch/parser family instead. FrankenRedis used **6,172,038,196.2** mean
+instructions versus Redis **4,162,585,480.4** (**1.482741490x**, CV **0.027295% / 0.513643%**).
+`process_buffered_frames` was **27.68% self** versus Redis `processMultibulkBuffer` **5.71%**;
+dispatch/parser explains **73.19%** of the net gap and dispatch plus `memcmp` **94.84%**. Complete
+`>=0.1%` tables (113 FrankenRedis and 121 Redis frames, zero lost) and inputs are in
+`tests/artifacts/perf/run_20260710T143901Z_getbit_p16_attribution/`.
+
+ONE LEVER: recognize only three-argument `OBJECT IDLETIME` at the existing borrowed dispatch floor,
+then reuse the existing `parse_borrowed_plain_object_stat_packet` and
+`execute_plain_object_stat_borrowed`. `FREQ`, `REFCOUNT`, and `ENCODING` retain their prior cascade.
+
+Honest A/B used one release-perf binary, one fail-closed RCH invocation, and one worker
+(`vmi1167313`). ORIG is a feature-only monomorph of the exact pre-lever token/command classifiers;
+both arms share binary SHA-256
+`90cf326cbf9e5d08cbc6c8deb59f0ce852aeca1b9808a9519ef9ad17ee4a0845`. Each of eight P16/C50
+samples interleaved both arms inside one routine in OCCO/COOC order with black-boxed packets and
+replies, 256,000 commands per arm, three-second quiescence, and 750 ms perf attach. The profile gate
+had zero lost samples and proved the exact candidate helper
+`dispatch_floor_fast_object_idletime` live at **1.93% self**; ORIG
+`process_buffered_frames` was **23.82% self**.
+
+Means were ORIG **1,565,175,837.625** and candidate **673,042,310.500** instructions:
+candidate/ORIG **0.430010670**, or **56.998933% fewer / 2.325524x reduction**. CV was
+**0.003281% ORIG**, **0.006384% candidate**, and **0.003859% paired ratio**. The unchanged GETBIT
+guard was **1.003397047x** with **0.003664%** ratio CV. This clears the 1% keep ratchet by 55.999
+percentage points.
+
+Behavior and quality proof: the exact mixed-case/sibling/arity classifier test passed; the full
+`fr-conformance` package passed **194/194** library tests, every auxiliary and doc-test target,
+**99/99** smoke cases, the **4,975-case** differential fixture harness, and **116/116** live OBJECT
+cases. Workspace all-target check passed on remote worker `hz1`; feature-enabled `fr-server`
+all-target clippy with `-D warnings` passed on `hz1`; direct rustfmt and source/doc diff checks
+passed. The two raw `perf report` frame tables intentionally preserve perf's column padding.
+Workspace-wide clippy reached only the filed `fr-persist` excessive-precision baseline
+(`frankenredis-u0x5d`) and concurrently owned `fr-store` test constants, so neither was changed.
+UBS found no new production defect in this lever; its scanner unexpectedly launched a local Cargo
+shadow-worktree check, whose output was discarded, and UBS was not rerun under the active disk
+constraint. Verdict: **FINAL KEEP.**
+
 ## 2026-07-10 cod_fr: FINAL KEEP — SORT ALPHA skips discarded UTF-8 validation; 51.82% fewer comparator instructions
 
 This closes the measured-win row immediately below after its parity and quality gates. Ledger-grep

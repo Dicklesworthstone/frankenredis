@@ -12150,6 +12150,7 @@ enum BorrowedDispatchFloorClass {
     KeyedValuesWrite(usize),
     Llen,
     MemoryUsage,
+    ObjectIdletime,
     Pfcount,
     Scard,
     Setbit,
@@ -12165,6 +12166,7 @@ enum BorrowedDispatchFloorClass {
 struct BorrowedDispatchFloorToken<'a> {
     array_len: usize,
     command: &'a [u8],
+    remaining: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12178,6 +12180,7 @@ enum BorrowedDispatchFloorCommand {
     Llen,
     Lpush,
     Memory,
+    Object,
     Pfcount,
     Rpush,
     Sadd,
@@ -12235,6 +12238,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
             [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
+            [b'O', b'B', b'J', b'E', b'C', b'T'] => Some(BorrowedDispatchFloorCommand::Object),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -12289,6 +12293,33 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
     }
 }
 
+#[cfg(feature = "perf-ab-object-idletime-floor")]
+#[inline]
+fn borrowed_dispatch_floor_command_orig(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
+    if token.len() != 6 {
+        return borrowed_dispatch_floor_command(token);
+    }
+    match uppercase_ascii_token::<6>(token)? {
+        [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
+        [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
+        [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
+        [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
+        [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
+        _ => None,
+    }
+}
+
+#[inline]
+fn borrowed_dispatch_floor_command_for<const OBJECT_IDLETIME_FLOOR: bool>(
+    token: &[u8],
+) -> Option<BorrowedDispatchFloorCommand> {
+    #[cfg(feature = "perf-ab-object-idletime-floor")]
+    if !OBJECT_IDLETIME_FLOOR {
+        return borrowed_dispatch_floor_command_orig(token);
+    }
+    borrowed_dispatch_floor_command(token)
+}
+
 fn parse_borrowed_dispatch_floor_decimal(
     input: &[u8],
     mut cursor: usize,
@@ -12339,18 +12370,83 @@ fn borrowed_dispatch_floor_token<'a>(
     }
     let command_end = cursor.checked_add(bulk_len)?;
     let command = input.get(cursor..command_end)?;
+    let remaining_start = command_end.checked_add(2)?;
+    if input.get(command_end..remaining_start)? != b"\r\n" {
+        return None;
+    }
+    Some(BorrowedDispatchFloorToken {
+        array_len,
+        command,
+        remaining: input.get(remaining_start..)?,
+    })
+}
+
+#[cfg(feature = "perf-ab-object-idletime-floor")]
+#[inline]
+fn borrowed_dispatch_floor_token_orig<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedDispatchFloorToken<'a>> {
+    if input.first().copied()? != b'*' {
+        return None;
+    }
+    let (array_len, cursor) = parse_borrowed_dispatch_floor_decimal(input, 1)?;
+    if array_len > config.max_array_len {
+        return None;
+    }
+    if input.get(cursor).copied()? != b'$' {
+        return None;
+    }
+    let (bulk_len, cursor) = parse_borrowed_dispatch_floor_decimal(input, cursor.checked_add(1)?)?;
+    if bulk_len > config.max_bulk_len {
+        return None;
+    }
+    let command_end = cursor.checked_add(bulk_len)?;
+    let command = input.get(cursor..command_end)?;
     if input.get(command_end..command_end.checked_add(2)?)? != b"\r\n" {
         return None;
     }
-    Some(BorrowedDispatchFloorToken { array_len, command })
+    Some(BorrowedDispatchFloorToken {
+        array_len,
+        command,
+        remaining: &[],
+    })
 }
 
-fn classify_borrowed_dispatch_floor_packet(
+#[inline]
+fn borrowed_dispatch_floor_token_for<'a, const OBJECT_IDLETIME_FLOOR: bool>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedDispatchFloorToken<'a>> {
+    #[cfg(feature = "perf-ab-object-idletime-floor")]
+    if !OBJECT_IDLETIME_FLOOR {
+        return borrowed_dispatch_floor_token_orig(input, config);
+    }
+    borrowed_dispatch_floor_token(input, config)
+}
+
+fn borrowed_dispatch_floor_object_idletime(
+    token: &BorrowedDispatchFloorToken<'_>,
+    config: &ParserConfig,
+) -> bool {
+    if config.max_bulk_len < b"IDLETIME".len() {
+        return false;
+    }
+    let Some(rest) = token.remaining.strip_prefix(b"$8\r\n") else {
+        return false;
+    };
+    rest.get(..8)
+        .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"IDLETIME"))
+        && rest.get(8..10).is_some_and(|ending| ending == b"\r\n")
+}
+
+#[inline]
+fn classify_borrowed_dispatch_floor_packet_impl<const OBJECT_IDLETIME_FLOOR: bool>(
     input: &[u8],
     config: &ParserConfig,
 ) -> Option<BorrowedDispatchFloorClass> {
-    let token = borrowed_dispatch_floor_token(input, config)?;
-    let command = borrowed_dispatch_floor_command(token.command)?;
+    let token = borrowed_dispatch_floor_token_for::<OBJECT_IDLETIME_FLOOR>(input, config)?;
+    let command = borrowed_dispatch_floor_command_for::<OBJECT_IDLETIME_FLOOR>(token.command)?;
     match (token.array_len, command) {
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
@@ -12379,6 +12475,11 @@ fn classify_borrowed_dispatch_floor_packet(
         (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
         (2, BorrowedDispatchFloorCommand::Pfcount) => Some(BorrowedDispatchFloorClass::Pfcount),
         (3, BorrowedDispatchFloorCommand::Memory) => Some(BorrowedDispatchFloorClass::MemoryUsage),
+        (3, BorrowedDispatchFloorCommand::Object)
+            if OBJECT_IDLETIME_FLOOR && borrowed_dispatch_floor_object_idletime(&token, config) =>
+        {
+            Some(BorrowedDispatchFloorClass::ObjectIdletime)
+        }
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
@@ -12405,6 +12506,48 @@ fn classify_borrowed_dispatch_floor_packet(
         }
         _ => None,
     }
+}
+
+/// The measurement feature selects an exact pre-lever classifier monomorph in the
+/// same binary. Production builds compile only the candidate monomorph and have no
+/// environment lookup.
+#[cfg(feature = "perf-ab-object-idletime-floor")]
+#[inline]
+fn object_idletime_floor_orig_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_OBJECT_IDLETIME_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+fn classify_borrowed_dispatch_floor_packet(
+    input: &[u8],
+    config: &ParserConfig,
+) -> Option<BorrowedDispatchFloorClass> {
+    #[cfg(feature = "perf-ab-object-idletime-floor")]
+    if object_idletime_floor_orig_enabled() {
+        return classify_borrowed_dispatch_floor_packet_impl::<false>(input, config);
+    }
+    classify_borrowed_dispatch_floor_packet_impl::<true>(input, config)
+}
+
+#[cfg_attr(feature = "perf-ab-object-idletime-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-object-idletime-floor"), inline)]
+fn dispatch_floor_fast_object_idletime(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet = parse_borrowed_plain_object_stat_packet(unparsed, parser_config)?;
+    if !matches!(packet.cmd, PlainObjectStatCmd::Idletime) {
+        return None;
+    }
+    let response = runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts)?;
+    Some((packet.consumed, response))
 }
 
 fn dispatch_floor_fast_exists_into(
@@ -12867,6 +13010,22 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ObjectIdletime => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_object_idletime(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -30126,6 +30285,43 @@ mod tests {
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::MemoryUsage)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nObJeCt\r\n$8\r\nIdLeTiMe\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ObjectIdletime)
+        );
+        // The floor lever is deliberately IDLETIME-only. Sibling OBJECT commands
+        // retain their unchanged borrowed-cascade route.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
