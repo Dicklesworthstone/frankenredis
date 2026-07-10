@@ -49,6 +49,26 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
+> ### ⚠️ Every cargo invocation MUST go through rch, fail-closed
+>
+> ```sh
+> RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo <subcommand> ...
+> ```
+>
+> `rch` defaults to *"Strict remote: off"* and **silently builds LOCALLY** when it cannot reserve a
+> remote slot; a local `cargo bench` drains ~73 GB/hour on this host. `RCH_REQUIRE_REMOTE=1` makes it
+> error instead. `env -u CARGO_TARGET_DIR` is mandatory because `~/.zshrc` globally exports
+> `CARGO_TARGET_DIR`, which makes rch artifact retrieval return ~0 bytes. If rch reports no remote
+> slot, that is a **blocker** — wait, retry, or do analysis-only work. Never fall back to a local
+> build; never run `maturin build`.
+>
+> **Before you benchmark or write a REJECT, read [`docs/BENCH_METHODOLOGY.md`](docs/BENCH_METHODOLOGY.md).**
+> It carries the A/B substrate rule (both arms in ONE binary and ONE rch invocation, interleaved
+> *within* a single measured routine — Criterion group members run sequentially and do not cancel
+> drift; `black_box` both input and result), and the ledger-integrity rule (profile-verify that the
+> bench actually executes the function under test with non-zero self-time, and record that self-time
+> in the entry).
+
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
