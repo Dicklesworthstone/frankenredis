@@ -5286,6 +5286,63 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: RE-VERIFIED two REJECT rows against the rule — **`EXISTS` no-expiry fast path is INVALID and REOPENED** (rejected code is 7.82% self); SMISMEMBER linear `contains_key` is INVALID-but-live (6.70% self on its true trigger)
+
+Acting on the provenance audit below, and on the fleet signal (frankensearch: 3/4 closed rows measured
+a copy or a revert; frankenmermaid: 4/4 crossing-min rows benched dead code and, once reopened,
+proved a real win). Picked the two REJECT rows whose *rejected code* my profiles could adjudicate.
+All profiling done on an existing symbol-verified binary — **no cargo, so no slot needed**.
+
+### `2026-06-21 cod-b frankenredis-uhthd: EXISTS no-expiry fast path rejected` → **INVALID, REOPENED**
+
+The hunk fast-pathed `Store::exists_no_touch` on a persistent keyspace
+(`count_expiring_keys() == 0`) with a direct `entries.contains_key` probe, skipping
+`record_keyspace_lookup`. Three reasons the rejection is not admissible:
+
+1. **Provenance unproven.** Measured via `cargo bench -p fr-bench --bench exists_vs_redis`. Every
+   fr-bench bench is *server-dependent*: `exists_vs_redis.rs:343` resolves the server as
+   `<CARGO_TARGET_DIR>/release/frankenredis` when `FR_SERVER_BIN` is unset. The row ran under `rch`
+   with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenredis-cod-b` — and **rch does not return
+   the linked binary**, so that path holds whatever `frankenredis` already existed. The sibling
+   GEOHASH row hit exactly this and said so: *"`geo_vs_redis` only built `fr-bench` and used whatever
+   `target/release/frankenredis` already existed on the worker."* No sha256, no symbol check.
+2. **Split-invocation A/B** (candidate vs "current-control" in separate runs) ⇒ INVALID under
+   substrate v2, and the metric is Criterion **wall-clock** with no CV and no `instructions:u`.
+3. **The rejected code is hot.** `EXISTS k0..k15` on a keyspace with **zero TTLs**, flat self%:
+   `execute_plain_exists_borrowed_into` 18.66%, `contains_key` 14.58%,
+   `plain_borrowed_default_key_read_allows` **9.42%**, `Store::drop_if_expired` **7.82%**.
+   `drop_if_expired` burning 7.82% self against **no expiring keys at all** is precisely the cost the
+   lever proposed to skip.
+
+⇒ **REOPEN.** The row is tagged `frankenredis-uhthd`, which is **OWNER-BLOCKED** — surfaced here with
+numbers, not taken. Whoever owns it: the `count_expiring_keys() == 0` guard has ~7.8–17% of EXISTS
+self-time behind it, and this pairs with the independently-found
+`hash_field_ttl_clear_for_key` (1.95% self on every GETDEL against an empty side map). Same vein:
+**unconditional probes of empty side maps.**
+
+### `2026-07-04 CrimsonHawk: small CompactFieldMap linear contains_key` → **measurement INVALID, code LIVE (not dead)**
+
+Split-invocation again (candidate vs `control origin/main 771158686`, separate runs), Criterion
+throughput, no CV, no sha. Its own control is internally inconsistent — the *same* control reports
+FR/Redis `1.236x` on `SMISMEMBER_2v` and `0.720x` on `SMISMEMBER_3v`.
+
+Liveness, checked on the lever's **true trigger shape** (`CompactFieldMap` with `len <= 128`):
+a 100-member set of **80-byte** members (> `set-max-listpack-value` 64 ⇒ `OBJECT ENCODING: hashtable`,
+and 100 ≤ 128). Flat self%: `process_buffered_frames` 13.98%, `GenericSet::contains` 11.09%,
+`__memmove` 7.53%, **`CompactFieldMap::lookup_slot_prehashed` 6.70%**.
+
+So the rejected function executes; this is a *called-but-modest* row, not dead code. Ceiling ≈ 6.7%
+of one command. Verdict: **the number is not trustworthy, the conclusion probably is.** If reopened,
+it must be benched as an **in-crate `cargo bench -p fr-store` target** — the harness class that
+demonstrably works through rch (it runs inside the worker's process) — never through the
+server-dependent `fr-bench` family.
+
+**Worked example of the rule, from my own hands:** my first attempt to adjudicate this row profiled
+SMISMEMBER on a 100-member set of *short* members. That set is compact-encoded
+(`GenericSet::contains` 26.83% self, `__memcmp` 26.12%) and **never touches `CompactFieldMap` at
+all** — I would have "confirmed" the REJECT by measuring a data structure the lever does not use.
+The trigger condition is part of the input, not just the command.
+
 ## 2026-07-10 cc_fr: PROVENANCE AUDIT — 70 REJECT rows, only **3** record a binary sha256 and only **10** record any self-time. Plus: the 07-02 `from_utf8` REJECT does NOT contradict cod_fr's 51.82% SORT win
 
 Prompted by frankensearch finding that 3 of its 4 closed rows had "measured a copy or a revert".
