@@ -4,6 +4,22 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: INVALID A/B — first SORT comparator ORIG was still dead code; no ratio trusted
+
+Ledger-integrity preflight for the proposed `sort_alpha_compare` short-circuit used one fail-closed
+remote `release-perf` bench binary on worker `vmi1264463`. The bench-only ORIG accepted the real
+runtime `Option<&CollatorBorrowed>` and was `#[inline(never)]`, but LLVM legally reordered/eliminated
+the pure UTF-8 validation because `None` makes its results unobservable. Its mandatory
+`perf record -F 997 -e instructions:u -g` profile had **17 samples**, approximately **2,308,933
+instructions**, **zero lost samples**, and **no `core::str::converts::from_utf8` frame (0% self)**.
+Startup/corpus formatting dominated (`String::write_char` 18.79%, formatter padding 10.02%, malloc
+11.50%). The harness therefore stopped before `perf stat` and emitted no ORIG/candidate ratio.
+
+Verdict: **INVALID, not a REJECT and not evidence about the source lever.** Do not quote the earlier
+void wall-clock ratios. Retry condition is satisfied only by explicitly keeping both historical
+`from_utf8` results observable to the optimizer (with symmetric benchmark barriers), then repeating
+the profile gate and requiring nonzero `from_utf8` self-time before collecting an A/B ratio.
+
 ## 2026-07-10 cc_fr: PARKED (no ratio claimed) — SORT `sort_alpha_compare` UTF-8 short-circuit: code written, correctness proven, A/B **blocked by `perf_event_paranoid=4` on the rch workers**
 
 Cashing in cod_fr's P16 attribution (entry below) and the integrity audit that reopened SORT.
