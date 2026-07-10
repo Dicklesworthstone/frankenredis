@@ -3078,12 +3078,29 @@ fn flush_restore_plain_chunk(out: &mut ChunkedList, chunk: &mut Vec<Vec<u8>>) {
 }
 
 impl ChunkedList {
-    fn from_restored_nodes(nodes: Vec<RestoredListNode>) -> Self {
+    /// Build the chunk list from restored QUICKLIST_2 nodes and accumulate the
+    /// growth-state totals in the SAME pass.
+    ///
+    /// Returns `(list, raw_total, enc_total)` where `raw_total` sums element
+    /// lengths and `enc_total` sums `list_lp_entry_bytes` per element — exactly
+    /// the fold `ListValue::rebuild_growth_state` performs, so the caller can
+    /// skip that second full iteration over every element. Byte-identical: the
+    /// same elements are summed, in the same encoding rules, and `+` is
+    /// associative. Keeping the per-element `list_lp_entry_bytes` call (rather
+    /// than deriving `enc_total` from the listpack header's `total_bytes`) is
+    /// load-bearing: a non-canonically-encoded payload must keep yielding the
+    /// same `lp_bytes` / `forced_quicklist` — and hence the same
+    /// `OBJECT ENCODING` — as the re-walk did. (frankenredis-c92f6)
+    fn from_restored_nodes(nodes: Vec<RestoredListNode>) -> (Self, u64, u64) {
         let mut out = ChunkedList::default();
         let mut plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+        let mut raw_total: u64 = 0;
+        let mut enc_total: u64 = 0;
         for node in nodes {
             match node {
                 RestoredListNode::Plain(elem) => {
+                    raw_total += elem.len() as u64;
+                    enc_total += list_lp_entry_bytes(&elem);
                     plain_chunk.push(elem);
                     if plain_chunk.len() == LIST_CHUNK_TARGET {
                         flush_restore_plain_chunk(&mut out, &mut plain_chunk);
@@ -3092,6 +3109,13 @@ impl ChunkedList {
                 }
                 RestoredListNode::Listpack { bytes, entries } => {
                     flush_restore_plain_chunk(&mut out, &mut plain_chunk);
+                    // The decoded spans are still hot here; summing now avoids a
+                    // second traversal of `bytes` through the chunk iterator.
+                    for span in &entries {
+                        let elem = span.as_bytes(&bytes);
+                        raw_total += elem.len() as u64;
+                        enc_total += list_lp_entry_bytes(elem);
+                    }
                     out.len += entries.len();
                     out.chunks
                         .push_back(ListChunk::from_listpack(bytes, entries));
@@ -3099,7 +3123,7 @@ impl ChunkedList {
             }
         }
         flush_restore_plain_chunk(&mut out, &mut plain_chunk);
-        out
+        (out, raw_total, enc_total)
     }
 }
 
@@ -3679,14 +3703,18 @@ impl ListValue {
         // single-node payload still re-derives (listpack iff it fits the configured
         // list-max-listpack-size, evaluated later in Store::object_encoding).
         let multi_node = nodes.len() > 1;
+        // `from_restored_nodes` folds the growth-state totals during construction,
+        // so we set them directly instead of paying `rebuild_growth_state`'s second
+        // full walk over every restored element. The assignments below are exactly
+        // what that fold would have written. (frankenredis-c92f6)
+        let (chunks, raw_total, enc_total) = ChunkedList::from_restored_nodes(nodes);
         let mut list = ListValue {
-            repr: ListRepr::Deque(Arc::new(ChunkedList::from_restored_nodes(nodes))),
-            lp_bytes: LIST_LP_OVERHEAD,
-            forced_quicklist: false,
+            repr: ListRepr::Deque(Arc::new(chunks)),
+            lp_bytes: LIST_LP_OVERHEAD + enc_total,
+            forced_quicklist: LIST_LP_OVERHEAD + raw_total > LIST_DEFAULT_BUDGET,
             fill: -2,
             decided_by_write: false,
         };
-        list.rebuild_growth_state();
         if multi_node {
             list.forced_quicklist = true;
             list.decided_by_write = true;
@@ -5547,6 +5575,123 @@ mod tests {
             (old_ns as f64 / new_ns as f64) > 2.0 || cfg!(debug_assertions),
             "expected >2x, got {:.1}x",
             old_ns as f64 / new_ns as f64
+        );
+    }
+
+    // (frankenredis-c92f6) `from_restored_quicklist2_nodes` now folds the
+    // growth-state totals during construction instead of calling
+    // `rebuild_growth_state`, which re-walked every restored element. Pin the
+    // equivalence: building the value and THEN running the old fold must not
+    // change `lp_bytes` / `forced_quicklist` (nor `len`), for every node shape.
+    //
+    // The non-canonical case is the load-bearing one: a listpack whose entries
+    // are STRING-encoded even though their bytes parse as integers. Deriving
+    // `enc_total` from the listpack header's `total_bytes` would report the
+    // on-wire size and silently change OBJECT ENCODING; summing
+    // `list_lp_entry_bytes` per element (as both the fold and the fused pass do)
+    // reports the canonical re-encoded size. These must stay equal.
+    fn string_encoded_listpack(entries: &[&[u8]]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for entry in entries {
+            let start = encoded.len();
+            assert!(entry.len() < 64, "test helper only emits 6-bit-len strings");
+            encoded.push(0x80 | entry.len() as u8);
+            encoded.extend_from_slice(entry);
+            let data_len = encoded.len() - start;
+            crate::encode_listpack_backlen(&mut encoded, data_len);
+        }
+        crate::finish_listpack_entries(encoded, entries.len()).expect("listpack fits")
+    }
+
+    fn listpack_node(bytes: Vec<u8>) -> super::RestoredListNode {
+        let entries =
+            fr_persist::listpack::decode_value_spans(&bytes).expect("test listpack must decode");
+        super::RestoredListNode::Listpack { bytes, entries }
+    }
+
+    fn assert_fused_totals_match_rewalk(
+        label: &str,
+        make: impl Fn() -> Vec<super::RestoredListNode>,
+        expect_len: usize,
+    ) {
+        let mut fused = ListValue::from_restored_quicklist2_nodes(make());
+        let (lp_bytes, forced, decided) = (
+            fused.lp_bytes,
+            fused.forced_quicklist,
+            fused.decided_by_write,
+        );
+        assert_eq!(fused.len(), expect_len, "{label}: element count");
+
+        // Re-run the exact fold the old code performed.
+        fused.rebuild_growth_state();
+        assert_eq!(fused.lp_bytes, lp_bytes, "{label}: lp_bytes drifted");
+        // multi-node payloads pin forced_quicklist AFTER the fold, so compare the
+        // fold's own verdict only where the constructor did not override it.
+        if !decided {
+            assert_eq!(
+                fused.forced_quicklist, forced,
+                "{label}: forced_quicklist drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6() {
+        // canonical: mixed strings + integer-encoded entries
+        let canonical: Vec<&[u8]> = vec![b"member:0001", b"42", b"-9999", b"x"];
+        let canonical_lp = crate::encode_listpack_strings(&canonical).expect("lp");
+        assert_fused_totals_match_rewalk(
+            "canonical single node",
+            || vec![listpack_node(canonical_lp.clone())],
+            canonical.len(),
+        );
+
+        // NON-CANONICAL: int-looking values stored as listpack STRINGS.
+        let noncanon: Vec<&[u8]> =
+            vec![b"123", b"4096", b"-1", b"0", b"00", b"9223372036854775807"];
+        let noncanon_lp = string_encoded_listpack(&noncanon);
+        assert_fused_totals_match_rewalk(
+            "non-canonical string-encoded ints",
+            || vec![listpack_node(noncanon_lp.clone())],
+            noncanon.len(),
+        );
+
+        // plain nodes only (large elements)
+        assert_fused_totals_match_rewalk(
+            "plain nodes",
+            || {
+                vec![
+                    super::RestoredListNode::Plain(vec![b'a'; 100]),
+                    super::RestoredListNode::Plain(b"77".to_vec()),
+                ]
+            },
+            2,
+        );
+
+        // mixed multi-node: plain + listpack interleaved (also exercises the
+        // plain-chunk flush between listpack nodes)
+        assert_fused_totals_match_rewalk(
+            "mixed multi-node",
+            || {
+                vec![
+                    super::RestoredListNode::Plain(vec![b'z'; 70]),
+                    listpack_node(canonical_lp.clone()),
+                    super::RestoredListNode::Plain(b"5".to_vec()),
+                    listpack_node(noncanon_lp.clone()),
+                ]
+            },
+            2 + canonical.len() + noncanon.len(),
+        );
+
+        // budget boundary: enough raw bytes to trip forced_quicklist
+        assert_fused_totals_match_rewalk(
+            "over LIST_DEFAULT_BUDGET",
+            || {
+                (0..200)
+                    .map(|i| super::RestoredListNode::Plain(vec![b'q'; 50 + (i % 3)]))
+                    .collect()
+            },
+            200,
         );
     }
 }

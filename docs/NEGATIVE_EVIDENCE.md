@@ -4,6 +4,79 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: KEEP — RESTORE second listpack walk eliminated (fused growth totals) — −2.71% server instructions:u, fr/redis 0.4343x → 0.4517x
+
+NEGATIVE-EVIDENCE CHECK: grepped both ledgers first. This is NOT a retry of the rejected
+owned-argv `Vec<Bytes>` dispatch rewrite (my own REJECT entry below, `05ed61c43`), nor of
+the rejected `ChunkedList → VecDeque` / decode-path rewrite, nor of the rejected zset-DUMP
+integer-score shortcut. It attacks the #7 ranked hotspot from that REJECT's profile.
+
+PROFILE FIRST (confirms the ranked hotspot). Control `fr-restore-orig`
+md5 `2e5dcb783608109af60a275faf769e6c`, candidate `fr-restore-cand`
+md5 `9d0f0a054ce1a40c815acf5f48731de8`, both `release-perf`, built locally from ONE source
+dir swapping only `packed_set.rs`. Bench shape = `restore_quicklist` (96 members × 40B →
+redis `DUMP` → quicklist2, 525B payload), pipeline 128, servers + client pinned to distinct
+cores.
+
+Control profile (self%): `rebuild_growth_state` **3.33%** + `list_lp_entry_bytes` 2.07%.
+`ListValue::from_restored_quicklist2_nodes` called `rebuild_growth_state`, whose
+`self.iter().fold(...)` re-traversed EVERY restored element through the chunk iterator —
+immediately after `decode_value_spans` had already decoded them.
+
+LEVER (one): fold `(raw_total, enc_total)` during construction in
+`ChunkedList::from_restored_nodes` (now returns `(Self, u64, u64)`), and have
+`from_restored_quicklist2_nodes` assign `lp_bytes` / `forced_quicklist` directly instead of
+calling `rebuild_growth_state`. `rebuild_growth_state` itself is retained (the
+`FromIterator` path still uses it).
+
+BYTE-EXACTNESS (load-bearing detail): the fused pass keeps calling `list_lp_entry_bytes`
+per element rather than deriving `enc_total` from the listpack header's `total_bytes`.
+`total_bytes` is the ON-WIRE size; a non-canonically-encoded payload (int-looking values
+STRING-encoded in the listpack) would then report a different `lp_bytes` and silently flip
+`OBJECT ENCODING`. Pinned by new unit test
+`restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6`: builds the value, then
+runs the OLD fold and asserts `lp_bytes` / `forced_quicklist` / `len` do not drift — across
+canonical listpacks, a hand-built STRING-encoded-integer listpack, plain nodes, mixed
+multi-node, and an over-`LIST_DEFAULT_BUDGET` shape.
+
+MEASURED — server-side `perf stat -e instructions:u` attached to the server pid over a
+FIXED 40,000-RESTORE window (wall-clock is noise at this effect size; median of 9
+interleaved trials):
+
+| engine | instructions | per RESTORE | cv |
+| --- | ---: | ---: | ---: |
+| orig | 2,233,410,097 | 55,835 | **0.00%** |
+| cand | 2,172,902,788 | 54,323 | **0.01%** |
+
+  **cand/orig instructions = 0.9729 (−2.71%)**, cv well under the 5% gate.
+  UNTOUCHED-PATH GUARD: GET-blast instructions cand/orig = **0.9998** (flat) — the delta is
+  the RESTORE path, not a global shift.
+
+Wall clock (min-of-9, three engines interleaved in one process):
+  orig 126,351 restore/s · cand 131,413 restore/s · redis 7.2.4 290,929 restore/s
+  cand/orig **1.0401x**;  fr/redis **0.4343x → 0.4517x**.
+
+Candidate profile confirms the target moved: `rebuild_growth_state` is GONE; the fused loop
+inlines into `from_restored_quicklist2_nodes` at 2.52% self.
+
+GATES: fr-store lib **749 passed / 0 failed** (incl. the new equivalence test);
+fr-conformance **105 passed / 0 failed**; DUMP/RESTORE differential family — 11 harnesses,
+10 PASS (`list_quicklist_dump_differ`, `restore_corrupt_payload_differ`,
+`restore_encoding_differ`, `restore_reoptimize_encoding_differ`, `restore_idletime_freq_differ`,
+`dump_restore_fuzz`, `reload_dump_determinism_gate`, `dump_byte_equality_gate`,
+`lzf_dump_byte_equality_differ`, `dump_restore_differ`) against a FRESH default-config oracle
+with `--enable-debug-command yes` on both engines. `quicklist_dump_boundary_differ` FAILS
+**identically on the control** (trial=232 n=70, oracle=10301 fr=10313) ⇒ PRE-EXISTING, bead
+`frankenredis-s36di`, not introduced here. clippy `-D warnings` + fmt + ubs clean.
+
+RESIDUAL / NEXT: this closes the SECOND walk only. The FIRST walk remains —
+`decode_value_spans` 9.36% + `entry_len_with_backlen` 4.26% — and redis pays ~0 for it
+(`sanitize-dump-payload` defaults `SANITIZE_DUMP_NO` ⇒ `lpValidateIntegrity(deep=0)` returns
+after the header check, `listpack.c:1363`, and the raw listpack is attached). The remaining
+prize is LAZY SPANS (defer `decode_value_spans` until a restored chunk is first indexed),
+which moves corrupt-payload behavior and wants its own slice. Bead `frankenredis-c92f6`
+lever 2. Do NOT re-attempt the owned-argv rewrite.
+
 ## 2026-07-10 cod_fr: REJECT (premise) — current P16 small-reply path is NOT writev-starved; do not retry wrappers over `write_buf`
 
 Directive was to reopen the README-named `writev` / scatter-gather workstream for
