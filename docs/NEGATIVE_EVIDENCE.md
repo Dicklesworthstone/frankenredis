@@ -4,6 +4,75 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: KEEP (verify) — manifest lever #5 lazy set-DUMP integer view CONFIRMED: −29.8% / −24.7% `instructions:u` (the BIGGEST of the six) + #2/#3/#4 profile-ranked as near-exhausted
+
+NEGATIVE-EVIDENCE CHECK: grepped both ledgers for all five remaining manifest levers
+(presize / pre-size, intset encode, lazy set-DUMP, listpack-blob builders). **No prior
+rejection exists for any of them.** The "do not retry … exact packed-buffer reserves" line in
+the long-form ledger belongs to the `uhthd` RSS-ratchet context, not to these DUMP levers.
+Lever **#6 was discharged in `9dccf9f9b`**, and the GETSET/GETDEL lane items were DECLINED
+there with code + ledger evidence (GETSET `_into` is already shipped; GETDEL's value is MOVED
+out by `internal_entries_remove`, so there is no clone to elide). Not retried.
+
+PROFILE FIRST — ranked the four remaining levers by profiling *each lever's own target shape*
+(perf flat self%, HEAD `release-perf`, repeated DUMP blast). **Set / list / hash DUMP is NOT
+memoized — only compact zsets are (`cache_compact_zset_dump`) — so a repeat blast is honest for
+these shapes**, unlike the zset case in the entry below.
+
+| lever | shape | fr/redis | what the profile says |
+| --- | --- | ---: | --- |
+| **#5** | 1000-int set (hashtable) | 1.457x | `parse_i64` **22.80%**, allocator (`_mi_theap_realloc_zero` 10.1 + `finish_grow` 6.2 + `do_reserve` 5.1 + `mi_free` 3.4 + `mi_realloc` 3.2 + `mi_malloc` 2.7) ≈ **31%** |
+| #3 | 400-int intset | 1.021x | `lzf_compress` 63.9%; `encode_intset` only **4.47%** ⇒ tiny ceiling |
+| #2 | multi-node quicklist | 1.192x | `lzf_compress` 64.2%, `common_prefix_len` 11.4%; **no realloc symbols** ⇒ presize already lean |
+| #4 | listpack hash | 0.637x | `lzf_compress` 42.8%, `PackedStrMapIter` 11.8%, `encode_listpack_entry` 8.7%; **no realloc symbols** ⇒ presize already lean |
+| #1 | BGSAVE / DEBUG RELOAD | — | not exercised by a DUMP loop; still unprofiled |
+
+⇒ **#5 taken** (top-ranked). #3/#2/#4 have a small measured ceiling on the DUMP-command path;
+do not chase them without a fresh bulk-save profile that names them.
+
+THE LEVER: pre-`bae131f7e`, `Store::dump_key`'s `Value::Set` arm built
+`let integer_members: Option<Vec<i64>>` **before** the encoding branch. Only the intset branch
+consumes it, so a large all-int hashtable set (and any FORCE-flagged set) paid a full
+`parse_i64` sweep + `Vec<i64>` allocation per DUMP and then discarded it. HEAD builds the view
+lazily, inside the branch that uses it.
+
+MEASURED — `ctl` `d788b21909978bc5ab07e77908e6be55` (verbatim eager view, hoisted back above the
+branch) vs `cand` `96f0bd1bf0cc1ce554be6892e17db0f2` (HEAD). Both `release-perf`, built from ONE
+source dir with only `fr-store/src/lib.rs` differing. Server-side `perf stat -e instructions:u`,
+300 sets × 40 DUMP reps, median of 9 interleaved trials, engines pinned to distinct cores:
+
+| shape | encoding | ctl instr/dump | cand instr/dump | ctl/cand | cv (ctl / cand) | verdict |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 1000 int members | hashtable | 788,149 | 553,265 | **1.4245** | 0.05% / 0.07% | **−29.8% instr** |
+| 99 int + 1 trailing string | listpack | 95,600 | 71,980 | **1.3281** | 0.00% / 0.27% | **−24.7% instr** |
+| 400 int members | intset | 113,065 | 111,998 | 1.0095 | 1.42% / 2.41% | **GUARD ok** — view *is* consumed |
+| 100 string members | listpack | 45,997 | 45,861 | 1.0030 | 0.21% / 0.24% | **GUARD ok** — collect short-circuits |
+
+All cv ≤ 2.41%, well under the 5% gate. The two guards are load-bearing: on the intset path the
+integer view is genuinely used, and on an all-string set the eager `collect()` short-circuits at
+the first non-integer member — both stay flat, proving the win is exactly the *wasted* parse and
+not a global shift. DUMP payloads are byte-identical between `ctl` and `cand` on all four shapes.
+
+GATES: fr-conformance **105 passed / 0 failed**; DUMP/RESTORE differential family 14/15 PASS
+against a FRESH default-config oracle with `--enable-debug-command yes` on both engines
+(incl. `set_listpack_dump_differ`, `intset_width_dump_differ`, `restore_encoding_differ`,
+`restore_reoptimize_encoding_differ`, `dump_byte_equality_gate`, `dump_restore_fuzz`,
+`dump_restore_differ`). `quicklist_dump_boundary_differ` fails IDENTICALLY on the control ⇒
+PRE-EXISTING, bead `frankenredis-s36di`.
+
+SHAPE CORRECTION (bank this): an all-integer set with ≤ `set-max-intset-entries` (512) members
+encodes as **intset**, never listpack — "a small all-int listpack set" does not exist. The
+listpack path needs ≥1 non-integer member, and the eager view is only wasted there when that
+member is *late* in iteration order (an early one short-circuits the `collect()`). My first
+harness asserted `listpack` for a 100-int set and correctly blew up.
+
+NOT A DEFECT (checked, don't re-raise): DUMP of a >512-member all-int set is **not** byte-equal
+between fr and redis. `RDB_TYPE_SET` emits members in hashtable-iteration order, which Redis
+leaves unspecified, and the trailing CRC64 is order-dependent. Verified semantically identical:
+each engine RESTOREs the other's payload and reproduces the same 1000 members
+(`SCARD` 1000 both ways). fr's own `dump_byte_equality_gate` covers the canonical
+(intset/listpack) shapes and passes.
+
 ## 2026-07-10 cc_fr: KEEP (verify) — manifest lever #6 zset DUMP direct-emit CONFIRMED: −6.7…−11.6% `instructions:u`, byte-exact — plus a NEW frac-score regression in the int-score shortcut
 
 NEGATIVE-EVIDENCE CHECK first. Two lane items were grepped and one is DECLINED as a

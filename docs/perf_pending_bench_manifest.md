@@ -19,7 +19,7 @@ shows no stable win.
 | 2 | c83e5e926 | presize quicklist node listpack buffer (both encoders) | fr-persist + fr-store | DUMP + DEBUG RELOAD of multi-node (>8 KiB) lists | fewer reallocs/node |
 | 3 | 78fff02e8 | intset encode sorts owned values in place (drop to_vec) | fr-persist | DUMP + BGSAVE of large int-sets (≤512 ints) | one fewer Vec<i64> alloc+copy/key |
 | 4 | ca61b6ca4 | presize DUMP-command listpack entry buffers (hash/zset/set) | fr-store | DUMP-loop on listpack hash/zset/set | fewer reallocs/DUMP |
-| 5 | bae131f7e | lazy set-DUMP integer view (only intset branch) | fr-store | DUMP of >512-member all-int (hashtable) sets + FORCE-flagged sets | skips a full parse+Vec<i64>/key |
+| 5 | bae131f7e | lazy set-DUMP integer view (only intset branch) | fr-store | DUMP of >512-member all-int (hashtable) sets + FORCE-flagged sets | skips a full parse+Vec<i64>/key — **CONFIRMED KEEP 2026-07-10 (cc_fr): −29.8% (hashtable) / −24.7% (listpack) `instructions:u`; biggest of the six** |
 | 6 | 921d21913 | zset listpack DUMP direct-emit (drop per-member copy + 2 Vecs) | fr-store | DUMP-loop on large listpack zsets; BGSAVE of many zsets | **N member-copies eliminated/zset** (largest of the set) — **CONFIRMED KEEP 2026-07-10 (cc_fr): −6.7…−11.6% `instructions:u`, byte-exact** |
 
 ## Status (cc_fr, 2026-07-10)
@@ -57,9 +57,45 @@ reconciles the apparent contradiction between ledger row "zset DUMP integer-scor
 shortcut … mixed then rejected (0.9559x)" and `9ce4b42ac`'s "+37%": **both are correct** — the
 lever wins on integer scores and loses slightly on fractional ones. Filed as a follow-up.
 
-Remaining unverified: #1, #2, #3, #5 (and #4, whose zset half is already folded into #6's
-`Vec::with_capacity`). Note #1/#2/#3/#5 sit on RDB-save / intset / set paths that a
-DUMP-command loop over listpack zsets does **not** exercise — each needs its own shape.
+**#5 CONFIRMED KEEP — the biggest of the six.** `ctl` = verbatim pre-`bae131f7e` (the
+`Option<Vec<i64>>` integer view built EAGERLY before the encoding branch) vs `cand` = HEAD
+(view built only inside the intset branch that consumes it). Same source dir, only
+`fr-store/src/lib.rs` differs. `perf stat -e instructions:u`, 300 sets × 40 DUMP reps, median
+of 9 interleaved trials:
+
+| shape | encoding | ctl instr/dump | cand instr/dump | ctl/cand | cv | verdict |
+|---|---|---:|---:|---:|---:|---|
+| 1000 int members | hashtable | 788,149 | 553,265 | **1.4245** | 0.05 / 0.07% | **−29.8% instr** |
+| 99 int + 1 trailing string | listpack | 95,600 | 71,980 | **1.3281** | 0.00 / 0.27% | **−24.7% instr** |
+| 400 int members | intset | 113,065 | 111,998 | 1.0095 | 1.42 / 2.41% | GUARD ok (view *is* consumed) |
+| 100 string members | listpack | 45,997 | 45,861 | 1.0030 | 0.21 / 0.24% | GUARD ok (collect short-circuits) |
+
+The two guard shapes are the point: on the intset path the view is genuinely used, and on an
+all-string set the eager `collect()` short-circuits at the first non-integer member — both stay
+flat, so the win is exactly the *wasted* parse. DUMP payloads identical between `ctl` and
+`cand` on all four shapes. fr-conformance 105 passed / 0 failed; 14/15 DUMP/RESTORE differs PASS
+(`quicklist_dump_boundary_differ` fails identically on the control ⇒ pre-existing `s36di`).
+
+**Shape correction worth banking:** an all-integer set with ≤ `set-max-intset-entries` (512)
+members encodes as **intset**, never listpack — so "a small all-int listpack set" does not exist.
+The listpack path is only reachable with ≥1 non-integer member; the eager view is wasted there
+only when the non-integer member is *late* in iteration order (an early one short-circuits the
+`collect()`).
+
+Ranked profile of the remaining levers' own target shapes (perf flat self%, HEAD, repeated DUMP;
+set/list/hash DUMP is **not** memoized — only compact zsets are — so a repeat blast is honest):
+
+| lever | shape | fr/redis DUMP | lever-attributable cost |
+|---|---|---:|---|
+| **#5** | 1000-int hashtable set | 1.457x | eager `parse_i64` sweep + `Vec<i64>`; ~31% allocator traffic — **taken, confirmed** |
+| #3 | 400-int intset | 1.021x | `encode_intset` 4.47% self — ceiling is small; `lzf_compress` 63.9% dominates |
+| #2 | multi-node quicklist | 1.192x | **no realloc symbols in profile** (`lzf_compress` 64.2%, `common_prefix_len` 11.4%) ⇒ presize already lean |
+| #4 | listpack hash | 0.637x | **no realloc symbols** (`lzf_compress` 42.8%, `PackedStrMapIter` 11.8%, `encode_listpack_entry` 8.7%) ⇒ presize already lean |
+| #1 | BGSAVE / DEBUG RELOAD | not profiled | needs its own bulk-save shape; not exercised by a DUMP loop |
+
+So #3/#2/#4 have a small measured ceiling on the DUMP-command path and should not be chased
+without a fresh bulk-save (BGSAVE / DEBUG RELOAD) profile that names them. Only #1 remains
+genuinely unprofiled. Remaining unverified: **#1, #2, #3, #4**.
 
 Ranked profile of the DUMP-command path (perf, flat self%, HEAD, 30k zsets × 100 members,
 cold cache): `lzf_compress` **32.5%**, `Store::dump_key` 12.7%, `crc64_redis` 5.3%,
