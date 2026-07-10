@@ -24,3 +24,7 @@ harness = false
 [[bench]]
 name = "set_algebra_build"
 harness = false
+
+[[bench]]
+name = "glob_scan"
+harness = false

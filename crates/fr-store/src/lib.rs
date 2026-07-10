@@ -24048,6 +24048,11 @@ impl Store {
             None => std::ops::Bound::Unbounded,
         };
 
+        // Classify the MATCH pattern ONCE, not once per key: `glob_match` re-ran
+        // `literal_glob_shape` on every candidate (7.3% self on a 20k-key SCAN MATCH). Byte-identical
+        // (`PreparedGlob::matches` == `glob_match`); measured 1.7–2.3x on the per-key match for the
+        // prefix/suffix shapes that dominate SCAN. (cc_fr)
+        let prepared_glob = pattern.map(glob_prepare);
         let mut result: Vec<Vec<u8>> = Vec::new();
         let mut last_key: Option<Vec<u8>> = None;
         let mut has_more = false;
@@ -24068,8 +24073,8 @@ impl Store {
             let logical = decode_db_key(physical).map(|(_, l)| l).unwrap_or(physical);
             // Glob (skipped for the `*` / no-pattern all-keys fast path).
             if !is_star
-                && let Some(pat) = pattern
-                && !glob_match(pat, logical)
+                && let Some(pg) = prepared_glob.as_ref()
+                && !pg.matches(logical)
             {
                 continue;
             }
@@ -32260,6 +32265,46 @@ fn scan_pattern_matches(pattern: Option<&[u8]>, item: &[u8]) -> bool {
         None => true,
         Some(p) if p == b"*" => true,
         Some(p) => glob_match(p, item),
+    }
+}
+
+/// A glob pattern with its literal shape classified ONCE, so a scan can match many strings without
+/// re-running [`literal_glob_shape`] per candidate. `SCAN`/`KEYS` match a fixed pattern against
+/// every key in a database, and the per-key `glob_match` re-classified the pattern each call
+/// (`glob_match` was ~7.3% self on a 20k-key `SCAN MATCH`). [`PreparedGlob::matches`] is
+/// **byte-identical** to `glob_match(pattern, s)` for every `s` (same classification, same
+/// matchers), just hoisted. (cc_fr)
+pub struct PreparedGlob<'a> {
+    pattern: &'a [u8],
+    shape: Option<LiteralGlob<'a>>,
+}
+
+impl<'a> PreparedGlob<'a> {
+    #[inline]
+    #[must_use]
+    pub fn matches(&self, string: &[u8]) -> bool {
+        // Mirror `glob_match`'s empty-string rule exactly: an empty string matches ONLY an empty
+        // pattern, regardless of the literal shape.
+        if string.is_empty() {
+            return self.pattern.is_empty();
+        }
+        match self.shape {
+            Some(LiteralGlob::Exact(lit)) => string == lit,
+            Some(LiteralGlob::Prefix(lit)) => string.starts_with(lit),
+            Some(LiteralGlob::Suffix(lit)) => string.ends_with(lit),
+            Some(LiteralGlob::Contains(lit)) => literal_glob_contains(string, lit),
+            None => glob_match_inner(self.pattern, string, 0, 0),
+        }
+    }
+}
+
+/// Classify `pattern` once for repeated matching (see [`PreparedGlob`]).
+#[inline]
+#[must_use]
+pub fn glob_prepare(pattern: &[u8]) -> PreparedGlob<'_> {
+    PreparedGlob {
+        pattern,
+        shape: literal_glob_shape(pattern),
     }
 }
 
@@ -40723,6 +40768,34 @@ mod tests {
             "lpush commandstats record A/B (x{reps}): old(lowercase+utf8+hashmap)={old_ns}ns new(direct field)={new_ns}ns ratio={:.2}x",
             old_ns as f64 / new_ns as f64
         );
+    }
+
+    #[test]
+    fn prepared_glob_matches_glob_match_for_every_pattern_and_string() {
+        use super::{glob_match, glob_prepare};
+        // The prepared matcher (classify once) MUST agree with glob_match (classify per call) for
+        // EVERY (pattern, string) — a divergence would change SCAN/KEYS output. Covers the literal
+        // fast-path shapes (exact/prefix/suffix/contains), the general backtracker, empty strings,
+        // and metachars.
+        let patterns: &[&[u8]] = &[
+            b"", b"*", b"**", b"?", b"a", b"abc", b"key:0001*", b"*.tmp", b"*mid*", b"user:*:tag",
+            b"h?llo", b"h[ae]llo", b"foo*bar", b"\\*lit", b"[!a]", b"a?c*e", b"", b"prefix",
+        ];
+        let strings: &[&[u8]] = &[
+            b"", b"a", b"abc", b"key:00012:tag", b"key:9:x", b"file.tmp", b".tmp", b"XmidY",
+            b"user:42:tag", b"hello", b"hallo", b"fooXYZbar", b"foobar", b"*lit", b"!", b"prefix",
+            b"prefixed", b"h\0llo",
+        ];
+        for p in patterns {
+            let prepared = glob_prepare(p);
+            for s in strings {
+                assert_eq!(
+                    prepared.matches(s),
+                    glob_match(p, s),
+                    "pattern={p:?} string={s:?}"
+                );
+            }
+        }
     }
 
     #[test]

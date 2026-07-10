@@ -5287,6 +5287,41 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED.** SCAN MATCH glob classified ONCE per scan, not per key — **2.32x prefix / 1.69x suffix** on the per-key match, byte-identical
+
+Profiled a 20k-key `SCAN MATCH key:0001*`: `fr_store::glob_match` was the top fr-owned frame at
+**7.32% self**. Root cause: `scan_in_db`'s loop calls `glob_match(pattern, key)` **per key**, and
+`glob_match` re-runs `literal_glob_shape` (the exact/prefix/suffix/contains classifier) on **every**
+call — 20k re-classifications of one fixed pattern.
+
+Added `PreparedGlob` + `glob_prepare(pattern)`: classify the shape once, then `PreparedGlob::matches`
+dispatches straight to the `starts_with`/`ends_with`/`==`/`contains`/backtracker without re-parsing.
+`scan_in_db` now prepares the pattern once above the range loop and calls `matches` per key.
+
+**A/B — classify-once vs classify-per-call**, one binary / one `rch` invocation, adjacent-pair
+interleaved, `black_box`, median of paired ratios, null-gated, worker `hz2`, 20k keys:
+
+| pattern shape | speedup | verdict |
+|---|---:|---|
+| prefix `key:0001*` | **2.319x** | WIN (≫ null p95) |
+| suffix `*:tag` | **1.694x** | WIN |
+| general `key:*5:tag` | 1.089x | indistinguishable (backtracker dominates; classification is a small share) |
+
+(Null cv was loose — 8–25% — on this tiny-per-key work, but the null medians sat at 1.02–1.05 and the
+prefix/suffix speedups are far outside their null spreads, so decidable.) The per-key match is
+1.7–2.3x cheaper on the literal shapes that dominate SCAN/KEYS; that frame was 7.32% of the scan, so
+end-to-end SCAN MATCH improves ~4%.
+
+**Byte-exact:** `PreparedGlob::matches(s) == glob_match(pattern, s)` for every `(pattern, s)` — the
+same classifier + matchers, hoisted — locked by `prepared_glob_matches_glob_match_for_every_pattern_
+and_string` (literal shapes, general backtracker, empty strings, metachars). fr-store scan tests 40/0
+(incl. `scan_in_db_isomorphic_and_faster_scandb`); `fr-conformance` **347 passed, 0 failed** (SCAN
+MATCH byte-equality end-to-end).
+
+Algorithmic (hoist a per-iteration classification), no `unsafe`, no fallback tier; `fr-store` keeps
+`#![forbid(unsafe_code)]`. `PreparedGlob`/`glob_prepare` are `pub`, so `SSCAN`/`KEYS`/keyspace-notify
+callers can adopt the same hoist. HSCAN/ZSCAN (cod's lane) untouched.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED.** Set-algebra `*STORE` result build **1.4–2.0x** (presize + `shrink_to_fit`), byte-identical, RAM-neutral vs redis. Resolves the "not-a-clean-lever" surface below — the RAM objection was solved with `shrink_to_fit`
 
 The surface below concluded a bare presize regresses RAM vs redis's incrementally-grown dst dict. The
