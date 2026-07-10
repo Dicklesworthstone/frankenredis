@@ -5286,6 +5286,61 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: PROVENANCE AUDIT — 70 REJECT rows, only **3** record a binary sha256 and only **10** record any self-time. Plus: the 07-02 `from_utf8` REJECT does NOT contradict cod_fr's 51.82% SORT win
+
+Prompted by frankensearch finding that 3 of its 4 closed rows had "measured a copy or a revert".
+That is a **provenance** failure, distinct from the dead-code failure the ledger-integrity rule
+catches: the bench ran live code, but *not the code the row claims to be about* — either a bench-local
+duplicate of the function, or a binary built from a tree where the hunk was already reverted, or two
+"arms" that linked the same rlib.
+
+Both failure modes have now occurred here, which is why this is not hypothetical:
+
+- **Measured a copy.** `cod_fr`'s first SORT comparator A/B used a bench-only ORIG; LLVM eliminated
+  the pure `from_utf8` because with `None` its results were unobservable. The profile gate caught it
+  (**0% `from_utf8` self**, 17 samples) and the row was voided (`99f3b6d86`). The repaired harness —
+  symmetric `black_box` barriers, ORIG profile showing `from_utf8` at **17.67% self** — then measured
+  **candidate/ORIG = 0.4818**, i.e. **51.82% fewer instructions** (`fda4c00f9`).
+- **Measured identical arms.** A `git status`-clean HEAD worktree sharing `CARGO_TARGET_DIR` with the
+  main tree linked the *candidate's* `fr-store` rlib into the "control". Both arms ran the same code;
+  the guard shape read a clean `1.0000`. Caught only by `strings -a <bin> | grep -x <fn>`.
+
+**Audit of every REJECT heading in both ledgers** (49 in the short-form, 21 in the long-form):
+
+| | count |
+|---|---:|
+| REJECT rows total | **70** |
+| …that record a binary `sha256` for either arm | **3** |
+| …that record any self-time for the function under test | **10** |
+| …that record **neither** | **~58** |
+
+So the great majority of our do-not-retry rows cannot, from what is written down, distinguish "the
+lever lost" from "we benched the wrong binary". They are not thereby wrong — most are probably fine —
+but they are **not admissible as written**, and several headings openly say "rejected *and reverted*"
+without stating whether the revert preceded the measurement. Re-verify before quoting any of them.
+
+**New rule, added to `docs/BENCH_METHODOLOGY.md`:** record binary provenance — a distinct `sha256`
+for each arm **and** a symbol- or frame-level check that the candidate binary actually contains the
+hunk (`strings -a <bin> | grep -x <fn>`, or the changed function appearing in the candidate's profile).
+
+### Reconciliation: two `from_utf8` rows that look contradictory and are not
+
+`2026-07-02 CrimsonHawk: REJECT — redis score String→bytes round-trip elision measured 0%` reports
+`3,509,777,428 → 3,509,767,464` instructions (0.0003%) for eliding `from_utf8` across 16 WITHSCORES /
+ZSCORE call sites, concluding "from_utf8 on a freshly-built ASCII Vec is essentially free".
+`2026-07-10 cod_fr` reports **51.82% fewer instructions** for eliding `from_utf8` in
+`sort_alpha_compare`. **Both are correct**, and the SORT win must NOT be used to reopen the score
+round-trip:
+
+- the score path validates one short (≤24-byte) ASCII buffer **once per element**, freshly built by
+  the formatter — LLVM's ASCII fast path makes it nearly free, and grisu2 formatting dominates;
+- SORT ALPHA validates **both operands, on every one of the `n log n` comparisons**, over full
+  elements (8–128 B) whose results are then discarded.
+
+Same function, ~3 orders of magnitude apart in call frequency. The 07-02 row is VALID (its A/B ran
+end-to-end on a path where the code demonstrably executes; the null result *is* the ceiling), but it
+lacks a self-time and so is under-documented by the current rule. Do not re-chase score formatting.
+
 ## 2026-07-10 cc_fr: CLOSES the line directly above — GETSET `_into` is SHIPPED, GETDEL `_into` is a REJECT, both now PROFILE-VERIFIED (they were prose)
 
 The `NEXT … GETSET, GETDEL` note above is what keeps getting re-issued as a lane ("the never-built

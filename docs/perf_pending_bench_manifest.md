@@ -139,7 +139,27 @@ genuinely unprofiled.
 > actually run on. The removable mass was the 7.46% Rust float formatter — a *correctness*
 > bug (RDB scores rendered with Rust `Display`, silently truncated to `1.5e+126` / `0` by a
 > real redis's 128-byte `zzlStrtod` buffer), fixed in `59fe5dc40`. #4 is `fr-store`
-> DUMP-command code and was ranked on an input that reaches it, so its row stands. Remaining unverified: **#1, #2, #3, #4**.
+> DUMP-command code and was ranked on an input that reaches it, so its row stands.
+>
+> **MANIFEST STATUS after this correction — the sentence that used to read "Remaining unverified:
+> #1, #2, #3, #4" is obsolete:**
+>
+> | lever | status |
+> |---|---|
+> | #5 lazy set-DUMP integer view | **CONFIRMED KEEP** (−29.8% / −24.7% `instructions:u`) |
+> | #6 zset listpack DUMP direct-emit | **CONFIRMED KEEP** (−6.7…−11.6% `instructions:u`, byte-exact) |
+> | #1 listpack-blob builders | **CLOSED on evidence** — 0.35% self on `SAVE` |
+> | #2 quicklist node presize | **CLOSED on evidence** — 0 samples on `SAVE` (called, never hot) |
+> | #3 intset encode in place | **CLOSED on evidence** — 0 samples on `SAVE` (called, never hot) |
+> | #4 DUMP-command entry presize | ranked on a reaching input (no realloc symbols); **verification BLOCKED** |
+>
+> **Why #4 cannot be finished right now, and why cod_fr's SORT bench does not unblock it.** Verifying a
+> manifest lever means A/B-ing two *server* binaries (pre-hunk vs HEAD) under `perf stat`. `rch` does
+> not return a linked binary — only worker-scoped artifacts — and a local build is forbidden. cod_fr's
+> `51.82%` SORT comparator win was measured by an **in-crate bench target** that runs entirely inside
+> the remote worker's own process (`cargo bench -p fr-command`), so it never needed a binary shipped
+> back. No such in-crate harness exists for a DUMP-command server A/B. Unblock = retrieve the built
+> `fr-server`, or authorize one local `release-perf` build.
 
 Ranked profile of the DUMP-command path (perf, flat self%, HEAD, 30k zsets × 100 members,
 cold cache): `lzf_compress` **32.5%**, `Store::dump_key` 12.7%, `crc64_redis` 5.3%,

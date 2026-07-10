@@ -88,6 +88,45 @@ Distinguish two cases when you write the verdict: **never called** on that input
 measurement ⇒ INVALID) versus **called but not hot** (a real, small ceiling ⇒ REJECT stands, with the
 number recorded).
 
+## 5. Binary provenance — prove the arm you measured contains the hunk
+
+Separate from dead code: the bench can run live code that is **not the code the row is about**. As of
+2026-07-10 our ledgers hold **70 REJECT rows; only 3 record a binary `sha256` and only 10 record any
+self-time.** Both provenance failures have actually happened here:
+
+- **Measured a copy.** A bench-only ORIG comparator, `#[inline(never)]` and taking the real runtime
+  `Option<&CollatorBorrowed>`, still had its `from_utf8` eliminated by LLVM because with `None` the
+  results were unobservable. The profile gate caught it (0% `from_utf8` self, 17 samples). The
+  repaired harness — symmetric `black_box` barriers on **both** arms — then measured a real 51.82%
+  instruction win.
+- **Measured identical arms.** A `git status`-clean HEAD worktree sharing `CARGO_TARGET_DIR` with the
+  main tree linked the *candidate's* rlib into the "control". Both arms ran the same code and the
+  guard read `1.0000`.
+
+So every A/B row must record:
+
+1. a distinct `sha256` for each arm's binary; **and**
+2. a symbol- or frame-level check that the candidate actually contains the hunk —
+   `strings -a <bin> | grep -x <fn>` (use `-x`/`-w`: `grep -c zset_score_listpack_entry`
+   false-positives on `encode_zset_score_listpack_entry` from another crate), or the changed function
+   appearing in the candidate's own profile.
+
+A heading that says "rejected **and reverted**" must state whether the revert preceded the
+measurement.
+
+## Worker facts (verify, don't assume)
+
+- **Not all rch workers are equal.** `hz2` has no `perf` executable; `ovh-a` runs
+  `perf_event_paranoid = 4` (no counters, no sampling); `hz1` completed a full profile + PMU A/B in
+  one fail-closed invocation. A perf failure on one worker is **not** a fleet-wide blocker — retry,
+  and record which worker produced the number.
+- `rch` does **not** return a linked binary. An **in-crate bench target** (`cargo bench -p <crate>`)
+  runs entirely inside the worker's own process and therefore works; a **server A/B** (two
+  `fr-server` binaries under `perf stat`) does not, because the binaries never come back. This is the
+  line between what can and cannot be measured today.
+- This host has `perf_event_paranoid = 1`, so profiling an **already-existing** binary is always
+  available and needs no Cargo at all.
+
 ---
 
 ## Profiling recipe that actually works here
