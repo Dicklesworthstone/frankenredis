@@ -130,6 +130,44 @@ Also state the **trigger condition** as part of the input, not just the command.
 members — that set is compact-encoded and never touches `CompactFieldMap` at all. Profiling the
 command without the trigger "confirms" a REJECT by measuring a data structure the lever does not use.
 
+## 6. The null control — measure your harness before you trust it
+
+**Before trusting ANY A/B ratio, register the identical arm twice in the same interleaved routine and
+measure it.** That A/A ratio is your harness's noise floor.
+
+- A "win" smaller than the null control is **indistinguishable from noise**.
+- A REJECT of a lever whose effect is **below the floor** is meaningless — it measured the harness,
+  not the lever.
+- If the null control is not tight (`cv` above ~5%, or the ratio further than a couple of percent
+  from `1.000`), the harness **is not fit to decide the lever**. Fix the harness first: raise
+  iterations, pin, interleave *within one measured routine*, `black_box` both input and result.
+  Then re-run. Do not report a number from an unfit harness — fail closed.
+
+Report the **null-control ratio and its cv alongside every WIN and every REJECT**, together with the
+binary sha256, self-time, and worker id.
+
+This came from `franken_whisper`, which rejected an SDPA BR tile sweep after its null control — the
+same arm against itself — measured **1.1163x at cv 29.0%**. Every "win" in that sweep was smaller
+than the harness's own noise.
+
+Worked example, from the BITCOUNT popcount kernel on `thinkstation1` (one binary, four arms rotated,
+`volatile` sink, min-of-40, microbench
+`sha256 = 57aa3fed03425c70e5006551bffc7082a56deaf9e29cf4e3ce26aacfab2fe5fa`):
+
+| arm | GiB/s | cv% |
+|---|---:|---:|
+| SSE2 SWAR (what fr emits) | 17.25 | 1.65 |
+| **SSE2 SWAR again — NULL CONTROL** | 17.27 | 1.46 |
+| AVX2 nibble-LUT | 54.47 | 3.84 |
+| scalar hardware POPCNT | 30.74 | 2.78 |
+
+```
+NULL CONTROL (A/A) = 1.0013x     <- the noise floor
+AVX2 / SSE2        = 3.158x      <- ~2400x larger than the floor: real
+```
+
+The null control is what licenses the `3.158x`. Without it, the number is an assertion.
+
 ### What an unprovenanced REJECT costs — a worked case
 
 `2026-06-21`: a row rejected an `expires_count == 0` fast path for `EXISTS`, on a split-invocation

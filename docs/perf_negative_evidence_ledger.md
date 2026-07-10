@@ -5287,6 +5287,74 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: NULL CONTROL PASSES (1.0013x) — the AVX2 popcount win is real, ~2400x the noise floor. Kernel written, PARKED uncompiled: rch has no admissible worker
+
+Adopted `franken_whisper`'s null-control rule and applied it **retroactively to my own published
+`3.136x` claim** before touching anything else. Registering the identical arm twice in the same
+interleaved routine measures the harness's own noise floor; a win smaller than that floor is noise.
+
+Microbench `sha256 = 57aa3fed03425c70e5006551bffc7082a56deaf9e29cf4e3ce26aacfab2fe5fa`, host
+`thinkstation1`, pinned to core 2, one binary / one invocation, **four** arms rotated every round,
+`volatile` sink, warm-up discarded, min-of-40. Arms verified to differ in machine code
+(`psadbw` / `vpshufb`+`vpsadbw` / `popcnt`):
+
+| arm | GiB/s | cv% |
+|---|---:|---:|
+| SSE2 SWAR (what fr emits) | 17.25 | **1.65** |
+| **SSE2 SWAR again — NULL CONTROL** | 17.27 | **1.46** |
+| AVX2 nibble-LUT | 54.47 | 3.84 |
+| scalar hardware POPCNT | 30.74 | 2.78 |
+
+```
+NULL CONTROL (A/A) = 1.0013x        <- noise floor; all cv < 5%
+AVX2   / SSE2      = 3.158x         <- ~2400x the floor
+POPCNT / SSE2      = 1.783x
+AVX2   / POPCNT    = 1.772x
+```
+
+**The harness is fit and the lever is real.** (My earlier 3.136x, reported without a null control,
+is confirmed at 3.158x with one.)
+
+### The kernel exists but is UNCOMPILED — do not assume it works
+
+Wrote `crates/fr-simd`: a runtime-dispatched `popcount_bytes` (`avx2` → `popcnt` → safe scalar),
+narrow `unsafe` isolated behind a safe interface exactly as AGENTS.md sanctions, with the safety
+argument written out, `#![deny(unsafe_op_in_unsafe_fn)]`, and equivalence tests against the
+`b.count_ones()` oracle for **all lengths 0..=1024 × 3 seeds**, every alignment 0..32, adversarial
+patterns, and a 1 MiB buffer. `fr-store` keeps `#![forbid(unsafe_code)]` and merely calls it.
+
+**It has never been compiled.** Four consecutive fail-closed attempts:
+
+```
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fr-simd
+[RCH] local (no admissible workers: insufficient_slots=10,active_project_exclusion=1)
+[RCH] remote required; refusing local fallback (no worker assigned)
+```
+
+A local build is forbidden; I did not fall back. Because an uncompiled crate in a shared workspace
+would break the twelve peers building this tree, **`fr-simd` was wired OUT of the workspace** (and the
+stale `Cargo.lock` entry removed). The crate files remain on disk — nothing deleted — and the full
+wiring diff, crate source, and null-control microbench are parked at
+`artifacts/optimization/bitcount-avx2/`.
+
+**Why `is_x86_feature_detected!` and not portable `std::simd`:** `core::simd`'s codegen is bounded by
+the *enabled* target features, so `Simd<u8, 32>` lowers to two SSE2 vectors on a baseline build —
+portable SIMD cannot reach AVX2 without `target-cpu`. Runtime AVX2 requires
+`#[target_feature(enable = "avx2")]`, and calling such a function from a context lacking the feature
+requires `unsafe`. `fr-runtime` is the only crate that permits `unsafe`, and it *depends on*
+`fr-store`, so it cannot host a store kernel. Hence a new, audited kernel crate — the route AGENTS.md
+explicitly allows.
+
+**To validate, in order, all fail-closed:**
+`cargo test -p fr-simd` → `cargo test -p fr-store bitcount` → `cargo test -p fr-conformance` →
+`cargo bench -p fr-simd --bench popcount`. The bench fails closed on **its own null control** before
+reporting any speedup.
+
+**No WIN is recorded for the Rust kernel.** What is recorded: `Store::bitcount` is 97.94% flat self
+(fr binary `sha256 = ad6506c4…`, host `thinkstation1`, cv 1.23%), the emitted code is SSE2 SWAR with
+zero `popcnt` in the binary, and an AVX2 kernel is 3.158x faster on this host with a 1.0013x null
+control. Amdahl puts `BITCOUNT` at ≈3.0x end-to-end — **an estimate, not a certified fr A/B.**
+
 ## 2026-07-10 cc_fr: TWO DIFFERENT CLAIMS, BOTH MEASURED — (a) **no AVX2 gap versus redis; do not chase it.** (b) versus OURSELVES, AVX2 is **3.14x** faster than the SSE2 SWAR we emit, and POPCNT only **1.79x** — so the right target is `x86-64-v3`, not `v2`
 
 ### (a) The phantom lever — kill it here

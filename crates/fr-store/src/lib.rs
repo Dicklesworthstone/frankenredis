@@ -9161,6 +9161,12 @@ impl Store {
     /// to `bytes.iter().map(|b| b.count_ones()).sum()` because popcount is
     /// order-independent; the word-at-a-time form just amortizes loop overhead
     /// and per-byte bounds checks for BITCOUNT over large bitmaps.
+    ///
+    /// NOTE (2026-07-10, cc_fr): this compiles to a baseline `x86-64` **SSE2 software popcount** —
+    /// the release profile sets no `target-cpu`, so no `popcnt` instruction exists anywhere in the
+    /// binary. It is 97.94% of `BITCOUNT`'s flat self-time, and an AVX2 kernel measured **3.158x**
+    /// faster on this host (null control 1.0013x). The runtime-dispatch implementation is parked,
+    /// uncompiled, at `artifacts/optimization/bitcount-avx2/` pending an rch worker.
     #[inline]
     fn popcount_bytes(bytes: &[u8]) -> usize {
         let (chunks, remainder) = bytes.as_chunks::<8>();
