@@ -5287,6 +5287,70 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: TWO DIFFERENT CLAIMS, BOTH MEASURED — (a) **no AVX2 gap versus redis; do not chase it.** (b) versus OURSELVES, AVX2 is **3.14x** faster than the SSE2 SWAR we emit, and POPCNT only **1.79x** — so the right target is `x86-64-v3`, not `v2`
+
+### (a) The phantom lever — kill it here
+
+**There is no AVX2 gap versus redis 7.2.4, and nobody should go looking for one.** redis's
+`redisPopcount` compiles to **pure scalar SWAR** — `0 popcnt` and `0 %ymm` in its entire binary.
+fr's `Store::bitcount` compiles to **SSE2-vectorized SWAR**. We are already **one ISA tier ahead of
+the comparator**, which is precisely why fr wins `BITCOUNT_1MB` **3.35x**. Any future row claiming
+"redis has AVX2 and we don't" is refuted by disassembly (see the three-way table below).
+
+### (b) The real claim — a win against ourselves, not a gap against redis
+
+Separately, and this is a *different question*: **would an AVX2 popcount beat our current SSE2 SWAR on
+this host?** Yes, and by more than hardware `POPCNT` does.
+
+One binary, one invocation, three arms rotated `A/B/C → B/C/A → C/A/B` **within a single measured
+routine**, result consumed through a `volatile` sink, warm-up round discarded, min-of-N.
+Microbench `sha256 = a95ae954df8b1f24dc9a5f0f5e0d15ed0ec92143f00ab6771fb7e7a123295eef`, host
+`thinkstation1`. **Arms verified to differ in machine code**, which is the whole point:
+
+| arm | verified instructions | GiB/s (min-of-N) | cv% (mean) |
+|---|---|---:|---:|
+| **SSE2 SWAR — what fr emits today** | `psadbw` ×1 | **17.19** | 5.72 |
+| **AVX2 nibble-LUT** | `vpshufb` ×2, `vpsadbw` ×1 | **53.91** | 8.55 |
+| scalar hardware `POPCNT` | `popcnt` ×1 | 30.75 | 10.85 |
+
+```
+AVX2   / SSE2   = 3.136x faster
+POPCNT / SSE2   = 1.789x faster
+AVX2   / POPCNT = 1.753x faster
+```
+
+**Stability.** Per-arm `cv` is inflated (5.7–10.9%) because this box carries 11 other agents; the
+min-of-N is the statistic. The meaningful check is that the **ratios reproduce to within 0.8% across
+two independent runs** with different round/rep counts and different pinning
+(unpinned 25×30: `3.161 / 1.785 / 1.770`; pinned core 2, 41×120: `3.136 / 1.789 / 1.753`).
+
+**Cross-check that the microbench models fr.** The SSE2 arm measures **17.19–17.32 GiB/s**; fr's
+in-server `Store::bitcount` measures **16.01 GiB/s** (cv 1.23%, binary
+`sha256 = ad6506c45b4c326ccbeba024dc8a14662a250104a1cc20c06d19c022464170f2`, self-time **97.94% flat
+self**, host `thinkstation1`). Agreement within ~8%, the residual being command dispatch and reply.
+So the SSE2 arm is a faithful stand-in for our real kernel.
+
+### What this changes
+
+My earlier recommendation of `target-cpu=x86-64-v2` as "the conservative floor" **captures only ~57%
+of the available win**: `v2` buys POPCNT (1.79x), while `v3` buys AVX2 (3.14x). Corrected guidance:
+
+| option | kernel speedup | minimum CPU | keeps `forbid(unsafe_code)`? |
+|---|---:|---|---|
+| `target-cpu=x86-64-v2` | 1.79x | Nehalem 2008 / Bulldozer 2011 | yes |
+| `target-cpu=x86-64-v3` | **3.14x** | Haswell 2013 | yes |
+| runtime dispatch (as `memchr` does) | 3.14x | baseline preserved | **no** — `#[target_feature]` needs `unsafe`, and `fr-store` forbids it at line 1 |
+
+Amdahl on the command: `Store::bitcount` is 97.94% of `BITCOUNT`'s self-time, so a 3.14x kernel makes
+the command ≈`1/(0.0206 + 0.9794/3.14)` ≈ **3.0x faster end-to-end**, which would move `BITCOUNT_1MB`
+from 3.35x-vs-redis toward ~10x. **That is an Amdahl estimate from a microbench, not a certified fr
+A/B**, and it must not be quoted as a measured lever.
+
+**Still blocked from certification.** A real A/B needs two `fr-server` binaries (baseline vs `+avx2`)
+under `perf stat`. `rch` returns no linked binary; a local build is forbidden. Profiling, disassembly
+and this microbench needed neither. The choice between `v2`, `v3`, and runtime dispatch is an operator
+decision about minimum-CPU and the unsafe-free guarantee — **not an agent's**.
+
 ## 2026-07-10 cc_fr: THE THREE-WAY ISA ANSWER — **there is NO comparator build gap.** redis 7.2.4 emits *scalar* SWAR; fr emits *SSE2-vectorized* SWAR. fr is already one ISA tier ahead. The gap is against the HARDWARE, not against redis
 
 The question posed was: *"if the build emits SSE2 SWAR where AVX2 popcnt is available, the lever is a
