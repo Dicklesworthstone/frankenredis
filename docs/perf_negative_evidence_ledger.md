@@ -5287,6 +5287,41 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`3c0af1aad`).** `is_empty()`-guard the per-write side-cache invalidation — **12.95x** on the isolated helper (~11ns/write) — a STRUCTURAL dict/hash-internals lever hitting EVERY scalar write
+
+Structural primitive (dict/hash internals). EVERY scalar write — SET/INCR insert
+(`internal_entries_insert_with_expiry`), DEL (`internal_entries_remove`), in-place INCR
+(`incrby_existing_or_insert`) — invalidated THREE per-key side caches (HLL register cache,
+DUMP payload memo, MEMORY-USAGE estimate) with an unconditional `remove(key)`. Each map is
+EMPTY for the vast majority of keys (only PFADD/DUMP/MEMORY USAGE on THAT key populates it),
+yet `remove` still foldhashes the key + probes → three wasted key-hashes per write. Extracted
+the triple into `invalidate_write_side_caches` with an O(1) `is_empty()` guard per cache and
+routed the three sites through it (pfadd's hll-only remove left alone — its cache is populated).
+
+Byte-identical: removing an absent entry from an empty map is a no-op, so the guard elides only
+no-ops; a populated cache still removes the key (proven with a decoy key that must survive).
+
+**A/B** — same-binary null-gated (write_cache_invalidation bench, worker `hz2`),
+unconditional-remove orig vs guarded, empty caches (the common per-write path):
+
+| op | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| invalidate_side_caches | **12.952x** | 1.000 | [0.967, 1.019] | 2.1% | WIN |
+
+12.95x is the ISOLATED helper (3 foldhashes+probes → 3 length checks). It runs once per scalar
+write, so the absolute saving is ~11ns/write — ~14% of an 80ns INCR (store_read). Never regresses
+(a populated cache takes the same remove; the guard is one length check).
+
+**Byte-exact, gates green:** `invalidate_write_side_caches_matches_orig` (empty → both no-op;
+populated with target+decoy → both remove target, keep decoy); 756 fr-store lib tests; full
+fr-conformance green (347 passed, 0 failed, incl. the 194-case live-redis differential + 99-case
+suites — which exercise PFADD/DUMP/MEMORY USAGE + writes end-to-end).
+
+**Vein:** this is the 2nd win from the store_read profile (after EXPIRE below). The pattern —
+per-write bookkeeping that hashes the key against usually-empty side-maps / does redundant peeks —
+is the fresh store-WRITE vein. Next: the `logical_key = to_vec` for notify still recurs across
+SET/DEL/LPUSH/SADD/HSET; INCR/get_sort_weight remain store_read outliers.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`c23e465fd`).** EXPIRE/EXPIREAT TTL-set streamlined — **1.20x** re-set — a DIFFERENT primitive (keyspace hot path, not persist), found by profiling `store_read`
 
 Left persist/listpack entirely and profiled the `store_read` bench: `expire_existing`
