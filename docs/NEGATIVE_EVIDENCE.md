@@ -4,6 +4,50 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: MEASURED WIN (parity gates pending) — SORT ALPHA comparator short-circuit uses 51.82% fewer instructions than live ORIG
+
+NEGATIVE-EVIDENCE CHECK: the prior dead-code attempt immediately below is INVALID, not a rejection;
+its retry condition required symmetric optimizer barriers and a fresh nonzero-self-time profile. The
+repaired harness satisfies that condition. The earlier fleet-wide "perf blocked" PARKED row is also
+superseded as a universal blocker: `hz2` lacks the `perf` executable, but `hz1` completed the full
+profile and PMU A/B in one fail-closed invocation.
+
+Method: **one binary, one RCH invocation, one worker (`hz1`)**, `release-perf`, bench-only semantic
+copy of the pre-short-circuit comparator versus the candidate, both `#[inline(never)]` and both given
+symmetric `black_box` barriers. The parent first profiled ORIG, then ran eight fixed-work
+`perf stat -e instructions:u` pairs in AB/BA order, then two Criterion AB/BA timing rounds at element
+lengths 8/32/128. Command routing was fail-closed with
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf ...`;
+RCH logged worker `hz1` and retrieved nonempty artifacts.
+
+Ledger-integrity gate: ORIG profile had **19 samples**, approximately **8,386,758 instructions**,
+**zero lost**, and `core::str::converts::from_utf8` **17.67% self**. The ORIG comparator itself was
+32.89% self. Therefore the rejected work is compiler-live in this A/B; this is not another dead-code
+row.
+
+| pair | order | ORIG instructions | candidate instructions | candidate/ORIG |
+|---:|---|---:|---:|---:|
+| 1 | O/C | 19,472,244 | 9,382,495 | 0.481839433 |
+| 2 | C/O | 19,471,968 | 9,381,787 | 0.481809902 |
+| 3 | O/C | 19,472,146 | 9,382,652 | 0.481849920 |
+| 4 | C/O | 19,472,117 | 9,382,489 | 0.481842267 |
+| 5 | O/C | 19,472,387 | 9,382,304 | 0.481826085 |
+| 6 | C/O | 19,472,168 | 9,382,301 | 0.481831350 |
+| 7 | O/C | 19,472,343 | 9,382,111 | 0.481817263 |
+| 8 | C/O | 19,471,747 | 9,382,532 | 0.481853631 |
+
+Means: ORIG **19,472,140** instructions, candidate **9,382,333.875**. Candidate/ORIG is
+**0.481833731x = 51.8166% fewer instructions (2.0754x reduction)**. Sample CVs are
+**0.001060% ORIG**, **0.002964% candidate**, and **0.003202% paired ratio**, all far below the 5%
+validity gate; the result clears the 1% keep ratchet by 50.82 percentage points. Criterion agrees:
+for 32-byte elements ORIG was 7.46-8.79 us per pass across AB/BA rounds versus candidate
+3.48-3.97 us; for 128-byte elements ORIG 11.59-13.91 us versus candidate 4.24-5.43 us.
+
+Verdict: **MEASURED WIN, not yet the final code KEEP**. The one production lever is only to return
+`left.cmp(right)` before UTF-8 validation when `collator` is `None`; the ICU `Some` path is unchanged.
+Commit source only after the focused equivalence test, full 4,975-case conformance harness, formatting,
+clippy/check gates, and UBS are green under the same fail-closed remote-build rule.
+
 ## 2026-07-10 cod_fr: INVALID A/B — first SORT comparator ORIG was still dead code; no ratio trusted
 
 Ledger-integrity preflight for the proposed `sort_alpha_compare` short-circuit used one fail-closed
