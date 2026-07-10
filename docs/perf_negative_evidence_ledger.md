@@ -5287,6 +5287,47 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`455c77c91`).** SSCAN MATCH glob classified ONCE per scan, not per member — same primitive as the keyspace-SCAN hoist below, applied to a **hotter** frame (**10.81% self** vs 7.32%), byte-identical
+
+The keyspace-SCAN entry below noted `PreparedGlob`/`glob_prepare` are `pub` so `SSCAN` can adopt the
+same hoist. Did it. Profiled `SSCAN bigset <cur> MATCH member:0001* COUNT 500` paginating a 10k-member
+**hashtable**-encoded set: `fr_store::glob_match` was the top fr-owned self frame at **10.81%** (next:
+`GenericSet::get_index` 2.89%, `Store::sscan` 2.71%). Root cause identical to keyspace SCAN — the
+hashtable pagination loop called `scan_pattern_matches(pattern, member)` → `glob_match` →
+`literal_glob_shape` **per member**, re-classifying one fixed pattern every candidate.
+
+Added a private `ScanFilter` (classify once) and hoisted it above the per-member loop in **both**
+`sscan` and `sscan0_borrow_scan`. `ScanFilter::prepare` preserves `scan_pattern_matches` **exactly**:
+`None` and the lone-`*` allkeys shortcut still match every member incl. the empty one (where a bare
+`glob_match` would drop it); any other pattern defers to `glob_prepare`'s `PreparedGlob` (byte-identical
+to `glob_match`). The listpack/intset short-circuit (return-all-in-one-pass) is unchanged — only the
+matcher was swapped.
+
+**A/B — classify-once vs classify-per-call**, `glob_scan` bench re-run on this tree, one binary / one
+`rch` invocation, adjacent-pair interleaved, `black_box`, median of paired ratios, null-gated, worker
+`vmi1149989`, 20k byte-string members:
+
+| pattern shape | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| prefix `member:0001*` | **2.695x** | 0.986 | [0.777, 1.341] | 21.8% | WIN (≫ null p95) |
+| suffix `*:tag` | **2.169x** | 0.980 | [0.687, 1.465] | 26.0% | WIN |
+| general `member:*5:x` | 1.111x | 1.009 | [0.961, 1.350] | 17.0% | indistinguishable (backtracker-bound) |
+
+Prefix is SSCAN MATCH's dominant real shape and the exact profiled 10.81%-self case. (Null cv is loose
+on this tiny-per-member work — reported, not gated; null medians sit at 0.98–1.01 so no position bias,
+and the prefix/suffix speedups are far outside their null spreads → decidable.)
+
+**Byte-exact, proven four ways:** new `scan_filter_matches_scan_pattern_matches_for_every_pattern_and_
+string` differential test (12 patterns × 10 members incl. empty / `*` / `**` / literal shapes / general
+backtracker) pins `ScanFilter::matches == scan_pattern_matches`; `sscan0_borrow_scan_matches_clone`
+(borrow-scan ≡ clone sscan) green; `hscan_sscan_zscan_short_circuit_on_small_encodings_yvxq6` (listpack/
+intset short-circuit preserved) green; **full `fr-conformance` green** (99-test suite + all others, exit 0).
+Test binary worker `hz2`.
+
+Algorithmic (hoist a per-iteration classification), no `unsafe`, no fallback tier; `fr-store` keeps
+`#![forbid(unsafe_code)]`. HSCAN/ZSCAN (cod's hash/sorted-set lane) untouched. Remaining unhoisted
+keyspace-scan arms (KEYS at 10054/10170, 24160) are follow-ups in the same primitive class.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED.** SCAN MATCH glob classified ONCE per scan, not per key — **2.32x prefix / 1.69x suffix** on the per-key match, byte-identical
 
 Profiled a 20k-key `SCAN MATCH key:0001*`: `fr_store::glob_match` was the top fr-owned frame at
