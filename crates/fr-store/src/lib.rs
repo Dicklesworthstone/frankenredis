@@ -24405,6 +24405,10 @@ impl Store {
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
+        // (cc_fr) Classify the MATCH glob ONCE, not per member. Byte-identical to
+        // `scan_pattern_matches(pattern, m)` (the hashtable path re-classified per
+        // member: `glob_match` was ~10.8% self on a hashtable SSCAN MATCH).
+        let scan_filter = ScanFilter::prepare(pattern);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
@@ -24429,7 +24433,7 @@ impl Store {
                         if is_listpack_or_intset {
                             let result: Vec<Vec<u8>> = s
                                 .iter()
-                                .filter(|member| scan_pattern_matches(pattern, member.as_ref()))
+                                .filter(|member| scan_filter.matches(member.as_ref()))
                                 .map(|m| m.into_owned())
                                 .collect();
                             return Ok((0, result));
@@ -24455,7 +24459,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
-                            if !scan_pattern_matches(pattern, member.as_ref()) {
+                            if !scan_filter.matches(member.as_ref()) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -24509,6 +24513,10 @@ impl Store {
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
+        // (cc_fr) Classify the MATCH glob ONCE, not per member. Byte-identical to
+        // `scan_pattern_matches(pattern, m)` (the hashtable path re-classified per
+        // member: `glob_match` was ~10.8% self on a hashtable SSCAN MATCH).
+        let scan_filter = ScanFilter::prepare(pattern);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
@@ -24527,7 +24535,7 @@ impl Store {
                         if is_listpack_or_intset {
                             let refs: Vec<Cow<'_, [u8]>> = s
                                 .iter()
-                                .filter(|member| scan_pattern_matches(pattern, member.as_ref()))
+                                .filter(|member| scan_filter.matches(member.as_ref()))
                                 .collect();
                             sink(SscanReplyEvent::Cursor(0));
                             sink(SscanReplyEvent::Len(refs.len()));
@@ -24553,7 +24561,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
-                            if !scan_pattern_matches(pattern, member.as_ref()) {
+                            if !scan_filter.matches(member.as_ref()) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -32305,6 +32313,41 @@ pub fn glob_prepare(pattern: &[u8]) -> PreparedGlob<'_> {
     PreparedGlob {
         pattern,
         shape: literal_glob_shape(pattern),
+    }
+}
+
+/// A SCAN-family `MATCH` filter with its glob shape classified ONCE, preserving
+/// [`scan_pattern_matches`] semantics exactly so it can be hoisted out of a scan's
+/// per-item loop: `None` and the lone-`*` allkeys shortcut match every item
+/// (including the empty one, which `glob_match` never would); any other pattern
+/// defers to a [`PreparedGlob`] (byte-identical to `glob_match`). `glob_match` was
+/// ~10.8% self on a hashtable `SSCAN MATCH` because the per-member call
+/// re-classified the pattern every candidate. (cc_fr)
+enum ScanFilter<'a> {
+    /// `None` pattern, or a lone `*`: every item matches (allkeys shortcut, incl. empty).
+    MatchAll,
+    /// Any other pattern, classified once.
+    Glob(PreparedGlob<'a>),
+}
+
+impl<'a> ScanFilter<'a> {
+    #[inline]
+    fn prepare(pattern: Option<&'a [u8]>) -> Self {
+        match pattern {
+            None => ScanFilter::MatchAll,
+            Some(p) if p == b"*" => ScanFilter::MatchAll,
+            Some(p) => ScanFilter::Glob(glob_prepare(p)),
+        }
+    }
+
+    /// Byte-identical to `scan_pattern_matches(pattern, item)` for the `pattern`
+    /// this filter was prepared from.
+    #[inline]
+    fn matches(&self, item: &[u8]) -> bool {
+        match self {
+            ScanFilter::MatchAll => true,
+            ScanFilter::Glob(g) => g.matches(item),
+        }
     }
 }
 
@@ -40793,6 +40836,52 @@ mod tests {
                     prepared.matches(s),
                     glob_match(p, s),
                     "pattern={p:?} string={s:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scan_filter_matches_scan_pattern_matches_for_every_pattern_and_string() {
+        use super::{scan_pattern_matches, ScanFilter};
+        // The hoisted SSCAN filter (classify once) MUST agree with `scan_pattern_matches`
+        // (classify per member) for EVERY (pattern, member) — a divergence would change
+        // SSCAN output. Beyond the glob shapes this pins the two allkeys shortcuts
+        // (`None` and a lone `*`, which match the EMPTY member — where `glob_match` alone
+        // would drop it) and that `**`/`?` do NOT match the empty member.
+        let patterns: &[Option<&[u8]>] = &[
+            None,
+            Some(b"*"),
+            Some(b"**"),
+            Some(b"?"),
+            Some(b""),
+            Some(b"a"),
+            Some(b"member:0001*"),
+            Some(b"*:tag"),
+            Some(b"*mid*"),
+            Some(b"m[ae]mber"),
+            Some(b"foo*bar"),
+            Some(b"\\*lit"),
+        ];
+        let members: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"member:00012:tag",
+            b"member:9",
+            b"XmidY",
+            b"mamber",
+            b"fooXYZbar",
+            b"*lit",
+            b"tag",
+            b":tag",
+        ];
+        for p in patterns {
+            let filter = ScanFilter::prepare(*p);
+            for s in members {
+                assert_eq!(
+                    filter.matches(s),
+                    scan_pattern_matches(*p, s),
+                    "pattern={p:?} member={s:?}"
                 );
             }
         }
