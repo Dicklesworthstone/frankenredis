@@ -5287,6 +5287,43 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`c23e465fd`).** EXPIRE/EXPIREAT TTL-set streamlined — **1.20x** re-set — a DIFFERENT primitive (keyspace hot path, not persist), found by profiling `store_read`
+
+Left persist/listpack entirely and profiled the `store_read` bench: `expire_existing`
+**162ns** / `expireat_existing` **156ns** stood out at ~5x a GET (35ns), while reading a TTL
+(`expiretime` 19ns) and removing one (`persist` 13ns) were fast. The asymmetry was in the
+TTL-SET path — two redundancies:
+1. `expiry_ms(key)` hashed+probed the key TWICE (the lazy-drop peek + `old_expiry`). On any
+   path reaching the TTL-set the key was NOT dropped (a due key drops → returns via
+   `contains_key`), so its expiry is unchanged → peek once, reuse.
+2. `logical_key = lk.to_vec()` allocated per call to feed `notify_keyspace_event`, which is
+   OFF by default and early-returns without using the key. It takes `&[u8]` → pass a slice
+   borrowing `key`, no allocation.
+
+Applied to `expire_milliseconds` + `expire_at_milliseconds` (EXPIRE/PEXPIRE/EXPIREAT/
+PEXPIREAT/SETEX). Byte-identical: same return, resulting TTL, `expires_count`, and emitted
+keyspace-notification bytes.
+
+**A/B** — same-binary null-gated (expire_reset bench, worker `hz2`), two-peek+to_vec orig vs
+one-peek+borrowed streamlined, idempotent TTL re-set (stable store state):
+
+| op | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| expire_reset | **1.196x** | 1.002 | [0.950, 1.042] | 9.9% | WIN |
+
+**Byte-exact, gates green:** `expire_milliseconds_streamlined_matches_orig` (fresh / re-set /
+milliseconds<=0 DEL / negative / absent, all keyspace-notify flags ON — return + pttl +
+expires_count + emitted notification bytes all match the two-peek original); 755 fr-store lib
+tests; full fr-conformance green (347 passed, 0 failed, incl. the 194-case live-redis
+differential + 99-case suites).
+
+**Method / frontier note:** the `store_read` bench is a live cc-profiling channel I had NOT
+run — it surfaced EXPIRE/EXPIREAT (and INCR 80ns, get_sort_weight 68ns) as store-lane
+outliers. Store WRITE hot paths (the `logical_key = to_vec` for notify + redundant lazy-drop
+peeks) are a fresh vein: the same to_vec-for-notify pattern recurs across many write commands
+(SET/DEL/LPUSH/SADD/…) — a broad follow-up. Next store-lane profile targets: INCR (parse+
+format), get_sort_weight.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`b280b3b70`).** Quicklist2 list encode: memoize per-item listpack lengths — **1.12x integer lists** — byte-exact. PARTIALLY CORRECTS the "encode_quicklist is LZF-bound / listpack saturated" claim in the HOLD entry below
 
 Re-profiled the `rdb_codec` baseline (which had `encode_quicklist` **21.3ms** — the slowest
