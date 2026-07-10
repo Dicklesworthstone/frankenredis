@@ -6428,3 +6428,62 @@ Behavior parity and quality gates:
   intentionally preserve the profiler's tool-emitted column padding.
 
 Verdict: **FINAL KEEP**. The source change is the single exact dispatch-floor lever above.
+
+## 2026-07-10 cod_fr: FINAL KEEP — packed ZADD skips a provably-false encoding rescan, median 0.796854328x instructions
+
+The selected family is sorted-set, outside cc's SIMD/CRC/dispatch lane. The profile workload keeps
+96 short members in packed/listpack-compatible storage and alternates the score of one existing
+member, so every operation mutates the ZSET and reaches the post-insert encoding refresh without
+changing cardinality. On remote worker **vmi1152480**, the unmodified full member scan had five
+`instructions:u` self-time samples of **18.91%, 20.27%, 20.98%, 21.40%, and 22.49%** (median
+**20.98%**, zero lost samples; baseline binary SHA-256
+**`392da17482cc76786564ef99f7a2057d21f4253cd53bbcbb82c7547cb4008a7d`**). The lever therefore
+cleared the mandatory median-self-time attribution gate before source editing.
+
+ONE LEVER: after a threshold-aware ZADD insertion, a value that is still internally `Packed`
+cannot exceed the active listpack entry/value limits, so its sticky encoding refresh is O(1).
+Internally `Full` remains deliberately on the exact old scan: RESTORE can decode a listpack into
+full storage under subsequently raised CONFIG limits, making that tier ambiguous. Existing sticky
+skiplist flags remain an immediate return. The same helper is used by plain ZADD, option-bearing
+ZADD, and ZINCRBY; the exact pre-change full scan remains available only behind the non-default
+`bench-reference` feature.
+
+The final same-binary command was:
+
+`RCH_WORKER=vmi1152480 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-store --features bench-reference --bench zadd_encoding_refresh`
+
+Both arms shared binary SHA-256
+**`1eef59776a33f0b039ca0692a38ea7b509cfd75c49139752b379e2859b2ce2d1`** on worker
+**vmi1152480**. The fallback refresh had three self-time samples **11.16%, 18.50%, 20.80%** and
+median **18.50%**; the candidate full-scan frame was absent above perf's **0.1%** reporting floor.
+The live `SortedSet::insert_with_limits_result` frame was present in every arm and all profiles had
+zero lost samples, proving the benchmark executed the mutated ZADD core and the removed work.
+
+The benchmark then ran 24 position-balanced, interleaved instruction rounds in that same
+invocation. The paired base/base null ratio had median **1.000001364**, p05 **0.999997471**, p95
+**1.000004751**, and CV **0.000236%**. Fallback/candidate had median **1.254934516x** and paired
+ratio CV **0.000290%**; equivalently candidate/fallback was **0.796854328**, or **20.314567% fewer
+instructions**. The candidate result is far outside the complete null band and clears the 1% keep
+ratchet.
+
+Behavior and fallback proof:
+
+- before measurement, both arms produced the same ZADD integer reply, ordered ZRANGE WITHSCORES
+  result, OBJECT ENCODING value, and DUMP bytes;
+- focused remote ZSET/encoding coverage passed **43 relevant tests**, including a 129-member
+  RESTORE regression that proves `Full` stays listpack under a raised limit and that the retained
+  fallback flips it to skiplist after the limit is tightened;
+- the full remote `fr-conformance` package passed **194/194** library tests, all auxiliary and doc
+  targets, **99/99** smoke cases, and **324/324** live Redis-oracle `core_zset` cases;
+- remote workspace all-target check passed; remote feature-enabled production-lib and benchmark
+  clippy both passed with `-D warnings`;
+- workspace-wide clippy is blocked outside this lever by duplicate `#[inline]` attributes in
+  `fr-persist`; the no-deps `fr-store --all-targets` check additionally reaches pre-existing test
+  literal lints. Neither surface was changed. Remote `cargo fmt --check` fail-closed with
+  **RCH-E301** because RCH classifies fmt as non-compilation; direct Rust 2024 rustfmt was clean;
+- UBS ran with Rust build/lint/dependency categories 12-14 disabled. Its nonzero output was
+  whole-file legacy inventory plus intentional fail-closed benchmark panics and checked quantile
+  indexes; no new production defect was identified.
+
+Verdict: **FINAL KEEP**. The packed tier removes the measured scan while preserving the exact
+pre-change fallback wherever the storage representation does not prove the encoding result.

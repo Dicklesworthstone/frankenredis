@@ -13,6 +13,9 @@ indexmap = "2"
 foldhash = "0.1"
 libc.workspace = true
 
+[features]
+bench-reference = []
+
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.5"
@@ -24,6 +27,11 @@ harness = false
 [[bench]]
 name = "set_algebra_build"
 harness = false
+
+[[bench]]
+name = "zadd_encoding_refresh"
+harness = false
+required-features = ["bench-reference"]
 
 [[bench]]
 name = "glob_scan"
