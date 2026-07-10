@@ -12,3 +12,7 @@ harness = false
 [[bench]]
 name = "first_mismatch"
 harness = false
+
+[[bench]]
+name = "bitand"
+harness = false

@@ -5287,6 +5287,66 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: STRATEGY — a crate-wide `+avx2` build target is SIMPLER than per-site dispatch AND **bit-identical** for fr (Rust never auto-contracts FP; fr has zero `mul_add`). BITOP AVX2 is only a size-conditional ~1.3x, NOT wired
+
+Two findings this pass: a measured BITOP result, and the answer to "is a crate-wide build target simpler
+than per-site fr-simd dispatch" (raised by frankenscipy's whole-repo `+avx2,+fma` 1.745x bit-identical).
+
+### The crate-wide build-target answer — bit-identical, and the FMA hazard does NOT apply to Rust
+
+The intuition (from C) is that `+fma` fuses `a*b+c → fma(a,b,c)`, changing the last bit and breaking
+byte-exact parity with redis 7.2.4's FP formatting (GEODIST haversine, double rendering). **That is a C
+fact, not a Rust fact.** Verified by disassembly + runtime, host `thinkstation1`:
+
+- `rustc -O -C target-feature=+avx2,+fma` emits **0 `vfmadd`** for a plain `a*b+c` (Rust sets
+  fp-contract OFF; it only fuses on an explicit `f64::mul_add`, which DOES change the bit —
+  `a*b+c = 0x000…0` vs `mul_add = 0xb970…` on the classic near-cancellation input).
+- A haversine-shaped `sin² + cos·cos·sin²` gave **bit-identical** output under baseline `x86-64`,
+  `+avx2`, and `+avx2,+fma` (`bits = 3f88b4d49c84b6b8` all three).
+- `rg '\.mul_add\(' crates/*/src/*.rs` = **0 hits** in any fr crate.
+
+⇒ `target-cpu=x86-64-v3` (or `+avx2`) is **fully bit-identical for the entire fr codebase**, one line in
+`[profile.release-perf]`, and it auto-vectorizes *every* integer hot loop (bitcount, bitpos, bitop, and
+any future one) to AVX2 with **zero `unsafe` and zero per-site work**. The only cost is raising the
+binary's minimum CPU to AVX2 (Haswell 2013) — an operator policy decision, not an agent's.
+
+**Trade vs per-site `fr-simd` dispatch (what I built for popcount/bitpos):**
+| | crate-wide `+avx2` | per-site fr-simd dispatch |
+|---|---|---|
+| coverage | every loop, automatic | only hand-converted sites |
+| `unsafe` | none | audited, isolated in fr-simd |
+| min CPU | raised to AVX2 | unchanged (runtime-dispatched) |
+| runs on pre-2013 / AVX2-disabled hosts | **no** | yes (SSE2/scalar fallback) |
+
+They compose: ship `x86-64-v3` as the default fast build, keep fr-simd's runtime dispatch for a
+portable build. **Recommendation: if all deployment targets are AVX2 (essentially all modern servers),
+the build target is the simpler, broader, bit-identical choice; it subsumes the per-site work.** This is
+a surface for the operator — I did not change the build profile (min-CPU policy).
+
+### BITOP AVX2 — MEASURED, size-conditional, NOT wired (the build target subsumes it anyway)
+
+`Store::bitop` emits SSE2 (128 xmm, 0 ymm) at baseline — same SWAR-on-AVX2 shape as BITCOUNT. But BITOP
+is a streaming **read-read-write**, so it goes bandwidth-bound where BITCOUNT (a cache-resident reduce)
+did not. Physics (`fr-cand3`, `sha256 ad6506c4…`, host `thinkstation1`): IPC 2.3–2.8, LLC-miss/KiB **0**
+across 16 KiB–4 MiB (the two operands stay hot across reps). Null-gated A/B, one binary, adjacent-pair
+interleaving, worker `hz2`, `bitand_inplace` (AVX2) vs `bitand_inplace_scalar` (LLVM SSE2):
+
+| size | null median | null p5..p95 | speedup | verdict |
+|---|---:|---|---:|---|
+| 8 KiB | 0.997 | [0.957, 1.080] | **1.306x** | WIN (L1, issue-bound) |
+| 64 KiB | 0.994 | [0.822, 1.008] | **1.103x** | win (L2) |
+| 512 KiB | 0.988 | [0.979, 0.997] | 0.997x | neutral |
+| 4 MiB | 0.986 | [0.951, 0.999] | 0.969x | neutral / bandwidth-bound |
+
+So AVX2 BITOP wins only while the data is L1/L2-resident and **decays to neutral (or a hair negative) by
+L3**, which is where realistic BITOP over large bitmaps lives. **Not wired into `fr-store`:** the win is
+small and conditional, the common large-bitmap case is neutral-to-slightly-negative, and a crate-wide
+`+avx2` build would capture the same L1/L2 win for free (bitop's scalar loop auto-vectorizes to AVX2)
+without hand-written `unsafe`. The `bitand_inplace` kernel + its exhaustive equivalence test + the
+null-gated bench stay in `fr-simd` as the measured evidence and A/B harness; nothing in the product calls
+them. Byte-identity proven (`bitand_matches_scalar_all_lengths_alignments_and_unequal`, all alignments +
+unequal lengths). Do not re-chase per-site AVX2 BITOP; if the win is wanted, take it via the build target.
+
 ## 2026-07-10 cc_fr: `fr-simd` made a PROPER 3-tier dispatch layer — SSE2 fallback for BITPOS gives non-AVX2 x86 hosts **8.1–8.6x** (they used to fall to scalar); AVX2 still **~15–17x**
 
 Portability hardening of the two SIMD wins below. Question raised: does the crate stay portable and

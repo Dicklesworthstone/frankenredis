@@ -266,6 +266,70 @@ unsafe fn first_mismatch_byte_avx2(bytes: &[u8], value: u8) -> Option<usize> {
     }
 }
 
+/// In-place `dst[i] &= src[i]` over the overlapping prefix (`min` length).
+///
+/// This is `BITOP AND`'s inner kernel. Like popcount/bitpos, `fr-store`'s word loop compiles to
+/// SSE2 at baseline `x86-64` (`Store::bitop`: 128 xmm, 0 ymm) even where AVX2 is present. Whether
+/// AVX2 actually wins here is a *measurement*, not an assumption: BITOP is a streaming
+/// read-read-write, so it can be cache-bandwidth-bound rather than issue-bound — see the A/B before
+/// trusting a speedup. Dispatches `avx2 → scalar` (the scalar arm is LLVM's SSE2-vectorized word
+/// loop on x86_64). Bit-identical to `for i { dst[i] &= src[i] }`.
+#[inline]
+pub fn bitand_inplace(dst: &mut [u8], src: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed present.
+            unsafe {
+                bitand_inplace_avx2(dst, src);
+            }
+            return;
+        }
+    }
+    bitand_inplace_scalar(dst, src);
+}
+
+/// Reference kernel: safe, portable, LLVM-vectorized to SSE2 on x86_64. The A/B baseline.
+#[inline]
+pub fn bitand_inplace_scalar(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    for i in 0..n {
+        dst[i] &= src[i];
+    }
+}
+
+/// # Safety
+/// The CPU must support `avx2`. Callers must check `is_x86_feature_detected!("avx2")`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bitand_inplace_avx2(dst: &mut [u8], src: &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_storeu_si256,
+    };
+
+    let n = dst.len().min(src.len());
+    let full = n / 32 * 32;
+
+    // SAFETY: AVX2 guaranteed by the caller. Every load/store spans `[offset, offset+32)` with
+    // `offset + 32 <= full <= n <= {dst,src}.len()`, so all accesses stay inside both slices.
+    unsafe {
+        let mut offset = 0usize;
+        while offset < full {
+            let a = _mm256_loadu_si256(dst.as_ptr().add(offset) as *const __m256i);
+            let b = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset) as *mut __m256i,
+                _mm256_and_si256(a, b),
+            );
+            offset += 32;
+        }
+    }
+
+    for i in full..n {
+        dst[i] &= src[i];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -424,5 +488,37 @@ mod tests {
         assert_eq!(first_mismatch_byte(&buf, 0x00), None);
         *buf.last_mut().unwrap() = 0x01;
         assert_eq!(first_mismatch_byte(&buf, 0x00), Some(1024 * 1024 - 1));
+    }
+
+    /// `bitand_inplace` must equal the scalar `dst[i] &= src[i]` loop for every input — the vector
+    /// body, the < 32-byte tail, unequal lengths (`min` truncation), and every alignment.
+    #[test]
+    fn bitand_matches_scalar_all_lengths_alignments_and_unequal() {
+        use super::{bitand_inplace, bitand_inplace_scalar};
+        let mut da = vec![0u8; 300];
+        let mut sa = vec![0u8; 300];
+        fill(&mut da, 0x1111_2222_3333_4444);
+        fill(&mut sa, 0x5555_6666_7777_8888);
+        for dstart in 0..34usize {
+            for sstart in 0..34usize {
+                for len in [0usize, 1, 15, 16, 31, 32, 33, 64, 100, 250] {
+                    if dstart + len > da.len() || sstart + len > sa.len() {
+                        continue;
+                    }
+                    let mut d1 = da[dstart..dstart + len].to_vec();
+                    let mut d2 = d1.clone();
+                    let s = &sa[sstart..sstart + len];
+                    bitand_inplace(&mut d1, s);
+                    bitand_inplace_scalar(&mut d2, s);
+                    assert_eq!(d1, d2, "dstart={dstart} sstart={sstart} len={len}");
+                }
+            }
+        }
+        // Unequal lengths: only the min prefix is touched.
+        let mut d = vec![0xffu8; 40];
+        let orig = d.clone();
+        bitand_inplace(&mut d, &[0x0fu8; 10]);
+        assert_eq!(&d[..10], &[0x0fu8; 10]);
+        assert_eq!(&d[10..], &orig[10..], "bytes past src.len() untouched");
     }
 }
