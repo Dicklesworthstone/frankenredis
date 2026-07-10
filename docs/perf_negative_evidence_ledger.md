@@ -5287,6 +5287,45 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **WIN — LANDED (`ac77762d8`).** `parse_listpack_integer` single-pass — **1.40x int / 1.25x mixed** — the listpack DUMP/RDB-save int-encode gate, byte-exact
+
+The symmetric ENCODE-side sibling of the backlen decode lever below. `parse_listpack_
+integer` decides whether each listpack entry is int-encoded on every DUMP / RDB-save; it
+scanned the digits TWICE — `listpack_int_bytes_are_canonical` ran `all(is_ascii_digit)` +
+the canonical predicates, then a second loop re-scanned to accumulate the i64. Fused the
+canonical check into the single accumulate pass: the leading-zero / "-0" rejections need
+only the first digit, and the per-digit `is_ascii_digit` gate replaces the separate
+`all(...)` scan. Non-integers still reject on the first non-digit in both.
+
+Byte-identical acceptance (`[-]?[0-9]+`, no '+', no redundant leading zero, not "-0"; same
+`checked_*` out-of-range, i64::MIN via the negative accumulator).
+
+**A/B** — same-binary null-gated (listpack_int_parse bench, worker `hz2`), two-pass orig vs
+single-pass fused:
+
+| workload | speedup | null median | null p5..p95 | cv | verdict |
+|---|---:|---:|---|---:|---|
+| all_ints (2048 canonical decimals) | **1.399x** | 0.996 | [0.890, 1.092] | 9.0% | WIN |
+| mixed (2048, half int / half string) | **1.251x** | 1.001 | [0.909, 1.046] | 6.2% | WIN |
+
+Even the half-string workload wins (the int half benefits, strings are neutral). Isolated
+parser; end-to-end `encode_listpack_entry` also pays the int-encoding + backlen, so its
+share is smaller. Never regresses.
+
+**Byte-exact, gates green:** `parse_listpack_integer_fused_matches_two_pass_orig` (hand
+cases + exhaustive 1-3 byte sweep over `-+0129x `) and the existing
+`parse_listpack_integer_matches_to_string_roundtrip` oracle (`value.to_string() == entry`)
+both green on the production fused fn; 206 fr-persist lib tests; full fr-conformance green
+(347 passed, 0 failed, incl. the 194-case live-redis differential + 99-case suites).
+
+**Listpack primitive status:** encode + decode backlen are both single-byte-fast-pathed, the
+int-parse gate is single-pass, and int-encode picks the smallest encoding — the per-entry
+listpack codec primitives are saturated. Remaining persist wins are STRUCTURAL: the intset
+RESTORE render→reparse round-trip (packed int → decimal ASCII in `decode_intset_members` →
+`RdbValue::Set` → fr-store parses ASCII back to i64) needs a typed `RdbValue::IntSet` variant
+(wide cross-crate enum change, not a clean one-lever), and decode's per-element owned alloc is
+inherent (the Vecs become the stored members).
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`79c6a4eee`).** Listpack per-entry backlen decode — single-byte fast path — **1.30x int / 1.05x str** on the isolated primitive, byte-exact (RESTORE/RDB-load decode)
 
 **Profile-first:** baselined the `rdb_codec` criterion bench (worker hz2) — `decode_rdb`
