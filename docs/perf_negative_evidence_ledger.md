@@ -5287,6 +5287,48 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: NOT WIRED (revert-on-loss) — AVX2 `common_prefix_len` kernel wins 1.5–1.8x on ≥128 B in isolation, but routing LZF's hot path through it adds cross-crate call overhead on the frequent SHORT-match case; end-to-end LZF net unproven
+
+Took `common_prefix_len` — LZF's match-extension inner loop (`lzf_compress`, fr-persist), profiled at
+up to **11.4% flat self on multi-node quicklist DUMP** — as the two-array sibling of the shipped
+`first_mismatch` kernel (`_mm256_cmpeq_epi8(a,b)` + movemask). Built the AVX2/SSE2/scalar kernel in
+`fr-simd` with the full portability tier, exhaustive byte-identity test (difference walked across
+every position + alignment; a wrong return would corrupt LZF output). **fr-persist 229/229 including
+the LZF byte-equality gate — byte-exact.**
+
+**Isolated per-length A/B** (one binary, adjacent-pair, null-gated on the median, worker `hz2` with a
+fit null ~0.9–1.0), `common_prefix_len` (dispatch) vs `common_prefix_len_scalar`:
+
+| common prefix | speedup | verdict |
+|---|---:|---|
+| 16 B | 0.53–0.65x | REGRESSION (SIMD setup + call overhead on tiny work) |
+| 32 B | 0.61–0.89x | regress |
+| 64 B | 0.54–1.16x | indistinguishable (inside null) |
+| **128 B** | **1.52–1.81x** | WIN (> null p95) |
+| **256 B** | **1.79–2.13x** | WIN |
+| **512 B** | **1.84–2.88x** | WIN |
+
+Added `SIMD_MIN_LEN = 128` so the kernel only takes the SIMD path where the win is decidable and runs
+the byte-identical scalar loop below it.
+
+**WHY NOT WIRED (reverted the fr-persist edit):** two findings the measurement forced:
+1. **The isolated microbench does not translate to the LZF hot path.** LZF calls `common_prefix_len`
+   overwhelmingly with SHORT matches, and the win is only on ≥128 B. The end-to-end net is the
+   short-match-frequency-weighted average, which the per-length numbers cannot give.
+2. **Cross-crate dispatch loses inlining.** Below the threshold the wrapper runs the *same* scalar
+   work, yet the bench shows ~0.53–0.65x at 16–64 B: `fr_simd::common_prefix_len` (which contains the
+   `unsafe target_feature` arms) does not inline into `lzf_compress` the way the in-place word loop
+   does, adding a real per-call cost on the frequent short case. On a function that returns in ~10 ns
+   this is 2x *of a tiny number*, so it may be negligible end-to-end — but it is a **regression risk on
+   the hot path**, and I cannot A/B `lzf_compress` with-vs-without the kernel in one binary to net it.
+
+Per revert-on-loss, `fr-persist::common_prefix_len` stays the **inlined word loop** (byte-exact,
+unchanged behavior). The kernel + exhaustive test + null-gated bench remain in `fr-simd` as measured
+evidence. **To decide it: an end-to-end `lzf_compress` A/B** (dispatch vs inlined-scalar, one binary,
+realistic RDB payloads so the real match distribution and the call overhead both count). If long
+matches turn out common on quicklist DUMP data and the call overhead washes out, wire it with the
+threshold; otherwise it stays a no-op. Do not wire on the isolated per-length numbers alone.
+
 ## 2026-07-10 cc_fr: SURFACE (handoff to cod_fr) — next dispatch-floor target ranked: **ZSCORE at 28.97% cascade self-time**. Ready-to-apply lever. BLOCKED for me: no linked binary + cod owns `ohsk5`
 
 Profiled the hottest **unfloored fixed-arity** commands to rank the next `BorrowedDispatchFloorCommand`

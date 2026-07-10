@@ -16,3 +16,7 @@ harness = false
 [[bench]]
 name = "bitand"
 harness = false
+
+[[bench]]
+name = "common_prefix"
+harness = false

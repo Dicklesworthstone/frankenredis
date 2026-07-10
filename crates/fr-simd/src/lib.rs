@@ -266,6 +266,117 @@ unsafe fn first_mismatch_byte_avx2(bytes: &[u8], value: u8) -> Option<usize> {
     }
 }
 
+/// Length of the common prefix of `a` and `b`: the smallest `i` where `a[i] != b[i]`, or
+/// `min(a.len(), b.len())` if one is a prefix of the other.
+///
+/// This is `lzf_compress`'s **match-extension** inner loop (fr-persist), which is up to **11.4% of
+/// flat self-time on a multi-node quicklist DUMP**. It is the two-array sibling of
+/// [`first_mismatch_byte`]: `_mm256_cmpeq_epi8(a_chunk, b_chunk)` + movemask, first zero bit = first
+/// differing byte. `fr-persist`'s current word loop stays scalar/SSE2 at baseline. Dispatches
+/// `avx2 → sse2 → scalar`; the SSE2 tier matters because a plain byte/word compare loop does not
+/// reliably auto-vectorize (same asymmetry proven for `first_mismatch`).
+///
+/// Bit-identical to the scalar loop for every input, so LZF output stays byte-exact.
+/// Below this common length the scalar word loop is faster than a SIMD compare — the vector
+/// setup costs more than it saves on a short match. Measured on `hz2` (fit null ~1.0): AVX2
+/// regresses at 16 B (0.53x) and 32 B (0.89x), is *indistinguishable* at 64 B (1.16x, inside the
+/// null spread), and is a decidable WIN only from **128 B (1.81x)** up (2.13x @256, 2.88x @512,
+/// each above its null p95). Gating at 128 makes the kernel **Pareto-safe**: below it the caller
+/// runs the byte-identical scalar loop, so this can never regress whatever the length distribution
+/// (LZF matches are often short), and it only takes the SIMD path where the win is decidable.
+const SIMD_MIN_LEN: usize = 128;
+
+#[inline]
+pub fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if n >= SIMD_MIN_LEN {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                // SAFETY: avx2 confirmed present; n >= SIMD_MIN_LEN <= min(a,b).len().
+                return unsafe { common_prefix_len_avx2(a, b, n) };
+            }
+            if std::arch::is_x86_feature_detected!("sse2") {
+                // SAFETY: sse2 confirmed present (baseline on x86_64).
+                return unsafe { common_prefix_len_sse2(a, b, n) };
+            }
+        }
+    }
+    common_prefix_len_scalar(a, b, n)
+}
+
+/// Reference kernel: safe, portable, the oracle the SIMD arms are tested against. 8 bytes/iter with
+/// a little-endian `trailing_zeros` first-difference, then a byte tail — verbatim of the loop
+/// `fr-persist` shipped.
+#[inline]
+pub fn common_prefix_len_scalar(a: &[u8], b: &[u8], n: usize) -> usize {
+    let mut i = 0;
+    while i + 8 <= n {
+        let d = u64::from_le_bytes(a[i..i + 8].try_into().unwrap())
+            ^ u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        if d != 0 {
+            return i + (d.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n {
+        if a[i] != b[i] {
+            return i;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// # Safety
+/// The CPU must support `avx2`, and `n <= min(a.len(), b.len())`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn common_prefix_len_avx2(a: &[u8], b: &[u8], n: usize) -> usize {
+    use std::arch::x86_64::{
+        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+    };
+    let full = n / 32 * 32;
+    // SAFETY: AVX2 guaranteed; every load spans `[off, off+32) ⊆ [0, full) ⊆ [0, n) ⊆` both slices.
+    unsafe {
+        let mut off = 0usize;
+        while off < full {
+            let av = _mm256_loadu_si256(a.as_ptr().add(off) as *const __m256i);
+            let bv = _mm256_loadu_si256(b.as_ptr().add(off) as *const __m256i);
+            // 1 bit per byte that is EQUAL; a zero marks the first difference in this lane.
+            let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(av, bv)) as u32;
+            if eq != u32::MAX {
+                return off + (!eq).trailing_zeros() as usize;
+            }
+            off += 32;
+        }
+    }
+    common_prefix_len_scalar(&a[full..n], &b[full..n], n - full) + full
+}
+
+/// # Safety
+/// The CPU must support `sse2` (baseline on x86_64), and `n <= min(a.len(), b.len())`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn common_prefix_len_sse2(a: &[u8], b: &[u8], n: usize) -> usize {
+    use std::arch::x86_64::{__m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8};
+    let full = n / 16 * 16;
+    // SAFETY: SSE2 guaranteed; every load spans `[off, off+16) ⊆ [0, full) ⊆ [0, n) ⊆` both slices.
+    unsafe {
+        let mut off = 0usize;
+        while off < full {
+            let av = _mm_loadu_si128(a.as_ptr().add(off) as *const __m128i);
+            let bv = _mm_loadu_si128(b.as_ptr().add(off) as *const __m128i);
+            let eq = _mm_movemask_epi8(_mm_cmpeq_epi8(av, bv)) as u32 & 0xFFFF;
+            if eq != 0xFFFF {
+                return off + (!eq & 0xFFFF).trailing_zeros() as usize;
+            }
+            off += 16;
+        }
+    }
+    common_prefix_len_scalar(&a[full..n], &b[full..n], n - full) + full
+}
+
 /// In-place `dst[i] &= src[i]` over the overlapping prefix (`min` length).
 ///
 /// This is `BITOP AND`'s inner kernel. Like popcount/bitpos, `fr-store`'s word loop compiles to
@@ -488,6 +599,51 @@ mod tests {
         assert_eq!(first_mismatch_byte(&buf, 0x00), None);
         *buf.last_mut().unwrap() = 0x01;
         assert_eq!(first_mismatch_byte(&buf, 0x00), Some(1024 * 1024 - 1));
+    }
+
+    /// `common_prefix_len` must equal the scalar oracle for every input: the difference walked
+    /// across every position (incl. the 16- and 32-byte lane boundaries and the tail), equal
+    /// slices, unequal lengths, and every alignment. A wrong return value would silently change LZF
+    /// output, so this is exhaustive.
+    #[test]
+    fn common_prefix_len_matches_scalar_exhaustively() {
+        use super::{common_prefix_len, common_prefix_len_scalar};
+        fn oracle(a: &[u8], b: &[u8]) -> usize {
+            let n = a.len().min(b.len());
+            (0..n).find(|&i| a[i] != b[i]).unwrap_or(n)
+        }
+        let mut base = vec![0u8; 200];
+        fill(&mut base, 0xcafe_f00d_1234_5678);
+        for len in 0..=140usize {
+            // Identical prefixes of every length: no difference => full min length.
+            let a = base[..len].to_vec();
+            assert_eq!(common_prefix_len(&a, &a), oracle(&a, &a), "equal len={len}");
+            // Single difference walked across every position.
+            for pos in 0..len {
+                let mut b = a.clone();
+                b[pos] ^= 0xff;
+                assert_eq!(common_prefix_len(&a, &b), pos, "len={len} pos={pos}");
+                assert_eq!(common_prefix_len(&a, &b), common_prefix_len_scalar(&a, &b, len));
+            }
+        }
+        // Unequal lengths: the shorter is a full prefix of the longer.
+        let a = vec![0x5au8; 50];
+        let b = vec![0x5au8; 20];
+        assert_eq!(common_prefix_len(&a, &b), 20);
+        assert_eq!(common_prefix_len(&b, &a), 20);
+        // Every alignment against a differing tail.
+        for astart in 0..34usize {
+            for bstart in 0..34usize {
+                for len in [1usize, 15, 16, 17, 31, 32, 33, 64, 130] {
+                    if astart + len > base.len() || bstart + len > base.len() {
+                        continue;
+                    }
+                    let x = &base[astart..astart + len];
+                    let y = &base[bstart..bstart + len];
+                    assert_eq!(common_prefix_len(x, y), oracle(x, y), "a={astart} b={bstart} len={len}");
+                }
+            }
+        }
     }
 
     /// `bitand_inplace` must equal the scalar `dst[i] &= src[i]` loop for every input — the vector

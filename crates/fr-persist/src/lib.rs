@@ -2776,6 +2776,15 @@ impl LzfScratch {
 /// vectorized (LLVM does not reliably vectorize the take_while early-exit).
 /// Used for the lzf match-length tail scan. (frankenredis-g9h0v)
 #[inline]
+/// Length of the common prefix of `a` and `b` — LZF's match-extension inner loop.
+///
+/// Kept as an **inlined** word loop on purpose. An AVX2 kernel (`fr_simd::common_prefix_len`) wins
+/// 1.5–1.8x on ≥128 B compares, but LZF calls this overwhelmingly with SHORT matches, and routing
+/// the hot path through a cross-crate dispatch loses the inlining the word loop gets here — a
+/// measured ~2x per-call overhead on 16–64 B, which the isolated microbench cannot net against the
+/// long-match win without an end-to-end `lzf_compress` A/B. Not routed through fr-simd until that
+/// net is proven. (see the SURFACE entry in docs/perf_negative_evidence_ledger.md)
+#[inline]
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let mut i = 0;
