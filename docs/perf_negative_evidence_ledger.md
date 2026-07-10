@@ -5287,7 +5287,69 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
-## 2026-07-10 cc_fr: NULL CONTROL PASSES (1.0013x) — the AVX2 popcount win is real, ~2400x the noise floor. Kernel written, PARKED uncompiled: rch has no admissible worker
+## 2026-07-10 cc_fr: TWO SIMD WINS LANDED — AVX2 popcount **3.045–3.188x** (`02cc97ee2`) + AVX2 BITPOS skip-scan **16.8–17.3x** (`c864775c0`). Both byte-identical, null-gated, conformance-green. The `fr-simd` audited-unsafe kernel crate
+
+The `SWAR-where-a-wider-ISA-is-available` pattern had a sibling, and both are now shipped. Both gate
+frames that are ~98% of their command's self-time, both were baseline-`x86-64` scalar/SSE2 kernels on
+a host with AVX2, and neither is a gap versus redis 7.2.4 (which emits *scalar* here) — they are wins
+against ourselves. Runtime-dispatched (`is_x86_feature_detected!`, `avx2 → …→ safe scalar`), so the
+binary's minimum CPU is unchanged.
+
+| lever | commit | frame | self% | speedup (null-gated) | null median | A/B worker |
+|---|---|---|---:|---|---|---|
+| BITCOUNT popcount | `02cc97ee2` | `Store::bitcount` | 97.94% | **3.045 / 3.188 / 3.130x** (1M/64K/4K) | 0.999 / 1.001 / 0.994 | `hz1` |
+| BITPOS skip-scan | `c864775c0` | `Store::bitpos_full_bytes` | 98.36% | **17.31 / 16.82 / 17.20x** | 1.001 / 0.999 / 1.005 | `hz2` |
+
+Shared provenance: profiled binary `sha256 = ad6506c45b4c326ccbeba024dc8a14662a250104a1cc20c06d19c022464170f2`,
+host `thinkstation1`, `perf_event_paranoid=1`, server core 2, 3 s quiesce. A/B substrate: ONE binary /
+ONE `rch` invocation, arms interleaved within a single measured routine, `black_box` on input and
+result, reps calibrated to ~2 ms segments, 41 rounds, **median of paired per-round ratios, gated on
+the candidate median lying outside the null control's p5..p95 spread** (`cv` reported, never gated).
+
+**Correctness.** popcount: bit-identical to the `count_ones()` oracle across all lengths 0..=1024 × 3
+seeds, every alignment, adversarial patterns, 1 MiB. BITPOS: `first_mismatch_byte ==
+position(|b| b != v)` for skip ∈ {0x00,0xff,0x55}, every length 0..=600 with the single mismatch
+walked across **every** position (incl. the 32-byte lane boundary and scalar tail), every alignment,
+1 MiB sparse. `fr-simd` 7/7, `fr-store --lib bit` 27/27, `fr-conformance` 347 passed / 0 failed
+(popcount pass measured 351/351 on its run).
+
+**Two harness bugs the null control caught — the reason to always run it.**
+1. *Position bias (popcount).* Rotating three slots with `arm = (k + round) % 3` still puts arm 1
+   always one position after arm 0; later positions run slower. Null median read **0.917** and the
+   candidate was depressed to a false 2.51–2.59x. Reversing execution order on odd rounds fixed it.
+2. *Fast-arm perturbation (BITPOS).* Measuring the two scalar null arms **split by** the 17x-faster
+   candidate blew the null spread to **[0.77, 3.38]** and inflated the reading to ~22x. Measuring each
+   like-work pair **adjacently** restored the null to ~1.00 and settled the honest figure at ~17x.
+
+Both confirm the rule: a null median away from 1.00, or a wide null spread, is a harness bug, not the
+lever. Fix the harness before reporting the number.
+
+**Design.** `crates/fr-simd` is a new crate holding narrow, audited `unsafe` behind safe interfaces —
+the route AGENTS.md sanctions. Every other crate, `fr-store` included, keeps `#![forbid(unsafe_code)]`.
+Portable `core::simd` cannot substitute: its codegen is bounded by the *enabled* target features, so a
+`Simd<u8,32>` lowers to two SSE2 vectors on a baseline build. `fr-runtime` is the only pre-existing
+crate permitting `unsafe`, and it depends on `fr-store`, so it could not host a store kernel.
+
+**Scope.** Both are kernel-level WINs, measured. Amdahl puts BITCOUNT ≈2.8x and a full BITPOS scan
+≈15x end-to-end — estimates, not certified server A/Bs (which need two `fr-server` binaries under
+`perf stat`; `rch` returns no linked binary). BITPOS's win is on the long-scan shape that dominates
+its self-time; short scans that find the bit early are unaffected and stay byte-identical.
+
+**Sibling audit — COMPLETE, no more drop-in wins.** Every fr-owned hot byte-loop was classified by
+disassembly (`objdump -d`, verdict = widest register used):
+- `crc64_redis` (2.78% self): scalar table, but fr already runs **slice-by-16** and beats redis's
+  slice-by-8; a `pclmulqdq` CRC would be a win-vs-ourselves but is a large, delicate change on a small
+  frame — a *named future lever*, not taken.
+- `common_prefix_len` (2.22%): already an 8-byte-word find-first-diff with `trailing_zeros` early
+  exit; a 32-byte SIMD load would over-read past the mismatch and regress the common short-prefix
+  case. Not a SWAR-where-SIMD-helps site.
+- `integer_decimal_bytes` (4.85%): SSE2, but it is decimal formatting, not a byte-slice reduction.
+- LCS DP `count_ones()` (fr-command): scalar popcount on a **single `u64`**, not a byte slice — that
+  is the `target-cpu`/POPCNT build-flag question, not the AVX2-kernel one.
+So the two shipped kernels (popcount, first-mismatch) are the complete set of drop-in
+byte-slice-reduction siblings. `pclmulqdq` CRC is the only remaining SIMD lever, and it is non-trivial.
+
+## 2026-07-10 cc_fr: [superseded by the LANDED entry above] NULL CONTROL PASSES (1.0013x) — AVX2 popcount win survives it, ~2400x the noise floor; kernel was parked uncompiled pending a worker
 
 Adopted `franken_whisper`'s null-control rule and applied it **retroactively to my own published
 `3.136x` claim** before touching anything else. Registering the identical arm twice in the same
