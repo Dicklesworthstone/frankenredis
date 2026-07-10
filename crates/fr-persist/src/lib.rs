@@ -4060,6 +4060,61 @@ mod tests {
         }
     }
 
+    /// Upstream `t_zset.c::zzlStrtod` reads a listpack score entry into `char buf[128]` and
+    /// SILENTLY TRUNCATES anything longer: `if (vlen > sizeof(buf)-1) vlen = sizeof(buf)-1;`.
+    ///
+    /// So an over-long score entry is not merely a byte-parity wart — it is cross-engine data
+    /// CORRUPTION. Rendering with Rust's `{}` (which never goes scientific) emitted 301 bytes
+    /// for `1.5e300` and 201 bytes for `1e-200`; a real redis loading that RDB read them back
+    /// as `1.5e+126` and `0` respectively, while frankenredis itself still reported the right
+    /// values. `d2string` never exceeds ~24 bytes, so staying on it is what keeps us safe.
+    #[test]
+    fn zset_score_render_never_overflows_zzlstrtod_buffer() {
+        const ZZLSTRTOD_BUF: usize = 128;
+        let mut scores: Vec<f64> = vec![
+            1.5e300,
+            -1.5e300,
+            1e-200,
+            -1e-200,
+            1e-100,
+            1e200,
+            1e308,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1), // smallest subnormal
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            0.0,
+            -0.0,
+        ];
+        for e in -320i32..=308 {
+            scores.push(format!("1e{e}").parse().unwrap());
+            scores.push(format!("-9.9e{e}").parse().unwrap());
+        }
+        for &score in &scores {
+            let mut rendered = Vec::new();
+            fr_protocol::push_redis_double_ascii(&mut rendered, score);
+            assert!(
+                rendered.len() < ZZLSTRTOD_BUF,
+                "d2string({score}) rendered {} bytes: a real redis would truncate this to {} \
+                 and silently corrupt the score",
+                rendered.len(),
+                ZZLSTRTOD_BUF - 1
+            );
+
+            // And the entry the RDB encoder actually writes must carry those same bytes.
+            let mut entry = Vec::new();
+            super::encode_zset_score_listpack_entry(&mut entry, b"m", score);
+            assert!(
+                entry.len() < ZZLSTRTOD_BUF,
+                "listpack entry for score {score} is {} bytes",
+                entry.len()
+            );
+        }
+    }
+
     /// The encoder must equal the reference form for EVERY score: render with `d2string`,
     /// then let `encode_listpack_entry` re-decide int-vs-string (upstream's own round trip).
     #[test]

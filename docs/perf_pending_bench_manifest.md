@@ -111,7 +111,35 @@ set/list/hash DUMP is **not** memoized — only compact zsets are — so a repea
 
 So #3/#2/#4 have a small measured ceiling on the DUMP-command path and should not be chased
 without a fresh bulk-save (BGSAVE / DEBUG RELOAD) profile that names them. Only #1 remains
-genuinely unprofiled. Remaining unverified: **#1, #2, #3, #4**.
+genuinely unprofiled.
+
+> **⚠️ THE TABLE ABOVE IS INVALID FOR #2 AND #3 — corrected 2026-07-10 (cc_fr).** Both are
+> `fr-persist` RDB-save levers, and a **DUMP-command blast never calls them**:
+> `encode_intset_blob` (#3) and `encode_compact_list_quicklist2` (#2) each have exactly one
+> caller, inside fr-persist's RDB-save path. The "`encode_intset` 4.47% self" cited for #3 is
+> actually **`fr_store::encode_intset`**, a homonym in a different crate reached from
+> `dump_key`. A DUMP profile shows the only `fr_persist` symbols present are `lzf_compress`
+> and `crc64_redis`. Those two rows ranked code that never executed.
+>
+> **Re-measured on `SAVE` (the real bulk-save path)**, 1,200 each of near-threshold hashes /
+> 400-int intsets / multi-node quicklists / listpack zsets, 4.8 MB RDB, `perf -F 997`, flat self%:
+>
+> | frame | self% |
+> |---|---:|
+> | `lzf_compress` | 13.70% |
+> | `__memmove_avx_unaligned_erms` | 10.35% |
+> | `encode_rdb_internal` | 7.43% |
+> | Rust `format!("{score}")` (grisu + float_to_decimal + format_inner) | **7.46%** |
+> | `encode_listpack_entry` | 1.24% |
+> | **#1** `encode_listpack_strings_blob` | **0.35%** |
+> | **#3** `encode_intset_blob` | **0 samples** (called, never hot) |
+> | **#2** `encode_compact_list_quicklist2` | **0 samples** (called, never hot) |
+>
+> ⇒ **#1, #2, #3 are CLOSED on evidence**: combined ceiling ≤ 0.35% self on the path they
+> actually run on. The removable mass was the 7.46% Rust float formatter — a *correctness*
+> bug (RDB scores rendered with Rust `Display`, silently truncated to `1.5e+126` / `0` by a
+> real redis's 128-byte `zzlStrtod` buffer), fixed in `59fe5dc40`. #4 is `fr-store`
+> DUMP-command code and was ranked on an input that reaches it, so its row stands. Remaining unverified: **#1, #2, #3, #4**.
 
 Ranked profile of the DUMP-command path (perf, flat self%, HEAD, 30k zsets × 100 members,
 cold cache): `lzf_compress` **32.5%**, `Store::dump_key` 12.7%, `crc64_redis` 5.3%,

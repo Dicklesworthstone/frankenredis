@@ -1846,6 +1846,183 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 }
 
 #[cfg(test)]
+mod d2string_edge_cases {
+    use super::{
+        ZsetScoreListpackEntry, format_redis_double, push_redis_double_ascii,
+        zset_score_listpack_entry,
+    };
+
+    /// `(f64 bit pattern, exact text)` — captured from **vendored redis 7.2.4** by running
+    /// `ZADD z <repr> m; ZSCORE z m` against a live server (2026-07-10). All 51 rows also had
+    /// byte-identical `DUMP` payloads between fr and the oracle.
+    ///
+    /// Keyed by bit pattern, not by literal, so subnormals survive the source round trip.
+    ///
+    /// These pin `d2string` (`util.c`) at the boundaries that actually bite:
+    ///   * the exact-integer `ll2string` window is `±(LLONG_MAX/2)` == 2^62, NOT 2^52 —
+    ///     `1e16`/`1e18`/`4e18`/`2^62` print as plain decimals, `5e18` prints as `"5e+18"`;
+    ///   * grisu2's plain-vs-scientific switch: `1e-5` -> `"0.00001"` but `1e-7` -> `"1e-7"`,
+    ///     and `123456789.12345679` -> `"1.2345678912345679e+8"` (scientific at ~1.2e8);
+    ///   * 17-significant-digit round trips (`0.1+0.2`, `1.2345678901234567`);
+    ///   * subnormals down to `5e-324`, and the normal/subnormal boundary;
+    ///   * `inf` / `-inf`.
+    ///
+    /// Regressing any row means a Redis client reading our RDB or `ZSCORE` sees different
+    /// score TEXT than upstream would emit.
+    const VENDORED: &[(u64, &str)] = &[
+        (0x0000000000000000, "0"),
+        (0x3FF0000000000000, "1"),
+        (0xBFF0000000000000, "-1"),
+        (0x405FC00000000000, "127"),
+        (0x4060000000000000, "128"),
+        (0x40B0000000000000, "4096"),
+        (0x40E0000000000000, "32768"),
+        (0x41E0000000000000, "2147483648"),
+        (0x4330000000000000, "4503599627370496"),  // 2^52
+        (0x4330000000000001, "4503599627370497"),  // 2^52 + 1
+        (0x4340000000000000, "9007199254740992"),  // 2^53
+        (0x430C6BF526340000, "1000000000000000"),  // 1e15
+        (0x4341C37937E08000, "10000000000000000"), // 1e16 — plain, NOT "1e+16"
+        (0x4376345785D8A000, "100000000000000000"),
+        (0x43ABC16D674EC800, "1000000000000000000"), // 1e18
+        (0x43BBC16D674EC800, "2000000000000000000"),
+        (0x43CBC16D674EC800, "4000000000000000000"),
+        (0x43D0000000000000, "4611686018427387904"), // 2^62 == double2ll's bound
+        (0x43D0000000000001, "4611686018427389000"), // just above the bound, still plain
+        (0x43D8000000000000, "6917529027641082000"), // grisu2 counterexample: plain + int-encodes
+        (0x43E0000000000000, "9223372036854776000"), // 2^63: plain, but overflows i64
+        (0x43D158E460913D00, "5e+18"),               // first round value that goes scientific
+        (0x43D8493FBA64EF00, "7e+18"),
+        (0x43E158E460913D00, "1e+19"),
+        (0x4415AF1D78B58C40, "1e+20"),
+        (0x444B1AE4D6E2EF50, "1e+21"),
+        (0x3FB999999999999A, "0.1"),
+        (0x3FC999999999999A, "0.2"),
+        (0x3FD3333333333333, "0.3"),
+        (0x3FD3333333333334, "0.30000000000000004"), // 0.1 + 0.2, 17 sig digits
+        (0x4004000000000000, "2.5"),
+        (0xC004000000000000, "-2.5"),
+        (0x40091EB851EB851F, "3.14"),
+        (0x3FD5555555555555, "0.3333333333333333"),
+        (0x3FF3C0CA428C59FB, "1.2345678901234567"),
+        (0x419D6F34547E6B75, "1.2345678912345679e+8"), // scientific at ~1.2e8
+        (0x3EE4F8B588E368F1, "0.00001"),               // 1e-5 stays fixed
+        (0x3EB0C6F7A0B5ED8D, "0.000001"),              // 1e-6 stays fixed
+        (0x3E7AD7F29ABCAF48, "1e-7"),                  // 1e-7 flips to scientific
+        (0x3DDB7CDFD9D7BDBB, "1e-10"),
+        (0x2B2BFF2EE48E0530, "1e-100"),
+        (0x0010000000000000, "2.2250738585072014e-308"), // smallest normal
+        (0x000FFFFFFFFFFFFF, "2.225073858507201e-308"),  // largest subnormal
+        (0x0000000000000001, "5e-324"),                  // smallest subnormal
+        (0x8000000000000001, "-5e-324"),
+        (0x7FEFFFFFFFFFFFFF, "1.7976931348623157e+308"), // f64::MAX
+        (0x7E41EB2D66005835, "1.5e+300"),
+        (0xFE41EB2D66005835, "-1.5e+300"),
+        (0x7FF0000000000000, "inf"),
+        (0xFFF0000000000000, "-inf"),
+    ];
+
+    #[test]
+    fn format_redis_double_matches_vendored_d2string() {
+        for (bits, want) in VENDORED {
+            let v = f64::from_bits(*bits);
+            assert_eq!(
+                format_redis_double(v),
+                *want,
+                "d2string(bits 0x{bits:016X}) diverged from vendored redis 7.2.4"
+            );
+            let mut out = Vec::new();
+            push_redis_double_ascii(&mut out, v);
+            assert_eq!(out, want.as_bytes(), "push_redis_double_ascii disagreed");
+        }
+    }
+
+    /// `-0.0` and `nan` never reach a stored score (`ZADD k -0` normalizes to `+0`; `ZADD k nan`
+    /// is rejected by both engines), so they cannot be captured from `ZSCORE`. Pin them from
+    /// `util.c::d2string`'s own special cases instead.
+    #[test]
+    fn format_redis_double_pins_unreachable_special_cases() {
+        assert_eq!(format_redis_double(-0.0), "-0");
+        assert_eq!(format_redis_double(0.0), "0");
+        assert_eq!(format_redis_double(f64::NAN), "nan");
+        assert_eq!(format_redis_double(-f64::NAN), "nan");
+    }
+
+    /// Every finite row must survive `text -> f64` unchanged: `d2string` is a shortest
+    /// round-trip representation, so re-parsing must land on the identical bit pattern.
+    #[test]
+    fn vendored_text_round_trips_to_the_same_bits() {
+        for (bits, text) in VENDORED {
+            let v = f64::from_bits(*bits);
+            if !v.is_finite() {
+                continue;
+            }
+            let back: f64 = text.parse().expect("d2string output must parse as f64");
+            assert_eq!(
+                back.to_bits(),
+                *bits,
+                "{text} did not round-trip (bits 0x{bits:016X})"
+            );
+        }
+    }
+
+    /// `lpStringToInt64`'s canonical-decimal rule, as `parse_listpack_integer` implements it in
+    /// fr-store / fr-persist. Duplicated here so this test needs no dependency on those crates.
+    fn canonical_i64(text: &str) -> Option<i64> {
+        let b = text.as_bytes();
+        if b.is_empty() || b.len() >= 21 {
+            return None;
+        }
+        let digits = if b[0] == b'-' { &b[1..] } else { b };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        if digits[0] == b'0' && digits.len() > 1 {
+            return None;
+        }
+        if b[0] == b'-' && digits == b"0" {
+            return None;
+        }
+        text.parse::<i64>().ok()
+    }
+
+    /// The contract that makes `zset_score_listpack_entry` safe, checked against the SAME text
+    /// the vendored server emits: `Str` may skip the re-parse only if the render truly is not a
+    /// canonical i64, and `Int(n)` must equal what the re-parse would have produced.
+    #[test]
+    fn classifier_agrees_with_vendored_render() {
+        for (bits, text) in VENDORED {
+            let v = f64::from_bits(*bits);
+            match zset_score_listpack_entry(v) {
+                ZsetScoreListpackEntry::Int(n) => assert_eq!(
+                    canonical_i64(text),
+                    Some(n),
+                    "{text}: classified Int({n}) but the render says otherwise"
+                ),
+                ZsetScoreListpackEntry::Str => assert!(
+                    canonical_i64(text).is_none(),
+                    "{text}: classified Str, but its render re-parses as an integer — \
+                     skipping the re-parse would flip the listpack entry encoding"
+                ),
+                ZsetScoreListpackEntry::Reparse => assert!(
+                    v.is_finite() && v.fract() == 0.0 && v.abs() > (i64::MAX / 2) as f64,
+                    "{text}: Reparse is only for integral doubles outside double2ll's window"
+                ),
+            }
+        }
+        // -0.0 is the one Str case not reachable through ZADD.
+        assert!(matches!(
+            zset_score_listpack_entry(-0.0),
+            ZsetScoreListpackEntry::Str
+        ));
+        assert!(matches!(
+            zset_score_listpack_entry(f64::NAN),
+            ZsetScoreListpackEntry::Str
+        ));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,

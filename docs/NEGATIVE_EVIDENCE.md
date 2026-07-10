@@ -4,7 +4,73 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
-## 2026-07-10 cc_fr: CORRECTNESS FIX — RDB-save wrote non-d2string zset scores (`"0.0000001"` for `1e-7`, a 301-digit decimal for `1.5e300`, an INT entry for `5e18`) — perf ratio DEFERRED, rch cannot return a linked binary
+## 2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT — manifest levers #2 and #3 were ranked on an input where their function NEVER EXECUTES; rows INVALID, reopened, re-measured on the real bulk-save path
+
+Triggered by the frankenmermaid `evidence/layout 5feb977` alert (a REJECT measured on dead code).
+Audited every row I have written today.
+
+**INVALID — do not trust the earlier ranking of manifest #2 / #3.** Both are `fr-persist`
+RDB-save levers, but I ranked them with a **DUMP-command blast**. `rg` shows
+`fr_persist::encode_intset_blob` (#3) and `fr_persist::encode_compact_list_quicklist2` (#2) have
+exactly one caller each, both **inside fr-persist's RDB-save path** — neither is reachable from
+`Store::dump_key`. Worse, the "`encode_intset` only **4.47%** self ⇒ tiny ceiling" figure I recorded
+for #3 belongs to **`fr_store::encode_intset`** (`fr-store/src/lib.rs:28256`, called from
+`dump_key:26488`) — a **homonym in a different crate**. A DUMP profile confirms it: the only
+`fr_persist` symbols that appear are `lzf_compress` and `crc64_redis`. Those rows measured code that
+never ran.
+
+**RE-MEASURED on the correct input** (`SAVE`, the synchronous in-process bulk-save path; 1,200 each
+of near-threshold hashes / 400-int intsets / multi-node quicklists / listpack zsets; 4.8 MB RDB;
+`perf record -F 997`, server pinned to core 2, seeded then quiesced 3 s before attach). Flat self%:
+
+| frame | self% | note |
+|---|---:|---|
+| `fr_persist::lzf_compress` | 13.70% | dominates, as on the DUMP path |
+| `__memmove_avx_unaligned_erms` | 10.35% | copy/realloc traffic |
+| `fr_persist::encode_rdb_internal` | 7.43% | the RDB writer itself |
+| **Rust `format!("{score}")`** — `grisu::format_shortest_opt` 3.74% + `float_to_decimal_common_shortest::<f64>` 1.87% + `alloc::fmt::format::format_inner` 1.85% | **7.46%** | **the data-corruption bug below; removed** |
+| `fr_persist::encode_listpack_entry` | 1.24% | |
+| `fr_persist::encode_zset_score_listpack_entry` | 0.47% | |
+| `fr_persist::encode_listpack_strings_blob` (**lever #1**) | **0.35%** | real ceiling, finally measured |
+| `fr_persist::encode_intset_blob` (**lever #3**) | **0 samples** | ran (the RDB holds intsets) but never hot |
+| `fr_persist::encode_compact_list_quicklist2` (**lever #2**) | **0 samples** | ran but never hot; likely inlined |
+
+Note the distinction, which the alert turns on: on the DUMP input #2/#3 were **never called**; on the
+bulk-save input they **are called but are not hot**. Only the first is a dead-code measurement.
+
+⇒ **Manifest #1/#2/#3 are now honestly ranked and effectively closed**: their combined ceiling on the
+real bulk-save path is ≤ 0.35% self. The removable mass in this profile was the **7.46% Rust float
+formatter**, which is exactly the entry below. #4 is `fr-store` DUMP-command code and *was* ranked on
+an input that reaches it, so it stands.
+
+**Execution check for the KEEP row two entries down** (zset DUMP score entry), per the alert. The
+benchmark provably exercises the code under test — flat self%, `fr-cand3` (symbol-verified new code):
+
+| shape | `Store::dump_key` | `encode_listpack_integer_entry` (Int arm) | `encode_listpack_string_entry` (Str arm) |
+|---|---:|---:|---:|
+| bigint | 15.21% | **5.49%** | 4.77% |
+| int (guard) | 12.74% | 1.70% | 1.65% |
+| frac | 8.46% | 1.79% | **8.84%** |
+
+Each shape lights up the arm the lever changed, and the guard shape (unchanged decision path) lands at
+`1.0035`. Non-zero, correctly-attributed self-time ⇒ that KEEP is valid.
+
+**Convention adopted:** every future REJECT/ranking row in this ledger must carry the flat self% of
+the function under test on the exact input used, or it is not admissible.
+
+## 2026-07-10 cc_fr: **DATA-CORRUPTION FIX** — RDB-save wrote non-d2string zset scores; a real redis loading our RDB silently read `1.5e300` back as `1.5e+126` and `1e-200` as `0`
+
+> **SEVERITY CORRECTION (same day, cc_fr).** The entry below originally called this
+> "byte-parity and RDB bloat rather than data loss". **That was wrong.** Upstream
+> `t_zset.c::zzlStrtod` reads a listpack score entry into `char buf[128]` and silently
+> truncates: `if (vlen > sizeof(buf)-1) vlen = sizeof(buf)-1;`. Rust's `{}` rendered
+> `1.5e300` as a **301-byte** plain decimal and `1e-200` as **201 bytes**, so a real redis
+> loading our RDB truncated them to 127 bytes and got `1.5e+126` and `0` — while
+> frankenredis itself still reported the correct scores. Demonstrated end-to-end: fr `SAVE`s,
+> vendored 7.2.4 loads the file, `ZSCORE` returns the corrupted values. This is a
+> **silent cross-engine corruption on replication / RDB handoff**, not a cosmetic defect.
+> Guarded permanently by `zset_score_render_never_overflows_zzlstrtod_buffer`, which asserts
+> every rendered score entry stays under the 128-byte buffer across the full exponent range.
 
 NEGATIVE-EVIDENCE CHECK: grepped both ledgers for `zset_listpack_integer_score`,
 `encode_zset_score_listpack_entry`, `rdbSaveObject`, and bulk-save rows. **No prior entry
@@ -24,11 +90,11 @@ RDB save — `fr-store::dump_key` does its own encoding).
 | `1.5e300` | `88` `"1.5e+300"` (8 B) | `c3 …` — **LZF-compressed 301-digit decimal** |
 | `1e-7` | `84` `"1e-7"` (4 B) | `89` `"0.0000001"` |
 
-Values survive a reload (redis's `zzlStrtod` parses all three forms), so this is a **byte-parity
-and RDB-size** defect, not data loss — but a 301-byte score entry can also push a loading redis
-to convert the zset to skiplist where its own RDB would have stayed listpack. `-0.0` was a fourth
-divergence (`Some(0)` → int `0` vs upstream's string `"-0"`), latent only because redis and fr both
-normalize `ZADD k -0` to `+0`.
+The `5e18` and `1e-7` rows survive a reload (redis's `zzlStrtod` parses both forms), so those are
+byte-parity/RDB-size defects. **The `1.5e300` row is not** — see the severity correction above: its
+301-byte entry overflows `zzlStrtod`'s 128-byte buffer and is silently truncated to `1.5e+126`;
+`1e-200` (201 bytes) truncates to `0`. `-0.0` was a fourth divergence (`Some(0)` → int `0` vs
+upstream's string `"-0"`), latent only because redis and fr both normalize `ZADD k -0` to `+0`.
 
 **ROOT CAUSE = duplicated decision.** `fr-store` and `fr-persist` each kept a private copy of the
 "how does `d2string` encode this score" rule, and they drifted. Fixed by hoisting the single
