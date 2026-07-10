@@ -1,0 +1,51 @@
+ TTL k: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            TTL k: rps=1021952.0 (overall: 1017880.5) avg_msec=0.495 (overall: 0.495)                                                                          TTL k: rps=1086406.4 (overall: 1052143.5) avg_msec=0.405 (overall: 0.448)                                                                          TTL k: rps=1126336.0 (overall: 1076808.5) avg_msec=0.393 (overall: 0.429)                                                                          ====== TTL k ======
+  1000000 requests completed in 0.94 seconds
+  50 parallel clients
+  20 bytes payload
+  keep alive: 1
+  host configuration "save": 
+  host configuration "appendonly": no
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.135 milliseconds (cumulative count 16)
+50.000% <= 0.367 milliseconds (cumulative count 574048)
+75.000% <= 0.447 milliseconds (cumulative count 751504)
+87.500% <= 0.543 milliseconds (cumulative count 877840)
+93.750% <= 0.727 milliseconds (cumulative count 938944)
+96.875% <= 0.815 milliseconds (cumulative count 968960)
+98.438% <= 0.927 milliseconds (cumulative count 985088)
+99.219% <= 1.023 milliseconds (cumulative count 992624)
+99.609% <= 1.095 milliseconds (cumulative count 996352)
+99.805% <= 1.135 milliseconds (cumulative count 998320)
+99.902% <= 1.159 milliseconds (cumulative count 999072)
+99.951% <= 1.207 milliseconds (cumulative count 999536)
+99.976% <= 1.359 milliseconds (cumulative count 999760)
+99.988% <= 1.383 milliseconds (cumulative count 999888)
+99.994% <= 1.399 milliseconds (cumulative count 999952)
+99.997% <= 1.407 milliseconds (cumulative count 999984)
+99.998% <= 1.463 milliseconds (cumulative count 1000000)
+100.000% <= 1.463 milliseconds (cumulative count 1000000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+0.013% <= 0.207 milliseconds (cumulative count 128)
+0.211% <= 0.303 milliseconds (cumulative count 2112)
+70.381% <= 0.407 milliseconds (cumulative count 703808)
+83.947% <= 0.503 milliseconds (cumulative count 839472)
+91.328% <= 0.607 milliseconds (cumulative count 913280)
+93.437% <= 0.703 milliseconds (cumulative count 934368)
+96.645% <= 0.807 milliseconds (cumulative count 966448)
+98.272% <= 0.903 milliseconds (cumulative count 982720)
+99.163% <= 1.007 milliseconds (cumulative count 991632)
+99.667% <= 1.103 milliseconds (cumulative count 996672)
+99.954% <= 1.207 milliseconds (cumulative count 999536)
+99.968% <= 1.303 milliseconds (cumulative count 999680)
+99.998% <= 1.407 milliseconds (cumulative count 999984)
+100.000% <= 1.503 milliseconds (cumulative count 1000000)
+
+Summary:
+  throughput summary: 1069518.75 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.424     0.128     0.367     0.767     0.991     1.463

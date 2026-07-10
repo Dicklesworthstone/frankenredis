@@ -1,0 +1,46 @@
+ TTL k: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            ====== TTL k ======
+  100000 requests completed in 0.09 seconds
+  50 parallel clients
+  20 bytes payload
+  keep alive: 1
+  host configuration "save": 
+  host configuration "appendonly": no
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.143 milliseconds (cumulative count 16)
+50.000% <= 0.367 milliseconds (cumulative count 63232)
+75.000% <= 0.391 milliseconds (cumulative count 75392)
+87.500% <= 0.471 milliseconds (cumulative count 88416)
+93.750% <= 0.503 milliseconds (cumulative count 95536)
+96.875% <= 0.519 milliseconds (cumulative count 97312)
+98.438% <= 0.591 milliseconds (cumulative count 98448)
+99.219% <= 0.655 milliseconds (cumulative count 99232)
+99.609% <= 0.959 milliseconds (cumulative count 99616)
+99.805% <= 1.031 milliseconds (cumulative count 99808)
+99.902% <= 1.071 milliseconds (cumulative count 99920)
+99.951% <= 1.095 milliseconds (cumulative count 99952)
+99.976% <= 1.175 milliseconds (cumulative count 99984)
+99.988% <= 1.215 milliseconds (cumulative count 100000)
+100.000% <= 1.215 milliseconds (cumulative count 100000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+0.128% <= 0.207 milliseconds (cumulative count 128)
+0.320% <= 0.303 milliseconds (cumulative count 320)
+78.080% <= 0.407 milliseconds (cumulative count 78080)
+95.536% <= 0.503 milliseconds (cumulative count 95536)
+98.560% <= 0.607 milliseconds (cumulative count 98560)
+99.312% <= 0.703 milliseconds (cumulative count 99312)
+99.376% <= 0.807 milliseconds (cumulative count 99376)
+99.520% <= 0.903 milliseconds (cumulative count 99520)
+99.728% <= 1.007 milliseconds (cumulative count 99728)
+99.952% <= 1.103 milliseconds (cumulative count 99952)
+99.984% <= 1.207 milliseconds (cumulative count 99984)
+100.000% <= 1.303 milliseconds (cumulative count 100000)
+
+Summary:
+  throughput summary: 1063829.88 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.389     0.136     0.367     0.503     0.631     1.215

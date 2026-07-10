@@ -1,0 +1,2 @@
+[ perf record: Woken up 2 times to write data ]
+[ perf record: Captured and wrote 0.362 MB artifacts/optimization/frankenredis-ohsk5-ttl-floor/20260710T0730Z/profile/fr_ttl_instr.data (2459 samples) ]

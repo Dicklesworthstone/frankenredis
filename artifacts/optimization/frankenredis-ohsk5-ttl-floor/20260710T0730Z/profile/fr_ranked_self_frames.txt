@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'instructions:u'
+# Event count (approx.): 10922400969
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                          
+# ........  ............  ................  ................................................................................................................................
+#
+    27.96%  frankenredis  frankenredis      [.] frankenredis::process_buffered_frames
+     9.05%  frankenredis  libc.so.6         [.] __memcmp_avx2_movbe
+     3.16%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_plain_keymeta_borrowed
+     2.78%  frankenredis  [vdso]            [.] 0x0000000000000986
+     2.66%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>
+     2.33%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+     1.74%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keys_multi_packet
+     1.54%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_key_arg2_packet
+     1.34%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::string::String, fr_store::CommandHistogram, foldhash::quality::RandomState>>::get_mut::<str>
+     1.32%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_ttl_packet
+     1.32%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mset_packet
+     1.31%  frankenredis  frankenredis      [.] frankenredis::try_dispatch_floor_classified_action
+     1.12%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_key_only_packet
+     1.00%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hmset_packet
+     1.00%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zmscore_multi_packet
+     0.91%  frankenredis  libc.so.6         [.] __memmove_avx_unaligned_erms
+     0.86%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hset_multi_packet
+     0.86%  frankenredis  frankenredis      [.] <[u8] as core::hash::Hash>::hash::<foldhash::quality::FoldHasher>
+     0.82%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_key_arg1_packet
+     0.78%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::is_pubsub_client
+     0.74%  frankenredis  frankenredis      [.] frankenredis::drain_pending_pubsub_to_connection
+     0.72%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_dispatch_floor_decimal
+     0.69%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_randomkey_packet
+     0.68%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_type_packet
+     0.66%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::run_active_expire_cycle
+     0.64%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_bulk
+     0.58%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_smismember_multi_packet
+     0.58%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zcard_packet
+     0.53%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_smismember2_packet
+     0.52%  frankenredis  libc.so.6         [.] clock_gettime@@GLIBC_2.17
+     0.51%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::record_plain_keymeta_borrowed_metrics
+     0.48%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_rpoplpush_packet
+     0.46%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_object_stat_packet
+     0.46%  frankenredis  frankenredis      [.] <fr_store::Store>::pttl
+     0.45%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_bitcount_unit_packet
+     0.45%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_substr_packet
+     0.43%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert
+     0.42%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.42%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_incr_packet
+     0.41%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::sub_timespec
+     0.39%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_object_encoding_packet
+     0.39%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keyed_values4_packet
+     0.37%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keyed_values3_packet
+     0.36%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zadd2_packet
+     0.35%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_llen_packet
+     0.33%  frankenredis  [unknown]         [k] 0xffffffffaf704104
+     0.33%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_scard_packet
+     0.33%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_getbit_packet
+     0.32%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::drain_pending_pubsub
+     0.31%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hlen_packet
+     0.31%  frankenredis  [unknown]         [k] 0xffffffffb0c29e6b
+     0.31%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keyed_values1_packet
+     0.30%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keyed_values2_packet
+     0.30%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_dump_packet
+     0.29%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_nx_packet
+     0.29%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_append_packet
+     0.28%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hstrlen_packet
+     0.28%  frankenredis  frankenredis      [.] <fr_protocol::RespFrame>::encode_into
+     0.27%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::now
+     0.27%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hexists_packet
+     0.26%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_getrange_packet
+     0.26%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_lpos_packet
+     0.26%  frankenredis  frankenredis      [.] <fr_runtime::ClientSession as core::clone::Clone>::clone
+     0.25%  frankenredis  frankenredis      [.] _mi_page_malloc_zero
+     0.25%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_seven_packet
+     0.24%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zmscore2_packet
+     0.23%  frankenredis  frankenredis      [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+     0.23%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_pexpireat_packet
+     0.23%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_two_packet
+     0.23%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_sismember_packet
+     0.23%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_bitpos_unit_packet
+     0.22%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_relexpire_get_packet
+     0.22%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zrank_packet
+     0.22%  frankenredis  [unknown]         [k] 0xffffffffb0a735e9
+     0.22%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_setrange_packet
+     0.22%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_getset_packet
+     0.22%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_six_packet
+     0.21%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_strlen_packet
+     0.21%  frankenredis  [unknown]         [k] 0xffffffffb0a24c34
+     0.20%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_bitpos_range_packet
+     0.20%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_smismember3_packet
+     0.20%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zadd_packet
+     0.20%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_incrby_packet
+     0.20%  frankenredis  [unknown]         [k] 0xffffffffafeaff39
+     0.19%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_hset_packet
+     0.19%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zrevrank_packet
+     0.18%  frankenredis  [unknown]         [k] 0xffffffffb0a22f0d
+     0.18%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>
+     0.18%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_lrange_packet
+     0.18%  frankenredis  libc.so.6         [.] __syscall_cancel
+     0.17%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_zincrby_packet
+     0.17%  frankenredis  [unknown]         [k] 0xffffffffb08ff26c
+     0.17%  frankenredis  [unknown]         [k] 0xffffffffb01292a3
+     0.17%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_keyed_pop_packet
+     0.17%  frankenredis  [unknown]         [k] 0xffffffffb08f6ba6
+     0.17%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_packet
+     0.16%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_object_refcount_packet
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffaf600083
+     0.15%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_five_packet
+     0.14%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_decrby_packet
+     0.14%  frankenredis  [unknown]         [k] 0xffffffffafdf1236
+     0.14%  frankenredis  [unknown]         [k] 0xffffffffafeaff17
+     0.14%  frankenredis  [unknown]         [k] 0xffffffffaf60008b
+     0.14%  frankenredis  [unknown]         [k] 0xffffffffb01121a1
+     0.13%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_relexpire_packet
+     0.13%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_eight_packet
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffaf923441
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb0a3caa7
+     0.13%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_expireat_packet
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffafdf123a
+     0.13%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_mget_three_packet
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb08f6bc1
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb08f1e6c
+     0.13%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb08efaf5
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb08ef99d
+     0.13%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_lindex_packet
+     0.13%  frankenredis  [unknown]         [k] 0xffffffffb08ef9ac
+     0.12%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_opt_get_packet
+     0.12%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_pexpire_packet
+     0.12%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_set_absexpire_packet
+     0.11%  frankenredis  [unknown]         [k] 0xffffffffb08efae3
+     0.11%  frankenredis  frankenredis      [.] frankenredis::parse_borrowed_plain_expire_packet
+     0.11%  frankenredis  [unknown]         [k] 0xffffffffb0a0321a
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

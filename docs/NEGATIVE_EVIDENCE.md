@@ -4,6 +4,94 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: KEEP — TTL dispatch-floor front gate: P16 `instructions:u` 5.463B -> 2.076B (`0.380x`); now `0.649x` Redis
+
+NEGATIVE-EVIDENCE CHECK first: current small-reply `writev` / output work is rejected,
+and the existing TTL borrowed parser/executor is already shipped. Earlier TTL/PTTL/TYPE
+evidence attributes the remaining tiny-command loss to `ohsk5` dispatch-chain depth, not
+expiry/store semantics. No prior row rejects routing exact `TTL key` through the newer
+command-token dispatch floor. This hunk does not change TTL calculation, expiry mutation,
+keyspace accounting, reply encoding, or restricted-context behavior.
+
+PROFILE FIRST: persistent-key `TTL k`, same host, server pinned to CPU 25, client pinned to
+CPUs 26,27, `redis-benchmark -c50 -P16 -n1000000`, and
+`perf stat -e instructions:u -p <server_pid>`. All engines reported
+`connected_slaves:0`. Control `fr-server` sha256
+`e0dd924954b212c4f2bf62c452aad71e5fd6ad89942b585d1143325102cf8c24`; vendored
+Redis 7.2.4 sha256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+Ranked pre-change self-time attribution (complete `>=0.1%` tables under
+`artifacts/optimization/frankenredis-ohsk5-ttl-floor/20260710T0730Z/profile/`):
+
+| engine | top self frames |
+| --- | --- |
+| FrankenRedis control | `process_buffered_frames` `27.96%`, `__memcmp_avx2_movbe` `9.05%`, `execute_plain_keymeta_borrowed` `3.16%`, vDSO time `2.78%`, store `HashMap::get_mut` `2.66%`, `plain_borrowed_default_key_read_allows` `2.33%`, `parse_borrowed_plain_keys_multi_packet` `1.74%`, `parse_borrowed_plain_key_arg2_packet` `1.54%`, `parse_borrowed_plain_ttl_packet` `1.32%` |
+| Redis 7.2.4 | vDSO time `12.67%`, `call` `6.54%`, `je_malloc_usable_size` `5.83%`, `__strcasecmp_l_avx2` `3.89%`, `processMultibulkBuffer` `3.67%`, `processCommand` `3.47%`, `__strchr_avx2` `2.92%`, `ttlCommand` `0.93%` |
+
+The comparable pre-change means were FrankenRedis `5.4633B` and Redis `3.1798B`
+instructions, a `2.2835B` gap. Applying the sampled self percentages attributes about
+`1.5275B` instructions (`66.9%` of that gap) to `process_buffered_frames` and `0.4944B`
+(`21.7%`) to `memcmp`; together they map to `88.5%` of the gap. The top mechanism is
+therefore dispatch/search, not the ledger-rejected output family.
+
+ONE LEVER: add `BorrowedDispatchFloorCommand::Ttl` /
+`BorrowedDispatchFloorClass::Ttl` for canonical `*2 TTL key`, then reuse the existing
+`parse_borrowed_plain_ttl_packet` and unchanged
+`execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, ...)`. Wrong arity, parser-limit
+failures, malformed packets, and gated execution fall back to the existing borrowed
+multibulk path. Focused classifier coverage locks mixed-case canonical TTL, wrong arity,
+and parser-limit rejection.
+
+MEASURED KEEP GATE: five honestly interleaved 1M-op live-socket trials. The A/B candidate
+binary sha256 was
+`b7a9a1602b5b8295aefa34fd1746c2f85cadb6cff98376edf175fba31a460cbd`.
+
+| engine | mean `instructions:u` | sample cv | mean req/s | rps sample cv |
+| --- | ---: | ---: | ---: | ---: |
+| control | 5,462,818,449.0 | 0.0235% | 866,738.42 | 10.529% |
+| candidate | 2,075,859,219.8 | 0.1781% | 1,101,380.09 | 4.894% |
+| Redis 7.2.4 | 3,199,552,215.2 | 4.1941% | 1,091,980.00 | 6.437% |
+
+Instructions are the decision metric because control/Redis throughput exceeded the `5%`
+CV gate. Candidate/control `instructions:u = 0.379998x` (**62.0002% fewer; 2.6316x
+fewer instructions**); candidate/Redis `0.648797x`; control/Redis `1.707370x`.
+Throughput means are routing evidence only: candidate `1.2707x` control and `1.0086x`
+Redis.
+
+The command-length classifier adds a small global tax, measured on neighboring hot
+three-byte commands. It stays below the `1%` instruction ratchet with low CV:
+
+| guard | control instructions (cv) | candidate instructions (cv) | candidate/control delta |
+| --- | ---: | ---: | ---: |
+| `GET k` | 1,679,213,295.3 (`0.0492%`) | 1,689,886,918.0 (`0.1336%`) | `+0.6356%` |
+| `SET k v` | 2,586,030,466.7 (`0.0408%`) | 2,594,899,007.0 (`0.1685%`) | `+0.3429%` |
+
+A distinct same-source candidate rebuild (sha256
+`84090b5959b2396569f74343dee5542174afc881c1a97b40856958ae52147679`) confirms the
+mechanism moved: `process_buffered_frames` `27.96% -> 5.67%` and
+`__memcmp_avx2_movbe` `9.05% -> 2.53%`; the expected new leaders are
+`try_dispatch_floor_classified_action` `7.66%` and
+`execute_plain_keymeta_borrowed` `5.91%`. The different hash comes from rebuilding the
+same hunk in a different target/path context; the exact `b7a9...` binary is the A/B keep
+proof. Both profiles lost zero samples.
+
+PARITY / GATES: the raw pipelined transcript for missing/persistent TTL, mixed-case token,
+wrong arity, deletion, and ordering is byte-identical across control, candidate, and
+Redis (reply sha256
+`8c6680069e7f748b992d4b988d6cb5e49c13307a6f97344afa939f70e282ddd9`). Formatting,
+workspace check, workspace clippy `-D warnings`, focused dispatch-floor tests, and full
+`fr-conformance` passed. RCH was attempted for each heavy gate but refused the detached
+proof tree outside `/data/projects` and failed open locally. UBS remains nonzero on the
+pre-existing whole-file `fr-server` inventory; no finding intersects an added hunk line.
+The remaining workspace sweep exposed unrelated baseline ACL and stale MSET assertions,
+filed as `frankenredis-tr2gd` and `frankenredis-n4zi2`.
+
+DECISION: **KEEP.** Do not retry TTL executor/store micro-levers from this result; any
+residual needs a fresh top-frame profile. Do not generalize this row to `PTTL`,
+`EXPIRETIME`, or `PEXPIRETIME` without measuring each exact packet shape. Full proof
+bundle: `artifacts/optimization/frankenredis-ohsk5-ttl-floor/20260710T0730Z/`.
+
 ## 2026-07-10 cod_fr: KEEP — MEMORY USAGE dispatch-floor front gate: P16 `instructions:u` 10.957B -> 2.608B; now 0.629x Redis
 
 NEGATIVE-EVIDENCE CHECK first: writev/output is already rejected; MEMORY accounting

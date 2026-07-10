@@ -12154,6 +12154,7 @@ enum BorrowedDispatchFloorClass {
     Scard,
     Setbit,
     Strlen,
+    Ttl,
     Type,
     Xlen,
     Zcard,
@@ -12184,6 +12185,7 @@ enum BorrowedDispatchFloorCommand {
     Setbit,
     Srem,
     Strlen,
+    Ttl,
     Type,
     Xlen,
     Zcard,
@@ -12205,6 +12207,9 @@ fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
 
 fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
     match token.len() {
+        3 => token
+            .eq_ignore_ascii_case(b"TTL")
+            .then_some(BorrowedDispatchFloorCommand::Ttl),
         4 => match uppercase_ascii_token::<4>(token)? {
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
@@ -12368,6 +12373,7 @@ fn classify_borrowed_dispatch_floor_packet(
         (2, BorrowedDispatchFloorCommand::Scard) => Some(BorrowedDispatchFloorClass::Scard),
         (2, BorrowedDispatchFloorCommand::Hlen) => Some(BorrowedDispatchFloorClass::Hlen),
         (2, BorrowedDispatchFloorCommand::Zcard) => Some(BorrowedDispatchFloorClass::Zcard),
+        (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
         (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
@@ -12876,6 +12882,26 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_setbit_borrowed(packet.key, packet.start, packet.end, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Ttl => {
+            if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, packet.key, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -30077,6 +30103,17 @@ mod tests {
             Some(super::BorrowedDispatchFloorClass::Type)
         );
         assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$3\r\ntTl\r\n$1\r\nk\r\n", &cfg,),
+            Some(super::BorrowedDispatchFloorClass::Ttl)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$3\r\nTTL\r\n$1\r\nk\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*2\r\n$7\r\npFcOuNt\r\n$1\r\nh\r\n",
                 &cfg,
@@ -30308,6 +30345,16 @@ mod tests {
                 b"*2\r\n$5\r\nGETEX\r\n$1\r\nk\r\n",
                 &ParserConfig {
                     max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$3\r\nTTL\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 2,
                     ..ParserConfig::default()
                 },
             ),

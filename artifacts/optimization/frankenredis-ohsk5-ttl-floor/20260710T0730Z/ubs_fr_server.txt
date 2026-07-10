@@ -1,0 +1,582 @@
+ℹ Ignoring paths from /data/projects/frankenredis/.ubsignore → **/tests/** **/test/** **/testing/** **/benches/** **/bench/** **/examples/** target .git legacy_redis_code crates/fr-conformance golden_outputs baselines artifacts scripts *_test.rs *_tests.rs test_*.rs tests.rs .idea .vscode *.swp *.swo *.md docs
+ℹ Preparing shadow workspace for 1 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.ruXJKSq8GS/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.4  2026-07-10 04:03:35
+Project: /data/projects/frankenredis
+Format:  text
+Detected: rust
+Scanning rust...
+Finished rust (60s)
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
+
+Project:  /data/projects/frankenredis
+Started:  2026-07-10 04:03:35
+Files:    1 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ⚠ cargo-outdated not installed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (786 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29017 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29017)
+                  stream
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29018 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29018)
+                      .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29019 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29019)
+                      .unwrap();
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29036 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29036)
+                  stream
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29037 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29037)
+                      .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (4 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:27723 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L27723)
+                      .unwrap_or_else(|| panic!("{nm}-member SMISMEMBER should parse"));
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:29142 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L29142)
+                      panic!("unexpected replconf frame");
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:31560 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L31560)
+                      .unwrap_or_else(|| panic!("subnormal {tiny} should yield a deadline"));
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:32457 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L32457)
+                  _ => panic!("Expected simple string response"),
+
+• dbg!/println!/eprintln!
+  ℹ Info (10 found)
+    println! found - prefer logging
+  ℹ Info (79 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+
+• Mutex::lock().unwrap()/expect()
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (4 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:22862 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L22862)
+          if timeout_secs == 0.0 {
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:31542 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L31542)
+              // -0.0 == 0.0 in IEEE-754, so negative-zero literals must
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (12 found)
+    Division by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (54 found)
+    clone() usages - audit for necessity
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:108 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L108)
+                  | BlockingOp::BZpopMin { keys } => keys.clone(),
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:527 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L527)
+                  let tx = completion_tx.clone();
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:764 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L764)
+                          Some(directive.args[0].clone())
+  ⚠ Warning (27 found)
+    clone() inside loops - potential perf hit
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:527 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L527)
+      let tx = completion_tx.clone();
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:764 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L764)
+      Some(directive.args[0].clone())
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:946 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L946)
+      bind_addr = args[i].clone();
+
+• collect::<Vec<_>>() then for
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+  ℹ Info (1 found)
+    std::fs operations present - consider async equivalents where applicable
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• Secret/token comparisons without timing-safe equality
+  🔥 CRITICAL (248 found)
+    Secret, signature, or token compared with ==/!=
+    Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:222 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L222)
+      if blocked.deadline_ms != u64::MAX {
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:1132 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L1132)
+      RespFrame::SimpleString(ref line) if line == "OK" => {
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:1337 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L1337)
+      token if token == WRITER_WAKE_TOKEN => {
+
+• JWT decode, validation bypass, or missing claim binding
+  ✓ OK No JWT decode/validation bypass patterns detected
+
+• Shell command execution through -c/-lc
+  ✓ OK No shell -c/-lc Command usage detected
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ✓ OK No wildcard imports detected
+
+• pub use re-exports (inventory)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ℹ Info (1 found)
+    cargo-outdated not installed; skipping update report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (3 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+  ℹ Info (1 found)
+    unwrap_or_default present - validate default semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ⚠ Warning (27 found)
+    TcpStream without shutdown() [37m[[0mcrates/fr-server/src/main.rs[37m][0m
+    Call shutdown() or drop connections explicitly when done (acquire=32, release=5)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (998 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (100 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:115 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L115)
+                      let num_keys: usize = std::str::from_utf8(&argv[2])
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:125 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L125)
+                          let remaining = &argv[idx + 1..];
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:154 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L154)
+                      let num_keys: usize = std::str::from_utf8(&argv[2])
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (25 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:20669 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L20669)
+          let hdr = [b'$', b'0' + clen as u8, b'
+', b'
+'];
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:651 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L651)
+          let us = std::time::SystemTime::now()
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:652 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L652)
+              .duration_since(std::time::UNIX_EPOCH)
+
+• len()/count() narrowed via `as`
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+  ⚠ Warning (7 found)
+    parse::<T>().unwrap()/expect() present
+    Validate input or propagate errors with context
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:28837 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L28837)
+              let snapshot_len = preamble
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:28838 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L28838)
+                  .strip_prefix('$')
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:28839 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L28839)
+                  .expect("snapshot preamble")
+
+• serde/toml deserialization unwrap()/expect()
+
+• env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (16 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:530 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L530)
+      .name(format!("fr-writer-{worker_idx}"))
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:1663 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L1663)
+      let sa: SocketAddr = format!("{a}:{port}")
+      /data/projects/frankenredis/crates/fr-server/src/main.rs:1665 (https://github.com/Dicklesworthstone/frankenredis/blob/709990a34daf94b646dbdcac00c8dd1de4148bb0/crates/fr-server/src/main.rs#L1665)
+      .map_err(|e| format!("invalid bind address '{a}:{port}': {e}"))?;
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯                                  
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    1
+  Critical issues:  252
+  Warning issues:   1961
+  Info items:       192
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-07-10 04:04:35
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 1
+Critical: 252
+Warning: 1961
+Info: 192

@@ -1,0 +1,9 @@
+# started on Fri Jul 10 03:46:34 2026
+
+
+ Performance counter stats for process id '1486574':
+
+        5461630870      instructions:u                                                        
+
+       1.078599792 seconds time elapsed
+

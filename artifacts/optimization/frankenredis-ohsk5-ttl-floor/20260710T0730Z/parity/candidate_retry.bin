@@ -1,0 +1,7 @@
+:-2
++OK
+:-1
+-ERR wrong number of arguments for 'ttl' command
+:1
+:-2
++OK

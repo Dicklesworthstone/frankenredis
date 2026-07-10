@@ -1,0 +1,4 @@
+Permission error mapping pages.
+Consider increasing /proc/sys/kernel/perf_event_mlock_kb,
+or try again with a smaller value of -m/--mmap_pages.
+(current value: 4294967295,0)

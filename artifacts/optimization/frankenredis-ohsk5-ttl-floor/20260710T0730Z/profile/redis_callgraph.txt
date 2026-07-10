@@ -1,0 +1,1451 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'instructions:u'
+# Event count (approx.): 6357392512
+#
+# Overhead  Command       Shared Object     Symbol                                   
+# ........  ............  ................  .........................................
+#
+    12.67%  redis-server  [vdso]            [.] 0x0000000000000ebc
+            |
+            ---0x732adbd82ebc
+               |          
+               |--12.26%--call
+               |          
+                --0.41%--activeExpireCycle
+
+     6.54%  redis-server  redis-server      [.] call
+            |
+            ---call
+
+     5.83%  redis-server  redis-server      [.] je_malloc_usable_size
+            |
+            ---je_malloc_usable_size
+               |          
+                --2.79%--0x200000
+
+     3.89%  redis-server  libc.so.6         [.] __strcasecmp_l_avx2
+            |
+            ---__strcasecmp_l_avx2
+               |          
+                --1.37%--0x732adb40f800
+                          0
+                          0xf043c07e083f089
+
+     3.67%  redis-server  redis-server      [.] processMultibulkBuffer
+            |
+            ---processMultibulkBuffer
+               |          
+               |--1.06%--0x732adbb3c2c0
+               |          
+                --0.64%--0x6b0a0d31240a0d4c
+
+     3.47%  redis-server  redis-server      [.] processCommand
+            |
+            ---processCommand
+               |          
+                --0.52%--0x732adbb3c2c0
+
+     2.92%  redis-server  libc.so.6         [.] __strchr_avx2
+            |
+            ---__strchr_avx2
+               |          
+                --1.49%--0x732adbb3c2c0
+
+     2.68%  redis-server  redis-server      [.] je_free
+            |
+            ---je_free
+               0x200000
+
+     2.32%  redis-server  redis-server      [.] je_malloc
+            |
+            ---je_malloc
+
+     1.71%  redis-server  redis-server      [.] processInputBuffer
+            |
+            ---processInputBuffer
+               0x732adbb3c2c0
+
+     1.57%  redis-server  redis-server      [.] zmalloc
+            |
+            ---zmalloc
+
+     1.55%  redis-server  redis-server      [.] ACLCheckAllUserCommandPerm
+            |
+            ---ACLCheckAllUserCommandPerm
+               |          
+                --0.11%--0
+
+     1.50%  redis-server  redis-server      [.] decrRefCount.part.0
+            |
+            ---decrRefCount.part.0
+               0x200000
+
+     1.48%  redis-server  redis-server      [.] resetClient
+            |
+            ---resetClient
+               |          
+                --1.43%--0x200000
+
+     1.46%  redis-server  [vdso]            [.] 0x0000000000000986
+            |
+            ---0x732adbd82986
+               clock_gettime@@GLIBC_2.17
+               getMonotonicUs_posix.lto_priv.0
+               |          
+               |--1.05%--0x732adb4085e8
+               |          
+                --0.40%--0x1
+
+     1.33%  redis-server  redis-server      [.] zfree
+            |
+            ---zfree
+               0x200000
+
+     1.17%  redis-server  redis-server      [.] siphash_nocase
+            |
+            ---siphash_nocase
+               0x732adb40f800
+               0
+               0xf043c07e083f089
+
+     1.15%  redis-server  redis-server      [.] dictFind
+            |
+            ---dictFind
+               |          
+               |--0.46%--0x732adb428700
+               |          0
+               |          0xf043c07e083f089
+               |          
+                --0.46%--0x732adb40f800
+                          0
+                          0xf043c07e083f089
+
+     0.99%  redis-server  redis-server      [.] _addReplyToBufferOrList
+            |
+            ---_addReplyToBufferOrList
+
+     0.99%  redis-server  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+
+     0.98%  redis-server  redis-server      [.] addReplyLongLongWithPrefix
+            |
+            ---addReplyLongLongWithPrefix
+
+     0.96%  redis-server  redis-server      [.] hdr_record_values
+            |
+            ---hdr_record_values
+
+     0.93%  redis-server  redis-server      [.] ttlCommand
+            |
+            ---ttlCommand
+               |          
+               |--0.23%--0x732adb463c73
+               |          
+                --0.23%--0x732adb463c2b
+
+     0.88%  redis-server  redis-server      [.] prepareClientToWrite
+            |
+            ---prepareClientToWrite
+               |          
+                --0.33%--0x20200000
+
+     0.86%  redis-server  redis-server      [.] siphash
+            |
+            ---siphash
+               0x732adb428700
+               0
+               0xf043c07e083f089
+
+     0.78%  redis-server  redis-server      [.] moduleCallCommandFilters
+            |
+            ---moduleCallCommandFilters
+
+     0.74%  redis-server  redis-server      [.] counts_index_for
+            |
+            ---counts_index_for
+
+     0.69%  redis-server  redis-server      [.] createEmbeddedStringObject
+            |
+            ---createEmbeddedStringObject
+               |          
+               |--0.23%--0x732adb463c73
+               |          
+                --0.17%--0x732adb463c2b
+
+     0.59%  redis-server  [vdso]            [.] 0x0000000000000eca
+            |
+            ---0x732adbd82eca
+               call
+
+     0.59%  redis-server  redis-server      [.] firePostExecutionUnitJobs
+            |
+            ---firePostExecutionUnitJobs
+
+     0.58%  redis-server  redis-server      [.] get_bucket_index
+            |
+            ---get_bucket_index
+
+     0.58%  redis-server  [vdso]            [.] 0x0000000000000eeb
+            |
+            ---0x732adbd82eeb
+               call
+
+     0.52%  redis-server  [vdso]            [.] 0x0000000000000eee
+            |
+            ---0x732adbd82eee
+               call
+
+     0.52%  redis-server  [vdso]            [.] 0x0000000000000f27
+            |
+            ---0x732adbd82f27
+               call
+
+     0.51%  redis-server  redis-server      [.] dictSdsHash
+            |
+            ---dictSdsHash
+               0x732adb428700
+               0
+               0xf043c07e083f089
+
+     0.49%  redis-server  [unknown]         [k] 0xffffffffb0a3caad
+            |
+            ---0xffffffffb0a3caad
+               0xffffffffb0a2323c
+               0xffffffffb0a23947
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.47%  redis-server  redis-server      [.] aeMain
+            |
+            ---aeMain
+               0x1
+
+     0.46%  redis-server  redis-server      [.] getCommandFlags
+            |
+            ---getCommandFlags
+
+     0.46%  redis-server  redis-server      [.] dictSdsKeyCompare
+            |
+            ---dictSdsKeyCompare
+               0x732adb428700
+               0
+               0xf043c07e083f089
+
+     0.45%  redis-server  redis-server      [.] string2ll.part.0
+            |
+            ---string2ll.part.0
+               |          
+                --0.12%--0x6b0a0d31240a0d4c
+
+     0.41%  redis-server  redis-server      [.] lookupCommandLogic
+            |
+            ---lookupCommandLogic
+
+     0.40%  redis-server  redis-server      [.] dictSdsKeyCaseCompare
+            |
+            ---dictSdsKeyCaseCompare
+               0x732adb40f800
+               0
+               0xf043c07e083f089
+
+     0.40%  redis-server  redis-server      [.] afterCommand
+            |
+            ---afterCommand
+
+     0.35%  redis-server  redis-server      [.] clientHasPendingReplies
+            |
+            ---clientHasPendingReplies
+               0x20200000
+
+     0.34%  redis-server  [unknown]         [k] 0xffffffffb0a31a24
+            |
+            ---0xffffffffb0a31a24
+               0xffffffffb0a25eb7
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.34%  redis-server  [unknown]         [k] 0xffffffffaf704104
+            |
+            ---0xffffffffaf704104
+               |          
+                --0.28%--__syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.30%  redis-server  [unknown]         [k] 0xffffffffb012a661
+            |
+            ---0xffffffffb012a661
+               |          
+                --0.24%--0xffffffffb01121f9
+                          0xffffffffb00a20ff
+                          0xffffffffb08ecd30
+                          0xffffffffafe7f5e6
+                          0xffffffffafe7fac6
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.30%  redis-server  [vdso]            [.] 0x0000000000000eda
+            |
+            ---0x732adbd82eda
+               call
+
+     0.30%  redis-server  [unknown]         [k] 0xffffffffb011783c
+            |
+            ---0xffffffffb011783c
+               0xffffffffb009f8b9
+               0xffffffffafe7b2e7
+               |          
+               |--0.18%--0xffffffffafe7e7e1
+               |          0xffffffffafe7f946
+               |          0xffffffffafe7f999
+               |          0xffffffffaf9252d5
+               |          0xffffffffb0c20551
+               |          0xffffffffaf60012b
+               |          __syscall_cancel_arch_end
+               |          read
+               |          connSocketRead
+               |          0x3
+               |          0
+               |          0x401f0fc3000d5e
+               |          
+                --0.12%--0xffffffffafe7f29c
+                          0xffffffffafe7fac6
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.29%  redis-server  [unknown]         [k] 0xffffffffb012a649
+            |
+            ---0xffffffffb012a649
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.29%  redis-server  [unknown]         [k] 0xffffffffb009f8ae
+            |
+            ---0xffffffffb009f8ae
+               0xffffffffafe7b2e7
+               |          
+                --0.23%--0xffffffffafe7f29c
+                          0xffffffffafe7fac6
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.29%  redis-server  [unknown]         [k] 0xffffffffafb24b38
+            |
+            ---0xffffffffafb24b38
+               0xffffffffb0c20705
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               |          
+                --0.23%--__GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.29%  redis-server  [unknown]         [k] 0xffffffffafeb1c1d
+            |
+            ---0xffffffffafeb1c1d
+               |          
+               |--0.17%--0xffffffffafe7fa2b
+               |          0xffffffffafe7fb19
+               |          0xffffffffaf9234b9
+               |          0xffffffffb0c20551
+               |          0xffffffffaf60012b
+               |          __syscall_cancel_arch_end
+               |          __GI___libc_write
+               |          connSocketWrite
+               |          writeToClient.constprop.0
+               |          
+                --0.12%--0xffffffffafe7f8ab
+                          0xffffffffafe7f999
+                          0xffffffffaf9252d5
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          read
+                          connSocketRead
+                          0x3
+                          0
+                          0x401f0fc3000d5e
+
+     0.29%  redis-server  redis-server      [.] getExpire
+            |
+            ---getExpire
+               |          
+               |--0.17%--0x732adb463c2b
+               |          
+                --0.12%--0x732adb463c73
+
+     0.29%  redis-server  redis-server      [.] commandProcessed.part.0
+            |
+            ---commandProcessed.part.0
+               0x732adbb3c2c0
+
+     0.29%  redis-server  libc.so.6         [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               0x732adb428700
+               0
+               0xf043c07e083f089
+
+     0.29%  redis-server  [vdso]            [.] 0x0000000000000ec5
+            |
+            ---0x732adbd82ec5
+               |          
+                --0.23%--call
+
+     0.29%  redis-server  redis-server      [.] beforeSleep
+            |
+            ---beforeSleep
+               |          
+                --0.12%--0x5e67da303e20
+                          0
+                          0x401f0fc3000d5e
+
+     0.29%  redis-server  redis-server      [.] expireIfNeeded
+            |
+            ---expireIfNeeded
+               |          
+               |--0.17%--0x732adb463c73
+               |          
+                --0.11%--0x732adb463c2b
+
+     0.29%  redis-server  redis-server      [.] getMonotonicUs_posix.lto_priv.0
+            |
+            ---getMonotonicUs_posix.lto_priv.0
+               |          
+                --0.23%--0x732adb4085e8
+
+     0.28%  redis-server  [unknown]         [k] 0xffffffffb00a2101
+            |
+            ---0xffffffffb00a2101
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.28%  redis-server  [unknown]         [k] 0xffffffffafba2988
+            |
+            ---0xffffffffafba2988
+               0xffffffffafb24b34
+               0xffffffffb0c20705
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               |          
+                --0.22%--__GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.27%  redis-server  redis-server      [.] sdsrange.constprop.0
+            |
+            ---sdsrange.constprop.0
+               0x732adbb3c2c0
+
+     0.24%  redis-server  libc.so.6         [.] __memmove_chk_avx_unaligned_erms
+            |
+            ---__memmove_chk_avx_unaligned_erms
+               |          
+               |--0.12%--0x732adb463c73
+               |          
+                --0.12%--0x732adb463c2b
+
+     0.24%  redis-server  [unknown]         [k] 0xffffffffb0236091
+            |
+            ---0xffffffffb0236091
+               0xffffffffb090ccc2
+               0xffffffffb090cecb
+               0xffffffffb090dc73
+               0xffffffffb0a262d6
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.24%  redis-server  redis-server      [.] ull2string
+            |
+            ---ull2string
+
+     0.24%  redis-server  redis-server      [.] writeCommandsDeniedByDiskError
+            |
+            ---writeCommandsDeniedByDiskError
+
+     0.23%  redis-server  redis-server      [.] connSocketEventHandler
+            |
+            ---connSocketEventHandler
+               0x1
+
+     0.23%  redis-server  [unknown]         [k] 0xffffffffafe7f38b
+            |
+            ---0xffffffffafe7f38b
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.23%  redis-server  [unknown]         [k] 0xffffffffafe7fa2e
+            |
+            ---0xffffffffafe7fa2e
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.23%  redis-server  [unknown]         [k] 0xffffffffb011787c
+            |
+            ---0xffffffffb011787c
+               0xffffffffb0117a8f
+               0xffffffffb009f8b9
+               0xffffffffafe7b2e7
+               |          
+                --0.17%--0xffffffffafe7f29c
+                          0xffffffffafe7fac6
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.23%  redis-server  libc.so.6         [.] clock_gettime@@GLIBC_2.17
+            |
+            ---clock_gettime@@GLIBC_2.17
+               0x1
+
+     0.23%  redis-server  redis-server      [.] activeExpireCycle
+            |
+            ---activeExpireCycle
+
+     0.23%  redis-server  [unknown]         [k] 0xffffffffaf600005
+            |
+            ---0xffffffffaf600005
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.23%  redis-server  [vdso]            [.] 0x0000000000000ed6
+            |
+            ---0x732adbd82ed6
+               call
+
+     0.22%  redis-server  [vdso]            [.] 0x0000000000000f39
+            |
+            ---0x732adbd82f39
+
+     0.22%  redis-server  redis-server      [.] blockedBeforeSleep
+            |
+            ---blockedBeforeSleep
+               0x732adb4085e8
+
+     0.20%  redis-server  redis-server      [.] readQueryFromClient
+            |
+            ---readQueryFromClient
+               |          
+                --0.10%--0x3
+                          0
+                          0x401f0fc3000d5e
+
+     0.18%  redis-server  [vdso]            [.] 0x0000000000000994
+            |
+            ---0x732adbd82994
+               clock_gettime@@GLIBC_2.17
+               getMonotonicUs_posix.lto_priv.0
+               0x732adb4085e8
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffaf6000a7
+            |
+            ---0xffffffffaf6000a7
+               __syscall_cancel_arch_end
+               handleClientsWithPendingWrites
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffaf600080
+            |
+            ---0xffffffffaf600080
+               __syscall_cancel_arch_end
+               handleClientsWithPendingWrites
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffafeb1b3e
+            |
+            ---0xffffffffafeb1b3e
+               |          
+                --0.12%--0xffffffffafe7fa2b
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffb090ccc3
+            |
+            ---0xffffffffb090ccc3
+               0xffffffffb090dc73
+               0xffffffffb0a262d6
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffafe7f243
+            |
+            ---0xffffffffafe7f243
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffb08ecd32
+            |
+            ---0xffffffffb08ecd32
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.18%  redis-server  [unknown]         [k] 0xffffffffb0a735e9
+            |
+            ---0xffffffffb0a735e9
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb08ff26c
+            |
+            ---0xffffffffb08ff26c
+               0xffffffffb0a230da
+               0xffffffffb0a23c3b
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb01121a1
+            |
+            ---0xffffffffb01121a1
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb08ecc95
+            |
+            ---0xffffffffb08ecc95
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffaf987bc3
+            |
+            ---0xffffffffaf987bc3
+               0xffffffffb0a3ba72
+               0xffffffffb0a31a0e
+               0xffffffffb0a25eb7
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb0c3a3b5
+            |
+            ---0xffffffffb0c3a3b5
+               0xffffffffb0a24b21
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb0a2394e
+            |
+            ---0xffffffffb0a2394e
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.17%  redis-server  [vdso]            [.] 0x0000000000000f00
+            |
+            ---0x732adbd82f00
+               call
+
+     0.17%  redis-server  redis-server      [.] updateClientMemUsageAndBucket
+            |
+            ---updateClientMemUsageAndBucket
+               0x732adbb3c2c0
+
+     0.17%  redis-server  redis-server      [.] addReplyProto
+            |
+            ---addReplyProto
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffb0c29e6b
+            |
+            ---0xffffffffb0c29e6b
+               |          
+                --0.11%--0xffffffffb08fbd39
+                          0xffffffffb08ff217
+                          0xffffffffb0a230da
+                          0xffffffffb0a23c3b
+                          0xffffffffb0a24b30
+                          0xffffffffb0a735f6
+                          0xffffffffb08ece01
+                          0xffffffffafe7f5e6
+                          0xffffffffafe7fac6
+                          0xffffffffafe7fb19
+                          0xffffffffaf9234b9
+                          0xffffffffb0c20551
+                          0xffffffffaf60012b
+                          __syscall_cancel_arch_end
+                          __GI___libc_write
+                          connSocketWrite
+                          writeToClient.constprop.0
+
+     0.17%  redis-server  [unknown]         [k] 0xffffffffafb9663f
+            |
+            ---0xffffffffafb9663f
+               0xffffffffafba2a63
+               0xffffffffafb24b34
+               0xffffffffb0c20705
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               |          
+                --0.11%--read
+                          connSocketRead
+                          0x3
+                          0
+                          0x401f0fc3000d5e
+
+     0.17%  redis-server  redis-server      [.] dictSdsCaseHash
+            |
+            ---dictSdsCaseHash
+               0x732adb40f800
+               0
+               0xf043c07e083f089
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0117880
+            |
+            ---0xffffffffb0117880
+               0xffffffffb0117a8f
+               0xffffffffb009f8b9
+               0xffffffffafe7b2e7
+               0xffffffffafe7f29c
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffaf6000a9
+            |
+            ---0xffffffffaf6000a9
+               __syscall_cancel_arch_end
+               handleClientsWithPendingWrites
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08f6b9b
+            |
+            ---0xffffffffb08f6b9b
+
+     0.12%  redis-server  libc.so.6         [.] __strcasecmp_avx2
+            |
+            ---__strcasecmp_avx2
+               0x732adb40f800
+               0
+               0xf043c07e083f089
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08f7e40
+            |
+            ---0xffffffffb08f7e40
+               0xffffffffb08f7f92
+               0xffffffffb0a25f48
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0c3a3dd
+            |
+            ---0xffffffffb0c3a3dd
+               0xffffffffb0a24b21
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb00a20ff
+            |
+            ---0xffffffffb00a20ff
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08f6bc0
+            |
+            ---0xffffffffb08f6bc0
+               0xffffffffb0a24b21
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb012a64c
+            |
+            ---0xffffffffb012a64c
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08ff259
+            |
+            ---0xffffffffb08ff259
+               0xffffffffb0a230da
+               0xffffffffb0a23c3b
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08ecd30
+            |
+            ---0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffafe53cce
+            |
+            ---0xffffffffafe53cce
+               0xffffffffafe59944
+               0xffffffffb08f7e3c
+               0xffffffffb08f7f92
+               0xffffffffb0a25f48
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.12%  redis-server  redis-server      [.] sdssubstr
+            |
+            ---sdssubstr
+               0x732adbb3c2c0
+
+     0.12%  redis-server  [vdso]            [.] 0x0000000000000f23
+            |
+            ---0x732adbd82f23
+               call
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0c20708
+            |
+            ---0xffffffffb0c20708
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffafe7b296
+            |
+            ---0xffffffffafe7b296
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0112195
+            |
+            ---0xffffffffb0112195
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb012a75b
+            |
+            ---0xffffffffb012a75b
+               0xffffffffb01121f9
+               0xffffffffb00a20ff
+               0xffffffffb08ecd30
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb090c8de
+            |
+            ---0xffffffffb090c8de
+               0xffffffffb0a25f60
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0c204ea
+            |
+            ---0xffffffffb0c204ea
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0c20524
+            |
+            ---0xffffffffb0c20524
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb08ecd95
+            |
+            ---0xffffffffb08ecd95
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0a03213
+            |
+            ---0xffffffffb0a03213
+               0xffffffffb0a3cb89
+               0xffffffffb0a2323c
+               0xffffffffb0a23947
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0a24b25
+            |
+            ---0xffffffffb0a24b25
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffafefebbb
+            |
+            ---0xffffffffafefebbb
+               0xffffffffafeff5fc
+               0xffffffffaf924855
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               aeApiPoll
+               0x732adb4fd000
+
+     0.12%  redis-server  redis-server      [.] ll2string
+            |
+            ---ll2string
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0a230f2
+            |
+            ---0xffffffffb0a230f2
+               0xffffffffb0a23c3b
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffaf600ef0
+            |
+            ---0xffffffffaf600ef0
+               __syscall_cancel_arch_end
+               0x1
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffafdf1288
+            |
+            ---0xffffffffafdf1288
+
+     0.12%  redis-server  [unknown]         [k] 0xffffffffb0c3a4c3
+            |
+            ---0xffffffffb0c3a4c3
+               0xffffffffb08f6bc0
+               0xffffffffb0a24b21
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.12%  redis-server  redis-server      [.] propagatePendingCommands.lto_priv.0
+            |
+            ---propagatePendingCommands.lto_priv.0
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafdf1236
+            |
+            ---0xffffffffafdf1236
+               0xffffffffb08ff2eb
+               0xffffffffb0a230da
+               0xffffffffb0a23c3b
+               0xffffffffb0a24b30
+               0xffffffffb0a735f6
+               0xffffffffb08ece01
+               0xffffffffafe7f5e6
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffb0c20541
+            |
+            ---0xffffffffb0c20541
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafdf128c
+            |
+            ---0xffffffffafdf128c
+
+     0.11%  redis-server  [vdso]            [.] 0x0000000000000eb3
+            |
+            ---0x732adbd82eb3
+               call
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafe59951
+            |
+            ---0xffffffffafe59951
+               0xffffffffb08f7f92
+               0xffffffffb0a25f48
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.11%  redis-server  [vdso]            [.] 0x00000000000009bf
+            |
+            ---0x732adbd829bf
+               clock_gettime@@GLIBC_2.17
+               getMonotonicUs_posix.lto_priv.0
+               0x732adb4085e8
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafe7f2ba
+            |
+            ---0xffffffffafe7f2ba
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafb24a10
+            |
+            ---0xffffffffafb24a10
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.11%  redis-server  redis-server      [.] je_tcache_bin_flush_stashed
+            |
+            ---je_tcache_bin_flush_stashed
+               je_tcache_gc_dalloc_event_handler
+
+     0.11%  redis-server  [unknown]         [k] 0xffffffffafe7f240
+            |
+            ---0xffffffffafe7f240
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.10%  redis-server  [unknown]         [k] 0xffffffffafe7f3ba
+            |
+            ---0xffffffffafe7f3ba
+               0xffffffffafe7fac6
+               0xffffffffafe7fb19
+               0xffffffffaf9234b9
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               __GI___libc_write
+               connSocketWrite
+               writeToClient.constprop.0
+
+     0.10%  redis-server  [unknown]         [k] 0xffffffffb090cdeb
+            |
+            ---0xffffffffb090cdeb
+               0xffffffffb090dc73
+               0xffffffffb0a262d6
+               0xffffffffb0a27751
+               0xffffffffb0a71c5f
+               0xffffffffb08ec3d6
+               0xffffffffb08ec49e
+               0xffffffffafe7eac4
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+     0.10%  redis-server  [unknown]         [k] 0xffffffffafe7e808
+            |
+            ---0xffffffffafe7e808
+               0xffffffffafe7f946
+               0xffffffffafe7f999
+               0xffffffffaf9252d5
+               0xffffffffb0c20551
+               0xffffffffaf60012b
+               __syscall_cancel_arch_end
+               read
+               connSocketRead
+               0x3
+               0
+               0x401f0fc3000d5e
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
