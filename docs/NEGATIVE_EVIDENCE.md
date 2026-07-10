@@ -4,6 +4,71 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: PARKED (no ratio claimed) — SORT `sort_alpha_compare` UTF-8 short-circuit: code written, correctness proven, A/B **blocked by `perf_event_paranoid=4` on the rch workers**
+
+Cashing in cod_fr's P16 attribution (entry below) and the integrity audit that reopened SORT.
+**No WIN and no REJECT is recorded, because no admissible ratio could be measured.** The patch is
+parked (uncommitted) at `tests/artifacts/perf/sort_alpha_from_utf8_lever.patch`, with the harness
+beside it as `sort_alpha_compare.bench.rs`. Note `tests/artifacts/` is **gitignored**, so those files
+live on the box, not in the repo; the same change is also sitting in the working tree as
+`crates/fr-command/{src/lib.rs, Cargo.toml, benches/sort_alpha_compare.rs}`.
+
+THE LEVER: `sort_alpha_compare` (`fr-command/src/lib.rs`) matched on the tuple
+`(collator, from_utf8(left), from_utf8(right))`. Rust builds a tuple **before** it matches, so both
+UTF-8 validations run unconditionally — including when `collator` is `None`, where arm 1 requires
+`Some(_)`, the code falls to `_ => left.cmp(right)`, and both results are discarded. Two full UTF-8
+scans of every element, on each of the `n log n` comparisons, thrown away. The fix short-circuits on
+`collator` first.
+
+**Byte-identical by construction**, and this is an argument, not a measurement: with
+`collator == None` the old code could only ever reach `_ => left.cmp(right)`; the `Some` path keeps
+the same `Ok/Ok + !contains('\0')` guards. Verified anyway —
+`sort_alpha_compare_without_collator_matches_the_pre_shortcircuit_form` cross-checks both forms over
+invalid UTF-8, embedded NULs, empties, and multibyte input; `cargo test -p fr-command --lib
+sort_alpha` is 4/4 green, run fail-closed on remote worker `vmi1227854`.
+
+### SELF-TIME PER ARM (the ledger-integrity requirement)
+
+| arm | function under test | self% | input | source |
+|---|---|---:|---|---|
+| **ORIG** | `core::str::converts::from_utf8` | **35.43%** | `SORT L ALPHA STORE D`, 1000 elems, pipelined | cc_fr, this session |
+| **ORIG** | `core::str::converts::from_utf8` | **20.35%** | P16/C50 `SORT L ALPHA STORE D`, 20k reqs | cod_fr, `26fcb2576` |
+| **ORIG** | SORT comparator closure | 16.26% / 21.69% | as above | cc_fr / cod_fr |
+| **CAND** | `core::str::converts::from_utf8` | **0% by construction** | — | not reachable from `sort_alpha_compare` when `collator == None` |
+
+Two independent harnesses, on binaries that provably execute the code, agree on the mechanism. The
+CAND row is structural, not measured — confirming it needs a post-fix **server** profile.
+
+### WHY NO RATIO (blocker, not an omission)
+
+The harness (`crates/fr-command/benches/sort_alpha_compare.rs`) is built to the substrate rule: one
+binary, one invocation, a faithful `#[inline(never)]` pre-short-circuit reference arm fed a
+**runtime-opaque** `Option<&CollatorBorrowed>` (a `None::<&()>` literal would make the guarded arm
+statically unreachable and let LLVM delete the very `from_utf8` calls under test), eight *alternating*
+ORIG/CAND `perf stat -e instructions:u` pairs, a CV gate, and a `perf record` profile of the ORIG arm.
+
+It **fails closed**, and did:
+
+```
+A/B INVALID: perf record failed: Access to performance monitoring ... is limited.
+perf_event_paranoid setting is 4
+```
+
+- rch workers run `perf_event_paranoid = 4` ⇒ no `instructions:u`, no sampling.
+- This host runs `perf_event_paranoid = 1` (perf works), but **rch does not return the linked
+  binary** — the bench executable exists only under the worker-scoped
+  `.rch-target-<worker>-pool-<hash>/` on the remote — and a local `cargo build` is forbidden.
+- A wall-clock fallback was **deliberately not taken**: on a worker shared with 11 other agents,
+  wall time is noise, and the campaign gate is `instructions:u`.
+
+**To unblock, any one of:** (a) `perf_event_paranoid <= 2` on the rch workers; (b) a way to retrieve
+the built bench binary so it can be run under local perf (one binary, one machine — strictly stronger
+than the substrate rule); or (c) an explicit decision to accept an interleaved min-of-N **wall-clock
+primitive** ratio, labelled as such.
+
+Do **not** ship this as a KEEP without one of those. Do not re-derive the mechanism — it is settled by
+two profiles. Do not retry the reply-clone (C3) lever: it does not clear 0.1% self in either profile.
+
 ## 2026-07-10 cod_fr: PROFILE WIN — P16 `SORT L ALPHA STORE D` instruction gap attributed; next lever is discarded UTF-8 validation (not a code KEEP yet)
 
 NEGATIVE-EVIDENCE CHECK: read both ledgers before profiling. The previously rejected SORT reply-clone
