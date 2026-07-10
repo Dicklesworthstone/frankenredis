@@ -5287,6 +5287,50 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: **FRONTIER SUMMARY + HOLD** — the clean per-turn SIMD/dispatch/store/persist/listpack/glob-classify levers available to cc are EXHAUSTED. Remaining work is structural, cod's lane, or blocked on a server-profiling channel cc lacks
+
+Session shipped 6 measured byte-exact wins (glob classify-once ×3: SCAN `f7474e040` /
+SSCAN `455c77c91` / KEYS `6ddda27f3`; listpack backlen decode `79c6a4eee`;
+`parse_listpack_integer` single-pass `ac77762d8`; plus earlier crc64/popcount/BITPOS).
+Fresh survey this turn confirms each lane is at its clean-per-turn floor:
+
+- **glob-classify** — the CLEAN shape (ONE pattern vs MANY items → hoist the one pattern)
+  is CLOSED: SCAN/SSCAN/KEYS done; `scan_walk` dead; HSCAN/ZSCAN are cod's lane. The only
+  remaining glob sites are the INVERSE shape (ONE item vs MANY stored patterns): ACL
+  key-patterns (`is_key_access_allowed`, fr-runtime 2178 — but default users are
+  `all_keys` → short-circuit, so only restrictive-ACL deployments pay), ACL channel-patterns
+  (2199), and `pubsub_pattern_subs` (6602, per-publish). Classify-once there needs a STORED
+  owned-shape per subscribed pattern (a ~7-site refactor of `pubsub_pattern_subs:
+  HashMap<Vec<u8>, HashSet<u64>>` + subscribe/unsubscribe/publish) — and its hotness is
+  workload-specific (notify-heavy + many pattern subs + write-heavy). cc has NO way to
+  profile that path (no linked binary / no redis-benchmark), so it fails "profile-first."
+  Identified but NOT taken; needs a server profile confirming the workload, or an explicit
+  decision to ship the primitive on faith.
+- **listpack** — per-entry codec primitives SATURATED: encode+decode backlen both
+  single-byte-fast-pathed, int-parse single-pass, int-encode picks smallest encoding.
+- **persist** — `decode_rdb` 2.5x slower than encode is STRUCTURAL (per-element owned Vecs
+  that become the stored members — not wasteful, not a scalar lever). The one real remaining
+  win is the intset RESTORE render→reparse round-trip (`decode_intset_members` renders packed
+  int→decimal ASCII→`RdbValue::Set`→fr-store parses ASCII back to i64), which needs a typed
+  `RdbValue::IntSet(Vec<i64>)` variant — a WIDE cross-crate enum change (every RdbValue match
+  site + fr-store restore consumer), not a clean one-lever.
+- **SIMD** — popcount (BITCOUNT), first_mismatch (BITPOS), crc64 (DUMP/RESTORE/RDB) are
+  wired; `bitand`/`common_prefix` kernels exist but are UNWIRED BY DESIGN (measured
+  net-neutral / LZF-parked); intset membership is already branchless-optimal (monobound cmov —
+  a SIMD linear scan LOSES). No new hot consumer to wire.
+- **dispatch** — cod's binary-crate lane (`ohsk5`); cc gets no linked binary from rch, so
+  dispatch floors are neither cc-benchable nor cc-owned.
+- **store** — reads are mature (GET/EXISTS/STRLEN parity+); the residual gaps are list/set/zset
+  WRITES (SADD 0.73x etc.) which are structural store-write work and need a server A/B.
+
+**The gating blocker is the missing server-profiling channel** (no linked binary from rch, no
+`redis-benchmark` on host, built server binaries stale). Every fresh hot-frame lever this
+session came from a lib-benchable pure function (glob, listpack, crc); those are now swept.
+Reopen when: (a) a server-profiling channel exists (rank fresh P16 hot frames), or (b) a
+decision to take on a structural lever — typed `RdbValue::IntSet`, borrowed/Arc RdbValue
+decode, or the pubsub owned-shape classify-once — is made. Holding per the exhausted-veins
+instruction rather than forcing a disproportionate refactor onto an unprofiled path.
+
 ## 2026-07-10 cc_fr: **WIN — LANDED (`ac77762d8`).** `parse_listpack_integer` single-pass — **1.40x int / 1.25x mixed** — the listpack DUMP/RDB-save int-encode gate, byte-exact
 
 The symmetric ENCODE-side sibling of the backlen decode lever below. `parse_listpack_
