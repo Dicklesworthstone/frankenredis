@@ -2706,7 +2706,6 @@ impl SortedSet {
         self.lex_count(min, max)
     }
 
-    #[cfg(test)]
     fn is_packed_storage(&self) -> bool {
         matches!(self.inner, SortedSetInner::Packed(_))
     }
@@ -7265,6 +7264,30 @@ impl Store {
         }
     }
 
+    /// O(1) sticky-encoding refresh for a packed sorted set after a threshold-aware insert.
+    ///
+    /// `SortedSet::insert_with_limits*` calls `maybe_promote_for_insert` before every mutation.
+    /// Under the exact current CONFIG limits, a post-insert `Packed` value therefore still fits
+    /// listpack and cannot need the sticky skiplist flag. `Full` is ambiguous because a restored
+    /// listpack can use full internal storage while still fitting raised CONFIG limits, so that
+    /// tier deliberately retains the general [`Self::refresh_zset_encoding_flag`] scan.
+    fn refresh_zset_encoding_flag_after_insert(
+        entry: &mut Entry,
+        max_entries: usize,
+        max_value: usize,
+    ) {
+        if entry.has_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING) {
+            return;
+        }
+        let Value::SortedSet(zs) = &entry.value else {
+            return;
+        };
+        if zs.is_packed_storage() {
+            return;
+        }
+        Self::refresh_zset_encoding_flag(entry, max_entries, max_value);
+    }
+
     /// (frankenredis-v4ba8) Set-algebra STORE destinations are built incrementally
     /// by redis, so an ALL-INTEGER result whose cardinality exceeds
     /// set-max-intset-entries converts intset->HASHTABLE (the intset-overflow
@@ -10049,9 +10072,13 @@ impl Store {
         for key in &candidates {
             self.drop_if_expired(key, now_ms);
         }
+        // (cc_fr) Classify the glob ONCE, not per candidate. `pg.matches` is byte-identical
+        // to `glob_match(pattern, key)`; hot when `lit` is empty (a non-prefix pattern globs
+        // the whole keyspace — the same per-key `glob_match` self-frame as SCAN/SSCAN).
+        let pg = glob_prepare(pattern);
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
-            .filter(|key| self.entries.contains_key(key.as_slice()) && glob_match(pattern, key))
+            .filter(|key| self.entries.contains_key(key.as_slice()) && pg.matches(key))
             .collect();
         // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
         // pdqsort is faster and skips the stable-sort scratch alloc (KEYS over a large keyspace).
@@ -10066,13 +10093,16 @@ impl Store {
     fn push_logical_key_if_match(
         result: &mut Vec<Vec<u8>>,
         physical_key: &[u8],
-        pattern: &[u8],
+        glob: &PreparedGlob<'_>,
         is_star: bool,
     ) {
         let logical = decode_db_key(physical_key)
             .map(|(_, logical)| logical)
             .unwrap_or(physical_key);
-        if is_star || glob_match(pattern, logical) {
+        // (cc_fr) `glob.matches(l)` is byte-identical to `glob_match(pattern, l)`; the
+        // pattern is classified ONCE by the caller instead of per key (KEYS over a
+        // large keyspace globbed every key: same `glob_match` self-frame as SCAN).
+        if is_star || glob.matches(logical) {
             result.push(logical.to_vec());
         }
     }
@@ -10106,13 +10136,16 @@ impl Store {
             self.expire_volatile_keys_in_db(db, now_ms);
             self.rebuild_ordered_keys_if_dirty();
             let is_star = pattern == b"*";
+            // (cc_fr) Classify the glob ONCE for the whole full-DB walk (byte-identical to
+            // per-key `glob_match`); `is_star` still short-circuits before it.
+            let pg = glob_prepare(pattern);
             let mut result: Vec<Vec<u8>> = Vec::new();
             if db == 0 {
                 for key in self.ordered_keys.iter() {
                     if decode_db_key(key).is_some() {
                         continue;
                     }
-                    Self::push_logical_key_if_match(&mut result, key, pattern, is_star);
+                    Self::push_logical_key_if_match(&mut result, key, &pg, is_star);
                 }
             } else {
                 let prefix = encode_db_key(db, b"");
@@ -10124,7 +10157,7 @@ impl Store {
                     ))
                     .take_while(|key| key.starts_with(&prefix))
                 {
-                    Self::push_logical_key_if_match(&mut result, key, pattern, is_star);
+                    Self::push_logical_key_if_match(&mut result, key, &pg, is_star);
                 }
             }
             return result;
@@ -10164,6 +10197,9 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
 
+        // (cc_fr) Classify the glob ONCE for the range-pruned candidates (byte-identical
+        // to per-candidate `glob_match`).
+        let pg = glob_prepare(pattern);
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
             .filter(|key| self.entries.contains_key(key.as_slice()))
@@ -10171,7 +10207,7 @@ impl Store {
                 let logical = decode_db_key(&key)
                     .map(|(_, logical)| logical)
                     .unwrap_or(key.as_slice());
-                if glob_match(pattern, logical) {
+                if pg.matches(logical) {
                     Some(logical.to_vec())
                 } else {
                     None
@@ -16650,6 +16686,27 @@ impl Store {
         members: Vec<(f64, Vec<u8>)>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.zadd_plain_owned_with_encoding_refresh::<false>(key, members, now_ms)
+    }
+
+    /// Same-binary benchmark reference for the pre-change full member scan.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "bench-reference"))]
+    pub fn bench_zadd_plain_owned_fallback(
+        &mut self,
+        key: &[u8],
+        members: Vec<(f64, Vec<u8>)>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zadd_plain_owned_with_encoding_refresh::<true>(key, members, now_ms)
+    }
+
+    fn zadd_plain_owned_with_encoding_refresh<const FULL_SCAN: bool>(
+        &mut self,
+        key: &[u8],
+        members: Vec<(f64, Vec<u8>)>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the contains_key/get_mut below re-probe entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -16681,7 +16738,15 @@ impl Store {
             let touched = added > 0 || changed > 0;
             if touched {
                 entry.touch_write(now_ms, lfu_tracking_enabled);
-                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+                if FULL_SCAN {
+                    Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+                } else {
+                    Self::refresh_zset_encoding_flag_after_insert(
+                        entry,
+                        zset_max_entries,
+                        zset_max_value,
+                    );
+                }
             }
             (added, changed, touched)
         } else {
@@ -16890,7 +16955,11 @@ impl Store {
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Lock skiplist encoding once a
                 // zset crosses zset-max-listpack-{entries,value}.
-                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+                Self::refresh_zset_encoding_flag_after_insert(
+                    entry,
+                    zset_max_entries,
+                    zset_max_value,
+                );
             }
             (added, changed, is_empty, touched)
         };
@@ -18481,7 +18550,11 @@ impl Store {
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Crossing the entries count via
                 // zincrby on a new member can promote to skiplist.
-                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
+                Self::refresh_zset_encoding_flag_after_insert(
+                    entry,
+                    zset_max_entries,
+                    zset_max_value,
+                );
             }
             (res, is_empty, touched)
         };
@@ -40821,13 +40894,44 @@ mod tests {
         // fast-path shapes (exact/prefix/suffix/contains), the general backtracker, empty strings,
         // and metachars.
         let patterns: &[&[u8]] = &[
-            b"", b"*", b"**", b"?", b"a", b"abc", b"key:0001*", b"*.tmp", b"*mid*", b"user:*:tag",
-            b"h?llo", b"h[ae]llo", b"foo*bar", b"\\*lit", b"[!a]", b"a?c*e", b"", b"prefix",
+            b"",
+            b"*",
+            b"**",
+            b"?",
+            b"a",
+            b"abc",
+            b"key:0001*",
+            b"*.tmp",
+            b"*mid*",
+            b"user:*:tag",
+            b"h?llo",
+            b"h[ae]llo",
+            b"foo*bar",
+            b"\\*lit",
+            b"[!a]",
+            b"a?c*e",
+            b"",
+            b"prefix",
         ];
         let strings: &[&[u8]] = &[
-            b"", b"a", b"abc", b"key:00012:tag", b"key:9:x", b"file.tmp", b".tmp", b"XmidY",
-            b"user:42:tag", b"hello", b"hallo", b"fooXYZbar", b"foobar", b"*lit", b"!", b"prefix",
-            b"prefixed", b"h\0llo",
+            b"",
+            b"a",
+            b"abc",
+            b"key:00012:tag",
+            b"key:9:x",
+            b"file.tmp",
+            b".tmp",
+            b"XmidY",
+            b"user:42:tag",
+            b"hello",
+            b"hallo",
+            b"fooXYZbar",
+            b"foobar",
+            b"*lit",
+            b"!",
+            b"prefix",
+            b"prefixed",
+            b"h\0llo",
         ];
         for p in patterns {
             let prepared = glob_prepare(p);
@@ -40843,7 +40947,7 @@ mod tests {
 
     #[test]
     fn scan_filter_matches_scan_pattern_matches_for_every_pattern_and_string() {
-        use super::{scan_pattern_matches, ScanFilter};
+        use super::{ScanFilter, scan_pattern_matches};
         // The hoisted SSCAN filter (classify once) MUST agree with `scan_pattern_matches`
         // (classify per member) for EVERY (pattern, member) — a divergence would change
         // SSCAN output. Beyond the glob shapes this pins the two allkeys shortcuts
@@ -48390,6 +48494,7 @@ mod tests {
             .zadd(b"z", &[(2.0, b"b".to_vec()), (1.0, b"a".to_vec())], 0)
             .unwrap();
         assert!(is_packed(&store, b"z"));
+        assert_eq!(store.object_encoding(b"z", 0), Some("listpack"));
         assert_eq!(store.zrank(b"z", b"a", 0).unwrap(), Some(0));
         assert_eq!(
             store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
@@ -48398,6 +48503,7 @@ mod tests {
 
         store.zadd(b"z", &[(1.0, b"c".to_vec())], 0).unwrap();
         assert!(is_full(&store, b"z"));
+        assert_eq!(store.object_encoding(b"z", 0), Some("skiplist"));
         assert_eq!(
             store.zrange(b"z", 0, -1, 0).unwrap(),
             vec![b"a".to_vec(), b"c".to_vec(), b"b".to_vec()]
@@ -48406,6 +48512,7 @@ mod tests {
 
         store.zadd(b"long", &[(1.5, b"wide".to_vec())], 0).unwrap();
         assert!(is_full(&store, b"long"));
+        assert_eq!(store.object_encoding(b"long", 0), Some("skiplist"));
         assert_eq!(store.zscore(b"long", b"wide", 0).unwrap(), Some(1.5));
     }
 
@@ -48426,6 +48533,7 @@ mod tests {
         store.zset_max_listpack_entries = 1;
         assert_eq!(store.zadd(b"z", &[(3.0, b"a".to_vec())], 0).unwrap(), 0);
         assert!(is_full(&store, b"z"));
+        assert_eq!(store.object_encoding(b"z", 0), Some("skiplist"));
         assert_eq!(
             store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
             vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 3.0)]
@@ -48444,6 +48552,7 @@ mod tests {
             0
         );
         assert!(is_full(&value_store, b"wide"));
+        assert_eq!(value_store.object_encoding(b"wide", 0), Some("skiplist"));
         assert_eq!(
             value_store.zrange(b"wide", 0, -1, 0).unwrap(),
             vec![b"wide".to_vec()]
@@ -56615,6 +56724,52 @@ mod tests {
         store2.restore_key(b"z", 0, &payload, false, 100).unwrap();
         assert_eq!(store2.zscore(b"z", b"a", 100).unwrap(), Some(1.5));
         assert_eq!(store2.zscore(b"z", b"b", 100).unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn restored_full_zset_keeps_listpack_encoding_after_in_limit_update() {
+        let mut source = Store::new();
+        source.zset_max_listpack_entries = 256;
+        let members: Vec<(f64, Vec<u8>)> = (0..129)
+            .map(|i| (i as f64, format!("member:{i:03}").into_bytes()))
+            .collect();
+        assert_eq!(source.zadd_plain_owned(b"z", members, 100).unwrap(), 129);
+        let payload = source.dump_key(b"z", 100).unwrap();
+        assert_eq!(payload[0], RDB_TYPE_ZSET_LISTPACK);
+
+        let mut restored = Store::new();
+        restored.zset_max_listpack_entries = 256;
+        restored.restore_key(b"z", 0, &payload, false, 100).unwrap();
+        {
+            let entry = restored.entries.get(b"z".as_slice()).unwrap();
+            let Value::SortedSet(zs) = &entry.value else {
+                panic!("RESTORE did not create a sorted set");
+            };
+            assert!(zs.is_full_storage());
+            assert!(!entry.has_flag(super::ENTRY_FORCE_ZSET_SKIPLIST_ENCODING));
+        }
+        assert_eq!(restored.object_encoding(b"z", 100), Some("listpack"));
+
+        assert_eq!(
+            restored
+                .zadd_plain_owned(b"z", vec![(64.5, b"member:064".to_vec())], 101)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            restored.zscore(b"z", b"member:064", 101).unwrap(),
+            Some(64.5)
+        );
+        assert_eq!(restored.object_encoding(b"z", 101), Some("listpack"));
+
+        restored.zset_max_listpack_entries = 128;
+        assert_eq!(
+            restored
+                .zadd_plain_owned(b"z", vec![(65.5, b"member:064".to_vec())], 102)
+                .unwrap(),
+            0
+        );
+        assert_eq!(restored.object_encoding(b"z", 102), Some("skiplist"));
     }
 
     #[test]
