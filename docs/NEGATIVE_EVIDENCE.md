@@ -4,6 +4,59 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: FINAL KEEP — SORT ALPHA skips discarded UTF-8 validation; 51.82% fewer comparator instructions
+
+This closes the measured-win row immediately below after its parity and quality gates. Ledger-grep
+and the ranked P16 frame table came first. The already-rejected SORT reply-clone family did not clear
+0.1% self-time, so it stayed closed. On `SORT L ALPHA STORE D`, FrankenRedis used
+**70,439,314,824** mean `instructions:u` versus Redis 7.2.4's **43,750,808,051**
+(`1.610011406x`, gap **26,688,506,773**; CV **0.000085% / 0.001673%**). The FrankenRedis
+`>=0.1%` leaders were the SORT comparator **21.69%**, `core::str::converts::from_utf8`
+**20.35%**, `__memcmp_avx2_movbe` **17.64%**, smallsort **4.42%**, and quicksort **4.34%**;
+Redis's leaders included `compareStringObjectsWithFlags` **24.23%**, `memmove` **10.23%**, and
+`memcmp` **10.15%**. The compare/sort family explained approximately **27.56B** instructions of
+delta, with discarded `from_utf8` alone approximately **14.33B / 53.7%** of the net gap. Full frame
+tables and stat inputs are in
+`artifacts/optimization/frankenredis-ohsk5-sort-alpha/20260710T1325Z/` and commit `26fcb2576`.
+
+ONE LEVER: `sort_alpha_compare` now returns `left.cmp(right)` before UTF-8 validation when no ICU
+collator exists. In the old tuple match, `from_utf8(left)` and `from_utf8(right)` were evaluated even
+though `collator == None` made their results unobservable. The `Some(collator)` path retains the same
+UTF-8 and embedded-NUL guards and the same ICU comparison.
+
+Honest A/B used one `release-perf` bench binary, one fail-closed RCH invocation, and one worker
+(`hz1`). The bench-only semantic ORIG and candidate were `#[inline(never)]`, symmetrically optimizer
+barriered, alternated in eight AB/BA `perf stat -e instructions:u` pairs, and then exercised in two
+Criterion AB/BA rounds. The mandatory ORIG profile proved the benchmark live before the ratio:
+**19 samples**, approximately **8,386,758 instructions**, zero lost, ORIG comparator **32.89% self**,
+and `from_utf8` **17.67% self**. Means were ORIG **19,472,140** and candidate
+**9,382,333.875** instructions: candidate/ORIG **0.481833731x**, or **51.8166% fewer / 2.0754x
+reduction**. CV was **0.001060% ORIG**, **0.002964% candidate**, and **0.003202% paired ratio**.
+This clears the 1% keep ratchet by 50.82 percentage points. The complete pair table remains in the
+measured-win row below.
+
+Behavior and quality proof:
+
+- focused no-collator old-vs-new equivalence: **1/1 green** over empty, ASCII, embedded-NUL,
+  invalid-UTF-8, and multibyte operands;
+- fail-closed remote `fr-conformance`: **194/194 library tests**, every auxiliary binary and doc test,
+  and **99/99 smoke tests green**, exercising the repository's **4,975 fixture cases**, including
+  `core_sort.json` **88/88**;
+- fail-closed remote `cargo check --workspace --all-targets`: green;
+- fail-closed remote `cargo clippy -p fr-command --all-targets -- -D warnings`: green;
+- workspace clippy reaches only unrelated `fr-persist` d2string-test
+  `clippy::excessive_precision` baseline findings, filed as `frankenredis-u0x5d`; no `fr-command`
+  finding;
+- strict RCH correctly refused `cargo fmt --check` as non-compilation (`RCH-E301`), so no local Cargo
+  fallback was taken; direct Rust 2024 `rustfmt --check` and `git diff --check` are green;
+- UBS was run on all three changed files. Its nonzero result is the existing file-wide inventory plus
+  intentional fail-closed benchmark panics/direct indexing whose lengths are established by local
+  invariants; it identified no defect in the production comparator hunk.
+
+Verdict: **KEEP and ship.** This does not close the P16 lane or authorize SORT reply cloning,
+writev, short-key comparison, `uhthd`, or `fr-store`/`fr-persist` work. Continue from a fresh ranked
+profile and a structurally different primitive.
+
 ## 2026-07-10 cod_fr: MEASURED WIN (parity gates pending) — SORT ALPHA comparator short-circuit uses 51.82% fewer instructions than live ORIG
 
 NEGATIVE-EVIDENCE CHECK: the prior dead-code attempt immediately below is INVALID, not a rejection;

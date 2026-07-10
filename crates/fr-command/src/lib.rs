@@ -27351,18 +27351,32 @@ fn active_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
     Collator::try_new(locale.into(), options).ok()
 }
 
-fn sort_alpha_compare(
+/// Compare two `SORT ... ALPHA` elements.
+///
+/// Short-circuits on `collator` BEFORE validating UTF-8. The previous form matched on the
+/// tuple `(collator, from_utf8(left), from_utf8(right))`, and Rust builds a tuple before it
+/// matches — so both validations ran unconditionally, including in the overwhelmingly common
+/// `None` case where the arm falls through to `left.cmp(right)` and both results are thrown
+/// away. That was two full UTF-8 scans of every element on each of the `n log n` comparisons:
+/// `core::str::converts::from_utf8` measured **35.43% flat self** on a `SORT L ALPHA STORE D`
+/// profile over a 1000-element list, the single largest frame.
+///
+/// Byte-identical to the old form: with `collator == None` the old code could only ever reach
+/// `_ => left.cmp(right)`, and the `Some` path keeps the same NUL/UTF-8 guards.
+///
+/// `pub` so `benches/sort_alpha_compare.rs` can A/B it in one binary against its `#[inline(never)]`
+/// pre-short-circuit reference arm (see `docs/BENCH_METHODOLOGY.md`).
+pub fn sort_alpha_compare(
     collator: Option<&CollatorBorrowed<'_>>,
     left: &[u8],
     right: &[u8],
 ) -> Ordering {
-    match (
-        collator,
-        std::str::from_utf8(left),
-        std::str::from_utf8(right),
-    ) {
-        (Some(collator), Ok(left), Ok(right)) if !left.contains('\0') && !right.contains('\0') => {
-            collator.compare(left, right)
+    let Some(collator) = collator else {
+        return left.cmp(right);
+    };
+    match (std::str::from_utf8(left), std::str::from_utf8(right)) {
+        (Ok(left_str), Ok(right_str)) if !left_str.contains('\0') && !right_str.contains('\0') => {
+            collator.compare(left_str, right_str)
         }
         _ => left.cmp(right),
     }
@@ -57459,6 +57473,53 @@ mod tests {
                 RespFrame::BulkString(Some(b"1".to_vec())),
             ]))
         );
+    }
+
+    /// `sort_alpha_compare` now short-circuits on `collator` before validating UTF-8. With no
+    /// collator the old form matched `(None, _, _)` and could only reach `_ => left.cmp(right)`,
+    /// so the two must agree on EVERY input — including invalid UTF-8, embedded NULs, and
+    /// empties, which are exactly the shapes the discarded `from_utf8` used to touch.
+    #[test]
+    fn sort_alpha_compare_without_collator_matches_the_pre_shortcircuit_form() {
+        fn orig(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+            // Verbatim pre-fix body with `collator = None` folded in.
+            match (
+                None::<&super::CollatorBorrowed<'_>>,
+                std::str::from_utf8(left),
+                std::str::from_utf8(right),
+            ) {
+                (Some(collator), Ok(l), Ok(r)) if !l.contains('\0') && !r.contains('\0') => {
+                    collator.compare(l, r)
+                }
+                _ => left.cmp(right),
+            }
+        }
+        let corpus: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"ab",
+            b"alpha",
+            b"bravo",
+            b"charlie",
+            b"\x00",
+            b"a\x00b",
+            b"\xff\xfe",    // invalid UTF-8
+            b"caf\xc3\xa9", // valid UTF-8, multibyte
+            b"caf\xe9",     // invalid UTF-8 (latin-1)
+            b"zzzzzzzzzzzzzzz",
+            b"0",
+            b"10",
+            b"9",
+        ];
+        for a in corpus {
+            for b in corpus {
+                assert_eq!(
+                    super::sort_alpha_compare(None, a, b),
+                    orig(a, b),
+                    "diverged on {a:?} vs {b:?}"
+                );
+            }
+        }
     }
 
     #[test]
