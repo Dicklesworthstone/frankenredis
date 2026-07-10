@@ -114,6 +114,34 @@ So every A/B row must record:
 A heading that says "rejected **and reverted**" must state whether the revert preceded the
 measurement.
 
+### Mandatory fields for every REJECT row
+
+A REJECT written without all four is inadmissible and must not be quoted:
+
+| field | why |
+|---|---|
+| **binary `sha256`, per arm** | proves the two arms were different binaries, and lets anyone reproduce |
+| **self-time of the function under test**, on the exact input used | proves the bench reached the code (and separates *never called* from *called but not hot*) |
+| **worker identity** | workers are not equal: `hz2` has no `perf`, `ovh-a` runs `perf_event_paranoid=4`, `hz1` works |
+| **`cv_pct`** | a ratio without a variance is not a measurement |
+
+Also state the **trigger condition** as part of the input, not just the command. A lever gated on
+`CompactFieldMap` with `len <= 128` is not exercised by `SMISMEMBER` on a 100-member set of *short*
+members — that set is compact-encoded and never touches `CompactFieldMap` at all. Profiling the
+command without the trigger "confirms" a REJECT by measuring a data structure the lever does not use.
+
+### What an unprovenanced REJECT costs — a worked case
+
+`2026-06-21`: a row rejected an `expires_count == 0` fast path for `EXISTS`, on a split-invocation
+Criterion wall-clock A/B, with a server-dependent harness that resolved
+`<CARGO_TARGET_DIR>/release/frankenredis` — a path `rch` never populates. No sha256, no self-time.
+
+`2026-07-04`: `bd358b400` independently re-derived the *same guard* one level deeper, inside
+`drop_if_expired`, and measured **11.4% on SET@1, all callers, byte-exact**.
+
+A bad REJECT hid a double-digit lever for two weeks. Across both ledgers, **70 REJECT rows record 3
+binary sha256s and 10 self-times.** Assume the rest are steering the search space until re-verified.
+
 ## Worker facts (verify, don't assume)
 
 - **Not all rch workers are equal.** `hz2` has no `perf` executable; `ovh-a` runs

@@ -5286,7 +5286,64 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
-## 2026-07-10 cc_fr: RE-VERIFIED two REJECT rows against the rule — **`EXISTS` no-expiry fast path is INVALID and REOPENED** (rejected code is 7.82% self); SMISMEMBER linear `contains_key` is INVALID-but-live (6.70% self on its true trigger)
+## 2026-07-10 cc_fr: SELF-CORRECTION + RANKED WORKLIST — the EXISTS lever needs no landing: the bad REJECT hid it for two weeks, then it was re-derived independently and measured at **11.4% SET@1** (`bd358b400`). Next target by gated-frame size is **`Store::bitcount` at 97.94% self**
+
+**I was about to re-implement a lever that already exists. Correcting my own entry below.**
+
+`Store::drop_if_expired` (`fr-store/src/lib.rs:22799`) already contains the exact guard the
+2026-06-21 row rejected:
+
+```rust
+if self.expires_count == 0 {
+    return self.entries.contains_key(key);
+}
+```
+
+It landed as **`bd358b400` (2026-07-04): "drop_if_expired fast-exit when expires_count==0 — 11.4%
+SET@1, all callers (byte-exact)"**, is locked by `drop_if_expired_fastexit_matches_full_body`, and is
+strictly *better* than the rejected hunk: the rejected version guarded only `exists_no_touch`, whereas
+this one benefits every unguarded caller (SET, DEL, HSET, SETNX, RENAME, …).
+
+**So the reopen diagnosis was right and the action was wrong.** The row's rejection *was* a bad
+measurement (split-invocation Criterion wall-clock, no CV, no `instructions:u`, no sha256, and a
+server-dependent harness resolving `<CARGO_TARGET_DIR>/release/frankenredis` — a path `rch` never
+populates). It closed a real lever on **2026-06-21**; the same idea was independently re-derived
+**two weeks later** and measured at **11.4% on SET@1**. That is the provenance thesis with a number
+attached: *unprovenanced REJECT rows silently steer the search space, and the cost is measured in
+weeks and double-digit percentages.*
+
+Nothing to land for EXISTS today. Its residual (`drop_if_expired` 7.82% self on a zero-TTL keyspace)
+is the fast-exit body itself — a branch plus the one `entries.contains_key` an existence check
+*must* perform. Skipping `record_keyspace_lookup` would elide a call and a counter, not the lookup.
+**Do not re-implement.**
+
+### RANKED WORKLIST — the ~67 unprovenanced REJECT rows, by the size of the frame each one gates
+
+Ranking by gated-frame flat self%, measured on the profiles listed. Rows that gate a big frame are
+worth reopening; rows that gate a small one are cheap to leave closed.
+
+| # | REJECT row | frame it gates | self% | verdict |
+|---:|---|---|---:|---|
+| 1 | BITCOUNT popcount multi-accumulator (`+6-8%`) | `Store::bitcount` | **97.94%** | **unprovenanced; gates the single hottest function measured anywhere in this codebase. In-crate benchable (`cargo bench -p fr-store`) — the harness class that works through rch. NEXT TARGET.** |
+| 2 | SORT reply-clone / "cost is the comparison" | `core::str::converts::from_utf8` | 35.43% | reopened; `cod_fr` then measured a **51.82%** instruction win (`fda4c00f9`) |
+| 3 | uppercase-match command dispatch (`+19.7%`) | `process_buffered_frames` | 10.15–22.74% | gates a large frame; **`cod_fr` owns dispatch** — surfaced, not taken |
+| 4 | EXISTS no-expiry fast path | `drop_if_expired` + `plain_borrowed_default_key_read_allows` | 7.82% + 9.42% | REJECT was invalid; **lever already captured** by `bd358b400` (11.4% SET@1). Nothing to do |
+| 5 | small `CompactFieldMap` linear `contains_key` | `CompactFieldMap::lookup_slot_prehashed` | 6.70% | measurement invalid; code live. Ceiling ~6.7% of one command |
+| 6 | GEOHASH multi-member direct encoder | `RespFrame::encode_into` | 3.22% | REJECT **valid** — a ~3% ceiling explains the `1.01/0.997/1.009` bracket |
+| 7 | both rewrites of `encode_bulk_string_slice` ("hottest reply encoder") | — | **<2%** | REJECT **plausible**: `GET g` @4096 B is syscall + `memmove` (8.49%) bound; the encoder does not clear 2% |
+| 8 | listpack-blob encode presize (`+5.1%`) | `encode_listpack_strings_blob` | 0.35% | REJECT **valid** (measured on `SAVE`, its real path) |
+| 9 | short-key-compare micro-lever | `__memcmp_avx2_movbe` | <0.5% | REJECT **valid** |
+
+Profiles: `EXISTS k0..k15` (no TTLs), `GEOHASH g m0..m3`, `SINTERCARD 2 s1 s2 LIMIT 10`,
+`SMISMEMBER` (both a compact 100×short set **and** the true `CompactFieldMap` trigger, 100×80 B ⇒
+`hashtable`), `SORT L ALPHA STORE D`, `GET g` @4096 B, `BITCOUNT bm` @1 MiB, `SAVE` bulk-save,
+`GETSET`/`GETDEL` @4096 B. All on an existing symbol-verified binary — **profiling needs no cargo and
+no slot**, which is why this ranking exists while the A/B substrate is contended.
+
+Rows 6–9 are **confirmed closed with numbers** and can now be quoted. Rows 1, 3, 5 remain open.
+Row 1 is the one to take: it gates 97.94% self and has never had a provenanced measurement.
+
+## 2026-07-10 cc_fr: RE-VERIFIED two REJECT rows against the rule — `EXISTS` no-expiry fast path measurement is INVALID (superseded above); SMISMEMBER linear `contains_key` is INVALID-but-live (6.70% self on its true trigger)
 
 Acting on the provenance audit below, and on the fleet signal (frankensearch: 3/4 closed rows measured
 a copy or a revert; frankenmermaid: 4/4 crossing-min rows benched dead code and, once reopened,
