@@ -8020,6 +8020,123 @@ impl Store {
         // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
         // when actually due, eliding the redundant `entries.get` before the `contains_key`
         // existence check. EXPIRE's TTL-set is light (expiry-map update), so this matters.
+        // (cc_fr) Peek the deadline ONCE and reuse it as `old_expiry` below — a due key is
+        // dropped and returns via `contains_key`, so any path reaching the TTL-set has an
+        // unchanged expiry (the redundant second `expiry_ms` hash+probe is elided).
+        let peeked_expiry = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, peeked_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.entries.contains_key(key) {
+            return false;
+        }
+        // (cc_fr) `logical_key` borrows `key` for the keyspace-notify (which is off by
+        // default and early-returns), so the old `to_vec` was a per-call allocation for a
+        // no-op consumer. `notify_keyspace_event` takes `&[u8]`.
+        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+            Some((db, lk)) => (db, lk),
+            None => (0, key),
+        };
+        if milliseconds <= 0 {
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+            self.internal_entries_remove(key);
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+            self.dirty = self.dirty.saturating_add(1);
+            return true;
+        }
+
+        let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
+        let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        let old_expiry = peeked_expiry;
+        let added_expiry = old_expiry.is_none();
+        if self.with_mutated_entry(key, |_| {}).is_some() {
+            self.set_existing_expiry_ms(key, Some(expires_at_ms));
+            if added_expiry {
+                self.expires_count = self.expires_count.saturating_add(1);
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db < self.database_count {
+                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                }
+            }
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
+            self.dirty = self.dirty.saturating_add(1);
+            self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
+        }
+        true
+    }
+
+    pub fn expire_at_milliseconds(&mut self, key: &[u8], when_ms: i64, now_ms: u64) -> bool {
+        // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired (return discarded): for a
+        // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
+        // when actually due, eliding the redundant `entries.get` before the `contains_key`
+        // existence check. Mirrors the relative-time sibling `expire_milliseconds`; the
+        // absolute-time variant (EXPIREAT/PEXPIREAT) was missed by that collapse. Byte-exact
+        // (no RNG, no stat; a live/absent key's drop_if_expired had no side effect).
+        let peeked_expiry = self.expiry_ms(key);
+        if evaluate_expiry(now_ms, peeked_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+        if !self.entries.contains_key(key) {
+            return false;
+        }
+
+        // (cc_fr) `logical_key` borrows `key` for the keyspace-notify (off by default);
+        // the old `to_vec` allocated per call for a no-op consumer.
+        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+            Some((db, lk)) => (db, lk),
+            None => (0, key),
+        };
+        if i128::from(when_ms) <= i128::from(now_ms) {
+            // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
+            // the deadline is already in the past on a master, deletes the key
+            // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
+            // event, which is reserved for natural lazy/active expiry. Verified
+            // differentially vs vendored 7.2.4 (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
+            // with a past deadline all emit "del"). Mirrors the relative-time
+            // sibling expire_milliseconds above.
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+            self.internal_entries_remove(key);
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+            self.dirty = self.dirty.saturating_add(1);
+            return true;
+        }
+
+        let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
+        let old_expiry = peeked_expiry;
+        let added_expiry = old_expiry.is_none();
+        if self.with_mutated_entry(key, |_| {}).is_some() {
+            self.set_existing_expiry_ms(key, Some(expires_at_ms));
+            if added_expiry {
+                self.expires_count = self.expires_count.saturating_add(1);
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db < self.database_count {
+                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                }
+            }
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
+            self.dirty = self.dirty.saturating_add(1);
+            self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
+        }
+        true
+    }
+
+    /// Bench-only baseline: the pre-streamline `expire_milliseconds` that peeks the
+    /// key's expiry TWICE (`expiry_ms` for the lazy-drop check and again for
+    /// `old_expiry`) and allocates `logical_key` via `to_vec` even though the
+    /// keyspace-notify consumer is off by default. Byte-identical effect to
+    /// `expire_milliseconds`; exists only so a same-binary A/B can isolate the two
+    /// elisions. Not on any production path.
+    #[doc(hidden)]
+    pub fn expire_milliseconds_orig(&mut self, key: &[u8], milliseconds: i64, now_ms: u64) -> bool {
         if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -8039,7 +8156,6 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             return true;
         }
-
         let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
         let old_expiry = self.expiry_ms(key);
@@ -8053,64 +8169,6 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
-            // The key now carries a TTL; defer rebuilding the sorted sampling
-            // view until a due expiry consumer needs key-order iteration.
-            self.mark_volatile_keys_dirty();
-            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
-            self.dirty = self.dirty.saturating_add(1);
-            self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
-        }
-        true
-    }
-
-    pub fn expire_at_milliseconds(&mut self, key: &[u8], when_ms: i64, now_ms: u64) -> bool {
-        // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired (return discarded): for a
-        // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
-        // when actually due, eliding the redundant `entries.get` before the `contains_key`
-        // existence check. Mirrors the relative-time sibling `expire_milliseconds`; the
-        // absolute-time variant (EXPIREAT/PEXPIREAT) was missed by that collapse. Byte-exact
-        // (no RNG, no stat; a live/absent key's drop_if_expired had no side effect).
-        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.entries.contains_key(key) {
-            return false;
-        }
-
-        let (db, logical_key) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk.to_vec()),
-            None => (0, key.to_vec()),
-        };
-        if i128::from(when_ms) <= i128::from(now_ms) {
-            // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
-            // the deadline is already in the past on a master, deletes the key
-            // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
-            // event, which is reserved for natural lazy/active expiry. Verified
-            // differentially vs vendored 7.2.4 (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
-            // with a past deadline all emit "del"). Mirrors the relative-time
-            // sibling expire_milliseconds above.
-            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
-            self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
-            self.dirty = self.dirty.saturating_add(1);
-            return true;
-        }
-
-        let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
-        let old_expiry = self.expiry_ms(key);
-        let added_expiry = old_expiry.is_none();
-        if self.with_mutated_entry(key, |_| {}).is_some() {
-            self.set_existing_expiry_ms(key, Some(expires_at_ms));
-            if added_expiry {
-                self.expires_count = self.expires_count.saturating_add(1);
-                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                if db < self.database_count {
-                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
-                }
-            }
-            // The key now carries a TTL; defer rebuilding the sorted sampling
-            // view until a due expiry consumer needs key-order iteration.
             self.mark_volatile_keys_dirty();
             self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
@@ -33694,6 +33752,57 @@ mod tests {
         assert!(store.expire_milliseconds(b"k", 1_500, 1_000));
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(1_500));
         assert_eq!(store.pttl(b"k", 2_501), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn expire_milliseconds_streamlined_matches_orig() {
+        // (cc_fr) The streamlined `expire_milliseconds` (one expiry peek reused as
+        // old_expiry + borrowed logical_key) MUST produce the IDENTICAL observable effect
+        // as the two-peek/to_vec original for every case: fresh TTL, re-set TTL, a
+        // deadline-in-the-past DEL (milliseconds<=0), an absent key, and — with keyspace
+        // notifications ON — the SAME emitted (channel, payload) bytes (the slice vs
+        // to_vec change must not alter the notified key). Run both on parallel stores.
+        let cases: &[(&[u8], i64, u64, bool)] = &[
+            (b"fresh", 1_500, 1_000, true),   // no prior TTL -> set
+            (b"reset", 9_000, 1_000, true),   // has prior TTL -> re-set
+            (b"del", 0, 1_000, false),        // milliseconds<=0 -> DEL
+            (b"del", -5, 1_000, false),       // negative -> DEL
+            (b"absent", 3_000, 1_000, false), // key doesn't exist
+            (b"reset", 250, 1_000, true),     // re-set to a nearer deadline
+        ];
+        for &(key, ms, now, prior_ttl) in cases {
+            let build = || {
+                let mut s = Store::new();
+                s.notify_keyspace_events =
+                    super::NOTIFY_KEYSPACE | super::NOTIFY_KEYEVENT | super::NOTIFY_GENERIC;
+                if key != b"absent" {
+                    s.set(key.to_vec(), b"v".to_vec(), None, 1_000);
+                    if prior_ttl {
+                        s.expire_milliseconds(key, 4_000, 1_000);
+                    }
+                    let _ = s.drain_keyspace_notifications(); // clear setup noise
+                }
+                s
+            };
+            let mut s_new = build();
+            let mut s_orig = build();
+            let r_new = s_new.expire_milliseconds(key, ms, now);
+            let r_orig = s_orig.expire_milliseconds_orig(key, ms, now);
+            assert_eq!(r_new, r_orig, "return for {:?}/{ms}", String::from_utf8_lossy(key));
+            assert_eq!(
+                s_new.pttl(key, now),
+                s_orig.pttl(key, now),
+                "pttl for {:?}/{ms}",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(s_new.expires_count, s_orig.expires_count, "expires_count");
+            assert_eq!(
+                s_new.drain_keyspace_notifications(),
+                s_orig.drain_keyspace_notifications(),
+                "notifications for {:?}/{ms}",
+                String::from_utf8_lossy(key)
+            );
+        }
     }
 
     #[test]
