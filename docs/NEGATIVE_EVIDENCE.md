@@ -7,11 +7,13 @@ BOLD-VERIFY pass. The canonical long-form project ledger remains
 ## 2026-07-10 cc_fr: PARKED (no ratio claimed) — SORT `sort_alpha_compare` UTF-8 short-circuit: code written, correctness proven, A/B **blocked by `perf_event_paranoid=4` on the rch workers**
 
 Cashing in cod_fr's P16 attribution (entry below) and the integrity audit that reopened SORT.
-**No WIN and no REJECT is recorded, because no admissible ratio could be measured.** The patch is
-parked (uncommitted) at `tests/artifacts/perf/sort_alpha_from_utf8_lever.patch`, with the harness
-beside it as `sort_alpha_compare.bench.rs`. Note `tests/artifacts/` is **gitignored**, so those files
-live on the box, not in the repo; the same change is also sitting in the working tree as
-`crates/fr-command/{src/lib.rs, Cargo.toml, benches/sort_alpha_compare.rs}`.
+**No WIN and no REJECT is recorded, because no admissible ratio could be measured.** The patch and the
+harness are parked on-disk at
+`artifacts/optimization/sort-alpha-utf8-shortcircuit/{lever.patch, sort_alpha_compare.bench.rs}` —
+`artifacts/` is gitignored, per this repo's convention for evidence bundles, so those files live on
+the box and not in git. The change also sits in the working tree at
+`crates/fr-command/{src/lib.rs, Cargo.toml, benches/sort_alpha_compare.rs}` (the bench file is
+`cod_fr`'s and I left it untouched).
 
 THE LEVER: `sort_alpha_compare` (`fr-command/src/lib.rs`) matched on the tuple
 `(collator, from_utf8(left), from_utf8(right))`. Rust builds a tuple **before** it matches, so both
@@ -47,24 +49,35 @@ binary, one invocation, a faithful `#[inline(never)]` pre-short-circuit referenc
 statically unreachable and let LLVM delete the very `from_utf8` calls under test), eight *alternating*
 ORIG/CAND `perf stat -e instructions:u` pairs, a CV gate, and a `perf record` profile of the ORIG arm.
 
-It **fails closed**, and did:
+It **fails closed**, and did — the blocker has **two layers**, and neither is a license to build
+locally:
 
-```
-A/B INVALID: perf record failed: Access to performance monitoring ... is limited.
-perf_event_paranoid setting is 4
-```
+1. **When a worker was assigned** (`ovh-a`), it runs `perf_event_paranoid = 4` ⇒ no `instructions:u`
+   and no sampling. The harness aborted with
+   `A/B INVALID: perf record failed: ... perf_event_paranoid setting is 4`.
+2. **Now no worker is admissible at all.** Re-run three times with the mandated
+   `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench …`:
+   ```
+   [RCH] local (no admissible workers: insufficient_slots=10,active_project_exclusion=1)
+   [RCH] remote required; refusing local fallback (no worker assigned)
+   ```
 
-- rch workers run `perf_event_paranoid = 4` ⇒ no `instructions:u`, no sampling.
-- This host runs `perf_event_paranoid = 1` (perf works), but **rch does not return the linked
-  binary** — the bench executable exists only under the worker-scoped
-  `.rch-target-<worker>-pool-<hash>/` on the remote — and a local `cargo build` is forbidden.
-- A wall-clock fallback was **deliberately not taken**: on a worker shared with 11 other agents,
-  wall time is noise, and the campaign gate is `instructions:u`.
+That second line is the flag earning its keep: without `RCH_REQUIRE_REMOTE=1` those three attempts
+would each have become a **silent local `cargo bench`** at ~73 GB/hour against 77 G free.
 
-**To unblock, any one of:** (a) `perf_event_paranoid <= 2` on the rch workers; (b) a way to retrieve
-the built bench binary so it can be run under local perf (one binary, one machine — strictly stronger
-than the substrate rule); or (c) an explicit decision to accept an interleaved min-of-N **wall-clock
-primitive** ratio, labelled as such.
+This host runs `perf_event_paranoid = 1` (perf works), but **rch does not return the linked binary** —
+the bench executable exists only under the worker-scoped `.rch-target-<worker>-pool-<hash>/` on the
+remote (checked: nothing syncs back) — and a local build is forbidden. A wall-clock fallback was
+**deliberately not taken** without authorization: on a worker shared with 11 other agents, wall time
+is noise, and the campaign gate is `instructions:u`.
+
+**To unblock, any one of:** (a) `perf_event_paranoid <= 2` on the rch workers *plus* a free slot;
+(b) a way to retrieve the built bench binary so it runs under local perf — one binary, one machine,
+interleaved, which is strictly *stronger* than the substrate rule since worker choice stops mattering;
+or (c) an explicit decision to accept an interleaved min-of-N **wall-clock primitive** ratio, labelled
+as such. Note (c) is safer than it sounds against the DCE trap: a ratio **≫ 1 is self-certifying**,
+because if LLVM had eliminated the `from_utf8` under test, ORIG and CAND would be the same code and
+the ratio would read ~1.000. The DCE hazard only bites a REJECT that observes ~1.000.
 
 Do **not** ship this as a KEEP without one of those. Do not re-derive the mechanism — it is settled by
 two profiles. Do not retry the reply-clone (C3) lever: it does not clear 0.1% self in either profile.
