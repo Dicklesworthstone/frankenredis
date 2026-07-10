@@ -4,6 +4,53 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: KEEP — MEMORY USAGE dispatch-floor front gate: P16 `instructions:u` 10.957B -> 2.608B; now 0.629x Redis
+
+NEGATIVE-EVIDENCE CHECK first: writev/output is already rejected; MEMORY accounting
+target changes / allocator counting are rejected; uhthd owns structural RAM/storage work.
+This hunk touches none of those. The fresh top attributed frame for the selected P16 row
+was `frankenredis::process_buffered_frames`, so the lever is a dispatch-position move for
+the already-existing `MEMORY USAGE key` borrowed parser/executor.
+
+Target selection: current P16/C50 sweep (300k ops, same host, excluding RESTORE/persist
+and uhthd storage paths) found `MEMORY USAGE k` as the largest live row: fr `477,707
+req/s` vs Redis `1,063,830 req/s` (`0.449x`). Profile/stat setup: server pinned to core
+2, client pinned to cores 6,7, `redis-benchmark -c50 -P16 -n1000000 MEMORY USAGE k`,
+`perf stat -e instructions:u -p <server_pid>`.
+
+Ranked self-time attribution (full `>=0.1%` tables in
+`artifacts/optimization/frankenredis-ohsk5-attrib/20260710T-current/memory_usage_profile/`):
+
+| engine | top self frames |
+| --- | --- |
+| FrankenRedis control | `process_buffered_frames` 29.49%, `__memcmp_avx2_movbe` 13.16%, `parse_borrowed_plain_key_arg2_packet` 2.66%, `estimate_value_memory_usage_bytes` 2.52%, hash `contains_key` 1.68%, `parse_borrowed_plain_memory_usage_packet` 1.24%, `RespFrame::encode_into` 1.18%, `execute_plain_memory_usage_borrowed` 1.06% |
+| Redis 7.2.4 | `je_malloc_usable_size` 9.93%, vDSO time 8.71%, `__strcasecmp_l_avx2` 8.26%, `__strchr_avx2` 5.10%, `processMultibulkBuffer` 3.71%, `call` 3.42%, `je_free` 3.16%, `je_malloc` 2.86%, `zmalloc` 2.85%, `siphash_nocase` 2.79% |
+
+Decision: KEEP. Five 1M-op trials, exact binaries: control
+`2c0a583f95bc96e6ed8c09d7b245d27324cecf4e11e86e23831fc538da167af1`,
+candidate `e0dd924954b212c4f2bf62c452aad71e5fd6ad89942b585d1143325102cf8c24`,
+Redis `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+| engine | mean `instructions:u` | cv | mean req/s |
+| --- | ---: | ---: | ---: |
+| control | 10,957,353,487 | 0.001% | 355,762 |
+| candidate | 2,607,606,576 | 0.316% | 779,131 |
+| Redis | 4,145,678,107 | 2.827% | 797,516 |
+
+Candidate/control `0.238x` instructions (4.20x fewer); candidate/Redis `0.629x`;
+control/Redis `2.643x`. Post-change profile moved `process_buffered_frames` 29.49% ->
+4.31% and `__memcmp` 13.16% -> 3.01%; residual is expected floor/executor/accounting
+(`try_dispatch_floor_classified_action` 7.40%, `estimate_value_memory_usage_bytes` 5.81%,
+`execute_plain_memory_usage_borrowed` 4.70%). Guard on neighboring 6-byte `GETBIT bm 7`
+is neutral at candidate/control `instructions:u = 1.000x` (3 x 500k ops).
+
+Source: add `BorrowedDispatchFloorCommand::Memory` /
+`BorrowedDispatchFloorClass::MemoryUsage` and route exact `*3 MEMORY USAGE key` through
+the existing `parse_borrowed_plain_memory_usage_packet` and unchanged
+`execute_plain_memory_usage_borrowed`; `MEMORY USAGE ... SAMPLES`, malformed, and gated
+forms fall back to the existing borrowed multibulk path. Do not retry allocator-counting,
+modeled MEMORY accounting, or uhthd storage-layout work from this result.
+
 ## 2026-07-10 cc_fr: KEEP (verify) — manifest lever #5 lazy set-DUMP integer view CONFIRMED: −29.8% / −24.7% `instructions:u` (the BIGGEST of the six) + #2/#3/#4 profile-ranked as near-exhausted
 
 NEGATIVE-EVIDENCE CHECK: grepped both ledgers for all five remaining manifest levers

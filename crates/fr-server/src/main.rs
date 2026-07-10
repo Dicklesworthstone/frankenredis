@@ -12149,6 +12149,7 @@ enum BorrowedDispatchFloorClass {
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
     Llen,
+    MemoryUsage,
     Pfcount,
     Scard,
     Setbit,
@@ -12175,6 +12176,7 @@ enum BorrowedDispatchFloorCommand {
     Hlen,
     Llen,
     Lpush,
+    Memory,
     Pfcount,
     Rpush,
     Sadd,
@@ -12227,6 +12229,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
+            [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -12369,6 +12372,7 @@ fn classify_borrowed_dispatch_floor_packet(
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
         (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
         (2, BorrowedDispatchFloorCommand::Pfcount) => Some(BorrowedDispatchFloorClass::Pfcount),
+        (3, BorrowedDispatchFloorCommand::Memory) => Some(BorrowedDispatchFloorClass::MemoryUsage),
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
@@ -12833,6 +12837,25 @@ fn try_dispatch_floor_classified_action(
                     packet.key,
                     ts,
                 )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::MemoryUsage => {
+            if let Some(packet) = parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_memory_usage_borrowed(packet.key, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -30062,6 +30085,20 @@ mod tests {
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nMeMoRy\r\n$5\r\nUsAgE\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::MemoryUsage)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$1\r\nk\r\n$7\r\nSAMPLES\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$6\r\nSeTbIt\r\n$1\r\nb\r\n$1\r\n7\r\n$1\r\n1\r\n",
                 &cfg,
             ),
@@ -30281,6 +30318,16 @@ mod tests {
                 b"*2\r\n$7\r\nPFCOUNT\r\n$1\r\nh\r\n",
                 &ParserConfig {
                     max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$5\r\nUSAGE\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
                     ..ParserConfig::default()
                 },
             ),
