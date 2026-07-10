@@ -15,6 +15,9 @@ use packed_set::{
 };
 
 use fr_expire::evaluate_expiry;
+// The d2string listpack-score decision is shared with fr-persist's RDB-save encoder.
+// Keeping one copy in fr-protocol is what stops the two from drifting apart again.
+use fr_protocol::{ZsetScoreListpackEntry, zset_score_listpack_entry};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -28382,63 +28385,6 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
         return false;
     }
     true
-}
-
-/// How Redis's `zzlInsertAt` would encode `score` as a listpack entry: it renders
-/// `d2string(score)` then lets `lpStringToInt64` re-decide int-vs-string. Deciding
-/// straight from the `f64` lets the two common arms skip that format + decimal
-/// re-parse round trip entirely.
-enum ZsetScoreListpackEntry {
-    /// `d2string` emits a canonical i64 decimal, so the entry is int-encoded.
-    Int(i64),
-    /// `d2string`'s output provably is NOT a canonical i64 decimal, so the entry is
-    /// string-encoded and the formatted bytes need no re-parse.
-    Str,
-    /// Integral but outside `double2ll`'s window, so `d2string` falls back to grisu2 —
-    /// whose shortest form may still be a canonical i64 decimal. Must be re-parsed.
-    Reparse,
-}
-
-/// Classify a zset score exactly as `d2string` (`push_redis_double_ascii`) branches,
-/// so the emitted listpack entry is byte-IDENTICAL to formatting the score and running
-/// `encode_listpack_entry` over the result.
-///
-/// The `Reparse` arm is load-bearing, not defensive: above `double2ll`'s window grisu2
-/// still emits a plain canonical decimal for some integral doubles — e.g. upstream renders
-/// `6917529027641081856` as `"6917529027641082000"` and int-encodes it — so those bytes
-/// must go through `parse_listpack_integer`. Only `Str` may skip it.
-/// (frankenredis-dump-zset-score-int)
-fn zset_score_listpack_entry(score: f64) -> ZsetScoreListpackEntry {
-    // "nan" / "inf" / "-inf" — never a canonical decimal.
-    if !score.is_finite() {
-        return ZsetScoreListpackEntry::Str;
-    }
-    // `d2string` special-cases zero BEFORE `double2ll`, and "-0" is non-canonical
-    // (`lpStringToInt64` rejects it) while "0" int-encodes. This must precede the
-    // integral test below, for which -0.0 is indistinguishable from +0.0.
-    if score == 0.0 {
-        return if score.is_sign_negative() {
-            ZsetScoreListpackEntry::Str
-        } else {
-            ZsetScoreListpackEntry::Int(0)
-        };
-    }
-    // A non-integral double's shortest grisu2 form always carries a '.' or an 'e':
-    // the plain-integer emit branch requires a non-negative decimal exponent, which
-    // would make the value integral. So the render can never re-parse as an integer.
-    if score.fract() != 0.0 {
-        return ZsetScoreListpackEntry::Str;
-    }
-    // `double2ll`'s window, mirrored bound-for-bound from `push_redis_double_ascii`
-    // (which rounds `LLONG_MAX/2` to 2^62, exactly as upstream's `(double)(LLONG_MAX/2)`).
-    // Upstream re-checks `(long long)d == d` afterwards; here `fract() == 0.0` above
-    // already proves the cast is exact, so the round trip back through f64 is skipped.
-    let lo = (-i64::MAX / 2) as f64;
-    let hi = (i64::MAX / 2) as f64;
-    if score >= lo && score <= hi {
-        return ZsetScoreListpackEntry::Int(score as i64);
-    }
-    ZsetScoreListpackEntry::Reparse
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {

@@ -2000,22 +2000,31 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
 
+/// Emit `member` then `score` as upstream `zzlInsertAt` would: `d2string(score)` fed through
+/// `lpAppend`'s int-vs-string decision.
+///
+/// This used to format the score with Rust's `{}`, which NEVER uses scientific notation, so the
+/// saved RDB diverged from redis 7.2.4 byte-for-byte: `1e-7` was written as `"0.0000001"`,
+/// `1.5e300` as a 301-digit decimal (then LZF-compressed), and `5e18` as `"5000000000000000000"`
+/// — which re-parsed as an i64 and became an *integer* entry where upstream stores the string
+/// `"5e+18"`. It also used a `±1e18` gate rather than `double2ll`'s real `±2^62` window.
+/// Both are fixed by deferring to the shared `fr_protocol` classifier.
 fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
     encode_listpack_entry(encoded, member);
-    if let Some(score) = zset_listpack_integer_score(score) {
-        let (scratch, start) = decimal_i64_scratch(score);
-        encode_listpack_entry(encoded, &scratch[start..]);
-    } else {
-        let score = format!("{score}");
-        encode_listpack_entry(encoded, score.as_bytes());
-    }
-}
-
-fn zset_listpack_integer_score(score: f64) -> Option<i64> {
-    if score.fract() == 0.0 && (-1e18..=1e18).contains(&score) && score.is_finite() {
-        Some(score as i64)
-    } else {
-        None
+    match fr_protocol::zset_score_listpack_entry(score) {
+        fr_protocol::ZsetScoreListpackEntry::Int(score) => {
+            encode_listpack_integer_entry(encoded, score);
+        }
+        fr_protocol::ZsetScoreListpackEntry::Str => {
+            let mut rendered = Vec::with_capacity(24);
+            fr_protocol::push_redis_double_ascii(&mut rendered, score);
+            encode_listpack_string_entry(encoded, &rendered);
+        }
+        fr_protocol::ZsetScoreListpackEntry::Reparse => {
+            let mut rendered = Vec::with_capacity(24);
+            fr_protocol::push_redis_double_ascii(&mut rendered, score);
+            encode_listpack_entry(encoded, &rendered);
+        }
     }
 }
 
@@ -2492,6 +2501,12 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
         return;
     }
 
+    encode_listpack_string_entry(buf, entry);
+}
+
+/// `encode_listpack_entry` for bytes already known not to be a canonical i64 decimal.
+#[inline]
+fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
     let start = buf.len();
     if entry.len() < 64 {
         buf.push(0x80 | entry.len() as u8);
@@ -4014,6 +4029,109 @@ pub fn read_rdb_file_with_functions(
 #[cfg(test)]
 mod tests {
     use fr_protocol::{RespFrame, RespParseError};
+
+    /// Bytes captured by hexdumping the RDB that vendored redis 7.2.4 `SAVE`d for
+    /// `ZADD <key> <score> m`, sliced to the two listpack entries (member then score).
+    /// Before this was fixed, fr wrote an int64 entry for `5e+18`, a 301-digit
+    /// LZF-compressed decimal for `1.5e+300`, and `"0.0000001"` for `1e-7`.
+    #[test]
+    fn zset_score_listpack_entry_matches_vendored_rdb_bytes() {
+        const MEMBER: &[u8] = b"m";
+        // 0x81 'm' 0x02  = member entry, then the score entry redis actually wrote.
+        let cases: &[(f64, &[u8])] = &[
+            (5e18, &[0x81, b'm', 0x02, 0x85, b'5', b'e', b'+', b'1', b'8', 0x06]),
+            (
+                1.5e300,
+                &[
+                    0x81, b'm', 0x02, 0x88, b'1', b'.', b'5', b'e', b'+', b'3', b'0', b'0', 0x09,
+                ],
+            ),
+            (1e-7, &[0x81, b'm', 0x02, 0x84, b'1', b'e', b'-', b'7', 0x05]),
+        ];
+        for (score, want) in cases {
+            let mut got = Vec::new();
+            super::encode_zset_score_listpack_entry(&mut got, MEMBER, *score);
+            assert_eq!(
+                got,
+                *want,
+                "score {score} (d2string={:?}) did not match vendored RDB bytes",
+                fr_protocol::format_redis_double(*score)
+            );
+        }
+    }
+
+    /// The encoder must equal the reference form for EVERY score: render with `d2string`,
+    /// then let `encode_listpack_entry` re-decide int-vs-string (upstream's own round trip).
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn zset_score_listpack_entry_equals_d2string_reference_form() {
+        let mut scores: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            127.0,
+            128.0,
+            -4097.0,
+            32768.0,
+            2_147_483_648.0,
+            1e15,
+            1e16,
+            1e17,
+            1e18,
+            1e18 + 1.0,
+            -1e18 - 1.0,
+            2e18,
+            4e18,
+            // double2ll's real window is +-2^62, NOT +-1e18 and NOT +-2^52.
+            4.611686018427387904e18,
+            -4.611686018427387904e18,
+            // Above the window, yet grisu2 still plain-renders these -> int entry upstream.
+            6.917529027641081856e18,
+            7.2e18,
+            // Above the window and the plain form overflows i64 -> string entry.
+            9.223372036854775808e18,
+            5e18,
+            7e18,
+            -5e18,
+            1e20,
+            1.5e300,
+            -1.5e300,
+            1e-7,
+            1e-10,
+            0.000001,
+            3.14,
+            -2.5,
+            0.1,
+            123456789.123456789,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+        ];
+        for i in -3000i64..=3000 {
+            scores.push(i as f64);
+            scores.push(i as f64 + 0.5);
+        }
+        for &score in &scores {
+            let mut want = Vec::new();
+            super::encode_listpack_entry(&mut want, b"m");
+            let mut rendered = Vec::new();
+            fr_protocol::push_redis_double_ascii(&mut rendered, score);
+            super::encode_listpack_entry(&mut want, &rendered);
+
+            let mut got = Vec::new();
+            super::encode_zset_score_listpack_entry(&mut got, b"m", score);
+            assert_eq!(
+                want,
+                got,
+                "score {score} (d2string={:?}) diverged from the reference form",
+                fr_protocol::format_redis_double(score)
+            );
+        }
+    }
 
     #[test]
     fn parse_listpack_integer_matches_to_string_roundtrip() {

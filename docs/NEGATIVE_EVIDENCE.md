@@ -4,6 +4,65 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: CORRECTNESS FIX — RDB-save wrote non-d2string zset scores (`"0.0000001"` for `1e-7`, a 301-digit decimal for `1.5e300`, an INT entry for `5e18`) — perf ratio DEFERRED, rch cannot return a linked binary
+
+NEGATIVE-EVIDENCE CHECK: grepped both ledgers for `zset_listpack_integer_score`,
+`encode_zset_score_listpack_entry`, `rdbSaveObject`, and bulk-save rows. **No prior entry
+covers the RDB-save zset score encoder.** Not a retry of the DUMP-side lever below (different
+crate, different code path: `fr-persist::encode_compact_zset_listpack`, reached only from
+RDB save — `fr-store::dump_key` does its own encoding).
+
+**THE BUG.** `fr-persist::encode_zset_score_listpack_entry` rendered the score with Rust's
+`format!("{score}")`. Rust's `Display` for `f64` **never uses scientific notation**; upstream's
+`d2string` does. It also gated the integer fast path on `±1e18` instead of `double2ll`'s real
+`±2^62` window. Verified by hexdumping the RDB that each engine `SAVE`d for `ZADD k <score> m`
+(both write `RDB_TYPE_ZSET_LISTPACK` = `0x11`):
+
+| score | vendored redis 7.2.4 entry | frankenredis entry (before) |
+|---|---|---|
+| `5e18` | `85` `"5e+18"` (string, 5 B) | `f4 00 00 f4 44 82 91 63 45` — **int64** |
+| `1.5e300` | `88` `"1.5e+300"` (8 B) | `c3 …` — **LZF-compressed 301-digit decimal** |
+| `1e-7` | `84` `"1e-7"` (4 B) | `89` `"0.0000001"` |
+
+Values survive a reload (redis's `zzlStrtod` parses all three forms), so this is a **byte-parity
+and RDB-size** defect, not data loss — but a 301-byte score entry can also push a loading redis
+to convert the zset to skiplist where its own RDB would have stayed listpack. `-0.0` was a fourth
+divergence (`Some(0)` → int `0` vs upstream's string `"-0"`), latent only because redis and fr both
+normalize `ZADD k -0` to `+0`.
+
+**ROOT CAUSE = duplicated decision.** `fr-store` and `fr-persist` each kept a private copy of the
+"how does `d2string` encode this score" rule, and they drifted. Fixed by hoisting the single
+classifier `zset_score_listpack_entry(f64) -> {Int|Str|Reparse}` into `fr-protocol`, beside the
+`d2string`/`fpconv` port it describes, and having both crates call it. `fr-persist` now renders via
+`push_redis_double_ascii` (the real `d2string`) instead of `format!`.
+
+Also corrected `format_redis_double`'s doc comment, which claimed upstream's exact-integer
+`ll2string` path uses a "±2^52 window". It does not — `util.c::double2ll` gates on
+`(double)(±LLONG_MAX/2)` ≈ **±2^62**. That false comment is what made the `±1e18` gates look
+suspicious in the first place; acting on it would have broken parity for `1e16 … 2^62`.
+
+VERIFIED: new `zset_score_listpack_entry_matches_vendored_rdb_bytes` pins the encoder against the
+**actual bytes hexdumped out of redis's RDB** for `5e18` / `1.5e300` / `1e-7`;
+`zset_score_listpack_entry_equals_d2string_reference_form` checks ~6k scores against the reference
+`d2string`-then-`encode_listpack_entry` form (incl. `±2^62`, the `6917529027641081856` grisu2
+counterexample, `2^63`, `±inf`, `nan`, `-0.0`). All green via `rch`: fr-protocol 86/86,
+fr-store 751/751, fr-persist 199+2, fr-conformance 333/333, 0 failures.
+
+**PERF RATIO: NOT MEASURED — do not infer one.** `rch exec -- cargo build --profile release-perf
+-p fr-server` retrieves only `Custom CARGO_TARGET_DIR artifacts: 2 files, 769 bytes` — **no linked
+binary** — and the active disk constraint forbids a local build, so the two servers a same-worker
+A/B needs cannot be produced. Per the 2026-07-10 methodology addendum, an A/B split across two
+`rch` invocations is INVALID anyway (no `--worker` flag; worker choice is non-deterministic and the
+ratio is not worker-invariant). Direction is expected-favourable (the `Str` arm drops a `String`
+alloc and a re-parse; the `Int` arm widens to `2^62` and direct-encodes instead of
+scratch-decimal-then-re-parse) but that is REASONED, not measured.
+
+**To measure it later, the only valid substrate:** register BOTH arms in ONE criterion group in ONE
+`rch` invocation, keeping the pre-fix encoder as a bench-only reference fn, alternating. That needs
+`encode_zset_score_listpack_entry` (and `encode_listpack_entry`) reachable from a bench — today they
+are private to `fr-persist`. Do NOT bench arm-per-invocation, and do NOT use the stash-ORIG/pop
+recipe.
+
 ## 2026-07-10 cc_fr: KEEP — zset listpack DUMP score entry decided from the f64 (one probe, no format+reparse) — bigint `-51.0%`, fractional `-2.7%`, integer `-0.3%` `instructions:u`, byte-exact
 
 NEGATIVE-EVIDENCE CHECK first. The assigned lane was **already closed and was not retried**:

@@ -173,6 +173,66 @@ pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\r\n");
 }
 
+/// How Redis's `zzlInsertAt` encodes `score` as a sorted-set listpack entry: it renders
+/// `d2string(score)` and then lets `lpStringToInt64` re-decide int-vs-string. Deciding it
+/// straight from the `f64` lets the two common arms skip that format + decimal re-parse.
+///
+/// This lives beside [`push_redis_double_ascii`] on purpose: it is a statement *about*
+/// `d2string`'s branching, and both the DUMP encoder (`fr-store`) and the RDB-save encoder
+/// (`fr-persist`) must agree with it. They previously kept private copies, which silently
+/// drifted — `fr-persist` formatted with Rust's `{}` (never scientific) and emitted
+/// `"0.0000001"` where upstream emits `"1e-7"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZsetScoreListpackEntry {
+    /// `d2string` emits a canonical i64 decimal, so the entry is int-encoded.
+    Int(i64),
+    /// `d2string`'s output provably is NOT a canonical i64 decimal, so the entry is
+    /// string-encoded and the formatted bytes need no re-parse.
+    Str,
+    /// Integral but outside `double2ll`'s window, so `d2string` falls back to grisu2 —
+    /// whose shortest form may still be a canonical i64 decimal. Must be re-parsed.
+    Reparse,
+}
+
+/// Classify `score` exactly as [`push_redis_double_ascii`] (`d2string`) branches, so the
+/// emitted listpack entry is byte-IDENTICAL to formatting the score and re-parsing it.
+///
+/// The `Reparse` arm is load-bearing, not defensive: above `double2ll`'s window grisu2 still
+/// emits a plain canonical decimal for some integral doubles — upstream renders
+/// `6917529027641081856` as `"6917529027641082000"` and int-encodes it — so those bytes must
+/// go through a `parse_listpack_integer`. Only `Str` may skip it.
+pub fn zset_score_listpack_entry(score: f64) -> ZsetScoreListpackEntry {
+    // "nan" / "inf" / "-inf" — never a canonical decimal.
+    if !score.is_finite() {
+        return ZsetScoreListpackEntry::Str;
+    }
+    // `d2string` special-cases zero BEFORE `double2ll`, and "-0" is non-canonical
+    // (`lpStringToInt64` rejects it) while "0" int-encodes. This must precede the integral
+    // test below, for which -0.0 is indistinguishable from +0.0.
+    if score == 0.0 {
+        return if score.is_sign_negative() {
+            ZsetScoreListpackEntry::Str
+        } else {
+            ZsetScoreListpackEntry::Int(0)
+        };
+    }
+    // A non-integral double's shortest grisu2 form always carries a '.' or an 'e': the
+    // plain-integer emit branch requires a non-negative decimal exponent, which would make
+    // the value integral. So the render can never re-parse as an integer.
+    if score.fract() != 0.0 {
+        return ZsetScoreListpackEntry::Str;
+    }
+    // `double2ll`'s window, mirrored bound-for-bound from `push_redis_double_ascii` below.
+    // Upstream re-checks `(long long)d == d` afterwards; `fract() == 0.0` above already
+    // proves the cast is exact, so the round trip back through f64 is skipped.
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if score >= lo && score <= hi {
+        return ZsetScoreListpackEntry::Int(score as i64);
+    }
+    ZsetScoreListpackEntry::Reparse
+}
+
 /// Append the Redis 7.2 `d2string` ASCII representation of `value` directly
 /// into `out`, byte-identical to [`format_redis_double`] but without building an
 /// intermediate `String`.
@@ -632,8 +692,11 @@ impl RespFrame {
 pub fn format_redis_double(value: f64) -> String {
     // Faithful port of util.c::d2string (the path addReplyHumanLongDouble /
     // addReplyDouble take for RESP2 scores): special-case nan/inf/±0, take the
-    // exact-integer ll2string fast path ONLY inside the ±2^52 window upstream
-    // uses, otherwise grisu2 via fpconv_dtoa. (frankenredis-sk4ss)
+    // exact-integer ll2string fast path ONLY inside the window upstream's
+    // util.c::double2ll uses — `(double)(±LLONG_MAX/2)`, which rounds to ±2^62
+    // (4611686018427387904), NOT ±2^52 — otherwise grisu2 via fpconv_dtoa.
+    // The bound matters: the oracle renders 1e16/1e18/4e18 as plain decimals and
+    // only goes scientific at 5e18 ("5e+18"). (frankenredis-sk4ss)
     let mut out = Vec::with_capacity(24);
     push_redis_double_ascii(&mut out, value);
     String::from_utf8(out).expect("ascii")
