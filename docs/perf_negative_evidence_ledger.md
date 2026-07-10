@@ -5287,6 +5287,47 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
+## 2026-07-10 cc_fr: SURFACE (handoff to cod_fr) — next dispatch-floor target ranked: **ZSCORE at 28.97% cascade self-time**. Ready-to-apply lever. BLOCKED for me: no linked binary + cod owns `ohsk5`
+
+Profiled the hottest **unfloored fixed-arity** commands to rank the next `BorrowedDispatchFloorCommand`
+target (25 already floored: TTL/TYPE/…/LPOS/OBJECT). `fr-cand3` (`sha256 ad6506c4…`), host
+`thinkstation1`, pipelined single-command blast (P16-shape), 2.5 s quiesce, `perf record -F 997`.
+Self% of `frankenredis::process_buffered_frames` — the dispatch cascade the floor short-circuits:
+
+| command | `process_buffered_frames` self% | shape | existing borrowed parser+executor? |
+|---|---:|---|---|
+| **ZSCORE** | **28.97%** | `*3 key member` | **yes** — `parse_borrowed_plain_zscore_packet` + `execute_plain_zscore_borrowed_into` |
+| SISMEMBER | 27.52% | `*3 key member` | yes — `parse_borrowed_plain_sismember_packet` + `execute_plain_sismember_borrowed` |
+| PTTL | 24.25% | `*2 key` | yes (keymeta family, mirrors TTL) |
+| SINTERCARD | 22.72% | variadic | harder (variadic) |
+| GETBIT | 19.99% | `*3 key offset` | yes |
+
+**READY-TO-APPLY LEVER (for cod):** add `Zscore` to `BorrowedDispatchFloorCommand` +
+`borrowed_dispatch_floor_command` (6-byte token `ZSCORE`), routing exact `*3 ZSCORE key member`
+through the already-live `parse_borrowed_plain_zscore_packet` + `execute_plain_zscore_borrowed_into`
+(both shipped, main.rs:15554 / fr-runtime:30182, and already used by the older borrowed fast path at
+main.rs:4748). Byte-identity follows from reusing the exact parser/executor family; malformed /
+wrong-arity / gated packets fall back. Same structure as the 25 landed floors. SISMEMBER is the
+natural second (same `*3 key member` parser family, one adjacent commit).
+
+**WHY I DID NOT SHIP IT — surfaced, not taken:**
+1. A dispatch-floor lever's proof is a `redis-benchmark -c50 -P16` A/B against a **running
+   `fr-server`**, which needs a linked binary. `rch` returns none (`2 files, 769 bytes`), and a local
+   build is forbidden. cod's own floor entries note this: *"artifact retrieval issues forced local
+   same-machine release-perf binaries"* — cod builds locally; the disk constraint bars me from it.
+2. The classifier lives in the `fr-server` **binary** crate, so it is **not `cargo bench`-able**
+   in-crate either — there is no median-self-time substrate available to me for it.
+3. This is **cod's active lane** (`frankenredis-ohsk5`): cod landed the LPOS (`3c9f1dc16`) and OBJECT
+   IDLETIME (`037083ebb`) floors in the last two commits. Two agents editing
+   `crates/fr-server/src/main.rs`'s floor enum at once is the shared-tree collision the coordination
+   rules forbid.
+
+So the honest gate — *median self-time vs a paired null control* — is **unreachable for a floor lever
+under the remote-only constraint**, unlike the fr-simd kernels (which are `cargo bench`-able in a lib
+crate). Handoff to cod, who owns `ohsk5` and can build locally to A/B it. **To unblock me on this
+family:** linked-binary retrieval from `rch`, OR moving the floor classifier into a lib crate so it is
+`cargo bench`-able.
+
 ## 2026-07-10 cc_fr: STRATEGY — a crate-wide `+avx2` build target is SIMPLER than per-site dispatch AND **bit-identical** for fr (Rust never auto-contracts FP; fr has zero `mul_add`). BITOP AVX2 is only a size-conditional ~1.3x, NOT wired
 
 Two findings this pass: a measured BITOP result, and the answer to "is a crate-wide build target simpler
