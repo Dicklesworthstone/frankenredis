@@ -4,6 +4,103 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: KEEP (verify) — manifest lever #6 zset DUMP direct-emit CONFIRMED: −6.7…−11.6% `instructions:u`, byte-exact — plus a NEW frac-score regression in the int-score shortcut
+
+NEGATIVE-EVIDENCE CHECK first. Two lane items were grepped and one is DECLINED as a
+recorded rejection (see the DECLINED section at the bottom of this entry).
+
+`docs/perf_pending_bench_manifest.md` lists 6 persist levers landed code-first with
+UNVERIFIED magnitude. This entry discharges **#6** (`921d21913`, zset listpack DUMP
+direct-emit). No source changed — this is the release A/B the manifest asks for.
+
+PROFILE FIRST (rank the manifest levers on the DUMP-command path). perf flat self%, HEAD,
+30,000 zsets × 100 members, cold cache, `perf record -F 1999 -m 4 -p <pid>` around the DUMP
+pass ONLY (a first attempt that left the reseed inside the window was polluted by
+ZADD/quicksort and was discarded):
+
+| symbol | self% |
+| --- | ---: |
+| `fr_persist::lzf_compress` | **32.50** |
+| `Store::dump_key` | 12.69 |
+| `fr_persist::crc64_redis` | 5.31 |
+| `fr_store::encode_listpack_entry` | 5.11 |
+| `__memmove_avx_unaligned_erms` | 3.77 |
+| `foldhash` (dump-payload-cache insert) | 3.44 |
+| `fr_store::encode_listpack_backlen` | 3.22 |
+| `fr_store::parse_listpack_integer` | 2.16 |
+
+So the manifest's DUMP-command levers (#4 presize, #6 direct-emit) live in the ~25%
+`dump_key` + `encode_listpack_*` cluster; LZF is the larger term. #1/#2/#3/#5 sit on
+RDB-save / intset / set paths this workload does not exercise.
+
+**BENCH TRAP (bank this):** compact-zset DUMP is MEMOIZED in `Store::dump_payload_cache`,
+keyed by `(key, modification_count, zset_max_listpack_*)` and cleared only by `flushdb`. A
+repeated-DUMP blast measures `Vec::clone` of the cache, NOT the encoder. Every trial below
+reseeds and DUMPs each key exactly once (always a cache miss).
+
+FACTORIAL A/B — three `release-perf` binaries built from ONE source dir, differing only in
+`dump_key`'s zset-listpack branch. `ctlA` `8c1e171a43b0b975c01a54bb0cf941f8` = verbatim
+pre-`921d21913` `Vec<Vec<u8>>` pairs materialization (`member.to_vec()` per member + a second
+`Vec<&[u8]>`), string scores. `ctlB` `8332987d7181e85e235725f31c7de105` = direct-emit, string
+scores. `cand` `6f9ea3d6612e1f0df5337fb80025e186` = HEAD (direct-emit + the LATER
+`9ce4b42ac` int-score shortcut). `ctlA/ctlB` isolates lever #6; `ctlB/cand` isolates the
+int-score shortcut. Server-side `perf stat -e instructions:u`, 18,000 zsets × 100 members ×
+32-byte members, median of 9 trials, engines pinned to distinct cores, all cv ≤ 4.92%:
+
+| shape | ctlA instr/dump | ctlB instr/dump | cand instr/dump | **ctlA/ctlB = #6** | ctlB/cand = int-score |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| integer scores | 167,201 | 147,863 | 122,941 | **1.1308 (−11.6%)** | 1.2027 (−16.9%) |
+| fractional scores | 230,716 | 214,351 | 219,910 | **1.0763 (−7.1%)** | **0.9747 (+2.6%)** |
+
+Reproduced across three independent runs (#6 = 1.104 / 1.111 / 1.131 int; 1.072 / 1.121 /
+1.076 frac). **VERDICT: #6 is a real, score-kind-independent win — KEEP.** Wall clock is NOT
+comparable across these engines (each is pinned to a different core and the harness spawns a
+client process per measurement; `ctlB` read 36.9k and 43.5k dump/s in two runs). Use the
+instruction counts.
+
+BYTE-EXACT: all three binaries emit DUMP payloads identical to vendored redis 7.2.4 for both
+shapes (794B int / 1073B frac). 14/15 DUMP/RESTORE differential harnesses PASS against a
+FRESH default-config oracle with `--enable-debug-command yes` on both engines
+(`zset_mixed_member_dump_differ`, `hash_mixed_member_dump_differ`, `set_listpack_dump_differ`,
+`intset_width_dump_differ`, `dump_byte_equality_gate`, `lzf_dump_byte_equality_differ`,
+`dump_restore_fuzz`, `dump_restore_differ`, `reload_dump_determinism_gate`,
+`restore_*` family). `quicklist_dump_boundary_differ` fails IDENTICALLY on the control ⇒
+PRE-EXISTING, bead `frankenredis-s36di`.
+
+**NEW FINDING — reconciles a contradictory ledger.** `ctlB/cand` shows the int-score shortcut
+(`9ce4b42ac`) is a large win on integer scores (−16.9…−26.5% instr) but a **+2.6…+2.9%
+instruction REGRESSION on fractional-score zsets**, reproducible in all three runs: it pays a
+failed `zset_score_listpack_integer(f64)` probe per member, then `encode_listpack_entry`
+re-probes the formatted string through `parse_listpack_integer`. The long-form ledger row
+"zset DUMP integer-score listpack shortcut in `Store::dump_key` — mixed then rejected
+(1.0805x then 0.9559x)" and `9ce4b42ac`'s "+37%" are therefore BOTH correct: the lever wins on
+integer scores and loses slightly on fractional ones, and the earlier A/B evidently sampled
+the fractional/mixed shape. Filed as a follow-up bead; the fix is to let the failed probe
+select a known-non-integer string encode instead of re-probing — but ONLY after proving that
+`zset_score_listpack_integer` returns `None` exclusively for scores whose decimal rendering
+also fails `parse_listpack_integer` (an integral score outside the listpack int range would
+otherwise silently change the entry encoding).
+
+RESIDUAL: fr/redis DUMP-command throughput is 0.37–0.53x. The profile says that gap is
+dominated by `lzf_compress` (32.5%) plus the dump-payload-cache insert (`payload.clone()` +
+`foldhash` 3.4%), which redis does not pay — NOT by the listpack encoder the manifest levers
+target. Do not chase further listpack-encoder micro-levers here without fresh evidence.
+
+### DECLINED (recorded rejection, not retried): GETSET / GETDEL zero-copy `_into`
+
+- **GETSET `_into` is ALREADY BUILT AND SHIPPED**, not "unbuilt": `Store::getset_with`
+  (`fr-store/src/lib.rs:8392`) + `Runtime::execute_plain_getset_borrowed_into`
+  (`fr-runtime/src/lib.rs:18961`), KEEP entry 2026-07-04 (`GETSET_4096B` 1.077x vs ORIG /
+  1.36x vs Redis).
+- **GETDEL value-clone `_into` is a recorded DEAD END** and this ledger's rule 1 forbids the
+  retry (no retry-condition was recorded): `store.getdel` returns `Option<Vec<u8>>` extracted
+  by `internal_entries_remove`, i.e. the old value is MOVED out of the entry, never cloned.
+  The GETSET win came from eliding a clone of a value that STAYS in the map; GETDEL has no
+  such clone. Encode-before-mutate would pay the same single memcpy into `write_buf` that the
+  move-then-encode path already pays. (GETDEL's separate keyspace-probe collapse shipped
+  2026-07-04.) The only remaining GETDEL upside is a borrowed dispatch fast path, which is in
+  the server dispatch path owned by the cod pane — not touched.
+
 ## 2026-07-10 cod_fr: KEEP — SETBIT joins the dispatch-floor front gate — 3.69x fewer server instructions vs control; 0.61x Redis instructions
 
 NEGATIVE-EVIDENCE CHECK: grepped both ledgers before coding. This is **not** the
