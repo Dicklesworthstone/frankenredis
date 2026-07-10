@@ -4,6 +4,97 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: PROFILE WIN — P16 `SORT L ALPHA STORE D` instruction gap attributed; next lever is discarded UTF-8 validation (not a code KEEP yet)
+
+NEGATIVE-EVIDENCE CHECK: read both ledgers before profiling. The previously rejected SORT reply-clone
+family stays rejected: none of its frames clears 0.1% self-time. The new top mechanism is structurally
+different and was reopened by the integrity audit below: when no ICU collator is configured,
+`sort_alpha_compare` validates both operands as UTF-8 and discards both results before bytewise compare.
+
+Method: existing symbolized control binary from `c15b6712f` (SHA-256
+`84090b5959b2396569f74343dee5542174afc881c1a97b40856958ae52147679`) versus vendored Redis 7.2.4
+(`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`); fresh servers pinned to
+CPU 25, clients on CPUs 26-27, 50 clients, pipeline 16, persistent 1000-element permuted list,
+`SORT L ALPHA STORE D`, 2k warm-up, 3 s quiesce, then exactly 20k requests. Five paired
+`perf stat -e instructions:u` trials used the same binaries and workload:
+
+| engine | instructions:u trials | mean | sample CV |
+|---|---|---:|---:|
+| FrankenRedis | 70,439,343,356; 70,439,344,736; 70,439,359,927; 70,439,313,745; 70,439,212,357 | **70,439,314,824** | **0.000085%** |
+| Redis 7.2.4 | 43,751,259,520; 43,750,065,568; 43,751,310,386; 43,749,955,926; 43,751,448,855 | **43,750,808,051** | **0.001673%** |
+
+Result: **1.610011x FrankenRedis/Redis instructions**, an absolute gap of **26,688,506,773
+instructions per 20k requests**. Throughput was descriptive only because the FrankenRedis RPS CV was
+7.28%; the instruction keep-gate is valid and low-CV. Full `instructions:u` profiles had zero lost
+samples and approximately 70,438,676,970 FrankenRedis / 43,745,363,565 Redis instructions.
+
+Complete ranked flat-self frame table, including every frame at or above 0.1%:
+
+| rank | FrankenRedis frame | self% | Redis 7.2.4 frame | self% |
+|---:|---|---:|---|---:|
+| 1 | SORT comparator closure | 21.69 | `compareStringObjectsWithFlags` | 24.23 |
+| 2 | `core::str::converts::from_utf8` | **20.35** | `__memmove_avx_unaligned_erms` | 10.23 |
+| 3 | `__memcmp_avx2_movbe` | 17.64 | `__memcmp_avx2_movbe` | 10.15 |
+| 4 | Rust `small_sort_general` | 4.42 | `je_malloc_usable_size` | 7.32 |
+| 5 | Rust unstable `quicksort` | 4.34 | `sortCompare` | 7.26 |
+| 6 | `__memmove_avx_unaligned_erms` | 3.11 | `listTypePush.constprop.0` | 5.70 |
+| 7 | `fr_persist::listpack::decode_value_spans` | 2.88 | `msort_with_tmp.part.0` | 5.57 |
+| 8 | `mi_free` | 2.86 | `lpInsert` | 2.93 |
+| 9 | `_mi_page_malloc_zero` | 2.50 | `zmalloc` | 1.98 |
+| 10 | `mi_theap_malloc_aligned` | 2.15 | `je_malloc` | 1.77 |
+| 11 | `ChunkedList::push_back_with_fill` | 1.81 | `quicklistNext` | 1.71 |
+| 12 | `ListValue::push_back` | 1.34 | `quicklistPushTail` | 1.71 |
+| 13 | `list_lp_entry_bytes` | 1.31 | `je_tcache_bin_flush_small` | 1.51 |
+| 14 | `mi_malloc_aligned` | 1.29 | `je_free` | 1.41 |
+| 15 | `fr_persist::encode_listpack_entry` | 1.08 | `lpNext` | 1.39 |
+| 16 | reply-byte `in_place_collect` | 0.93 | `__mempcpy_avx_unaligned_erms` | 1.29 |
+| 17 | `ChunkedListIter::next` | 0.87 | `decrRefCount.part.0` | 1.17 |
+| 18 | `ListValueIter` map/clone `next` | 0.86 | `je_arena_ralloc_no_move` | 1.09 |
+| 19 | `Arc<Vec<Vec<u8>>>::make_mut` | 0.68 | `lpValidateNext` | 0.98 |
+| 20 | `Store::store_as_list` | 0.67 | `zfree` | 0.96 |
+| 21 | `Arc<ChunkedList>::make_mut` | 0.65 | `sortCommandGeneric` | 0.92 |
+| 22 | `fr_command::sort_generic` | 0.55 | `je_arena_cache_bin_fill_small` | 0.84 |
+| 23 | collect SORT `(index, value)` pairs | 0.45 | `createEmbeddedStringObject` | 0.74 |
+| 24 | `Store::sort_elements` | 0.39 | `__mempcpy@plt` | 0.71 |
+| 25 | collect sorted `Vec<Vec<u8>>` | 0.35 | `tcache_bin_flush_edatas_lookup` | 0.65 |
+| 26 | `mi_page_free_list_extend` | 0.34 | `do_rallocx` | 0.65 |
+| 27 | collect SORT-BY option values | 0.27 | `je_arena_ralloc` | 0.53 |
+| 28 | `process_buffered_frames` | 0.27 | `quicklistPush` | 0.49 |
+| 29 | `mi_theap_umalloc` | 0.25 | `listTypeNext` | 0.40 |
+| 30 | `ListChunk::seal_if_owned` | 0.22 | `listTypeGet` | 0.37 |
+| 31 | `mi_find_page` | 0.21 | `zrealloc_usable` | 0.36 |
+| 32 | `ListValue::maybe_promote` | 0.20 | `memcmp@plt` | 0.34 |
+| 33 | `_mi_theap_realloc_zero` | 0.17 | `lpAppend` | 0.34 |
+| 34 | Rust sort `median3_rec` | 0.16 | `decrRefCount` | 0.22 |
+| 35 | drop `Vec<Vec<u8>>` | 0.16 | `__memmove_chk_avx_unaligned_erms` | 0.22 |
+| 36 | `listpack::entry_len_with_backlen` | 0.15 | `je_te_event_trigger` | 0.16 |
+| 37 | `_mi_theap_collect_retired` | 0.10 | `lpGetValue` | 0.12 |
+| 38 | `mi_realloc_aligned` | 0.10 | `memcpy@plt` | 0.12 |
+| 39 | — | — | `je_free_default` | 0.12 |
+
+Absolute attribution from the rounded self percentages: FrankenRedis's compare/sort family consumes
+approximately **48.21B** instructions versus Redis's **20.65B**, a **27.56B** family delta (103.2%
+of the net gap; Redis's larger list/move paths offset the excess). `from_utf8` alone is approximately
+**14.33B instructions, 53.7% of the total net gap**. The dispatch frame is only 0.27%, so this is not
+the already-rejected dispatch-position family. The next one-lever candidate is therefore exactly the
+top live frame: return `left.cmp(right)` before UTF-8 validation when `collator.is_none()`; preserve
+the ICU path byte-for-byte. This entry is a **profile-attribution WIN, not yet a code KEEP**.
+
+Artifacts: `artifacts/optimization/frankenredis-ohsk5-sort-alpha/20260710T1325Z/` contains the five
+stat pairs, binary hashes, zero-loss `perf.data`, callgraphs, and complete ranked reports.
+
+### Integrity erratum: short-key compare executes, but its claimed `<0.5%` `memcmp` bound is invalid
+
+The audit entry immediately below truncated `perf report` with `head -9`; `__memcmp_avx2_movbe` was
+rank 10, not absent. Re-reading the preserved SMISMEMBER profile at a 0.1% threshold gives
+`CompactFieldMap::lookup_slot_prehashed` **5.81% self** and `__memcmp_avx2_movbe` **2.61% self**
+(75 `cycles:P` samples, approximately 163,421,244 cycles, zero lost). Disassembly confirms
+`lookup_slot_prehashed+0x12e` calls `bcmp`, but sparse callchains cannot attribute all 2.61% to that
+site. Therefore the historical short-key REJECT is **execution-valid / not dead code**, while the
+new "final memcmp <0.5%, REJECT confirmed" annotation is **INVALID**. Its original 0.82x A/B remains
+the keep/reject fact; do not infer a cold-compare ceiling or retry until a higher-sample call-attributed
+profile establishes the residual mechanism.
+
 ## 2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT #2 — the four sweeping do-not-retry families, profile-verified. **SORT REOPENED**: its REJECT row had NO profile, and 35.43% of SORT ALPHA's self-time is a discarded `from_utf8`
 
 Applied the ledger-integrity rule (a row is inadmissible unless a profile shows the function under
