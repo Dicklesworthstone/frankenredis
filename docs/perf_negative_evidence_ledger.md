@@ -5212,6 +5212,17 @@ zero-copy-RESP lever (helps every large-arg command), the only structural cold-p
 besides RAM. Every per-turn per-crate codec/kernel lever is shipped or eliminated. fr remains
 at-or-ahead of redis 7.2.4 on the entire online surface + DUMP.
 
+> **SUPERSEDED 2026-07-09 (cc_fr) — the "SOLELY / DEFINITIVE" claim above is WRONG.** Re-profiled
+> at the benched shape (96x40B quicklist2, pipeline 128): the DUMP payload is only **525 bytes**,
+> so the owned-argv copy is a fraction of a single 3.50% `memmove` row and cannot explain
+> fr/redis = 0.425x. The dominant fr-specific cost is a **listpack re-walk cluster (20.13%)** —
+> `decode_value_spans` + `entry_len_with_backlen` + `rebuild_growth_state` + `list_lp_entry_bytes`
+> — which redis does not pay at all: `sanitize-dump-payload` defaults to `SANITIZE_DUMP_NO`, so
+> `lpValidateIntegrity(..., deep=0)` returns right after the header check (`listpack.c:1363`) and
+> the raw listpack is attached. Do NOT undertake the whole-dispatch `Vec<Bytes>` argv rewrite on
+> RESTORE's account. Full hotspot table, source citations, and ranked levers: see the
+> `2026-07-09 cc_fr: REJECT (premise)` entry at the top of `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-30 TealHeron: SHIPPED zero-copy HGET `_into` — −9..11% server instructions at 4KB–64KB field values (scales with value size, byte-exact)
 
 Continued the zero-copy `_into` dispatch-migration vein (after GETRANGE 0a6ac17fc). The two hot

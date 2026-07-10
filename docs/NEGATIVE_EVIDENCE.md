@@ -4,6 +4,92 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-09 cc_fr: REJECT (premise) — the RESTORE gap is NOT "solely the owned-argv large-payload copy"; it is a listpack RE-WALK that redis does not do
+
+CORRECTS a prior `DEFINITIVE` claim. `docs/perf_negative_evidence_ledger.md`
+(2026-06-29 cc, "RESTORE gap — CRC64 RULED OUT ... gap is architectural argv-copy ONLY")
+concluded: *"the RESTORE-command gap is SOLELY the owned-argv large-payload copy = an
+architectural zero-copy-RESP lever"*. Fresh profiling refutes this. Do NOT open the
+whole-dispatch `&[Vec<u8>]` -> `&[&[u8]]` / `Vec<Bytes>` rewrite on RESTORE's account:
+at the benched shape the argv copy cannot pay for it.
+
+REPRODUCED the gap first (`restore_quicklist` bench shape: 96 members x 40B -> redis
+`DUMP` -> quicklist2 payload; pipeline 128; local release-perf binary; servers + client
+pinned to distinct cores; min-of-N):
+  fr  132,496 restore/s   redis 7.2.4  305,339 restore/s   => **fr/redis 0.425x**
+(matches the 0.375-0.39x figure previously recorded at p128; spread fr 5.8% / redis 6.5%.)
+
+**The payload is 525 bytes.** That alone bounds the argv-copy prize: one
+`extend_from_slice` of 525B is tens of ns against a ~7.5us/op command.
+
+RANKED HOTSPOT TABLE (perf, flat self%, fr under sustained pipelined RESTORE;
+`perf record -F 1999 -m 4 -p <pid>` — note this box needs `-m 4`, the default
+mmap_pages fails with a bogus "try a smaller -m"):
+
+| rank | symbol | self% |
+| ---: | --- | ---: |
+| 1 | `frankenredis::process_buffered_frames` | 13.53 |
+| 2 | `fr_persist::listpack::decode_value_spans` | 9.50 |
+| 3 | `fr_store::decode_rdb_string` | 8.41 |
+| 4 | `fr_persist::listpack::entry_len_with_backlen` | 5.23 |
+| 5 | `fr_persist::crc64_redis` | 4.32 |
+| 6 | `__memmove_avx_unaligned_erms` (libc) | 3.50 |
+| 7 | `ListValue::rebuild_growth_state` | 3.33 |
+| 8 | `__memcmp_avx2_movbe` (libc) | 2.11 |
+| 9 | `fr_store::packed_set::list_lp_entry_bytes` | 2.07 |
+| 10 | `Runtime::execute_frame_internal` | 1.30 |
+| 11 | `parse_borrowed_plain_key_arg{1,2,3,4}_packet` | 3.20 (summed) |
+
+The owned-argv copy is a *fraction* of the single 3.50% `memmove` row (which it shares
+with `decode_rdb_string`'s payload copy). It is not rank 1, and eliminating it entirely
+could not move 0.425x materially. `restore_key`/`restore_key_with_metadata` already take
+`payload: &[u8]`, and the RESTORE handler passes it borrowed to the store — so exactly ONE
+payload copy exists in the whole path (`copy_borrowed_argv_into_scratch`, main.rs ~21673).
+
+TRUE ASYMMETRY (source-verified against the vendored oracle): **redis does not walk the
+listpack on RESTORE; fr walks it 2-3 times.**
+  * `rdb.c:1833` `deep_integrity_validation = server.sanitize_dump_payload == SANITIZE_DUMP_YES`
+  * `config.c:3139` `sanitize-dump-payload` default = `SANITIZE_DUMP_NO`
+  * `rdb.c:2202` -> `lpValidateIntegrity(lp, encoded_len, deep=0, ...)`
+  * `listpack.c:1363` `if (!deep) return 1;`  => O(1) header/terminator check, then the raw
+    listpack is attached via `quicklistAppendListpack`.
+fr instead does, per restored node: `decode_value_spans` (full walk, allocates a
+`Vec<ListpackValueSpan>`), then `ListValue::rebuild_growth_state` -> `self.iter().fold()`
+(a SECOND full walk, re-decoding entry headers through `entry_len_with_backlen` and
+re-deriving each entry's encoded size via `list_lp_entry_bytes`).
+Walk cluster = rows 2+4+7+9 = **20.13% of fr's RESTORE time**, with a redis-side cost of ~0.
+
+ALSO OBSERVED: RESTORE has no borrowed fast path, so every RESTORE packet falls through
+the borrowed cascade, paying `parse_borrowed_plain_key_arg{1..4}_packet` (3.20%) plus
+`memcmp_avx2` (2.11%) probing arms it can never match — ~5% burned on failed dispatch
+probes. That is a dispatch-floor/pre-classifier item, not an argv-ownership item.
+
+CONCRETE NEXT LEVERS (ranked, with risk):
+  1. **Kill the second walk** (bounded, byte-exact): compute `(raw_total, enc_total)` while
+     building from the already-decoded spans in `from_restored_quicklist2_nodes` /
+     `ChunkedList::from_restored_nodes`, and skip `rebuild_growth_state`. Must keep calling
+     `list_lp_entry_bytes(value)` per element so a non-canonically-encoded (hostile) payload
+     yields the identical `lp_bytes`/`forced_quicklist` as today -- do NOT shortcut to
+     `total_bytes - header - terminator`, which would silently change `OBJECT ENCODING` for
+     non-canonical payloads. Est. 6-8% of RESTORE. Gate: `restore_corrupt_payload_differ.py`,
+     `list_quicklist_dump_differ.py`, `quicklist_dump_boundary_differ.py`.
+  2. **Lazy spans** (the real prize, structural): defer `decode_value_spans` until a restored
+     listpack chunk is first indexed/iterated, mirroring redis's shallow-validate-and-attach.
+     Worth most of the 20.13% and the span `Vec` alloc. RISK: fr's eager decode is currently
+     what rejects malformed listpacks; going shallow changes corrupt-payload behavior and must
+     be reconciled against `sanitize-dump-payload` semantics + the corrupt-payload differ.
+     Wants a dedicated slice, not a drive-by.
+  3. RESTORE borrowed fast path / floor entry, to stop the ~5% of failed cascade probes.
+
+METHOD NOTE (bank): `rch exec -- cargo build` compiled both binaries remotely but retrieved
+only `.rustc_info.json` (per-worker `CARGO_TARGET_DIR` remap), and a cold remote build of
+`fr-server` fails outright because `fr-command`'s build script reads
+`legacy_redis_code/redis/src/commands`, which `.rchignore` excludes from sync (an earlier
+`cargo check` only passed because its remote target dir was warm). For A/B binaries: build
+LOCALLY (`RCH_ENABLED=0 RCH_CARGO_WRAPPER_BYPASS=1`) from ONE source dir, swapping only the
+changed file between builds, so deps and every sibling crate are shared and only the changed
+crate recompiles (~20s for the second binary).
+
 ## 2026-07-09 cod_fr: KEEP — dispatch-floor routes VARIADIC WRITES at 9-18 values — 1.75-2.84x vs HEAD control on the 12/16v cliff
 
 NEGATIVE-EVIDENCE CHECK: grepped this file and `docs/perf_negative_evidence_ledger.md`
