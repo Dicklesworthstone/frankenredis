@@ -233,9 +233,26 @@ impl GenericSet {
     #[must_use]
     pub fn with_capacity_and_hasher(n: usize, _hasher: foldhash::quality::RandomState) -> Self {
         if n > PACKED_MAX_ENTRIES {
-            GenericSet::Hash(CompactStrSet::new())
+            // (cc_fr) Actually honor the hint. The previous `CompactStrSet::new()` ignored `n`, so a
+            // large set-algebra `*STORE` destination rehashed O(log n) times building the result
+            // (`CompactFieldMap::rehash` was 8% self on SINTERSTORE of two 5000-member sets). Reserve
+            // the slot table for `n` entries; the STORE path calls `shrink_to_fit` before storing
+            // (`SetValue::from_index_set`), so RAM stays at parity with redis's incrementally-grown
+            // dst dict and transient (non-STORE) callers free the reservation on drop. `buf_bytes = 0`
+            // lets the arena grow to exactly the members (no over-reserved payload).
+            GenericSet::Hash(CompactStrSet::with_capacity(n, 0))
         } else {
             GenericSet::Packed(PackedStrSet::with_capacity(n.saturating_mul(8)))
+        }
+    }
+
+    /// Release capacity reserved past the live members. Preserves membership and iteration order,
+    /// so any reply built from the set is byte-identical. Used on set-algebra `*STORE` results,
+    /// which are pre-sized to an upper bound during the build. (cc_fr)
+    pub(crate) fn shrink_to_fit(&mut self) {
+        match self {
+            GenericSet::Hash(h) => h.shrink_to_fit(),
+            GenericSet::Packed(_) => {}
         }
     }
 
@@ -1071,6 +1088,20 @@ impl CompactFieldMap {
         self.tombs = 0;
     }
 
+    /// Rebuild the slot table at the smallest power-of-two that fits the live entries and release
+    /// unused `buf`/`order`/`slot_of` capacity. `rehash` rebuilds from `order`, so insertion order
+    /// — hence iteration order and every reply — is byte-identical. Skips the rehash when the slot
+    /// table is already minimal, so it is ~free on a tightly-built map. (cc_fr set-algebra presize)
+    pub(crate) fn shrink_to_fit(&mut self) {
+        let target = (((self.order.len() + 1) * 2).next_power_of_two()).max(8);
+        if target < self.slots.len() {
+            self.rehash(target);
+        }
+        self.buf.shrink_to_fit();
+        self.order.shrink_to_fit();
+        self.slot_of.shrink_to_fit();
+    }
+
     fn append_entry(&mut self, field: &[u8], value: &[u8]) -> u32 {
         let off = self.buf.len() as u32;
         write_varint(&mut self.buf, field.len());
@@ -1395,6 +1426,12 @@ impl CompactStrSet {
         Self {
             inner: CompactFieldMap::with_capacity(entries, buf_bytes),
         }
+    }
+
+    /// Release capacity reserved past the live members (see
+    /// [`CompactFieldMap::shrink_to_fit`]). Byte-identical membership + order.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
     }
 
     #[must_use]

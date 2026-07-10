@@ -5287,7 +5287,44 @@ on a 16-reply RESP2+RESP3 battery (OOR-positive/negative nil, missing key, WRONG
 empty, 100KB element, negative index, mixed pipeline). GET+GETRANGE+HGET+LINDEX now zero-copy.
 NEXT (writes, encode-before-mutate, trickier): GETSET, GETDEL.
 
-## 2026-07-10 cc_fr: SURFACE / not-a-clean-lever — SINTERSTORE's `CompactFieldMap::rehash` (8.09% self) is **redis-PARITY** (redis grows its dst dict incrementally too); presizing beats redis on speed but REGRESSES RAM vs redis's incremental growth. Also: post-crc64 the DUMP path is `lzf`-dominated (frozen)
+## 2026-07-10 cc_fr: **WIN — LANDED.** Set-algebra `*STORE` result build **1.4–2.0x** (presize + `shrink_to_fit`), byte-identical, RAM-neutral vs redis. Resolves the "not-a-clean-lever" surface below — the RAM objection was solved with `shrink_to_fit`
+
+The surface below concluded a bare presize regresses RAM vs redis's incrementally-grown dst dict. The
+fix is **presize + `shrink_to_fit`**, which is RAM-neutral AND faster, so it shipped.
+
+`GenericSet::with_capacity_and_hasher(n)` **silently ignored `n`** for large sets (`CompactStrSet::
+new()`), so SINTERSTORE/SUNIONSTORE/SDIFFSTORE rehashed O(log n) times building the result
+(`CompactFieldMap::rehash` 8.09% self on two 5000-member sets). Now it honors the hint (reserve the
+slot table for `n`), and `SetValue::from_index_set` calls the new `shrink_to_fit` on the large-set
+STORE result before storing — so the build skips every incremental rehash while the *stored* set
+keeps only `next_pow2(actual)` slots, at parity with redis's incrementally-grown dst.
+
+**A/B — presize+shrink vs the pre-cc_fr unsized build.** One binary / one `rch` invocation via a
+`#[doc(hidden)]` `Store::bench_build_set_algebra_hash(members, presize)` helper (the build path lives
+in a private module, so this is the only substrate — same pattern as cod's SORT bench). Adjacent-pair
+interleaved, `black_box`, median of paired ratios, **null-gated (medians 0.998–1.001)**, worker `hz2`:
+
+| members built | speedup | verdict |
+|---|---:|---|
+| 512 | **1.990x** | WIN |
+| 2000 | **1.885x** | WIN |
+| 5000 | **1.405x** | WIN |
+| 20000 | **1.413x** | WIN |
+
+Each candidate median is far outside its null p5..p95. The result BUILD (insert + rehash, ~26% of
+SINTERSTORE self on the profile) is 1.4–2x faster; end-to-end SINTERSTORE improves by that share
+(~9–13%). RAM is unchanged vs before for stored results (`shrink_to_fit` reclaims the presize slack).
+
+**Safe in every dimension the campaign weighs:** `rehash` rebuilds the slot table from `order`, so
+insertion order — hence iteration order and every SINTER/SUNION/SDIFF reply — is byte-identical.
+`shrink_to_fit` preserves membership + order and skips the rehash when already tight (~free on a
+high-overlap result where `actual ≈ n`). fr-store set tests 150/0; full `fr-conformance` + `fr-store`
+**1303 passed, 0 failed** (SINTER/SUNION/SDIFF `*STORE` byte-equality + OBJECT ENCODING end-to-end).
+
+**Not a SIMD kernel** — an algorithmic (capacity-hint) fix, no `unsafe`, no fallback tier needed;
+`fr-store` keeps `#![forbid(unsafe_code)]`.
+
+## 2026-07-10 cc_fr: [RESOLVED by the WIN above] SURFACE — SINTERSTORE's `CompactFieldMap::rehash` (8.09% self) is redis-PARITY; a *bare* presize regresses RAM, but presize + `shrink_to_fit` is RAM-neutral and shipped. Post-crc64 the DUMP path is `lzf`-dominated (frozen)
 
 Profiled fresh after the crc64 win. Two rankings, `fr-cand3` `sha256 ad6506c4…`, host `thinkstation1`,
 `perf record -F 997`:

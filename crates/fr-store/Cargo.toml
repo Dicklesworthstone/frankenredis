@@ -20,3 +20,7 @@ criterion = "0.5"
 [[bench]]
 name = "store_read"
 harness = false
+
+[[bench]]
+name = "set_algebra_build"
+harness = false

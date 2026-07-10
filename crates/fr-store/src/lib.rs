@@ -3809,6 +3809,12 @@ impl SetValue {
         // input GenericSet already holds exactly those (de-duplicated) members, so
         // wrap it directly. Encoding flags are (re)derived by the caller afterward.
         if set.len() > max_intset_entries {
+            // (cc_fr) The set-algebra build pre-sizes this map to an upper bound (the smallest
+            // input's cardinality) to avoid O(log n) incremental rehashes; release the slack now
+            // that the final membership is known, so a stored `*STORE` result keeps RAM at parity
+            // with redis's incrementally-grown dst dict. Byte-identical (order/membership unchanged).
+            let mut set = set;
+            set.shrink_to_fit();
             return SetValue::Generic(set);
         }
         let mut sv = SetValue::new();
@@ -11749,6 +11755,29 @@ impl Store {
 
     /// Bench-only copy of the pre-overlay existing-hash HSET loop. Production
     /// callers must use [`Self::hset_borrowed_many`]; this exists so the
+    /// Bench-only A/B for the set-algebra `*STORE` build. `presize = true` is the shipped path
+    /// (`with_capacity_and_hasher` honors the hint, then `shrink_to_fit`); `false` is the pre-cc_fr
+    /// path (`CompactStrSet::new()` grown incrementally, O(log n) `rehash`es). Inserts the members
+    /// and returns the count. Both build byte-identical sets (same membership + order).
+    #[doc(hidden)]
+    pub fn bench_build_set_algebra_hash(members: &[Vec<u8>], presize: bool) -> usize {
+        let mut set = if presize {
+            packed_set::GenericSet::with_capacity_and_hasher(
+                members.len(),
+                foldhash::quality::RandomState::default(),
+            )
+        } else {
+            packed_set::GenericSet::Hash(packed_set::CompactStrSet::new())
+        };
+        for member in members {
+            set.insert(member.clone());
+        }
+        if presize {
+            set.shrink_to_fit();
+        }
+        set.len()
+    }
+
     /// Criterion A/B can keep measuring the exact old primitive after the live
     /// path changes.
     #[doc(hidden)]
