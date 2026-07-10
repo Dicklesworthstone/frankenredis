@@ -4,6 +4,86 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cc_fr: KEEP — zset listpack DUMP score entry decided from the f64 (one probe, no format+reparse) — bigint `-51.0%`, fractional `-2.7%`, integer `-0.3%` `instructions:u`, byte-exact
+
+NEGATIVE-EVIDENCE CHECK first. The assigned lane was **already closed and was not retried**:
+GETSET `_into` is shipped (`Store::getset_with` + `Runtime::execute_plain_getset_borrowed_into`,
+KEEP 2026-07-04), GETDEL `_into` is a recorded DEAD END (its value is MOVED out by
+`internal_entries_remove` — no clone to elide), manifest levers #5/#6 were CONFIRMED earlier
+today, and #2/#3/#4 profile as near-exhausted on the DUMP path. Per NO CEILING this digs a
+different primitive in the same vein: the **follow-up filed by the #6 entry**, i.e. the
+`9ce4b42ac` int-score shortcut's `+2.6…+2.9%` regression on fractional-score zsets.
+
+THE LEVER: `Store::dump_key`'s zset-listpack arm formatted every score with `d2string`
+(`redis_score_to_string`) and then let `encode_listpack_entry` **re-parse** the decimal back to
+an i64 to pick int-vs-string encoding — Redis's own `zzlInsertAt` round trip. Replaced the
+`Option<i64>` probe with `zset_score_listpack_entry(f64) -> {Int(i64) | Str | Reparse}`, which
+mirrors `d2string`'s branch directly: integral scores inside `double2ll`'s window int-encode with
+no format at all; non-integral / non-finite / `-0.0` scores string-encode with no re-parse; only
+the rare integral-above-window band still needs both. Split `encode_listpack_string_entry` out of
+`encode_listpack_entry` (`#[inline]` — it runs once per **member**, and letting it go out-of-line
+costs ~10% of DUMP instructions).
+
+⚠️ **The fix prescribed by the #6 entry ("let the failed probe select a known-non-integer string
+encode instead of re-probing") is UNSOUND as written — do not implement it.** A failed probe does
+NOT imply the render fails `parse_listpack_integer`. Counterexample verified against the live
+oracle: `6917529027641081856` is integral and above `double2ll`'s window, so `d2string` uses
+grisu2 — which still emits the plain canonical decimal `"6917529027641082000"`, and upstream
+**int-encodes** it. Skipping the re-parse there emits a string entry and diverges. That is why the
+`Reparse` arm exists; `zset_score_reparse_arm_is_load_bearing` pins the counterexample.
+
+**REFUTED (bank this, it cost an hour):** `format_redis_double`'s doc comment claims upstream's
+exact-integer `ll2string` fast path uses a "**±2^52 window**". That is FALSE. Vendored
+`util.c::double2ll` gates on `(double)(±LLONG_MAX/2)`, which rounds to **±2^62**
+(`4611686018427387904`), and the Rust code correctly implements `±(i64::MAX/2)` — only the comment
+is wrong. Acting on that comment (narrowing the score gate to 2^52) would BREAK parity for every
+integral score in `1e16 … 2^62`: the oracle int-encodes `1e16`/`1e18`/`4e18` and renders them as
+plain decimals, and string-encodes only `5e18`/`7e18` (`"5e+18"`). Verified live, not reasoned.
+The old `±1e18` gate was therefore *conservative, not wrong* — byte-safe but leaving the
+`1e18 … 2^62` band paying a needless format + re-parse. Fixing that comment is a filed follow-up.
+
+MEASURED, same-worker A/B, `release-perf`, server pinned to core 2, client to cores 6,7, server-side
+`perf stat -e instructions:u`, 6000 zsets × 100 members × 31-byte members, median of 9 interleaved
+trials after a discarded warmup. ctl = HEAD `709990a34`, cand = HEAD + this hunk only — **both built
+from ONE source dir and symbol-verified** (`strings | grep -x`) before benching:
+
+| shape | ctl instr/DUMP | cand instr/DUMP | ctl/cand | cv (ctl/cand) | verdict |
+|---|---:|---:|---:|---:|---|
+| integral > 1e18, ≤ 2^62 (`bigint`) | 177,723.7 | 87,167.6 | **2.0389** | 0.02% / 0.00% | **−51.0% instr** |
+| fractional | 170,077.2 | 165,452.3 | **1.0280** | 0.00% / 0.00% | **−2.7% instr** |
+| plain integer (guard, ≤ 1e18) | 85,900.9 | 85,601.0 | 1.0035 | 0.00% / 0.02% | −0.3%, neutral |
+
+The `frac` result recovers exactly the `+2.6…+2.9%` regression the #6 entry recorded as an open
+follow-up. The `int` row is the guard: both binaries run the same decision there, so it must be
+~1.000 — it is, once the redundant `truncated as f64 == score` round-trip is dropped (`fract()==0`
+above it already proves the cast exact).
+
+**HARNESS TRAPS — three, all of which produced confident garbage before being caught:**
+1. *Stale rlib.* A `git status`-clean HEAD worktree sharing `CARGO_TARGET_DIR` with the main tree
+   linked the **candidate's** `fr-store` rlib. Both "arms" ran identical code; the guard read
+   `1.0000` and the lever read `1.0000`. **Always symbol-verify each binary before benching.**
+2. *Post-seed background slug.* The first perf window after seeding charges **130.7M instructions
+   with zero commands issued** (dict rehash / cron) vs 551K once quiet — ~16% of a DUMP pass,
+   varying with machine load. Sleep to quiescence BEFORE attaching perf; this alone took cv from
+   10–22% to ≤0.03% and flipped a phantom "+10.6% int regression" (which was noise: the *same*
+   ctl binary measured 123,622 then 136,700 across runs).
+3. *Peer WIP contamination.* The shared tree held 47 uncommitted lines of `cod_fr`'s `main.rs`;
+   building "cand" from the main tree and "ctl" from a HEAD worktree straddled that change.
+
+Re-confirms the #6 caveat: compact-zset DUMP is memoized (`dump_payload_cache`); a repeat blast is
+49.7x cheaper and measures `Vec::clone`, not the encoder. `FLUSHALL` **does** clear it, so
+reseed-then-DUMP-each-key-once is a valid cold measurement.
+
+CONFORMANCE: `cargo test -p fr-conformance` 194 tests, 0 failures. `scripts/dump_byte_equality_gate.py`
+PASS (8 types; redis RESTORE accepts every fr DUMP). Targeted 20-band score differential vs live
+vendored 7.2.4 — `-0`, `±inf`, `1e15`, `1e16`, `1e18`, `1e18+1`, `2e18`, `4e18`, `2^62`, `2^62+1`,
+the `6917529027641081856` counterexample, `2^63`, `5e18`, `7e18`, `1e20` — **20/20 ZSCORE agree and
+20/20 DUMP payloads byte-identical**, and redis `RESTORE`s all 20.
+
+Do not retry: narrowing the score gate to 2^52; skipping the re-parse on a failed probe; further
+listpack-encoder micro-levers on the DUMP path without fresh evidence (`lzf_compress` is 25–32% of
+that profile and the dump-cache insert clone is next — neither is the score encoder).
+
 ## 2026-07-10 cod_fr: KEEP — TTL dispatch-floor front gate: P16 `instructions:u` 5.463B -> 2.076B (`0.380x`); now `0.649x` Redis
 
 NEGATIVE-EVIDENCE CHECK first: current small-reply `writev` / output work is rejected,

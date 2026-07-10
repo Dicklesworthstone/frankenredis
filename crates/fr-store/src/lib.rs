@@ -26545,17 +26545,28 @@ impl Store {
                     let mut entry_count = 0usize;
                     for (member, score) in zs.iter_asc() {
                         encode_listpack_entry(&mut encoded, member);
-                        // Integer scores (the common case) encode directly into the
-                        // listpack, skipping the f64->decimal-string->reparse->i64 round
-                        // trip the string form pays. Byte-identical (see
-                        // zset_score_listpack_integer). (frankenredis-dump-zset-score-int)
-                        if let Some(int_score) = zset_score_listpack_integer(score) {
-                            encode_listpack_integer_entry(&mut encoded, int_score);
-                        } else {
-                            encode_listpack_entry(
-                                &mut encoded,
-                                redis_score_to_string(score).as_bytes(),
-                            );
+                        // Decide the score entry from the f64 itself rather than formatting
+                        // it and re-parsing the decimal back to an i64. Integer scores skip
+                        // the format outright; non-integral ones skip the re-parse. Only the
+                        // rare above-`double2ll` integral band still needs both.
+                        // Byte-identical (see zset_score_listpack_entry).
+                        // (frankenredis-dump-zset-score-int)
+                        match zset_score_listpack_entry(score) {
+                            ZsetScoreListpackEntry::Int(int_score) => {
+                                encode_listpack_integer_entry(&mut encoded, int_score);
+                            }
+                            ZsetScoreListpackEntry::Str => {
+                                encode_listpack_string_entry(
+                                    &mut encoded,
+                                    redis_score_to_string(score).as_bytes(),
+                                );
+                            }
+                            ZsetScoreListpackEntry::Reparse => {
+                                encode_listpack_entry(
+                                    &mut encoded,
+                                    redis_score_to_string(score).as_bytes(),
+                                );
+                            }
                         }
                         entry_count += 2;
                     }
@@ -28373,27 +28384,61 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
     true
 }
 
-/// Integer-valued zset score eligible for direct listpack integer encoding.
-/// Mirrors fr-persist's already-gated `zset_listpack_integer_score`: for a
-/// finite integer-valued score in `[-1e18, 1e18]`, Redis's `d2string`
-/// (`format_redis_double`) emits the plain canonical i64 decimal, which
-/// `encode_listpack_entry` would re-parse and int-encode identically — so
-/// `encode_listpack_integer_entry(score as i64)` is byte-IDENTICAL while
-/// skipping the f64-format + decimal-reparse round trip. Outside this range
-/// (or non-integer), fall back to the string form. (frankenredis-dump-zset-score-int)
-fn zset_score_listpack_integer(score: f64) -> Option<i64> {
-    if score.fract() == 0.0 && (-1e18..=1e18).contains(&score) && score.is_finite() {
-        let int_score = score as i64;
-        // Negative zero is the one trap: `d2string(-0.0)` is "-0" (non-canonical →
-        // string-encoded by Redis), NOT "0" (int-encoded). Guard it so the fast
-        // path stays byte-identical to the string form.
-        if int_score == 0 && score.is_sign_negative() {
-            return None;
-        }
-        Some(int_score)
-    } else {
-        None
+/// How Redis's `zzlInsertAt` would encode `score` as a listpack entry: it renders
+/// `d2string(score)` then lets `lpStringToInt64` re-decide int-vs-string. Deciding
+/// straight from the `f64` lets the two common arms skip that format + decimal
+/// re-parse round trip entirely.
+enum ZsetScoreListpackEntry {
+    /// `d2string` emits a canonical i64 decimal, so the entry is int-encoded.
+    Int(i64),
+    /// `d2string`'s output provably is NOT a canonical i64 decimal, so the entry is
+    /// string-encoded and the formatted bytes need no re-parse.
+    Str,
+    /// Integral but outside `double2ll`'s window, so `d2string` falls back to grisu2 —
+    /// whose shortest form may still be a canonical i64 decimal. Must be re-parsed.
+    Reparse,
+}
+
+/// Classify a zset score exactly as `d2string` (`push_redis_double_ascii`) branches,
+/// so the emitted listpack entry is byte-IDENTICAL to formatting the score and running
+/// `encode_listpack_entry` over the result.
+///
+/// The `Reparse` arm is load-bearing, not defensive: above `double2ll`'s window grisu2
+/// still emits a plain canonical decimal for some integral doubles — e.g. upstream renders
+/// `6917529027641081856` as `"6917529027641082000"` and int-encodes it — so those bytes
+/// must go through `parse_listpack_integer`. Only `Str` may skip it.
+/// (frankenredis-dump-zset-score-int)
+fn zset_score_listpack_entry(score: f64) -> ZsetScoreListpackEntry {
+    // "nan" / "inf" / "-inf" — never a canonical decimal.
+    if !score.is_finite() {
+        return ZsetScoreListpackEntry::Str;
     }
+    // `d2string` special-cases zero BEFORE `double2ll`, and "-0" is non-canonical
+    // (`lpStringToInt64` rejects it) while "0" int-encodes. This must precede the
+    // integral test below, for which -0.0 is indistinguishable from +0.0.
+    if score == 0.0 {
+        return if score.is_sign_negative() {
+            ZsetScoreListpackEntry::Str
+        } else {
+            ZsetScoreListpackEntry::Int(0)
+        };
+    }
+    // A non-integral double's shortest grisu2 form always carries a '.' or an 'e':
+    // the plain-integer emit branch requires a non-negative decimal exponent, which
+    // would make the value integral. So the render can never re-parse as an integer.
+    if score.fract() != 0.0 {
+        return ZsetScoreListpackEntry::Str;
+    }
+    // `double2ll`'s window, mirrored bound-for-bound from `push_redis_double_ascii`
+    // (which rounds `LLONG_MAX/2` to 2^62, exactly as upstream's `(double)(LLONG_MAX/2)`).
+    // Upstream re-checks `(long long)d == d` afterwards; here `fract() == 0.0` above
+    // already proves the cast is exact, so the round trip back through f64 is skipped.
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if score >= lo && score <= hi {
+        return ZsetScoreListpackEntry::Int(score as i64);
+    }
+    ZsetScoreListpackEntry::Reparse
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
@@ -28432,6 +28477,15 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
         return;
     }
 
+    encode_listpack_string_entry(buf, entry);
+}
+
+/// `encode_listpack_entry` for bytes already known not to be a canonical i64 decimal.
+///
+/// `#[inline]` is load-bearing: `encode_listpack_entry` runs once per member on every
+/// listpack DUMP, and letting this body go out-of-line costs ~10% of DUMP instructions.
+#[inline]
+fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
     let start = buf.len();
     if entry.len() < 64 {
         buf.push(0x80 | entry.len() as u8);
@@ -51240,7 +51294,7 @@ mod tests {
     #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn zset_score_int_listpack_fastpath_is_byte_identical_to_string_form() {
         // The DUMP zset-listpack score fast path
-        // (zset_score_listpack_integer + encode_listpack_integer_entry) MUST emit
+        // (zset_score_listpack_entry + encode_listpack_integer_entry) MUST emit
         // byte-IDENTICAL listpack bytes to the prior string form
         // (encode_listpack_entry(redis_score_to_string(score))) for EVERY score —
         // including the negative-zero trap and the int/string boundary.
@@ -51285,22 +51339,60 @@ mod tests {
             123456789.123456789,
             f64::INFINITY,
             f64::NEG_INFINITY,
+            f64::NAN,
             1e18 + 1.0,
             -1e18 - 1.0,
             9.2e18,
+            // `double2ll`'s real window is ±(LLONG_MAX/2), which rounds to ±2^62 as a
+            // double — NOT ±2^52, and not the ±1e18 the old gate used. Both sides of
+            // the inclusive bound must still int-encode.
+            4.611686018427387904e18,  // 2^62 exactly
+            -4.611686018427387904e18, // -2^62 exactly
+            4.611686018427387392e18,  // 2^62 - 512 (one double ulp below)
+            // ABOVE the window, but grisu2's shortest form is still a plain canonical
+            // decimal inside i64 range, so upstream int-encodes these. These are the
+            // cases that make the `Reparse` arm load-bearing: string-encoding them
+            // (i.e. skipping the re-parse on any non-`Int` classification) diverges.
+            6.917529027641081856e18, // -> "6917529027641082000", int-encoded upstream
+            7.2e18,
+            // Above the window AND the plain form overflows i64 -> string-encoded.
+            9.223372036854775808e18, // 2^63 -> "9223372036854776000"
+            5e18,                    // -> "5e+18"
+            7e18,                    // -> "7e+18"
+            -5e18,
+            1e19,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
         ];
         // Add every integer in a dense band to exercise all listpack int widths.
         for i in -5000i64..=5000 {
             scores.push(i as f64);
         }
+        // Dense fractional band: these take the `Str` arm, which is the one that skips
+        // the re-parse, so it must never swallow a value whose render re-parses.
+        for i in -500i64..=500 {
+            scores.push(i as f64 + 0.5);
+            scores.push(i as f64 / 3.0);
+        }
         for &score in &scores {
             let mut want = Vec::new();
             super::encode_listpack_entry(&mut want, redis_score_to_string(score).as_bytes());
             let mut got = Vec::new();
-            if let Some(int_score) = super::zset_score_listpack_integer(score) {
-                super::encode_listpack_integer_entry(&mut got, int_score);
-            } else {
-                super::encode_listpack_entry(&mut got, redis_score_to_string(score).as_bytes());
+            match super::zset_score_listpack_entry(score) {
+                super::ZsetScoreListpackEntry::Int(int_score) => {
+                    super::encode_listpack_integer_entry(&mut got, int_score);
+                }
+                super::ZsetScoreListpackEntry::Str => {
+                    super::encode_listpack_string_entry(
+                        &mut got,
+                        redis_score_to_string(score).as_bytes(),
+                    );
+                }
+                super::ZsetScoreListpackEntry::Reparse => {
+                    super::encode_listpack_entry(&mut got, redis_score_to_string(score).as_bytes());
+                }
             }
             assert_eq!(
                 want,
@@ -51308,6 +51400,65 @@ mod tests {
                 "score {score} (d2string={:?}) diverged",
                 redis_score_to_string(score)
             );
+        }
+    }
+
+    /// Pins the counterexample that forces the `Reparse` arm to exist. Upstream renders
+    /// this integral double — above `double2ll`'s window, so `d2string` uses grisu2 — as
+    /// the plain canonical decimal "6917529027641082000", then int-encodes it. Collapsing
+    /// `Reparse` into `Str` (i.e. string-encoding whenever the int fast path misses) would
+    /// emit a string entry here and diverge from redis 7.2.4.
+    #[test]
+    fn zset_score_reparse_arm_is_load_bearing() {
+        let score = 6.917529027641081856e18;
+        assert!(matches!(
+            super::zset_score_listpack_entry(score),
+            super::ZsetScoreListpackEntry::Reparse
+        ));
+        let rendered = redis_score_to_string(score);
+        assert_eq!(rendered, "6917529027641082000");
+        assert!(super::parse_listpack_integer(rendered.as_bytes()).is_some());
+
+        // The two encodings genuinely differ, so the test above discriminates.
+        let mut int_form = Vec::new();
+        super::encode_listpack_entry(&mut int_form, rendered.as_bytes());
+        let mut str_form = Vec::new();
+        super::encode_listpack_string_entry(&mut str_form, rendered.as_bytes());
+        assert_ne!(int_form, str_form);
+    }
+
+    /// The `Str` arm is the only one that skips `parse_listpack_integer`. Prove the
+    /// classifier never routes a score there whose `d2string` render would in fact
+    /// re-parse as a canonical i64 — that would silently flip the entry encoding.
+    #[test]
+    fn zset_score_str_arm_never_hides_a_canonical_integer_render() {
+        let mut scores: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            3.14,
+            -2.5,
+            1e20,
+            5e18,
+            9.223372036854775808e18,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ];
+        for i in -2000i64..=2000 {
+            scores.push(i as f64 + 0.25);
+            scores.push(i as f64 * 1.5);
+            scores.push(i as f64);
+        }
+        for &score in &scores {
+            if let super::ZsetScoreListpackEntry::Str = super::zset_score_listpack_entry(score) {
+                let rendered = redis_score_to_string(score);
+                assert!(
+                    super::parse_listpack_integer(rendered.as_bytes()).is_none(),
+                    "score {score} classified Str but d2string={rendered:?} re-parses as an integer"
+                );
+            }
         }
     }
 

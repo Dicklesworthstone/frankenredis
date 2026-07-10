@@ -57,6 +57,22 @@ reconciles the apparent contradiction between ledger row "zset DUMP integer-scor
 shortcut … mixed then rejected (0.9559x)" and `9ce4b42ac`'s "+37%": **both are correct** — the
 lever wins on integer scores and loses slightly on fractional ones. Filed as a follow-up.
 
+> **FOLLOW-UP DISCHARGED 2026-07-10 (cc_fr).** Fixed by deciding the listpack score entry
+> straight from the f64 (`zset_score_listpack_entry -> {Int|Str|Reparse}`, mirroring
+> `d2string`'s own branch) instead of formatting-then-re-parsing. Measured `instructions:u`,
+> cv ≤ 0.02%: **fractional 1.0280 (−2.7%, the regression above, recovered)**, integral
+> `>1e18 ≤2^62` **2.0389 (−51.0%)**, plain-integer guard 1.0035. Byte-exact: 20/20 score bands
+> vs live vendored 7.2.4, DUMP gate PASS, fr-conformance 194/194.
+>
+> ⚠️ **The fix sketched below ("let the failed probe select a known-non-integer string encode
+> instead of re-probing") is UNSOUND — do NOT implement it.** The probe's `None` domain is NOT
+> confined to scores whose render fails `parse_listpack_integer`. `double2ll`'s window is
+> `±(LLONG_MAX/2)` = **±2^62** (NOT ±2^52 — `format_redis_double`'s doc comment is wrong), and
+> *above* that window grisu2 still emits a plain canonical decimal for some integral doubles:
+> upstream renders `6917529027641081856` as `"6917529027641082000"` and **int-encodes** it.
+> Those must still be re-parsed — hence the `Reparse` arm, pinned by the unit test
+> `zset_score_reparse_arm_is_load_bearing`. The old `±1e18` gate was conservative, not wrong.
+
 **#5 CONFIRMED KEEP — the biggest of the six.** `ctl` = verbatim pre-`bae131f7e` (the
 `Option<Vec<i64>>` integer view built EAGERLY before the encoding branch) vs `cand` = HEAD
 (view built only inside the intset branch that consumes it). Same source dir, only
