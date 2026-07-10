@@ -4,6 +4,105 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-10 cod_fr: KEEP — SETBIT joins the dispatch-floor front gate — 3.69x fewer server instructions vs control; 0.61x Redis instructions
+
+NEGATIVE-EVIDENCE CHECK: grepped both ledgers before coding. This is **not** the
+freshly rejected `writev` / scatter-gather premise below, not the old
+writer-owned-outbox / `write_vectored` family, and not a retry of SETBIT's
+already-shipped borrowed executor fast path. The previous SETBIT entries say the
+remaining gap is constant per-command dispatch/matcher overhead; they do not reject
+adding SETBIT to the newer dispatch-floor command-token classifier. Rows with rejected
+or closed sibling families were skipped explicitly: `GEOHASH` direct encoder is rejected,
+`SINTERCARD` / `GEOHASH` / `BITFIELD` have their own measured routes, and `uhthd` was not
+touched.
+
+PROFILE FIRST / ATTRIBUTION: P16/C50 `SETBIT bm 7 1`, 1M-op perf-stat and
+instruction-sampled reports, same host, server pinned to core 2, client pinned to cores
+6,7, `release-perf` with frame pointers. Control `fr-server` sha256
+`1fe39b56e4e8cc17acbd374b996e3163a0435d026b63c3112426986859eb4288`; vendored
+Redis 7.2.4 `redis-server` sha256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+Perf-stat baseline:
+
+| engine | requests/s | p50 | instructions:u |
+| --- | ---: | ---: | ---: |
+| FrankenRedis control | 564,015.81 | 1.287 ms | 9,366,845,936 |
+| Redis 7.2.4 | 1,058,201.12 | 0.375 ms | 4,162,875,960 |
+
+The server-side delta is `+5.204B` instructions. The top FrankenRedis frame alone,
+`process_buffered_frames` at `29.07%` self, accounts for roughly `2.72B` control
+instructions in the 1M-op window, and the matcher's `__memcmp_avx2_movbe` child adds
+roughly `0.97B`. Redis's corresponding parser/dispatcher frames are smaller:
+`processMultibulkBuffer` `4.96%`, `processCommand` `2.22%`, and `setbitCommand` `0.59%`.
+
+Ranked pre-change FrankenRedis frame table (full `>=0.1%` table at
+`artifacts/optimization/frankenredis-ohsk5-attrib/20260710T-current/setbit_profile_instr/fr_setbit_instr_table.txt`):
+
+| rank | frame | self% |
+| ---: | --- | ---: |
+| 1 | `frankenredis::process_buffered_frames` | 29.07 |
+| 2 | `__memcmp_avx2_movbe` | 10.38 |
+| 3 | `parse_borrowed_plain_key_arg2_packet` | 2.29 |
+| 4 | `Runtime::execute_plain_setbit_borrowed` | 2.01 |
+| 5 | `HashMap<Box<[u8]>, Entry>::get_mut` | 1.54 |
+| 6 | `parse_borrowed_plain_set_bulk` | 1.45 |
+| 7 | `Runtime::plain_borrowed_default_key_write_allows` | 1.39 |
+| 8 | `[vdso]` | 1.39 |
+| 9 | `parse_borrowed_plain_setbit_packet` | 1.31 |
+| 10 | `parse_borrowed_plain_keys_multi_packet` | 1.30 |
+| 11 | `parse_borrowed_plain_hmset_packet` | 1.19 |
+| 12 | `parse_borrowed_plain_zadd_flag_multi_packet` | 0.92 |
+| 13 | `try_dispatch_floor_classified_action` | 0.91 |
+| 14 | `parse_borrowed_plain_mset_packet` | 0.86 |
+| 15 | `parse_borrowed_plain_hset_multi_packet` | 0.83 |
+| 16 | `parse_borrowed_plain_zadd_multi_packet` | 0.80 |
+| 17 | `CommandHistogram HashMap::get_mut` | 0.74 |
+| 18 | `RespFrame::encode_into` | 0.73 |
+
+LEVER (one): add canonical `SETBIT key offset value` (`*4`, command token len 6) to
+`BorrowedDispatchFloorCommand` / `BorrowedDispatchFloorClass`, then dispatch it through
+the existing `parse_borrowed_plain_setbit_packet` and
+`Runtime::execute_plain_setbit_borrowed`. Malformed, wrong-arity, gated, or noncanonical
+packets fall back to the pre-existing borrowed multibulk path.
+
+MEASURED KEEP GATE: same-worker live socket A/B, five interleaved 1M-op trials, `perf
+stat -e instructions:u -p <server_pid>`. Candidate binary sha256
+`0c03164165c0d6072dcffaf170e56993c3e4af3d8946fb9161bb23c25d2eef33`.
+
+| engine | mean instructions:u | instr cv | mean requests/s | rps cv |
+| --- | ---: | ---: | ---: | ---: |
+| control | 9,369,588,866 | 0.00% | 368,397.57 | 23.07% |
+| candidate | 2,537,222,088 | 0.39% | 737,646.15 | 13.86% |
+| Redis 7.2.4 | 4,147,632,936 | 0.97% | 770,246.32 | 14.65% |
+
+Decision metric is server instructions because wall-time throughput was scheduler-noisy
+for all three engines. Candidate/control `instructions:u = 0.271x` (**3.69x fewer
+instructions**), candidate/Redis `instructions:u = 0.612x` (candidate uses **38.8% fewer
+instructions than Redis** on this row). The clean single pass in the same artifact had
+candidate `898,472.56 req/s`, Redis `1,007,049.38 req/s`, and control `475,285.16 req/s`.
+
+Post-change instruction sample confirms the target moved: `process_buffered_frames`
+falls from `29.07%` self to `5.78%`, `__memcmp_avx2_movbe` from `10.38%` to `2.57%`.
+The new top frames are the expected floor arm and already-proven executor:
+`try_dispatch_floor_classified_action` `7.64%`,
+`Runtime::execute_plain_setbit_borrowed` `6.95%`.
+
+GATES: `cargo fmt --check`; RCH focused
+`cargo test -p fr-server dispatch_floor_classifier -- --nocapture` (2 tests);
+RCH `cargo check --workspace --all-targets`; RCH
+`cargo clippy --workspace --all-targets -- -D warnings`; RCH
+`cargo test -p fr-conformance -- --nocapture` (194 lib tests, all bins, 99 smoke tests,
+doctests). UBS was run on touched source/docs; docs are ignored by `.ubsignore`, and the
+`fr-server` scan remains nonzero on pre-existing whole-file inventory (panic/assert/
+constant-time-compare heuristics outside this hunk), while fmt/clippy/check/test-build were
+clean.
+
+Artifacts:
+`artifacts/optimization/frankenredis-ohsk5-attrib/20260710T-current/setbit_profile3/`,
+`artifacts/optimization/frankenredis-ohsk5-attrib/20260710T-current/setbit_profile_instr/`,
+and `artifacts/optimization/frankenredis-ohsk5-setbit-floor/20260710T0300Z/`.
+
 ## 2026-07-10 cc_fr: KEEP — RESTORE second listpack walk eliminated (fused growth totals) — −2.71% server instructions:u, fr/redis 0.4343x → 0.4517x
 
 NEGATIVE-EVIDENCE CHECK: grepped both ledgers first. This is NOT a retry of the rejected

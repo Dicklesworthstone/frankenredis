@@ -12151,6 +12151,7 @@ enum BorrowedDispatchFloorClass {
     Llen,
     Pfcount,
     Scard,
+    Setbit,
     Strlen,
     Type,
     Xlen,
@@ -12178,6 +12179,7 @@ enum BorrowedDispatchFloorCommand {
     Rpush,
     Sadd,
     Scard,
+    Setbit,
     Srem,
     Strlen,
     Type,
@@ -12222,6 +12224,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         },
         6 => match uppercase_ascii_token::<6>(token)? {
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
+            [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
             _ => None,
@@ -12366,6 +12369,7 @@ fn classify_borrowed_dispatch_floor_packet(
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
         (4, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexExpire),
         (2, BorrowedDispatchFloorCommand::Pfcount) => Some(BorrowedDispatchFloorClass::Pfcount),
+        (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
@@ -12829,6 +12833,26 @@ fn try_dispatch_floor_classified_action(
                     packet.key,
                     ts,
                 )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Setbit => {
+            if let Some(packet) = parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_setbit_borrowed(packet.key, packet.start, packet.end, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -30035,6 +30059,20 @@ mod tests {
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::Pfcount)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nSeTbIt\r\n$1\r\nb\r\n$1\r\n7\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Setbit)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$6\r\nSETBIT\r\n$1\r\nb\r\n$1\r\n7\r\n$1\r\n1\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
