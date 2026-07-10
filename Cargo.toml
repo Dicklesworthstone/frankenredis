@@ -5,6 +5,7 @@ members = [
   "crates/fr-eventloop",
   "crates/fr-protocol",
   "crates/fr-command",
+  "crates/fr-simd",
   "crates/fr-store",
   "crates/fr-expire",
   "crates/fr-persist",

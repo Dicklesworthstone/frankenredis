@@ -9156,29 +9156,22 @@ impl Store {
         Ok(old_value)
     }
 
-    /// Population count (number of set bits) over a byte slice, processed eight
-    /// bytes per iteration as a single 64-bit POPCNT. The result is bit-identical
-    /// to `bytes.iter().map(|b| b.count_ones()).sum()` because popcount is
-    /// order-independent; the word-at-a-time form just amortizes loop overhead
-    /// and per-byte bounds checks for BITCOUNT over large bitmaps.
+    /// Population count (number of set bits) over a byte slice. Bit-identical to
+    /// `bytes.iter().map(|b| b.count_ones()).sum()` for every input, because popcount is
+    /// order-independent.
     ///
-    /// NOTE (2026-07-10, cc_fr): this compiles to a baseline `x86-64` **SSE2 software popcount** —
-    /// the release profile sets no `target-cpu`, so no `popcnt` instruction exists anywhere in the
-    /// binary. It is 97.94% of `BITCOUNT`'s flat self-time, and an AVX2 kernel measured **3.158x**
-    /// faster on this host (null control 1.0013x). The runtime-dispatch implementation is parked,
-    /// uncompiled, at `artifacts/optimization/bitcount-avx2/` pending an rch worker.
+    /// Delegates to [`fr_simd::popcount_bytes`], which dispatches once per call on the CPU's
+    /// actual features. This matters because the previous inline word loop *is* 97.94% of
+    /// `BITCOUNT`'s flat self-time, and the release profile sets no `target-cpu` — so it compiled
+    /// to a baseline `x86-64` **SSE2 software popcount**, with no `popcnt` instruction anywhere in
+    /// the binary. Measured on `thinkstation1` (one binary, four arms rotated, null control
+    /// `1.0013x`): SSE2 SWAR 17.25 GiB/s, scalar `POPCNT` 30.74, AVX2 **54.47**.
+    ///
+    /// `fr-simd` is the one crate permitted narrow, audited `unsafe`; `fr-store` keeps
+    /// `#![forbid(unsafe_code)]`.
     #[inline]
     fn popcount_bytes(bytes: &[u8]) -> usize {
-        let (chunks, remainder) = bytes.as_chunks::<8>();
-        let mut count: usize = 0;
-        for chunk in chunks {
-            let word = u64::from_ne_bytes(*chunk);
-            count += word.count_ones() as usize;
-        }
-        for &b in remainder {
-            count += b.count_ones() as usize;
-        }
-        count
+        fr_simd::popcount_bytes(bytes)
     }
 
     #[inline]

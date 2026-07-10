@@ -138,13 +138,27 @@ measure it.** That A/A ratio is your harness's noise floor.
 - A "win" smaller than the null control is **indistinguishable from noise**.
 - A REJECT of a lever whose effect is **below the floor** is meaningless — it measured the harness,
   not the lever.
-- If the null control is not tight (`cv` above ~5%, or the ratio further than a couple of percent
-  from `1.000`), the harness **is not fit to decide the lever**. Fix the harness first: raise
-  iterations, pin, interleave *within one measured routine*, `black_box` both input and result.
-  Then re-run. Do not report a number from an unfit harness — fail closed.
 
-Report the **null-control ratio and its cv alongside every WIN and every REJECT**, together with the
-binary sha256, self-time, and worker id.
+**THE GATE IS THE MEDIAN, NOT THE `cv`.** A paired A/A sweep across `min_sample ∈ {2,10,40} ms ×
+min_of ∈ {1,3}` showed `cv < 5%` is **unattainable on this hardware**; gating on it discards valid
+measurements. Instead:
+
+1. Take the **median of the paired null ratio** — it must sit at ≈`1.00`.
+2. Take its **observed spread** (e.g. p5..p95).
+3. A claim is decidable only when the **candidate's median lies clearly outside that spread**.
+
+Report the **null median, the null spread, and the candidate median together**, plus `cv` as
+information (never as a threshold), the binary sha256, the self-time, and the worker id.
+
+**The null floor is per-function and per-size, not global.** Recalibrate it for the function you are
+actually measuring.
+
+**Rotation alone does not balance a pair.** With `arm = (k + round) % 3`, arm 1 always executes
+exactly one position after arm 0, and later positions in a round run slower (cache and frequency
+effects from the preceding arm). That leaked an ~8% systematic bias into a null control — median
+`0.917` instead of `1.000` — while *also* depressing the candidate in the same direction. Reverse the
+execution order on odd rounds so each pair is position-balanced; the null median then returned to
+`0.9938 / 1.0007 / 0.9991`. **A null median away from 1.00 is a harness bug, not noise: find it.**
 
 This came from `franken_whisper`, which rejected an SDPA BR tile sweep after its null control — the
 same arm against itself — measured **1.1163x at cv 29.0%**. Every "win" in that sweep was smaller

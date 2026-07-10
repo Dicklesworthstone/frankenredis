@@ -8,6 +8,7 @@ fr-expire = { version = "0.1.0", path = "../fr-expire" }
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-sentinel = { version = "0.1.0", path = "../fr-sentinel" }
+fr-simd = { version = "0.1.0", path = "../fr-simd" }
 indexmap = "2"
 foldhash = "0.1"
 libc.workspace = true
