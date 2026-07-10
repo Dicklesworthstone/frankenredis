@@ -42,3 +42,9 @@ harness = false
 [[bench]]
 name = "expire_reset"
 harness = false
+
+# (cc_fr) Same-binary null-gated A/B for the per-write side-cache invalidation: unconditional
+# remove (hashes key vs empty maps) vs is_empty()-guarded.
+[[bench]]
+name = "write_cache_invalidation"
+harness = false

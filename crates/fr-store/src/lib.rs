@@ -6403,6 +6403,45 @@ impl Store {
         }
     }
 
+    /// (cc_fr) Drop the three per-key side caches a write invalidates — the HLL register
+    /// cache, the DUMP payload memo, and the MEMORY-USAGE estimate. Each is EMPTY for the
+    /// vast majority of keys (only populated by PFADD / DUMP / MEMORY USAGE on THAT key),
+    /// so an O(1) `is_empty()` guard skips hashing the key against an empty map — where the
+    /// removal is a no-op anyway. Runs on EVERY scalar write (SET/INCR insert, DEL,
+    /// in-place INCR), so eliding three foldhashes of the key on the common empty-cache
+    /// path is a per-write structural saving. Byte-identical: removing an absent entry from
+    /// an empty map does nothing.
+    #[inline]
+    fn invalidate_write_side_caches(&mut self, key: &[u8]) {
+        if !self.hll_register_cache.is_empty() {
+            self.hll_register_cache.remove(key);
+        }
+        if !self.dump_payload_cache.is_empty() {
+            self.remove_dump_payload_cache_entry(key);
+        }
+        let mut mem = self.mem_estimate_cache.borrow_mut();
+        if !mem.is_empty() {
+            mem.remove(key);
+        }
+    }
+
+    /// Bench-only baseline: the pre-guard three-cache invalidation (unconditional
+    /// `remove`, hashing the key against each map even when empty). Byte-identical effect
+    /// to `invalidate_write_side_caches`; exists only so a same-binary A/B can isolate the
+    /// `is_empty()` guards. Not on any production path.
+    #[doc(hidden)]
+    pub fn invalidate_write_side_caches_orig(&mut self, key: &[u8]) {
+        self.hll_register_cache.remove(key);
+        self.remove_dump_payload_cache_entry(key);
+        self.mem_estimate_cache.borrow_mut().remove(key);
+    }
+
+    /// Bench-only shim exposing the production guarded `invalidate_write_side_caches`.
+    #[doc(hidden)]
+    pub fn invalidate_write_side_caches_new(&mut self, key: &[u8]) {
+        self.invalidate_write_side_caches(key);
+    }
+
     fn insert_dump_payload_cache(&mut self, key: &[u8], cache: DumpPayloadCache) {
         let payload_len = cache.payload.len();
         if payload_len > DUMP_PAYLOAD_CACHE_MAX_BYTES {
@@ -7996,9 +8035,7 @@ impl Store {
         } else {
             self.forget_volatile_key(key);
         }
-        self.hll_register_cache.remove(key);
-        self.remove_dump_payload_cache_entry(key);
-        self.mem_estimate_cache.borrow_mut().remove(key);
+        self.invalidate_write_side_caches(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -10686,9 +10723,7 @@ impl Store {
         } else {
             self.forget_volatile_key(&key);
         }
-        self.hll_register_cache.remove(&key);
-        self.remove_dump_payload_cache_entry(&key);
-        self.mem_estimate_cache.borrow_mut().remove(&key);
+        self.invalidate_write_side_caches(&key);
         let old_entry = match canonical_key {
             // New key: insert the boxed bytes as the canonical key.
             Some(canonical_key) => self.entries.insert(canonical_key, entry),
@@ -10733,9 +10768,7 @@ impl Store {
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         let old_expiry = self.expiry_ms(key);
         if let Some(entry) = self.entries.remove(key) {
-            self.hll_register_cache.remove(key);
-            self.remove_dump_payload_cache_entry(key);
-            self.mem_estimate_cache.borrow_mut().remove(key);
+            self.invalidate_write_side_caches(key);
             self.mark_ordered_keys_dirty();
             self.expiry_deadlines.remove(key);
             // RANDOMKEY's per-db vector is a lazy cache; dropping any key in the
@@ -39814,6 +39847,43 @@ mod tests {
         assert_eq!(store.incrby(b"n", 5, 0).expect("incrby"), 5);
         assert_eq!(store.incrby(b"n", -3, 0).expect("incrby"), 2);
         assert_eq!(store.incrby(b"n", -10, 0).expect("incrby"), -8);
+    }
+
+    #[test]
+    fn invalidate_write_side_caches_matches_orig() {
+        // (cc_fr) The `is_empty`-guarded write-side-cache invalidation MUST have the
+        // identical effect as the unconditional original: when a cache is empty the guard
+        // skips a no-op remove, and when it holds the key the guard passes and removes it
+        // (leaving decoy keys). Checked directly on the `mem_estimate_cache`; the HLL and
+        // DUMP caches take the identical guard and are covered end-to-end by conformance
+        // (PFADD / DUMP / MEMORY USAGE followed by a write).
+        // Empty caches: both a pure no-op, caches stay empty.
+        let mut a = Store::new();
+        let mut b = Store::new();
+        a.invalidate_write_side_caches(b"k");
+        b.invalidate_write_side_caches_orig(b"k");
+        assert_eq!(a.mem_estimate_cache.borrow().len(), 0);
+        assert_eq!(b.mem_estimate_cache.borrow().len(), 0);
+
+        // Populated with the target key + a decoy: both remove the target, keep the decoy.
+        let mut sn = Store::new();
+        let mut so = Store::new();
+        sn.mem_estimate_cache.borrow_mut().insert(b"k".to_vec(), (1, 2));
+        sn.mem_estimate_cache.borrow_mut().insert(b"other".to_vec(), (3, 4));
+        so.mem_estimate_cache.borrow_mut().insert(b"k".to_vec(), (1, 2));
+        so.mem_estimate_cache.borrow_mut().insert(b"other".to_vec(), (3, 4));
+        sn.invalidate_write_side_caches(b"k");
+        so.invalidate_write_side_caches_orig(b"k");
+        assert_eq!(
+            sn.mem_estimate_cache.borrow().get(b"k".as_slice()).copied(),
+            so.mem_estimate_cache.borrow().get(b"k".as_slice()).copied()
+        );
+        assert!(sn.mem_estimate_cache.borrow().get(b"k".as_slice()).is_none());
+        assert_eq!(
+            sn.mem_estimate_cache.borrow().get(b"other".as_slice()).copied(),
+            so.mem_estimate_cache.borrow().get(b"other".as_slice()).copied()
+        );
+        assert!(sn.mem_estimate_cache.borrow().get(b"other".as_slice()).is_some());
     }
 
     #[test]
