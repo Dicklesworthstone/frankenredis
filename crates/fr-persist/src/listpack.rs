@@ -123,6 +123,10 @@ pub enum ListpackError {
     StringLengthOverflow,
     /// Header element count is not the unknown sentinel and does not match the entries scanned.
     ElementCountMismatch,
+    /// A sorted-set score entry did not parse as a finite/valid `f64` decimal.
+    /// Only produced by [`decode_zset_listpack_pairs`], which folds the score
+    /// parse the RDB zset-listpack arm used to do into the structural walk.
+    InvalidScore,
 }
 
 impl fmt::Display for ListpackError {
@@ -141,6 +145,7 @@ impl fmt::Display for ListpackError {
             Self::ElementCountMismatch => {
                 f.write_str("listpack element count header does not match entries")
             }
+            Self::InvalidScore => f.write_str("listpack zset score entry is not a valid f64"),
         }
     }
 }
@@ -181,7 +186,26 @@ pub fn parse_header(data: &[u8]) -> Result<(u32, u16), ListpackError> {
 
 /// Decode a single entry at `cursor`. Returns the decoded entry and the
 /// total number of bytes the entry occupies (encoding + data + backlen).
-fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), ListpackError> {
+/// A decoded listpack entry that has NOT yet materialized its string payload:
+/// integers carry their `i64`, strings carry the byte `Range` into the source
+/// listpack. This is the shared, allocation-free core of [`decode_entry`]; a
+/// consumer that only needs to *read* a string entry (e.g. parse a zset score to
+/// `f64`) can borrow the slice instead of forcing the `to_vec()` copy that
+/// materializing a [`ListpackEntry::String`] would pay. (frankenredis zsetlpscore)
+enum RawListpackValue {
+    Integer(i64),
+    String(Range<usize>),
+}
+
+/// Allocation-free entry decode: the exact byte-dispatch of [`decode_entry`] but
+/// string entries return their `Range` rather than a copied `Vec`. Returns the
+/// raw value and the total bytes the entry occupies (encoding + data + backlen).
+/// [`decode_entry`] is a thin materializing wrapper over this, so both share one
+/// parser and cannot drift.
+fn decode_entry_raw(
+    data: &[u8],
+    cursor: usize,
+) -> Result<(RawListpackValue, usize), ListpackError> {
     let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
 
     // 7-bit uint: 0xxxxxxx
@@ -189,7 +213,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         let value = i64::from(first & 0x7F);
         let data_len = 1;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackEntry::Integer(value), entry_len));
+        return Ok((RawListpackValue::Integer(value), entry_len));
     }
     // 6-bit str: 10xxxxxx, length in low 6 bits, string follows.
     if first & 0xC0 == 0x80 {
@@ -201,10 +225,9 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         if end > data.len() {
             return Err(ListpackError::TruncatedEntry);
         }
-        let bytes = data[start..end].to_vec();
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackEntry::String(bytes), entry_len));
+        return Ok((RawListpackValue::String(start..end), entry_len));
     }
     // 13-bit signed int: 110xxxxx + 1 byte.
     if first & 0xE0 == 0xC0 {
@@ -218,7 +241,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         };
         let data_len = 2;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackEntry::Integer(signed), entry_len));
+        return Ok((RawListpackValue::Integer(signed), entry_len));
     }
     // 12-bit str: 1110xxxx + 1 byte = length, then string.
     if first & 0xF0 == 0xE0 {
@@ -231,10 +254,9 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         if end > data.len() {
             return Err(ListpackError::TruncatedEntry);
         }
-        let bytes = data[start..end].to_vec();
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackEntry::String(bytes), entry_len));
+        return Ok((RawListpackValue::String(start..end), entry_len));
     }
     // Remaining: 0xF0..=0xF4 / 0xFF.
     match first {
@@ -256,10 +278,9 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             if end > data.len() {
                 return Err(ListpackError::TruncatedEntry);
             }
-            let bytes = data[start..end].to_vec();
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackEntry::String(bytes), entry_len))
+            Ok((RawListpackValue::String(start..end), entry_len))
         }
         0xF1 => {
             // 16-bit signed int: 11110001 + u16 LE.
@@ -269,7 +290,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackEntry::Integer(i64::from(raw)), entry_len))
+            Ok((RawListpackValue::Integer(i64::from(raw)), entry_len))
         }
         0xF2 => {
             // 24-bit signed int: 11110010 + 3 bytes LE.
@@ -286,7 +307,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             };
             let data_len = 4;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackEntry::Integer(signed), entry_len))
+            Ok((RawListpackValue::Integer(signed), entry_len))
         }
         0xF3 => {
             // 32-bit signed int: 11110011 + i32 LE.
@@ -301,7 +322,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             ]);
             let data_len = 5;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackEntry::Integer(i64::from(raw)), entry_len))
+            Ok((RawListpackValue::Integer(i64::from(raw)), entry_len))
         }
         0xF4 => {
             // 64-bit signed int: 11110100 + i64 LE.
@@ -320,10 +341,21 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             ]);
             let data_len = 9;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackEntry::Integer(raw), entry_len))
+            Ok((RawListpackValue::Integer(raw), entry_len))
         }
         _ => Err(ListpackError::InvalidEncoding(first)),
     }
+}
+
+fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), ListpackError> {
+    let (raw, entry_len) = decode_entry_raw(data, cursor)?;
+    let entry = match raw {
+        RawListpackValue::Integer(value) => ListpackEntry::Integer(value),
+        // Materialize the borrowed range into the owned payload — the single
+        // `to_vec()` the pre-refactor `decode_entry` performed inline.
+        RawListpackValue::String(range) => ListpackEntry::String(data[range].to_vec()),
+    };
+    Ok((entry, entry_len))
 }
 
 fn entry_len_with_backlen(
@@ -539,6 +571,108 @@ pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError>
         return Err(ListpackError::ElementCountMismatch);
     }
     Ok(entries)
+}
+
+/// Decode a `RDB_TYPE_ZSET_LISTPACK` payload (`m1, score1, m2, score2, …`)
+/// straight into owned `(member, score)` pairs.
+///
+/// The win over `decode_listpack(..).into_iter()` + a pair loop is on the
+/// **score** entries: upstream stores non-integer scores (`1.5`, `inf`, …) as
+/// listpack STRING entries, so the old path let `decode_listpack` heap-allocate a
+/// `Vec<u8>` for every such score only to `from_utf8` + `parse::<f64>` it and drop
+/// the `Vec`. Here each score is read through the allocation-free
+/// [`decode_entry_raw`] core — integer scores stay `n as f64` (CrimsonHawk's
+/// shortcut, `788bbfd00`), string scores parse a borrowed slice — so no score
+/// `Vec` is ever allocated. Members still materialize their owned bytes (the RESTORE
+/// result outlives the transient decompressed listpack, so that copy is forced).
+///
+/// Byte-/bit-identical to the old path: same member bytes, and each score is the
+/// same `n as f64` / `parse(same bytes)` `f64`. Structural validation mirrors
+/// [`decode_listpack`] exactly (same per-entry checks, terminator, and element
+/// count), and an odd element count is rejected just as the old
+/// `decoded.len().is_multiple_of(2)` guard did. (frankenredis zsetlpscore)
+pub fn decode_zset_listpack_pairs(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1; // terminator is at total_bytes - 1
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut pairs = if num_elements == LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::new()
+    } else {
+        Vec::with_capacity(usize::from(num_elements) / 2)
+    };
+    let mut entry_count = 0usize;
+    let mut pending_member: Option<Vec<u8>> = None;
+    while cursor < end {
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        match pending_member.take() {
+            None => {
+                // Member position: materialize the owned payload (integers render
+                // to canonical decimal, matching `ListpackEntry::into_bytes`).
+                pending_member = Some(match raw {
+                    RawListpackValue::Integer(n) => crate::decimal_i64_bytes(n),
+                    RawListpackValue::String(range) => data[range].to_vec(),
+                });
+            }
+            Some(member) => {
+                // Score position: read the f64 WITHOUT allocating the score string.
+                let score = match raw {
+                    RawListpackValue::Integer(n) => n as f64,
+                    RawListpackValue::String(range) => std::str::from_utf8(&data[range])
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .ok_or(ListpackError::InvalidScore)?,
+                };
+                pairs.push((member, score));
+            }
+        }
+        entry_count += 1;
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && entry_count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    // A trailing member with no score = odd element count (the old path's
+    // `is_multiple_of(2)` guard rejected this).
+    if pending_member.is_some() {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(pairs)
+}
+
+/// Bench/test-only reference: the pre-change zset-listpack decode that
+/// [`decode_zset_listpack_pairs`] replaces — `decode_listpack` (which allocates a
+/// `Vec<u8>` per string entry, scores included) + a pair loop that parses then
+/// drops each string score's `Vec`. Kept in-crate (like `entry_len_with_backlen_orig`)
+/// so the same-binary A/B measures exactly what shipped. Result is identical to the
+/// production path.
+pub fn decode_zset_listpack_pairs_orig(
+    data: &[u8],
+) -> Result<Vec<(Vec<u8>, f64)>, ListpackError> {
+    let decoded = decode_listpack(data)?;
+    if !decoded.len().is_multiple_of(2) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    let mut members = Vec::with_capacity(decoded.len() / 2);
+    let mut it = decoded.into_iter();
+    while let Some(member) = it.next() {
+        let score = match it.next().ok_or(ListpackError::ElementCountMismatch)? {
+            ListpackEntry::Integer(n) => n as f64,
+            ListpackEntry::String(bytes) => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or(ListpackError::InvalidScore)?,
+        };
+        members.push((member.into_bytes(), score));
+    }
+    Ok(members)
 }
 
 fn decode_string_entry_range(
@@ -1258,5 +1392,98 @@ mod tests {
             ListpackEntry::String(b"hello".to_vec()).into_bytes(),
             b"hello".to_vec()
         );
+    }
+
+    // ── zset-listpack pair decode: byte-/bit-exact vs the pre-change reference ──
+    // (frankenredis zsetlpscore) `decode_zset_listpack_pairs` must be
+    // indistinguishable from `decode_zset_listpack_pairs_orig` (decode_listpack +
+    // pair-parse) on every accepted AND rejected input — the alloc elision is the
+    // only difference.
+
+    /// Compare pairs bit-exactly on the score (so -0.0 / inf / rounding all count).
+    fn zpair_bits(pairs: &[(Vec<u8>, f64)]) -> Vec<(Vec<u8>, u64)> {
+        pairs.iter().map(|(m, s)| (m.clone(), s.to_bits())).collect()
+    }
+
+    #[test]
+    fn zset_listpack_pairs_matches_orig_and_is_bit_exact() {
+        // Interleaved (member, score) covering every score encoding class:
+        // integer scores (int entries) and fractional/inf scores (string entries),
+        // plus an integer-encoded member.
+        let lp = assemble(&[
+            &entry_6bit_str(b"m000"),
+            &entry_7bit_uint(0), // score 0 (int)
+            &entry_6bit_str(b"m001"),
+            &entry_6bit_str(b"1.5"), // score 1.5 (str)
+            &entry_6bit_str(b"m002"),
+            &entry_13bit_int(-42), // score -42 (int)
+            &entry_6bit_str(b"m003"),
+            &entry_6bit_str(b"inf"), // score +inf (str)
+            &entry_6bit_str(b"m004"),
+            &entry_32bit_int(1_000_000), // score 1e6 (int)
+            &entry_6bit_str(b"m005"),
+            &entry_6bit_str(b"-2.5"), // score -2.5 (str)
+            &entry_7bit_uint(7),      // integer MEMBER
+            &entry_6bit_str(b"3.14159"),
+        ]);
+        let new = decode_zset_listpack_pairs(&lp).expect("new decode");
+        let orig = decode_zset_listpack_pairs_orig(&lp).expect("orig decode");
+        assert_eq!(zpair_bits(&new), zpair_bits(&orig), "new vs orig diverged");
+        assert_eq!(new[3].0, b"m003");
+        assert!(new[3].1.is_infinite() && new[3].1 > 0.0);
+        assert_eq!(new[6].0, b"7"); // int member 7 renders to "7"
+        assert_eq!(new[6].1, 3.14159);
+    }
+
+    #[test]
+    fn zset_listpack_pairs_empty_is_ok_empty() {
+        let lp = assemble(&[]);
+        assert!(decode_zset_listpack_pairs(&lp).unwrap().is_empty());
+        assert!(decode_zset_listpack_pairs_orig(&lp).unwrap().is_empty());
+    }
+
+    #[test]
+    fn zset_listpack_pairs_rejects_same_inputs_as_orig() {
+        // Odd element count (dangling member, no score).
+        let odd = assemble(&[
+            &entry_6bit_str(b"m0"),
+            &entry_7bit_uint(1),
+            &entry_6bit_str(b"m1"),
+        ]);
+        assert!(decode_zset_listpack_pairs(&odd).is_err());
+        assert!(decode_zset_listpack_pairs_orig(&odd).is_err());
+
+        // Unparseable string score.
+        let bad = assemble(&[&entry_6bit_str(b"m0"), &entry_6bit_str(b"not_a_number")]);
+        assert!(decode_zset_listpack_pairs(&bad).is_err());
+        assert!(decode_zset_listpack_pairs_orig(&bad).is_err());
+
+        // Truncated blob (drop the terminator → header total_bytes mismatch).
+        let mut trunc = assemble(&[&entry_6bit_str(b"m0"), &entry_7bit_uint(1)]);
+        trunc.pop();
+        assert!(decode_zset_listpack_pairs(&trunc).is_err());
+        assert!(decode_zset_listpack_pairs_orig(&trunc).is_err());
+    }
+
+    #[test]
+    fn zset_listpack_pairs_matches_orig_on_encoder_built_blob() {
+        // Faithful blob via the production listpack encoder (int-encodes canonical
+        // integer scores, string-encodes fractional ones) — the mix the rdb_codec
+        // `build_mixed_zset_entries` bench uses (1/3 integer, 2/3 fractional).
+        let mut refs: Vec<Vec<u8>> = Vec::new();
+        for i in 0..200i64 {
+            refs.push(format!("m{i:04}:tag").into_bytes());
+            if i % 3 == 0 {
+                refs.push(format!("{}", i - 100).into_bytes());
+            } else {
+                refs.push(format!("{}", (i as f64) * 1.5 + 0.125).into_bytes());
+            }
+        }
+        let slices: Vec<&[u8]> = refs.iter().map(Vec::as_slice).collect();
+        let lp = crate::encode_listpack_strings_blob(&slices).expect("encode zset lp");
+        let new = decode_zset_listpack_pairs(&lp).expect("new");
+        let orig = decode_zset_listpack_pairs_orig(&lp).expect("orig");
+        assert_eq!(zpair_bits(&new), zpair_bits(&orig));
+        assert_eq!(new.len(), 200);
     }
 }

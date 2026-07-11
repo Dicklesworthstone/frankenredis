@@ -3916,36 +3916,18 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        // Same owned-entry move as the hash listpack path above:
-                        // string members/scores move out, integer scores render.
-                        let decoded = listpack::decode_listpack(&listpack)
+                        // Decode straight to (member, score) pairs. Members
+                        // materialize owned bytes; each score's f64 is read
+                        // allocation-free via the shared raw-entry core —
+                        // integer scores as `n as f64` (CrimsonHawk 788bbfd00's
+                        // -24.7% shortcut: `n as f64` == `parse(decimal(n))`),
+                        // string scores (1.5, inf, ...) by parsing a BORROWED
+                        // slice rather than a decode_listpack-allocated `Vec<u8>`
+                        // that was parsed then dropped. Byte-/bit-identical
+                        // members and scores; structural validation and the odd
+                        // element-count rejection mirror the old path exactly.
+                        let members = listpack::decode_zset_listpack_pairs(&listpack)
                             .map_err(|_| PersistError::InvalidFrame)?;
-                        if !decoded.len().is_multiple_of(2) {
-                            return Err(PersistError::InvalidFrame);
-                        }
-                        let mut members = Vec::with_capacity(decoded.len() / 2);
-                        let mut it = decoded.into_iter();
-                        while let Some(member) = it.next() {
-                            // (CrimsonHawk) Integer-valued scores round-trip through
-                            // the listpack as INT entries (the encoder int-encodes the
-                            // decimal). Reading the i64 straight to f64 skips the
-                            // render→from_utf8→parse::<f64> round-trip (a decimal alloc
-                            // + a float parse) for those — measured -24.7% on the zset
-                            // listpack decode (isolated A/B). Byte-identical: `n as f64`
-                            // and `parse(decimal(n))` both yield the nearest f64 to n.
-                            // Non-integer scores stay String entries (1.5, inf, ...) and
-                            // take the textual parse path unchanged.
-                            let score = match it.next().ok_or(PersistError::InvalidFrame)? {
-                                listpack::ListpackEntry::Integer(n) => n as f64,
-                                listpack::ListpackEntry::String(bytes) => {
-                                    std::str::from_utf8(&bytes)
-                                        .ok()
-                                        .and_then(|s| s.parse::<f64>().ok())
-                                        .ok_or(PersistError::InvalidFrame)?
-                                }
-                            };
-                            members.push((member.into_bytes(), score));
-                        }
                         RdbValue::SortedSet(members)
                     }
                     RDB_TYPE_LIST_QUICKLIST_2 => {

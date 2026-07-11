@@ -60,3 +60,10 @@ harness = false
 [[bench]]
 name = "int_render_itoa2"
 harness = false
+
+# (frankenredis zsetlpscore) Same-binary A/B for RDB ZSET_LISTPACK decode: decode_listpack +
+# pair-parse (allocates+drops a Vec per string score) vs decode_zset_listpack_pairs (reads each
+# score through the alloc-free raw-entry core). Null-gated; WIN on fractional, neutral on integer.
+[[bench]]
+name = "zset_lp_score_decode"
+harness = false
