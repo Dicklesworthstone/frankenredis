@@ -16,6 +16,9 @@ sha2.workspace = true
 [build-dependencies]
 serde_json.workspace = true
 
+[features]
+bench-reference = []
+
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.5"
@@ -27,3 +30,8 @@ harness = false
 [[bench]]
 name = "sort_alpha_compare"
 harness = false
+
+[[bench]]
+name = "geosearchstore_bybox"
+harness = false
+required-features = ["bench-reference"]

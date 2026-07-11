@@ -5351,6 +5351,115 @@ fn geo_collect_box_candidate(
     }
 }
 
+/// GEOSEARCHSTORE historically measures the east-west BYBOX half-width at the
+/// search center's latitude, unlike GEOSEARCH's upstream-compatible point-
+/// latitude predicate. Keep that observable predicate byte-for-byte while
+/// borrowing members and pruning with the already-proven conservative bbox.
+/// (frankenredis-3oviz)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_searchstore_box_candidate(
+    member: &[u8],
+    score: f64,
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    // Preserve the old operation order and exact f64 calls for every survivor.
+    let dist = geo_distance_m(cx, cy, lon, lat);
+    let lat_dist = geo_distance_m(cx, cy, cx, lat);
+    let lon_dist = geo_distance_m(cx, cy, lon, cy);
+    if lat_dist <= half_h && lon_dist <= half_w {
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+/// Collect GEOSEARCHSTORE BYBOX results in the exact ascending (score, member)
+/// order of `zrange_withscores(0, -1)`, borrowing every raw-score member and
+/// cloning only survivors. The bbox skips distance work only; every score must
+/// still be visited because ordinary ZADD can put fractional/negative scores in
+/// a GEO-readable zset and `geo_decode_score` casts those raw f64 values to u64.
+/// (frankenredis-3oviz)
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn geo_searchstore_box_results(
+    store: &mut Store,
+    key: &[u8],
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    now_ms: u64,
+) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
+    let bb = geo_box_bbox(cx, cy, half_w, half_h);
+    let mut results = Vec::new();
+    store.zset_for_each_asc(key, now_ms, |member, score| {
+        geo_collect_searchstore_box_candidate(
+            member,
+            score,
+            cx,
+            cy,
+            half_w,
+            half_h,
+            bb,
+            &mut results,
+        );
+    })?;
+    Ok(results)
+}
+
+/// Exact pre-3oviz materialize-and-scan arm, compiled only for unit proof and
+/// the same-binary benchmark reference.
+#[cfg(any(test, feature = "bench-reference"))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[inline(never)]
+fn geo_searchstore_box_reference(
+    store: &mut Store,
+    key: &[u8],
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    now_ms: u64,
+) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
+    let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+    let mut results = Vec::new();
+    for (member, score) in members {
+        let Some((lon, lat)) = geo_decode_score(score) else {
+            continue;
+        };
+        let dist = geo_distance_m(cx, cy, lon, lat);
+        let lat_dist = geo_distance_m(cx, cy, cx, lat);
+        let lon_dist = geo_distance_m(cx, cy, lon, cy);
+        if lat_dist <= half_h && lon_dist <= half_w {
+            results.push((member, score, dist, lon, lat));
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(feature = "bench-reference")]
+static BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the old GEOSEARCHSTORE BYBOX collector in a benchmark child. This is
+/// absent from normal builds; both measured arms pay the same atomic load.
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_geosearchstore_bybox_reference(reference: bool) {
+    BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Conservative lat/lon bounding box fully containing the GEOSEARCH BYBOX
 /// rectangle (`half_w` x `half_h` metres centred at (`cx`,`cy`)), returned as
 /// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. A point passes
@@ -7404,21 +7513,18 @@ fn geosearchstore(
     let results = if let Some(rm) = radius_m {
         geo_search_core(store, &synth[1], cx, cy, rm, count, sort, any, now_ms)?
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
-        let members = store.zrange_withscores(&synth[1], 0, -1, now_ms)?;
         let half_w = w / 2.0;
         let half_h = h / 2.0;
-        let mut res: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        for (member, score) in members {
-            let Some((lon, lat)) = geo_decode_score(score) else {
-                continue;
+        #[cfg(feature = "bench-reference")]
+        let mut res =
+            if BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+                geo_searchstore_box_reference(store, &synth[1], cx, cy, half_w, half_h, now_ms)?
+            } else {
+                geo_searchstore_box_results(store, &synth[1], cx, cy, half_w, half_h, now_ms)?
             };
-            let dist = geo_distance_m(cx, cy, lon, lat);
-            let lat_dist = geo_distance_m(cx, cy, cx, lat);
-            let lon_dist = geo_distance_m(cx, cy, lon, cy);
-            if lat_dist <= half_h && lon_dist <= half_w {
-                res.push((member, score, dist, lon, lat));
-            }
-        }
+        #[cfg(not(feature = "bench-reference"))]
+        let mut res =
+            geo_searchstore_box_results(store, &synth[1], cx, cy, half_w, half_h, now_ms)?;
         // (frankenredis-1axne) Apply same SORT_NONE handling as
         // geo_search_core / GEOSEARCH BYBOX (upstream geo.c:714-718).
         let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
@@ -29188,6 +29294,127 @@ mod tests {
             ratio > 2.0 || cfg!(debug_assertions),
             "expected >2x, got {ratio:.2}x"
         );
+    }
+
+    #[test]
+    fn geosearchstore_box_scan_matches_materialized_reference_bitwise() {
+        use super::{geo_encode_wgs84, geo_searchstore_box_reference, geo_searchstore_box_results};
+
+        fn canonical(
+            values: Vec<(Vec<u8>, f64, f64, f64, f64)>,
+        ) -> Vec<(Vec<u8>, u64, u64, u64, u64)> {
+            values
+                .into_iter()
+                .map(|(member, score, dist, lon, lat)| {
+                    (
+                        member,
+                        score.to_bits(),
+                        dist.to_bits(),
+                        lon.to_bits(),
+                        lat.to_bits(),
+                    )
+                })
+                .collect()
+        }
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state = 0x4753_5354_4f52_4542_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1_u64 << 53) as f64;
+        let mut adds = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let (lon, lat) = if i < 5 {
+                [
+                    (0.0, 0.0),
+                    (179.99, 0.0),
+                    (-179.99, 0.0),
+                    (30.0, 84.0),
+                    (-30.0, -84.0),
+                ][i]
+            } else {
+                (unit() * 360.0 - 180.0, unit() * 170.0 - 85.0)
+            };
+            let bits = geo_encode_wgs84(lon, lat).expect("generated WGS84 coordinate");
+            adds.push((bits as f64, format!("member:{i:05}").into_bytes()));
+        }
+        store.zadd_plain_owned(key, adds, 0).unwrap();
+
+        let mut cases = vec![
+            (0.0, 0.0, 0.0, 0.0),
+            (10.0, 40.0, 20_000.0, 20_000.0),
+            (179.9, 0.0, 200_000.0, 100_000.0),
+            (-179.9, 10.0, 500_000.0, 50_000.0),
+            (30.0, 84.0, 2_000_000.0, 400_000.0),
+            (0.0, 0.0, f64::INFINITY, 1_000.0),
+            (0.0, 0.0, f64::NAN, 1_000.0),
+        ];
+        for _ in 0..400 {
+            cases.push((
+                unit() * 360.0 - 180.0,
+                unit() * 168.0 - 84.0,
+                10_f64.powf(1.0 + unit() * 7.0),
+                10_f64.powf(1.0 + unit() * 7.0),
+            ));
+        }
+
+        for (cx, cy, half_w, half_h) in cases {
+            let reference =
+                geo_searchstore_box_reference(&mut store, &key[..], cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            let candidate =
+                geo_searchstore_box_results(&mut store, &key[..], cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            assert_eq!(
+                canonical(candidate),
+                canonical(reference),
+                "GEOSEARCHSTORE BYBOX mismatch c=({cx},{cy}) half=({half_w},{half_h})"
+            );
+        }
+
+        // Ordinary ZADD can create a small packed zset with scores that are not
+        // canonical integer geohashes. The production decoder still casts every
+        // finite score to u64, so the borrowed scan must visit these values too.
+        let mut packed = Store::new();
+        let canonical_bits = geo_encode_wgs84(10.0, 40.0).unwrap() as f64;
+        packed
+            .zadd_plain_owned(
+                b"packed",
+                vec![
+                    (-1.0, b"negative".to_vec()),
+                    (canonical_bits + 0.5, b"fractional".to_vec()),
+                    ((1_u64 << 53) as f64, b"above-52-bit".to_vec()),
+                    (f64::INFINITY, b"infinity".to_vec()),
+                    (0.0, b"zero".to_vec()),
+                    (canonical_bits, b"canonical".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+        assert_eq!(packed.object_encoding(b"packed", 0), Some("listpack"));
+        for (cx, cy, half_w, half_h) in [
+            (10.0, 40.0, 20_000.0, 20_000.0),
+            (0.0, 0.0, 20_000_000.0, 20_000_000.0),
+            (-179.9, -84.0, 2_000_000.0, 2_000_000.0),
+            (0.0, 0.0, f64::INFINITY, f64::INFINITY),
+        ] {
+            let reference =
+                geo_searchstore_box_reference(&mut packed, b"packed", cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            let candidate =
+                geo_searchstore_box_results(&mut packed, b"packed", cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            assert_eq!(
+                canonical(candidate),
+                canonical(reference),
+                "packed/noncanonical GEOSEARCHSTORE BYBOX mismatch c=({cx},{cy}) half=({half_w},{half_h})"
+            );
+        }
     }
 
     #[test]

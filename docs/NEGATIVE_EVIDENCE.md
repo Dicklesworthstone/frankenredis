@@ -4,6 +4,63 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-11 cod_fr: SHIPPED — GEOSEARCHSTORE BYBOX bbox-guided borrowed full traversal uses 82.299% fewer instructions
+
+NEGATIVE-LEDGER-FIRST / PROFILE-FIRST: after reading this ledger and live `bv --robot-triage`,
+the unchanged 32K-member selective-BYBOX path was profiled before editing, fail-closed on worker
+`vmi1293453`. Binary SHA-256
+`e242fc795e7628c8aca9457942704f0ab8744c818c0d5714516fe9fed25defbe` showed
+`geosearchstore` at median **1.1900% self** (`[1.03, 1.14, 1.19, 1.31, 1.65]`) and the
+full-range materializer `index_slice_asc_adaptive` at **0.4900% self**
+(`[0.32, 0.36, 0.49, 0.57, 0.65]`), with zero lost samples.
+
+ONE LEVER: replace `zrange_withscores(0, -1)` materialization in `GEOSEARCHSTORE BYBOX` with one
+bbox-guided `zset_for_each_asc` borrowed full traversal. The conservative bbox only rejects decoded
+points before distance work; survivors retain the historical three `geo_distance_m` calls and
+center-latitude width predicate verbatim. This deliberately does **not** use geohash score-cell
+ranges: an ordinary ZSET may contain negative, fractional, greater-than-52-bit, or non-finite raw
+`f64` scores, and the existing decoder's cast/skip behavior is observable. Visiting every score in
+global `(score, member)` order preserves that semantic fallback tier while cloning only survivors.
+
+Exact same-binary parity passed across 9 cases and RESP2+RESP3, including selective/broad boxes,
+ASC/DESC, COUNT/ANY, STOREDIST, antimeridian, high latitude, zero-result deletion, missing source,
+`dest == source`, and seeded noncanonical raw scores:
+`reply_bytes_scores_bits_dump_encoding_ttl_dirty_modcount_stats_digest=identical`. A separate
+bitwise differential unit gate covered 10,000 full-encoding canonical scores plus packed/listpack
+negative, fractional, greater-than-52-bit, infinite, zero, and canonical scores.
+
+The decisive gate was one strict-remote invocation on worker `vmi1293453`:
+`RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=FR_ALLOW_STUB_COMMANDS FR_ALLOW_STUB_COMMANDS=1 env -u
+CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-command --features
+bench-reference --bench geosearchstore_bybox`. Both arms shared binary SHA-256
+`164579931c072b4ed26855d9314605ac8b835477c2a0d7185c14b1cfdc9ccf98`. Three zero-loss
+profiles proved the exact reference helper live at median **17.5400% self**
+(`[17.32, 17.54, 19.98]`) and candidate helper live at **78.1800% self**
+(`[77.27, 78.18, 80.48]`). Across 24 position-balanced instruction rounds, the
+candidate/candidate null median was **1.000015139** (p05 **0.999836265**, p95
+**1.000145705**, CV **0.010326%**). Reference/candidate median was **5.649504615x**
+(candidate **0.177006670x**, **82.299333% fewer instructions**), with **0.043272%** ratio CV,
+decisively outside the null spread and above the 1% keep gate.
+
+Quality proof: strict-remote workspace all-target check passed; the expanded bitwise unit test and
+focused `fr-conformance` `conformance_core_geo` gate passed remotely; and feature-enabled
+`fr-command` all-target clippy with `-D warnings` passed on remote worker `ovh-b`. The full
+`fr-conformance` command reached **192/194** green library tests, including GEO; only the ACL and
+server command-metadata fixtures failed because the remote build's explicit
+`FR_ALLOW_STUB_COMMANDS` fallback generated empty ACL/COMMAND-doc tables when the legacy
+command-description directory was excluded from RCH transfer. The measured GEO command/store path
+does not consult those tables. Workspace clippy reached only three unchanged `fr-store`
+test-literal lints (`excessive_precision`, `approx_constant`) outside this lever. UBS ran with all
+Cargo-backed Rust categories disabled and found no new production defect; its nonzero result was
+whole-file baseline inventory plus intentional fail-closed benchmark panics and bounded indexes.
+Direct Rust 2024 rustfmt and diff checks passed. No Cargo command ever fell back locally. Verdict:
+**SHIPPED** (`frankenredis-3oviz`).
+
+HONEST SCOPE: the performance claim is only for this 32K-member selective 40 km x 40 km BYBOX
+workload. Broad, high-latitude, antimeridian, and infinite-box forms are exactness controls, not
+separately measured performance crossovers. No claim is made for all selectivities, server
+throughput, latency percentiles, or memory.
+
 ## 2026-07-10 cod_fr: FINAL KEEP — exact LPOS dispatch floor uses 54.747% fewer instructions
 
 NEGATIVE-EVIDENCE CHECK: writev remains VALIDLY rejected and is unrelated to this frame. The prior
