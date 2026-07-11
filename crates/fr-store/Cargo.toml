@@ -42,6 +42,7 @@ required-features = ["bench-reference"]
 [[bench]]
 name = "glob_scan"
 harness = false
+required-features = ["bench-reference"]
 
 # (cc_fr) Same-binary null-gated A/B for expire_milliseconds re-setting a TTL: two-peek +
 # to_vec original vs one-peek + borrowed-logical-key streamlined.

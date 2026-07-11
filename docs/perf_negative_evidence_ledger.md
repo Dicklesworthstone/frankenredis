@@ -7048,3 +7048,70 @@ Behavior, fallback, and quality proof:
 Verdict: **FINAL KEEP**. Strictly increasing XADD mutates the active tail without a per-append
 B-tree traversal; every ambiguous ID retains the exact historical B-tree lookup, split, overwrite,
 and removal behavior.
+
+## 2026-07-11 cod_fr: FINAL KEEP — ZSCAN MATCH classifies once per scan, median 0.933911853x instructions
+
+The selected family is sorted-set, outside cc's SIMD/dispatch lane. The profile workload scans an
+8,192-member full ZSET from cursor zero with `COUNT 8192` and `MATCH hit:*`; exactly half the
+members match. On remote worker **vmi1227854**, the unmodified `Store::zscan` had five
+`instructions:u` self-time samples of **7.51%, 10.85%, 11.75%, 12.58%, and 13.11%** (median
+**11.75%**), while `glob_match` had **8.73%, 9.53%, 9.57%, 9.87%, and 11.96%** (median
+**9.57%**). All profiles reported zero lost samples. The baseline binary SHA-256 was
+**`393fc62d727da3ceeb780d5a137ec4e4ab097cca45da940c834e1c8ddab0cfc1`**, so the lever cleared
+the mandatory profile-attribution gate before source editing.
+
+ONE LEVER: for a nontrivial ZSCAN `MATCH` pattern, prepare the existing byte-equivalent
+`ScanFilter` once per scan invocation and reuse it for every examined member. Both packed and full
+sorted-set tiers use the prepared classifier. An absent pattern and the lone `*` retain their exact
+historical paths; cursor calculation, examined-count semantics, resume anchors, cache behavior,
+member order, score bits, and storage behavior are unchanged. The exact pre-change per-member
+classification remains available only under `test` or the non-default `bench-reference` feature.
+
+The final same-binary command was:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-store --features bench-reference --bench glob_scan`
+
+Both arms shared binary SHA-256
+**`0e4e9e3795930153cf9822858a9e180d135d739ef1717d42deb9cfc80414de9e`** on worker
+**vmi1227854**. Reference-wrapper self-time samples were **1.49%, 1.58%, 1.79%, 3.56%, and
+4.70%** (median **1.79%**), with `glob_match` at **7.49%, 7.61%, 9.60%, 10.14%, and 10.57%**
+(median **9.60%**). Candidate-wrapper samples were **0.96%, 1.43%, 2.54%, 2.61%, and 2.71%**
+(median **2.54%**); its `glob_match` frame was absent in all five profiles above perf's **0.1%**
+reporting floor. All ten profiles had zero lost samples.
+
+The benchmark then ran 24 position-balanced instruction rounds in the same invocation. The paired
+candidate/candidate B/A null ratio had median **1.000772862**, p05 **0.998769855**, p95
+**1.002393104**, and CV **0.128306%**. Reference/candidate had median **1.070764866x** with
+paired-ratio CV **0.113422%**; equivalently candidate/reference was **0.933911853**, or
+**6.608815% fewer instructions**. The candidate median lies far outside the complete null band and
+clears the 1% keep gate.
+
+Behavior, fallback, and quality proof:
+
+- the same-binary correctness gate produced an identical cursor, ordered member bytes, and
+  bit-identical scores for both implementations;
+- focused coverage compares the prepared and historical implementations across packed and full
+  storage, cursor zero and nonzero batches, absent and lone-`*` filters, prefix, suffix, general,
+  and empty patterns, including an empty member. The exact post-change remote ZSCAN run passed all
+  **6/6** selected tests;
+- the full remote `fr-store` package passed **761/761** library tests with **13** deliberate
+  ignores, plus every integration, metamorphic, and doc target. Exact remote
+  `tests::conformance_core_scan` and the focused core-scan smoke case also passed;
+- remote workspace all-target check passed through the documented `FR_ALLOW_STUB_COMMANDS=1` tier.
+  The exact changed `fr-store` library/benchmark Clippy gate passed with `-D warnings`; workspace
+  all-target Clippy stopped only on three existing unrelated sorted-set test-literal
+  `approx_constant` / `excessive_precision` findings;
+- the vendored live Redis-oracle binary is excluded from RCH transfer, so that tier was surfaced as
+  unavailable. `cargo fmt --check` also failed closed with **RCH-E301** because RCH classifies fmt
+  as non-compilation. Direct Rust 2024 rustfmt found the changed benchmark clean and only unrelated
+  drift outside the changed `fr-store` hunks; `git diff --check` passed;
+- UBS ran with Rust build/lint/dependency categories 12-14 disabled and a restricted PATH, so it
+  could not invoke local Cargo. Its nonzero output was whole-file heuristic inventory plus
+  intentional benchmark fail-closed panics and test assertions; no actionable changed-production
+  finding was identified;
+- every Cargo command was fail-closed through `RCH_REQUIRE_REMOTE=1`; no local Cargo fallback was
+  used. Agent Mail remained degraded read-only, so Git, Beads, and the isolated worktree supplied
+  coordination truth.
+
+Verdict: **FINAL KEEP**. Nontrivial ZSCAN MATCH prepares its byte-equivalent classifier once per
+scan invocation; absent-pattern and lone-`*` calls retain the exact historical fallback.

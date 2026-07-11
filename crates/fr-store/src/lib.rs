@@ -25128,6 +25128,34 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
+        self.zscan_with_filter::<true>(key, cursor, pattern, count, now_ms)
+    }
+
+    /// Exact pre-hoist ZSCAN MATCH implementation for same-binary behavior and
+    /// instruction comparison. Production prepares the fixed MATCH pattern once;
+    /// this reference deliberately re-classifies it for every examined member.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[allow(clippy::type_complexity)]
+    pub fn zscan_classify_per_member_reference(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
+        self.zscan_with_filter::<false>(key, cursor, pattern, count, now_ms)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn zscan_with_filter<const PREPARED: bool>(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut below re-probes. (ZSCAN.)
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -25176,11 +25204,21 @@ impl Store {
                         let fits_listpack = zs.len() <= zset_max_listpack_entries
                             && zs.keys().all(|k| k.len() <= zset_max_listpack_value);
                         if fits_listpack {
-                            let result: Vec<(Vec<u8>, f64)> = zs
-                                .iter_asc()
-                                .filter(|(member, _)| scan_pattern_matches(pattern, member))
-                                .map(|(m, s)| (m.to_vec(), s))
-                                .collect();
+                            let result: Vec<(Vec<u8>, f64)> = if PREPARED
+                                && let Some(pat) = pattern
+                                && pat != b"*"
+                            {
+                                let scan_filter = ScanFilter::prepare(Some(pat));
+                                zs.iter_asc()
+                                    .filter(|(member, _)| scan_filter.matches(member))
+                                    .map(|(m, s)| (m.to_vec(), s))
+                                    .collect()
+                            } else {
+                                zs.iter_asc()
+                                    .filter(|(member, _)| scan_pattern_matches(pattern, member))
+                                    .map(|(m, s)| (m.to_vec(), s))
+                                    .collect()
+                            };
                             return Ok((0, result));
                         }
                         let start = cursor as usize;
@@ -25220,14 +25258,29 @@ impl Store {
                         // resume anchor for the next call (captured before the filter
                         // consumes `window`).
                         let last_examined = window.last().map(|(m, s)| (m.clone(), *s));
-                        let result: Vec<(Vec<u8>, f64)> = match pattern {
-                            Some(pat) if pat != b"*" => window
-                                .into_iter()
-                                .filter(|(member, _)| glob_match(pat, member))
-                                .collect(),
-                            // exact `*` (or None) = no-filter shortcut: keep all,
-                            // including the empty member (redis use_pattern semantics).
-                            _ => window,
+                        let result: Vec<(Vec<u8>, f64)> = if PREPARED {
+                            match pattern {
+                                Some(pat) if pat != b"*" => {
+                                    let scan_filter = ScanFilter::prepare(Some(pat));
+                                    window
+                                        .into_iter()
+                                        .filter(|(member, _)| scan_filter.matches(member))
+                                        .collect()
+                                }
+                                // Keep the exact historical no-filter tier for an absent
+                                // pattern or lone `*`; this lever targets MATCH only.
+                                _ => window,
+                            }
+                        } else {
+                            match pattern {
+                                Some(pat) if pat != b"*" => window
+                                    .into_iter()
+                                    .filter(|(member, _)| glob_match(pat, member))
+                                    .collect(),
+                                // exact `*` (or None) = no-filter shortcut: keep all,
+                                // including the empty member (redis use_pattern semantics).
+                                _ => window,
+                            }
                         };
                         let pos = resume_start + examined;
 
@@ -39923,6 +39976,67 @@ mod tests {
             Err(StoreError::WrongType)
         ));
         assert_eq!(borrow(&mut Store::new(), 0, None, 10), (0, Vec::new()));
+    }
+
+    #[test]
+    fn zscan_prepared_filter_matches_per_member_reference() {
+        fn build(n: usize) -> Store {
+            let mut store = Store::new();
+            let pairs = (0..n)
+                .map(|i| {
+                    let member = if i == 0 {
+                        Vec::new()
+                    } else {
+                        let class = if i % 2 == 0 { "hit" } else { "miss" };
+                        format!("{class}:{i:08}:tag").into_bytes()
+                    };
+                    (i as f64 + 0.5, member)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(store.zadd(b"z", &pairs, 1).unwrap(), n);
+            store
+        }
+
+        fn score_bits(result: (u64, Vec<(Vec<u8>, f64)>)) -> (u64, Vec<(Vec<u8>, u64)>) {
+            (
+                result.0,
+                result
+                    .1
+                    .into_iter()
+                    .map(|(member, score)| (member, score.to_bits()))
+                    .collect(),
+            )
+        }
+
+        let patterns: [(&str, Option<&[u8]>); 6] = [
+            ("absent", None),
+            ("all", Some(b"*")),
+            ("prefix", Some(b"hit:*")),
+            ("suffix", Some(b"*:tag")),
+            ("general", Some(b"h?t:*")),
+            ("empty", Some(b"")),
+        ];
+        let tiers = [
+            ("packed", 96, 0, 1),
+            ("full_all", 8_192, 0, 8_192),
+            ("full_batch", 8_192, 17, 37),
+        ];
+
+        for (tier, n, cursor, count) in tiers {
+            for (pattern_name, pattern) in patterns {
+                let mut candidate = build(n);
+                let mut reference = build(n);
+                let got = candidate.zscan(b"z", cursor, pattern, count, 2).unwrap();
+                let expected = reference
+                    .zscan_classify_per_member_reference(b"z", cursor, pattern, count, 2)
+                    .unwrap();
+                assert_eq!(
+                    score_bits(got),
+                    score_bits(expected),
+                    "tier={tier} pattern={pattern_name} cursor={cursor} count={count}"
+                );
+            }
+        }
     }
 
     // across a FULL cursor walk, both encodings — SCAN is read-only (no bump/touch under non-LFU),
