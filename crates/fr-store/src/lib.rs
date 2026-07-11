@@ -9459,6 +9459,175 @@ impl Store {
         }
     }
 
+    /// (frankenredis-i229a) Apply a whole BITFIELD write/mixed command under ONE keyspace lookup.
+    ///
+    /// The generic command path re-resolves the key PER op (`bitfield_get_no_stat` /
+    /// `bitfield_set` / `bitfield_incrby` / `bitfield_reserve_for_write` — one `entries.get`/
+    /// `get_mut` each) where upstream `bitfieldGeneric` resolves it ONCE (`lookupStringForBitCommand`
+    /// then `lookupKeyWrite`). This folds all ops into one `get_mut` (or one create), applying each
+    /// in order against the same in-memory string.
+    ///
+    /// `resolve(idx, current_signed)` runs the caller's overflow clamp (kept in fr-command):
+    /// `Some(write_value)` writes it (SET => reply the OLD value; INCRBY => reply the new value),
+    /// `None` reserve-extends WITHOUT writing (OVERFLOW FAIL => reply nil). GET ops never call it.
+    ///
+    /// Byte-identical to the per-op path (locked by the equivalence unit test): applying ops in
+    /// order with every write op resizing to its own offset gives the same final string SIZE as
+    /// upstream's reserve-to-max (a GET before a later extending write reads out-of-range = 0, same
+    /// as reading reserved-zero), and the per-op bookkeeping is replicated EXACTLY — including the
+    /// new-key vs existing-key asymmetry (the first write on an absent key uses the new-key branch:
+    /// NO `modification_count`/`clear_entry_flags`/digest-stale/expiry accounting; later writes and
+    /// all writes on a present key use the existing-key branch that DOES those).
+    pub fn bitfield_apply_ops<R: FnMut(usize, i64) -> Option<i64>>(
+        &mut self,
+        key: &[u8],
+        ops: &[BitfieldOp],
+        now_ms: u64,
+        mut resolve: R,
+    ) -> Result<Vec<Option<i64>>, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        // Offset guard per WRITE op (mirrors bitfield_set/bitfield_incrby; the command layer already
+        // validated offsets, but the store guard is load-bearing for the top few addressable ones).
+        for op in ops {
+            if op.is_write() && (op.offset() >> 3) as usize >= self.proto_max_bulk_len {
+                return Err(StoreError::GenericError(
+                    "ERR bit offset is not an integer or out of range".to_string(),
+                ));
+            }
+        }
+        let has_write = ops.iter().any(BitfieldOp::is_write);
+        let had_expiry = self.key_has_expiry(key);
+
+        // Resolve the key ONCE. WrongType (present non-string) is rejected before any op, matching
+        // the per-op path where the first store op's materialize_string does the same.
+        let present = self.entries.get(key).is_some();
+        let mut created_empty = false;
+        if present {
+            let Some(entry) = self.entries.get_mut(key) else { unreachable!() };
+            if entry.value.materialize_string().is_none() {
+                return Err(StoreError::WrongType);
+            }
+        } else if has_write {
+            // Absent + at least one write: upstream creates the key. Materialize it empty now (RAW,
+            // like the new-key branches); the first write's bookkeeping is gated to the new-key
+            // contract via `created_empty`+`first_write` below.
+            let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+            self.internal_entries_insert(key.to_vec(), entry);
+            created_empty = true;
+        }
+
+        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+        let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
+        let mut first_write = true;
+
+        // Absent + all-reads: nothing was created; every read is against the empty string.
+        let Some(entry) = self.entries.get_mut(key) else {
+            for op in ops {
+                match *op {
+                    BitfieldOp::Get { offset, bits, signed } => {
+                        results.push(Some(bitfield_read(&[], offset, bits, signed)));
+                    }
+                    _ => unreachable!("has_write implies the key was created above"),
+                }
+            }
+            return Ok(results);
+        };
+        for (idx, op) in ops.iter().enumerate() {
+            let (offset, bits, signed) = match *op {
+                BitfieldOp::Get { offset, bits, signed }
+                | BitfieldOp::Set { offset, bits, signed }
+                | BitfieldOp::Incrby { offset, bits, signed } => (offset, bits, signed),
+            };
+            if let BitfieldOp::Get { .. } = *op {
+                let bytes = entry
+                    .value
+                    .materialize_string()
+                    .expect("string checked/created above");
+                results.push(Some(bitfield_read(bytes, offset, bits, signed)));
+                continue;
+            }
+            let is_set = matches!(*op, BitfieldOp::Set { .. });
+            let end_bit = offset.saturating_add(u64::from(bits));
+            let needed_bytes = end_bit.div_ceil(8) as usize;
+            let new_key_write = created_empty && first_write;
+            first_write = false;
+
+            // `bytes` scope ends before the entry/self bookkeeping so the `&mut entry.value` borrow
+            // does not conflict with `entry.*`/`self.*` mutations (NLL handoff, as in `bitfield_set`).
+            let (result, changed_or_grew, wrote) = {
+                let bytes = entry
+                    .value
+                    .materialize_string()
+                    .expect("string checked/created above");
+                let current_signed = bitfield_read(bytes, offset, bits, signed);
+                let old_unsigned = bitfield_read(bytes, offset, bits, false);
+                match resolve(idx, current_signed) {
+                    Some(write_value) => {
+                        let old_len = bytes.len();
+                        if bytes.len() < needed_bytes {
+                            bytes.resize(needed_bytes, 0);
+                        }
+                        bitfield_write(bytes, offset, bits, write_value);
+                        let changed = old_len != bytes.len()
+                            || old_unsigned != bitfield_read(bytes, offset, bits, false);
+                        (Some(if is_set { old_unsigned } else { write_value }), changed, true)
+                    }
+                    None => {
+                        // OVERFLOW FAIL: reserve-extend, no value written, reply nil.
+                        let grew = bytes.len() < needed_bytes;
+                        if grew {
+                            bytes.resize(needed_bytes, 0);
+                        }
+                        (None, grew, false)
+                    }
+                }
+            };
+
+            if wrote {
+                if !new_key_write {
+                    // existing-key SET/INCRBY-write bookkeeping
+                    entry.clear_entry_flags();
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    entry.modification_count = entry.modification_count.wrapping_add(1);
+                    Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                    if had_expiry {
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                        }
+                    }
+                }
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = LFU_INIT_VAL;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if changed_or_grew {
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+            } else if !new_key_write {
+                // existing-key reserve bookkeeping (no clear_entry_flags, no expiry accounting)
+                entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                entry.set_flag(ENTRY_FORCE_STRING_ENCODING, false);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = LFU_INIT_VAL;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if changed_or_grew {
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+            } else {
+                // new-key reserve: upstream creates a zeroed string and bumps dirty unconditionally
+                // (the empty upfront-create grew to needed_bytes here).
+                self.dirty = self.dirty.saturating_add(1);
+            }
+            results.push(result);
+        }
+        Ok(results)
+    }
+
     /// Population count (number of set bits) over a byte slice. Bit-identical to
     /// `bytes.iter().map(|b| b.count_ones()).sum()` for every input, because popcount is
     /// order-independent.
@@ -29192,6 +29361,28 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError>
     Ok(HashFieldMap::from_unique_pairs_borrowed(&pairs))
 }
 
+// ── (frankenredis-b1o02 ceiling A/B, bench-only) ──────────────────────────────
+// Quantifies the RESTORE-decode win CEILING of a listpack-backed small-HASH repr.
+// CURRENT = the real RESTORE-command build (`hash_from_listpack_spans`: decode_value_spans +
+// dedup-check + `from_unique_pairs_borrowed` re-pack into PackedStrMap/CompactFieldMap).
+// KEEP_LISTPACK = what a `HashFieldMap::Listpack` variant would do (redis-style): keep the raw
+// listpack bytes verbatim (one alloc+memcpy, no decode/dedup/rebuild). The ratio bounds how
+// much the multi-day b1o02 structural rewrite could reclaim on RESTORE-then-never-read.
+#[doc(hidden)]
+#[must_use]
+pub fn bench_hash_restore_current(listpack: &[u8]) -> usize {
+    hash_from_listpack_spans(listpack).map_or(0, |h| h.len())
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn bench_hash_restore_keep_listpack(listpack: &[u8]) -> usize {
+    // black_box the CLONE so the alloc+memcpy actually happens — otherwise the compiler proves
+    // `to_vec().len() == listpack.len()` and elides the copy, making the ratio meaningless.
+    let raw = std::hint::black_box(listpack.to_vec());
+    raw.len()
+}
+
 fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError> {
     let (chunks, remainder) = entries.as_chunks::<2>();
     if !remainder.is_empty() {
@@ -31506,6 +31697,29 @@ const CRC16_TAB: [u16; 256] = [
     0xef1f, 0xff3e, 0xcf5d, 0xdf7c, 0xaf9b, 0xbfba, 0x8fd9, 0x9ff8,
     0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0,
 ];
+
+/// (frankenredis-i229a) One BITFIELD subcommand for the fused [`Store::bitfield_apply_ops`] path.
+/// Read variants carry `signed` for sign-extension; write variants defer the overflow clamp to the
+/// caller's `resolve` closure (which stays in fr-command).
+#[derive(Clone, Copy, Debug)]
+pub enum BitfieldOp {
+    Get { offset: u64, bits: u8, signed: bool },
+    Set { offset: u64, bits: u8, signed: bool },
+    Incrby { offset: u64, bits: u8, signed: bool },
+}
+
+impl BitfieldOp {
+    fn offset(&self) -> u64 {
+        match self {
+            Self::Get { offset, .. } | Self::Set { offset, .. } | Self::Incrby { offset, .. } => {
+                *offset
+            }
+        }
+    }
+    fn is_write(&self) -> bool {
+        matches!(self, Self::Set { .. } | Self::Incrby { .. })
+    }
+}
 
 /// Convert a Redis-style index (negative = from end) to a `usize`.
 /// Read `bits` bits starting at `bit_offset` from a byte slice (MSB-first bit ordering).
@@ -54658,6 +54872,142 @@ mod tests {
             "bitfield_write u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
             ref_ns / new_ns
         );
+    }
+
+    #[test]
+    fn bitfield_apply_ops_matches_per_op_reference_across_matrix() {
+        use super::BitfieldOp;
+        // (frankenredis-i229a) Byte-exactness gate: the fused one-lookup `bitfield_apply_ops` must
+        // leave the SAME observable state (reply values, string bytes, OBJECT ENCODING, per-key
+        // modification_count, expires_count, dirty) as the per-op path fr-command runs today
+        // (bitfield_get_no_stat / bitfield_set / bitfield_incrby / bitfield_reserve_for_write).
+        // Uses non-overflowing values so the clamp is identity (the overflow matrix is a separate
+        // fr-command fuzz gate); explicit FAIL ops exercise the reserve/nil path.
+        #[derive(Clone, Copy, Debug)]
+        enum Spec {
+            Get(u64, u8, bool),
+            Set(u64, u8, bool, i64),
+            Incrby(u64, u8, bool, i64),
+            Fail(u64, u8), // SET whose OVERFLOW FAIL reserves without writing (reply nil)
+        }
+        fn sign_ext(v: i64, bits: u8) -> i64 {
+            if bits >= 64 {
+                v
+            } else {
+                let shift = 64 - u32::from(bits);
+                (v << shift) >> shift
+            }
+        }
+        let sequences: &[&[Spec]] = &[
+            &[Spec::Set(0, 8, false, 200)],
+            &[Spec::Get(0, 8, false), Spec::Set(0, 8, false, 42), Spec::Get(0, 8, false)],
+            &[Spec::Set(0, 8, false, 10), Spec::Set(8, 8, false, 20), Spec::Set(0, 4, false, 3)],
+            &[Spec::Incrby(0, 8, false, 5), Spec::Incrby(0, 8, false, 3), Spec::Get(0, 8, false)],
+            &[Spec::Set(0, 8, true, -5), Spec::Get(0, 8, true), Spec::Incrby(0, 8, true, -3)],
+            &[Spec::Fail(0, 8), Spec::Get(0, 8, false)],
+            &[Spec::Set(0, 8, false, 7), Spec::Fail(16, 8), Spec::Get(0, 8, false), Spec::Set(24, 8, false, 9)],
+            &[Spec::Set(100, 16, false, 1000), Spec::Get(100, 16, false)],
+            &[Spec::Get(0, 8, false), Spec::Set(0, 8, false, 1)],
+            &[Spec::Incrby(3, 13, true, -100), Spec::Get(3, 13, true), Spec::Set(3, 13, true, 42)],
+        ];
+        let presets: &[Option<&[u8]>] = &[None, Some(&[0xA5, 0x5A, 0x0F][..]), Some(&[0xFF; 8][..])];
+
+        for (si, seq) in sequences.iter().enumerate() {
+            for (pi, preset) in presets.iter().enumerate() {
+                for &with_expiry in &[false, true] {
+                    let setup = |s: &mut Store| {
+                        if let Some(bytes) = preset {
+                            s.set(b"k".to_vec(), bytes.to_vec(), None, 1);
+                            if with_expiry {
+                                s.expire_at_milliseconds(b"k", 1_000_000_000_000, 1);
+                            }
+                        }
+                    };
+                    let ts = 2u64;
+                    let label = format!("seq={si} preset={pi} expiry={with_expiry}");
+
+                    // ---- reference: per-op, exactly as fr-command dispatches ----
+                    let mut refs = Store::new();
+                    setup(&mut refs);
+                    let mut ref_results: Vec<Option<i64>> = Vec::new();
+                    for op in seq.iter() {
+                        match *op {
+                            Spec::Get(off, bits, signed) => ref_results.push(Some(
+                                refs.bitfield_get_no_stat(b"k", off, bits, signed, ts).unwrap(),
+                            )),
+                            Spec::Set(off, bits, signed, v) => {
+                                let old = refs.bitfield_set(b"k", off, bits, v, ts).unwrap();
+                                ref_results
+                                    .push(Some(if signed { sign_ext(old, bits) } else { old }));
+                            }
+                            Spec::Incrby(off, bits, signed, incr) => {
+                                let r = refs
+                                    .bitfield_incrby(b"k", off, bits, signed, ts, |cur| {
+                                        Some(cur + incr)
+                                    })
+                                    .unwrap();
+                                ref_results.push(r);
+                            }
+                            Spec::Fail(off, bits) => {
+                                refs.bitfield_reserve_for_write(b"k", off, bits, ts).unwrap();
+                                ref_results.push(None);
+                            }
+                        }
+                    }
+
+                    // ---- candidate: one fused lookup ----
+                    let mut cand = Store::new();
+                    setup(&mut cand);
+                    let ops: Vec<BitfieldOp> = seq
+                        .iter()
+                        .map(|op| match *op {
+                            Spec::Get(off, bits, signed) => BitfieldOp::Get { offset: off, bits, signed },
+                            Spec::Set(off, bits, signed, _) => BitfieldOp::Set { offset: off, bits, signed },
+                            Spec::Incrby(off, bits, signed, _) => BitfieldOp::Incrby { offset: off, bits, signed },
+                            Spec::Fail(off, bits) => BitfieldOp::Set { offset: off, bits, signed: false },
+                        })
+                        .collect();
+                    let raw = cand
+                        .bitfield_apply_ops(b"k", &ops, ts, |idx, cur| match seq[idx] {
+                            Spec::Set(_, _, _, v) => Some(v),
+                            Spec::Incrby(_, _, _, incr) => Some(cur + incr),
+                            Spec::Fail(_, _) => None,
+                            Spec::Get(..) => unreachable!("resolver only called for writes"),
+                        })
+                        .unwrap();
+                    let cand_results: Vec<Option<i64>> = seq
+                        .iter()
+                        .zip(raw)
+                        .map(|(op, r)| match *op {
+                            Spec::Set(_, bits, true, _) => r.map(|old| sign_ext(old, bits)),
+                            _ => r,
+                        })
+                        .collect();
+
+                    assert_eq!(ref_results, cand_results, "reply mismatch {label}");
+                    assert_eq!(
+                        refs.get(b"k", 3).unwrap(),
+                        cand.get(b"k", 3).unwrap(),
+                        "value bytes mismatch {label}"
+                    );
+                    assert_eq!(
+                        refs.object_encoding(b"k", 3),
+                        cand.object_encoding(b"k", 3),
+                        "OBJECT ENCODING mismatch {label}"
+                    );
+                    assert_eq!(
+                        refs.key_modification_count(b"k", 3),
+                        cand.key_modification_count(b"k", 3),
+                        "modification_count mismatch {label}"
+                    );
+                    assert_eq!(refs.dirty, cand.dirty, "dirty mismatch {label}");
+                    assert_eq!(
+                        refs.expires_count, cand.expires_count,
+                        "expires_count mismatch {label}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

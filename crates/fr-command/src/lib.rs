@@ -26287,7 +26287,18 @@ fn bitfield_cmd(
         )));
     }
 
-    let mut results: Vec<RespFrame> = Vec::new();
+    // (frankenredis-i229a) Parse the whole command into ops + per-op clamp metadata, then apply
+    // them under ONE keyspace lookup via `Store::bitfield_apply_ops` (was: one store lookup PER op).
+    // Byte-identical: the SAME per-op clamp/overflow/reserve semantics run in the resolver below,
+    // and `bitfield_apply_ops` replicates the per-op read/write/reserve bookkeeping exactly (locked
+    // by `bitfield_apply_ops_matches_per_op_reference_across_matrix`).
+    enum BfMeta {
+        Get,
+        Set { value: i64, signed: bool, bits: u8, mode: BitfieldOverflow },
+        Incrby { incr: i64, signed: bool, bits: u8, mode: BitfieldOverflow },
+    }
+    let mut store_ops: Vec<fr_store::BitfieldOp> = Vec::new();
+    let mut metas: Vec<BfMeta> = Vec::new();
     let mut overflow_mode = BitfieldOverflow::Wrap;
     let mut i = 2;
 
@@ -26314,10 +26325,8 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            let val = store
-                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
-                .map_err(CommandError::Store)?;
-            results.push(RespFrame::Integer(val));
+            store_ops.push(fr_store::BitfieldOp::Get { offset: bit_offset, bits, signed });
+            metas.push(BfMeta::Get);
             i += 3;
         } else if sub.eq_ignore_ascii_case("SET") {
             if i + 3 >= argv.len() {
@@ -26341,57 +26350,12 @@ fn bitfield_cmd(
                 }
             };
             let value = parse_i64_arg(&argv[i + 3])?;
-            // Mirror upstream bitops.c::bitfieldCommand SET path:
-            //   newval = thisop->i64;
-            //   overflow = checkUnsignedBitfieldOverflow(newval, 0, bits, owtype, &wrapped);
-            //                  ^ for unsigned, newval (int64_t) is read as uint64_t, so a
-            //   negative i64 becomes UINT64_MAX which exceeds max → positive-overflow path,
-            //   SAT clamps to MAX (255 for u8), not 0. fr was funneling all SET-paths through
-            //   bitfield_clamp_with_overflow with i64_overflowed=false, hitting the
-            //   `value < 0 → (0, true)` branch that's only correct for INCRBY underflow.
-            // Signal the positive-overflow case via the existing i64_overflowed hint so the
-            // unsigned-SAT branch returns max (matches upstream).
-            // Also: upstream's SET path with FAIL overflow returns nil and does NOT write
-            //   `if (!(overflow && owtype == BFOVERFLOW_FAIL)) { addReply; setUnsignedBitfield; }`
-            // fr was writing the wrap value and returning Integer(0) regardless; switch to
-            // returning BulkString(None) without touching the store under FAIL-on-overflow.
-            // (frankenredis-bfsetovrflw)
-            let (clamped, overflowed) = if signed {
-                // Signed SET routes through the faithful checkSignedBitfieldOverflow
-                // port so extreme-negative literals saturate like redis. (INCRBY
-                // and unsigned SET keep the existing clamp.)
-                bitfield_signed_set_resolve(value, bits, overflow_mode)
-            } else {
-                let trigger_pos_overflow = value < 0;
-                bitfield_clamp_with_overflow(
-                    value,
-                    trigger_pos_overflow,
-                    bits,
-                    false,
-                    overflow_mode,
-                )
-            };
-            if overflowed && overflow_mode == BitfieldOverflow::Fail {
-                // Upstream still ran lookupStringForBitCommand, so the key is
-                // created/extended to this write's offset even though the value
-                // isn't written (FAIL). (frankenredis bitfield-fail-extend)
-                store
-                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::BulkString(None));
-                i += 4;
-                continue;
-            }
-            let old = store
-                .bitfield_set(key, bit_offset, bits, clamped, now_ms)
-                .map_err(CommandError::Store)?;
-            // Return old value, sign-extended if signed
-            let old_result = if signed {
-                bitfield_sign_extend(old, bits)
-            } else {
-                old
-            };
-            results.push(RespFrame::Integer(old_result));
+            // Clamp/overflow semantics (bfsetovrflw) are unchanged — they now run in the resolver
+            // passed to `bitfield_apply_ops` (SET: signed via bitfield_signed_set_resolve, unsigned
+            // via bitfield_clamp_with_overflow with the value<0 positive-overflow hint; FAIL =>
+            // reserve-extend without writing => nil).
+            store_ops.push(fr_store::BitfieldOp::Set { offset: bit_offset, bits, signed });
+            metas.push(BfMeta::Set { value, signed, bits, mode: overflow_mode });
             i += 4;
         } else if sub.eq_ignore_ascii_case("INCRBY") {
             if i + 3 >= argv.len() {
@@ -26416,35 +26380,10 @@ fn bitfield_cmd(
             };
             let increment = parse_i64_arg(&argv[i + 3])?;
 
-            // (frankenredis-bfincrfast) Single keyspace lookup: fold the current-value read
-            // into the write's get_mut. The closure keeps the overflow clamp here; the store
-            // reads `current`, applies it, and writes (or reserve-extends on OVERFLOW FAIL) under
-            // one lookup instead of the prior get_no_stat + bitfield_set/reserve two-lookup pair.
-            // Byte-identical: get_no_stat was a pure read, so the net bookkeeping is unchanged.
-            let result = store
-                .bitfield_incrby(key, bit_offset, bits, signed, now_ms, |current| {
-                    let (new_val, i64_overflowed) = current.overflowing_add(increment);
-                    let (clamped, overflowed) = bitfield_clamp_with_overflow(
-                        new_val,
-                        i64_overflowed,
-                        bits,
-                        signed,
-                        overflow_mode,
-                    );
-                    // As with SET: on FAIL the key is still created/extended upfront (the store
-                    // reserve-extends), but no value is written and the reply is nil.
-                    // (frankenredis bitfield-fail-extend)
-                    if overflowed && overflow_mode == BitfieldOverflow::Fail {
-                        None
-                    } else {
-                        Some(clamped)
-                    }
-                })
-                .map_err(CommandError::Store)?;
-            match result {
-                Some(clamped) => results.push(RespFrame::Integer(clamped)),
-                None => results.push(RespFrame::BulkString(None)),
-            }
+            // Clamp/overflow (current+incr via bitfield_clamp_with_overflow, FAIL => nil) now runs
+            // in the resolver below, applied under the single fused lookup.
+            store_ops.push(fr_store::BitfieldOp::Incrby { offset: bit_offset, bits, signed });
+            metas.push(BfMeta::Incrby { incr: increment, signed, bits, mode: overflow_mode });
             i += 4;
         } else if sub.eq_ignore_ascii_case("OVERFLOW") {
             if i + 1 >= argv.len() {
@@ -26472,6 +26411,53 @@ fn bitfield_cmd(
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
     }
+
+    // (frankenredis-i229a) Apply every op under ONE keyspace lookup; the resolver runs the per-op
+    // clamp/overflow exactly as the per-op path did (byte-identical, `bitfield_apply_ops` gate).
+    let raw = store
+        .bitfield_apply_ops(key, &store_ops, now_ms, |idx, current| match &metas[idx] {
+            BfMeta::Set { value, signed, bits, mode } => {
+                let (clamped, overflowed) = if *signed {
+                    bitfield_signed_set_resolve(*value, *bits, *mode)
+                } else {
+                    bitfield_clamp_with_overflow(*value, *value < 0, *bits, false, *mode)
+                };
+                if overflowed && *mode == BitfieldOverflow::Fail {
+                    None
+                } else {
+                    Some(clamped)
+                }
+            }
+            BfMeta::Incrby { incr, signed, bits, mode } => {
+                let (new_val, i64_overflowed) = current.overflowing_add(*incr);
+                let (clamped, overflowed) =
+                    bitfield_clamp_with_overflow(new_val, i64_overflowed, *bits, *signed, *mode);
+                if overflowed && *mode == BitfieldOverflow::Fail {
+                    None
+                } else {
+                    Some(clamped)
+                }
+            }
+            BfMeta::Get => unreachable!("resolver is only called for write ops"),
+        })
+        .map_err(CommandError::Store)?;
+    let results: Vec<RespFrame> = metas
+        .iter()
+        .zip(raw)
+        .map(|(meta, r)| match meta {
+            BfMeta::Get => RespFrame::Integer(r.expect("GET always yields a value")),
+            BfMeta::Set { signed, bits, .. } => match r {
+                Some(old) => {
+                    RespFrame::Integer(if *signed { bitfield_sign_extend(old, *bits) } else { old })
+                }
+                None => RespFrame::BulkString(None),
+            },
+            BfMeta::Incrby { .. } => match r {
+                Some(new) => RespFrame::Integer(new),
+                None => RespFrame::BulkString(None),
+            },
+        })
+        .collect();
     Ok(RespFrame::Array(Some(results)))
 }
 

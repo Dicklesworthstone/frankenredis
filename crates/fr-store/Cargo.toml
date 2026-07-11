@@ -104,3 +104,15 @@ harness = false
 [[bench]]
 name = "listpack_int_probe"
 harness = false
+
+# (frankenredis-b1o02) CEILING A/B for a listpack-backed small-HASH repr: current re-pack
+# (hash_from_listpack_spans) vs raw listpack.to_vec() keep — bounds the RESTORE-decode win.
+[[bench]]
+name = "hash_restore_ceiling"
+harness = false
+
+# (frankenredis-i229a) Same-binary A/B for the fused BITFIELD write/mixed path: per-op N-lookup
+# loop vs one-lookup Store::bitfield_apply_ops.
+[[bench]]
+name = "bitfield_apply_ops"
+harness = false
