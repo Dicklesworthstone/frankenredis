@@ -26318,28 +26318,34 @@ fn bitfield_cmd(
             };
             let increment = parse_i64_arg(&argv[i + 3])?;
 
-            // Read current value (no-stat: this is a write command, so the
-            // single keyspace lookup was already accounted for above).
-            let current = store
-                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
+            // (frankenredis-bfincrfast) Single keyspace lookup: fold the current-value read
+            // into the write's get_mut. The closure keeps the overflow clamp here; the store
+            // reads `current`, applies it, and writes (or reserve-extends on OVERFLOW FAIL) under
+            // one lookup instead of the prior get_no_stat + bitfield_set/reserve two-lookup pair.
+            // Byte-identical: get_no_stat was a pure read, so the net bookkeeping is unchanged.
+            let result = store
+                .bitfield_incrby(key, bit_offset, bits, signed, now_ms, |current| {
+                    let (new_val, i64_overflowed) = current.overflowing_add(increment);
+                    let (clamped, overflowed) = bitfield_clamp_with_overflow(
+                        new_val,
+                        i64_overflowed,
+                        bits,
+                        signed,
+                        overflow_mode,
+                    );
+                    // As with SET: on FAIL the key is still created/extended upfront (the store
+                    // reserve-extends), but no value is written and the reply is nil.
+                    // (frankenredis bitfield-fail-extend)
+                    if overflowed && overflow_mode == BitfieldOverflow::Fail {
+                        None
+                    } else {
+                        Some(clamped)
+                    }
+                })
                 .map_err(CommandError::Store)?;
-
-            let (new_val, i64_overflowed) = current.overflowing_add(increment);
-            let (clamped, overflowed) =
-                bitfield_clamp_with_overflow(new_val, i64_overflowed, bits, signed, overflow_mode);
-
-            if overflowed && overflow_mode == BitfieldOverflow::Fail {
-                // As with SET: the key is created/extended upfront even when the
-                // INCRBY aborts under FAIL. (frankenredis bitfield-fail-extend)
-                store
-                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::BulkString(None));
-            } else {
-                store
-                    .bitfield_set(key, bit_offset, bits, clamped, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::Integer(clamped));
+            match result {
+                Some(clamped) => results.push(RespFrame::Integer(clamped)),
+                None => results.push(RespFrame::BulkString(None)),
             }
             i += 4;
         } else if sub.eq_ignore_ascii_case("OVERFLOW") {

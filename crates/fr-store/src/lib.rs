@@ -9317,6 +9317,132 @@ impl Store {
         Ok(old_value)
     }
 
+    /// (frankenredis-bfincrfast) Fuse BITFIELD INCRBY's read+write into ONE keyspace lookup.
+    /// The generic command path did `bitfield_get_no_stat` (a lookup) to read the current value,
+    /// computed the clamped new value in fr-command, then `bitfield_set`/`bitfield_reserve_for_write`
+    /// (a SECOND lookup) to write it — two `entries.get`/`get_mut` where upstream `bitfieldGeneric`
+    /// resolves the key ONCE (`lookupKeyWrite`). `bitfield_get_no_stat` is a PURE read (no
+    /// `next_rand`, no LFU, no mutation), so folding the read into the write's `get_mut` is
+    /// byte-identical: the `compute` closure still owns the overflow clamp in fr-command, and the
+    /// write/reserve bookkeeping below mirrors `bitfield_set` / `bitfield_reserve_for_write` exactly.
+    /// `compute(current)` returns `Some(new)` to write `new` (INCRBY success, result = the new value)
+    /// or `None` to reserve-only without writing (OVERFLOW FAIL — extend the string, reply nil).
+    /// Returns the closure's decision after applying it (`Some(new)` written, `None` reserved).
+    pub fn bitfield_incrby<F: FnOnce(i64) -> Option<i64>>(
+        &mut self,
+        key: &[u8],
+        bit_offset: u64,
+        bits: u8,
+        signed: bool,
+        now_ms: u64,
+        compute: F,
+    ) -> Result<Option<i64>, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
+            return Err(StoreError::GenericError(
+                "ERR bit offset is not an integer or out of range".to_string(),
+            ));
+        }
+        let end_bit = bit_offset.saturating_add(u64::from(bits));
+        let needed_bytes = end_bit.div_ceil(8) as usize;
+        let had_expiry = self.key_has_expiry(key);
+        if let Some(entry) = self.entries.get_mut(key) {
+            let Some(bytes) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            let current = bitfield_read(bytes, bit_offset, bits, signed);
+            match compute(current) {
+                Some(new_value) => {
+                    // Mirror bitfield_set existing-key write.
+                    let old_unsigned = bitfield_read(bytes, bit_offset, bits, false);
+                    let old_len = bytes.len();
+                    if bytes.len() < needed_bytes {
+                        bytes.resize(needed_bytes, 0);
+                    }
+                    bitfield_write(bytes, bit_offset, bits, new_value);
+                    let changed = old_len != bytes.len()
+                        || old_unsigned != bitfield_read(bytes, bit_offset, bits, false);
+                    entry.last_access_ms = lru_access_millis(now_ms);
+                    entry.lfu_freq = LFU_INIT_VAL;
+                    entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                    entry.modification_count = entry.modification_count.wrapping_add(1);
+                    entry.clear_entry_flags();
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    if had_expiry {
+                        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
+                        }
+                    }
+                    if changed {
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    Ok(Some(new_value))
+                }
+                None => {
+                    // Mirror bitfield_reserve_for_write existing-key.
+                    let grew = bytes.len() < needed_bytes;
+                    if grew {
+                        bytes.resize(needed_bytes, 0);
+                    }
+                    entry.last_access_ms = lru_access_millis(now_ms);
+                    entry.lfu_freq = LFU_INIT_VAL;
+                    entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                    entry.modification_count = entry.modification_count.wrapping_add(1);
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    entry.set_flag(ENTRY_FORCE_STRING_ENCODING, false);
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    if grew {
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    Ok(None)
+                }
+            }
+        } else {
+            let current = bitfield_read(&[], bit_offset, bits, signed);
+            match compute(current) {
+                Some(new_value) => {
+                    // Mirror bitfield_set new-key.
+                    let mut bytes = Vec::new();
+                    let old_unsigned = bitfield_read(&bytes, bit_offset, bits, false);
+                    if bytes.len() < needed_bytes {
+                        bytes.resize(needed_bytes, 0);
+                    }
+                    bitfield_write(&mut bytes, bit_offset, bits, new_value);
+                    let changed = !bytes.is_empty()
+                        || old_unsigned != bitfield_read(&bytes, bit_offset, bits, false);
+                    let mut entry = Entry::new(Value::String(bytes.into()), now_ms);
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    self.internal_entries_insert(key.to_vec(), entry);
+                    if changed {
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    Ok(Some(new_value))
+                }
+                None => {
+                    // Mirror bitfield_reserve_for_write new-key.
+                    let mut entry =
+                        Entry::new(Value::String(vec![0u8; needed_bytes].into()), now_ms);
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    self.internal_entries_insert(key.to_vec(), entry);
+                    self.dirty = self.dirty.saturating_add(1);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     /// Population count (number of set bits) over a byte slice. Bit-identical to
     /// `bytes.iter().map(|b| b.count_ones()).sum()` for every input, because popcount is
     /// order-independent.
@@ -54182,6 +54308,86 @@ mod tests {
         println!(
             "BITFIELD SET large-string A/B over {n} bytes x{reps}: clone={clone_ns}ns inplace={inplace_ns}ns ratio={ratio:.2}x"
         );
+    }
+
+    // (frankenredis-bfincrfast) bitfield_incrby folds BITFIELD INCRBY's current-value read into
+    // the write's get_mut. Prove byte-identity vs the prior two-call sequence (bitfield_get_no_stat
+    // + bitfield_set / bitfield_reserve_for_write) for the SAME compute decision, over a fuzzed op
+    // set: fresh / pre-existing / volatile-with-TTL / wrongtype keys, varied offset/bits/signedness,
+    // and both the write (Some) and reserve (None = OVERFLOW FAIL) outcomes. Assert identical
+    // returned value, full-state digest, dirty, expires_count, and entry modification_count.
+    #[test]
+    fn bitfield_incrby_matches_getnostat_then_set_or_reserve() {
+        // Deterministic stand-in for the fr-command overflow clamp: i64::MIN => the OVERFLOW-FAIL
+        // reserve path (None); otherwise write current+param (bitfield_write truncates to `bits`).
+        fn tc(current: i64, param: i64) -> Option<i64> {
+            if param == i64::MIN {
+                None
+            } else {
+                Some(current.wrapping_add(param))
+            }
+        }
+        let key = b"bfk".as_slice();
+        let now = 5_000u64;
+        for setup in 0..4 {
+            for &signed in &[false, true] {
+                for &bits in &[1u8, 4, 8, 16, 63] {
+                    for &offset in &[0u64, 1, 7, 8, 100, 4096] {
+                        for &param in &[0i64, 1, -1, 255, -128, 1000, i64::MIN] {
+                            let mut a = Store::new();
+                            let mut b = Store::new();
+                            match setup {
+                                1 => {
+                                    a.set(key.to_vec(), vec![0x5a; 8], None, now);
+                                    b.set(key.to_vec(), vec![0x5a; 8], None, now);
+                                }
+                                2 => {
+                                    a.set(key.to_vec(), vec![0xa5; 8], Some(100_000), now);
+                                    b.set(key.to_vec(), vec![0xa5; 8], Some(100_000), now);
+                                }
+                                3 => {
+                                    a.hset(key, b"f".to_vec(), b"v".to_vec(), now).unwrap();
+                                    b.hset(key, b"f".to_vec(), b"v".to_vec(), now).unwrap();
+                                }
+                                _ => {}
+                            }
+                            // OLD: get_no_stat + compute + set / reserve.
+                            let res_a = match a.bitfield_get_no_stat(key, offset, bits, signed, now) {
+                                Ok(cur) => match tc(cur, param) {
+                                    Some(v) => {
+                                        a.bitfield_set(key, offset, bits, v, now).map(|_| Some(v))
+                                    }
+                                    None => a
+                                        .bitfield_reserve_for_write(key, offset, bits, now)
+                                        .map(|_| None),
+                                },
+                                Err(e) => Err(e),
+                            };
+                            // NEW: fused single-lookup bitfield_incrby.
+                            let res_b =
+                                b.bitfield_incrby(key, offset, bits, signed, now, |c| tc(c, param));
+                            let ctx = format!(
+                                "setup={setup} signed={signed} bits={bits} off={offset} param={param}"
+                            );
+                            assert_eq!(res_a.is_ok(), res_b.is_ok(), "ok mismatch {ctx}");
+                            if let (Ok(ra), Ok(rb)) = (&res_a, &res_b) {
+                                assert_eq!(ra, rb, "result {ctx}");
+                            }
+                            assert_eq!(
+                                a.state_digest_full_scan(),
+                                b.state_digest_full_scan(),
+                                "digest {ctx}"
+                            );
+                            assert_eq!(a.dirty, b.dirty, "dirty {ctx}");
+                            assert_eq!(a.expires_count, b.expires_count, "expires_count {ctx}");
+                            let mc_a = a.entries.get(key).map(|e| e.modification_count);
+                            let mc_b = b.entries.get(key).map(|e| e.modification_count);
+                            assert_eq!(mc_a, mc_b, "modification_count {ctx}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── Extended List store tests ───────────────────────────────────────

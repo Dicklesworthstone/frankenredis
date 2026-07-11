@@ -72,3 +72,9 @@ harness = false
 [[bench]]
 name = "smove_member_clone"
 harness = false
+
+# (frankenredis-bfincrfast) Same-binary null-gated A/B for BITFIELD INCRBY: old two-lookup
+# get_no_stat+bitfield_set vs fused single-lookup bitfield_incrby.
+[[bench]]
+name = "bitfield_incrby_fuse"
+harness = false
