@@ -16132,3 +16132,22 @@ the same fusion there is NOT CRC-diluted and MIGHT gate — but list RDB SAVE is
 ChunkedList-not-listpack-backed slow path (project_list_restore_gap_architectural), a bigger fish. Rollback: n/a
 (reverted). LESSON: a redundant-parse elision only gates where the parse is a real fraction of the whole op;
 CRC/LZF/byte-write-dominated paths dilute it below the noise floor.
+
+### 2026-07-11 SHIPPED (DUMP-payload cache extended to small hash/set — completes the listpack-type cache) — CreamPeak
+Consistency gap in the DUMP-payload memoization: it covered list (99fwc) + zset (lever6) but NOT hash + set,
+despite the same listpack-encode path. My memory note "hash/set DUMP already beat redis so they don't need
+caching" conflated single-DUMP-vs-redis (MIGRATE, cache-miss) with repeat-DUMP-with-cache (a cache-hit clone
+beats even a fast re-encode). Fixed: dump_key now sets cache_dump_payload for the small listpack HASH and
+intset/listpack SET encodings (large hashtable hash/set left uncached, mirroring the zset skiplist path, to keep
+the cache bounded); DumpPayloadCache + validity filter gained hash_max_listpack_entries/value +
+set_max_intset_entries/set_max_listpack_entries so an encoding-flipping config change invalidates. Commit
+2a0a0dfc5. CORRECTNESS: all hash/set writes bump modification_count (hset/hdel/hincrby/hincrbyfloat/hsetnx/
+sadd/srem/spop/smove — verified) so the mod_count-keyed cache auto-invalidates; hash_set_dump_cache_invalidates_
+on_writes_and_config asserts cached==fresh after every write path + a hash config flip + a set config flip +
+a pure intset set; + 58 fr-store dump tests + fr-conformance core_hash/core_set/dump_restore + live_redis hash/
+set DUMP/RESTORE roundtrip vs 7.2.4. A/B (same-binary median, isolated re-encode vs cache-hit clone): hash
+31/104/220x, set 17/52/112x (n=8/40/120). HONEST CAVEAT (the dumpfuse lesson, inverted): that 16-220x is the
+ISOLATED encode-vs-clone magnitude (99fwc's methodology); because hash/set listpack encode is CHEAP (not
+structural like lists), the END-TO-END repeat-DUMP-COMMAND benefit is dispatch/IO-bound and MODEST — consistent
+with zset lever6's -6.7..-11.6% measured end-to-end. Shipped as a byte-identical consistency fix, not on the
+headline isolated number. Rollback: drop the two arm flags + the 4 validity/insert fields.
