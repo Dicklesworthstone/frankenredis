@@ -6860,3 +6860,44 @@ Behavior, fallback, and quality proof:
 
 Verdict: **FINAL KEEP**. Strictly monotonic XADD appends take the single tail-node tier; every
 ambiguous ID retains the exact old lookup and split behavior.
+
+## 2026-07-10 CobaltHarbor: SHIPPED crc64 fold-by-4 PCLMULQDQ (990cfe75c) — 1.14x@1KiB→1.40x@256KiB, byte-exact; CORRECTS "crc64 ruled out" rows
+
+CRC64 was previously logged as "ruled out as a lever / already faster than redis" (slice-by-16
+table beat redis slice-by-8; then a PCLMULQDQ fold-by-1 shipped, 22f6a9bc5). That fold-by-1 kernel
+was a **single 128-bit accumulator** — latency-bound: each 16-byte fold sits on the critical path
+through PCLMULQDQ's ~4-cycle latency, leaving the unit idle. **Fold-by-4** (four independent
+accumulators, 4-block/512-bit fold constant `reflect(x^575)`/`reflect(x^511)`, then a 3-fold combine
+`r = a0·x^384 ^ a1·x^256 ^ a2·x^128 ^ a3`) hides the latency. Reaches the real path: `crc64_redis`
+dispatches to `fr_simd::crc64` at ≥1024 B (large-value DUMP/RESTORE + whole-RDB-file BGSAVE / DEBUG
+RELOAD checksums).
+
+MEASURED — same binary, ONE rch invocation, `crc64_fold1_reference` vs `crc64` interleaved
+(order-swapped on odd rounds), null control = fold1-vs-fold1, gated on median outside null p5..p95;
+worker **hz2** (pclmulqdq present), reproduced across two runs:
+
+| size | null med | null p5..p95 | fold4/fold1 | verdict |
+|---|---:|---|---:|---|
+| 1 KiB | 1.0007 | [0.996, 1.009] | 1.140x | WIN |
+| 4 KiB | 0.9993 | [0.978, 1.011] | 1.289x | WIN |
+| 16 KiB | 1.0000 | [0.996, 1.006] | 1.375x | WIN |
+| 64 KiB | 0.9998 | [0.991, 1.009] | 1.402x | WIN |
+| 256 KiB | 1.0001 | [0.977, 1.018] | 1.402x | WIN |
+
+Win rises with size (fixed combine amortizes) → confirms the old kernel was latency-bound. 512 B is
+below the ≥1024 wiring and reads noisy/indistinguishable — moot.
+
+BYTE-EXACT (self-verifying, a wrong 4-block constant cannot ship): (1) a software-clmul model
+confirmed fold-by-4 == `crc64_scalar` for lengths 16..1200 AND that the 4-block exps are UNIQUELY
+575/511 (D=3/D=5 mismatch at len=128); (2) the crate's exhaustive test now gates fold4 AND the
+retained fold1 reference == scalar for every length 0..=2048 × 3 seeds + unaligned; (3) fr-persist's
+`crc64_pclmul_matches_slice_table` (fr_simd::crc64 == slice-by-16 table, all lengths) stays green.
+Clippy `-D warnings` on fr-simd --all-targets clean.
+
+LESSON: "algorithm already optimal / ruled out" is a hypothesis — re-profile the *frame's own
+mechanism*. The fold-by-1 clmul was correct but latency-bound; the standard fold-by-N latency-hiding
+technique (Intel CRC white paper; zlib-ng/Linux kernel) still had 1.14–1.40x. The prior "BITCOUNT
+popcount multi-accumulator REJECTED" row does NOT generalize here: that was a register add-chain
+(throughput-bound); clmul folding is latency-bound, where multi-accumulator is the textbook fix.
+NOTE: agent-mail DB was corruption-circuit-broken this session (reads only); fr-simd was uncontended
+so reservation absence was safe. Retry-condition: n/a (shipped, gated).
