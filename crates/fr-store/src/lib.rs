@@ -8912,8 +8912,13 @@ impl Store {
                 result
             }
             None => {
-                let mut current = vec![0; needed];
-                current[offset..offset + value.len()].copy_from_slice(value);
+                // (CobaltHarbor) Same double-write elision as the existing-key path above: the old
+                // `vec![0; needed]` zero-filled the value region `[offset, offset+len)` too, which the
+                // `copy_from_slice` then overwrote. Allocate the gap `[0, offset)` as zeros, then
+                // append `value` once. Byte-identical (leading zeros + value); new_len == needed.
+                let mut current = Vec::with_capacity(needed);
+                current.resize(offset, 0);
+                current.extend_from_slice(value);
                 let new_len = current.len();
                 let mut entry = Entry::new(Value::String(current.into()), now_ms);
                 // (br-frankenredis-84bv)
