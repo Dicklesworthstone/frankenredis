@@ -7115,3 +7115,54 @@ Behavior, fallback, and quality proof:
 
 Verdict: **FINAL KEEP**. Nontrivial ZSCAN MATCH prepares its byte-equivalent classifier once per
 scan invocation; absent-pattern and lone-`*` calls retain the exact historical fallback.
+
+## 2026-07-11 cc_fr: LANDED zsetlpscore — RDB ZSET_LISTPACK decode reads scores alloc-free — 1.45-1.50x fractional / 1.36x mixed (byte-exact)
+
+The zset-listpack decode arm (RDB-load / RESTORE / DEBUG RELOAD) called
+`decode_listpack` (heap-allocates a `Vec<u8>` per string entry, scores included) +
+a pair loop that, for every NON-integer score (`1.5`, `inf`, ...), parsed that
+just-allocated `Vec` to `f64` and **dropped** it — one wasted alloc+copy+free per
+fractional score. CrimsonHawk's `788bbfd00` had already removed the render→parse for
+INTEGER scores (`n as f64`), but string scores kept allocating. NOT blocked by the
+LZF-temp lifetime (ledger row "set/zset listpack RESTORE decode ... per-element
+`Vec<u8>` copy forced by LZF-temp lifetime"): that forces only the MEMBER copy; a
+score becomes an `f64` inline and outlives nothing.
+
+FIX (`24e1b365c`): new `listpack::decode_zset_listpack_pairs` reads each score
+through a shared allocation-free raw-entry core
+`RawListpackValue{Integer(i64)|String(Range)}`, factored out of `decode_entry`
+(now a byte-identical materializing wrapper — 211 lib tests + 12 metamorphic RDB
+roundtrips green). Integer scores stay `n as f64`; string scores parse a BORROWED
+slice into the listpack. No score `Vec` is ever allocated. Members still
+materialize owned bytes (forced by the RESTORE result outliving the transient
+decompressed listpack). Structural validation + odd-count rejection mirror
+`decode_listpack` + the old `is_multiple_of(2)` guard exactly.
+
+BYTE-/BIT-EXACT: 4 differential tests assert `decode_zset_listpack_pairs` ==
+retained `decode_zset_listpack_pairs_orig` across int / fractional / inf / negative
+/ integer-member scores, on an encoder-built 200-member mixed blob, and on
+malformed inputs (odd count, unparseable score, truncated) — same accept/reject.
+Scores compared via `f64::to_bits`.
+
+MEASURED (same-binary null-gated A/B, `cargo bench -p fr-persist --bench
+zset_lp_score_decode`, worker vmi1149989, median-of-41 position-balanced pairs,
+`new/orig`, reproduced across 2 runs):
+
+| workload | new/orig run1 | run2 | null p5..p95 (run2) | null cv% | verdict |
+|---|---:|---:|---|---:|---|
+| frac_512 | 1.455x | 1.500x | [0.813, 1.286] | 15.4 | **WIN** |
+| frac_96  | 1.479x | 1.477x | [0.724, 1.330] | 18.6 | **WIN** |
+| mixed_96 | 1.363x | 1.373x | [0.814, 1.243] | 12.8 | **WIN** |
+| int_96 (guard) | 1.055x | 1.063x | [0.897, 1.174] | 9.1 | small win / neutral |
+
+Candidate median clears the null p95 for frac_512/frac_96/mixed_96 in BOTH runs.
+The int-only guard is a small win (the intermediate `Vec<ListpackEntry>` is elided
+even when no score allocates) and NEVER a regression. Mechanism: a fractional-score
+zset drops N of 2N string allocs (members kept, scores elided).
+
+Retry condition: the MEMBER `Vec` copy remains forced by the owned `RdbValue` API
+(a borrowed/Arc `RdbValue` is multi-day and lands in the fr-store consumer, not
+fr-persist). Do NOT re-chase the score alloc (done) or the member copy (blocked)
+without that structural change. The same raw-entry core now exists for hash-field /
+set-member decode arms if a future lever needs a borrowed read of those (CrimsonHawk's
+"worth revisiting the hash-field and set-member decode arms the same way").
