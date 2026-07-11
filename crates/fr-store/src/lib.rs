@@ -44679,6 +44679,71 @@ mod tests {
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
     }
 
+    #[test]
+    fn zadd_plain_owned_matches_zadd_for_rdb_load_shapes() {
+        // (frankenredis-zsetrdbmove) The zset RDB-load arm switched from the borrowed `zadd`
+        // (which CLONES every member into its collapse HashMap) to the owned `zadd_plain_owned`
+        // (which MOVES them). This must be BYTE-IDENTICAL on the fresh-key load path across
+        // every encoding the RDB loader produces — the DUMP payload is what RDB round-trip and
+        // MIGRATE compare, so equal dumps == equal on the wire. Covers listpack (small) and
+        // skiplist (large) encodings, integer/float/-0.0 scores, long members, and the exact
+        // (score, member) tuple order the RDB arm builds.
+        fn shape(n: usize, long: bool) -> Vec<(f64, Vec<u8>)> {
+            (0..n)
+                .map(|i| {
+                    let score = if i % 4 == 0 {
+                        i as f64 // integer-valued
+                    } else if i % 4 == 1 {
+                        -(i as f64) - 0.5 // negative fractional
+                    } else if i % 4 == 2 {
+                        i as f64 + 0.25
+                    } else {
+                        1e18 + i as f64 // above the double2ll band
+                    };
+                    let mut m = format!("m{i:05}").into_bytes();
+                    if long {
+                        m.resize(80, b'q'); // > zset_max_listpack_value -> forces skiplist
+                    }
+                    (score, m)
+                })
+                .collect()
+        }
+        // (n, long): small listpack, boundary, large skiplist by count, skiplist by value width.
+        for (n, long) in [(1usize, false), (8, false), (128, false), (600, false), (40, true)] {
+            let mut pairs = shape(n, long);
+            // Include a -0.0 member so canonicalize_zero_score is exercised on both paths.
+            pairs.push((-0.0, b"zzz_zero".to_vec()));
+
+            let mut borrowed = Store::new(); // OLD RDB path
+            let added_b = borrowed.zadd(b"z", &pairs, 0).unwrap();
+            let mut owned = Store::new(); // NEW RDB path
+            let added_o = owned.zadd_plain_owned(b"z", pairs.clone(), 0).unwrap();
+
+            assert_eq!(added_b, added_o, "n={n} long={long}: added count");
+            assert_eq!(
+                borrowed.dump_key(b"z", 1),
+                owned.dump_key(b"z", 1),
+                "n={n} long={long}: DUMP payload diverged"
+            );
+            assert_eq!(
+                borrowed.object_encoding(b"z", 1),
+                owned.object_encoding(b"z", 1),
+                "n={n} long={long}: OBJECT ENCODING diverged"
+            );
+            assert_eq!(
+                borrowed.zget_members_with_scores(b"z", 1).unwrap(),
+                owned.zget_members_with_scores(b"z", 1).unwrap(),
+                "n={n} long={long}: ordered members/scores diverged"
+            );
+            assert_eq!(
+                borrowed.entries.get(b"z".as_slice()).unwrap().modification_count,
+                owned.entries.get(b"z".as_slice()).unwrap().modification_count,
+                "n={n} long={long}: modification_count diverged"
+            );
+            assert_eq!(borrowed.dirty, owned.dirty, "n={n} long={long}: dirty diverged");
+        }
+    }
+
     // (CrimsonHawk) SWAR 8-digit parse (Lemire multiply-fold) matches scalar over a broad exhaustive
     // sweep + edges, and the all-digits predicate rejects non-digits. A/B vs the scalar digit loop.
     #[test]

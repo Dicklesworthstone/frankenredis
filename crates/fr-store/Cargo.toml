@@ -122,3 +122,9 @@ harness = false
 [[bench]]
 name = "list_dump_cache"
 harness = false
+
+# (frankenredis-zsetrdbmove) Same-binary A/B for the zset RDB-load member-clone elision:
+# borrowed zadd (clones each member into the collapse HashMap) vs owned zadd_plain_owned (moves).
+[[bench]]
+name = "zset_rdb_load_move"
+harness = false

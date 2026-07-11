@@ -43167,14 +43167,20 @@ fn apply_rdb_entries_to_store(
             }
             RdbValue::SortedSet(members) => {
                 // (frankenredis-cc rdb-apply-move) Own `members` (no `ref`) so each member
-                // MOVES into the reordered (score, member) pair `zadd` wants, instead of
-                // cloning every member byte-string per zset on RDB load. Byte-identical.
+                // MOVES into the reordered (score, member) pair, instead of cloning every
+                // member byte-string per zset on RDB load.
+                // (frankenredis-zsetrdbmove) Feed the owned pairs to `zadd_plain_owned` (the
+                // owned-input ZADD fast path the ZADD command already uses) rather than the
+                // borrowed `zadd`, whose fresh-key path CLONES every member into its collapse
+                // HashMap (`member.clone()`) — the last redundant per-member alloc+copy on the
+                // zset RDB-load path, the qxfmr/duab9/qxfmrstream pattern still owed to zset.
+                // Byte-identical result (zadd_plain_owned_matches_default_option_engine).
                 let zset_members: Vec<(f64, Vec<u8>)> = members
                     .into_iter()
                     .map(|(member, score)| (score, member))
                     .collect();
                 store
-                    .zadd(&key, &zset_members, now_ms)
+                    .zadd_plain_owned(&key, zset_members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
