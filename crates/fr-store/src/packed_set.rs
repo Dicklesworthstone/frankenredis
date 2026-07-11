@@ -1867,6 +1867,23 @@ impl PackedStreamLog {
         }
     }
 
+    fn insert_span_fallback(&mut self, id: (u64, u64), span: FieldSpan) -> bool {
+        if let Some(key) = self.node_key_for(id) {
+            let old_len = {
+                let node = self.nodes.get_mut(&key).expect("node key came from map");
+                let pos = node.position(id).expect("node contains requested id");
+                let old = std::mem::replace(&mut node.entries[pos].span, span);
+                old.len as usize
+            };
+            self.dead += old_len;
+            self.maybe_compact();
+            true
+        } else {
+            self.insert_new_span(id, span);
+            false
+        }
+    }
+
     /// Insert/overwrite `id`'s fields (packed into the arena). Returns `true` if
     /// an entry with this id already existed (whose old bytes are now dead).
     pub fn insert<F: AsRef<[u8]>, V: AsRef<[u8]>>(
@@ -1886,20 +1903,70 @@ impl PackedStreamLog {
             len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
             count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
         };
-        if let Some(key) = self.node_key_for(id) {
-            let old_len = {
-                let node = self.nodes.get_mut(&key).expect("node key came from map");
-                let pos = node.position(id).expect("node contains requested id");
-                let old = std::mem::replace(&mut node.entries[pos].span, span);
-                old.len as usize
-            };
-            self.dead += old_len;
-            self.maybe_compact();
-            true
-        } else {
-            self.insert_new_span(id, span);
-            false
+
+        // XADD appends IDs strictly above the stream watermark. In that dominant case the
+        // last node proves both absence and the insertion location, so do not run
+        // `node_key_for` and then repeat the B-tree search in `insert_new_span`. Direct store
+        // callers can still overwrite or insert out of order; those IDs take the exact old
+        // fallback below.
+        if self.nodes.is_empty() {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return false;
         }
+
+        let mut strictly_after_last = false;
+        let appended_to_last = {
+            let mut last_entry = self.nodes.last_entry().expect("stream index is non-empty");
+            let node = last_entry.get_mut();
+            let last_id = node
+                .last_id()
+                .expect("a stream index node contains at least one entry");
+            if id > last_id {
+                strictly_after_last = true;
+                if node.entries.len() < PACKED_STREAM_NODE_MAX_ENTRIES {
+                    node.entries.push(StreamNodeEntry { id, span });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if appended_to_last {
+            self.len += 1;
+            return false;
+        }
+        if strictly_after_last {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return false;
+        }
+
+        self.insert_span_fallback(id, span)
+    }
+
+    /// Exact pre-monotonic-tier insertion, retained only for same-binary benchmark/test proof.
+    #[cfg(any(test, feature = "bench-reference"))]
+    pub fn bench_insert_fallback<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        id: (u64, u64),
+        pairs: &[(F, V)],
+    ) -> bool {
+        let off = self.arena.len();
+        for (f, v) in pairs {
+            let idx = self.intern_field(f.as_ref());
+            write_varint(&mut self.arena, idx);
+            write_varint(&mut self.arena, v.as_ref().len());
+            self.arena.extend_from_slice(v.as_ref());
+        }
+        let span = FieldSpan {
+            off,
+            len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
+            count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+        };
+        self.insert_span_fallback(id, span)
     }
 
     /// Bulk-build a log from entries supplied in **strictly id-ascending** order
@@ -4591,6 +4658,79 @@ mod tests {
                         .sum::<usize>())
                     + 1
         );
+    }
+
+    #[test]
+    fn packed_stream_monotonic_append_matches_fallback_he1yu() {
+        type Pairs = Vec<(Vec<u8>, Vec<u8>)>;
+        let pairs =
+            |i: u64| -> Pairs { vec![(b"field".to_vec(), format!("value:{i}").into_bytes())] };
+        let assert_same = |candidate: &PackedStreamLog, fallback: &PackedStreamLog| {
+            assert_eq!(candidate.arena, fallback.arena);
+            assert_eq!(candidate.field_dict, fallback.field_dict);
+            assert_eq!(candidate.dead, fallback.dead);
+            assert_eq!(candidate.len, fallback.len);
+            let contents = |log: &PackedStreamLog| {
+                log.iter()
+                    .map(|(id, fields)| (*id, fields.to_pairs()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(contents(candidate), contents(fallback));
+            let layout = |log: &PackedStreamLog| {
+                log.nodes
+                    .iter()
+                    .map(|(key, node)| {
+                        (
+                            *key,
+                            node.entries
+                                .iter()
+                                .map(|entry| entry.id)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(layout(candidate), layout(fallback));
+        };
+
+        let mut candidate = PackedStreamLog::new();
+        let mut fallback = PackedStreamLog::new();
+        // Cross 99/100/101 and a second full-node boundary.
+        for i in 1..=201_u64 {
+            let fields = pairs(i);
+            assert_eq!(
+                candidate.insert((i, 0), &fields),
+                fallback.bench_insert_fallback((i, 0), &fields)
+            );
+        }
+        assert_same(&candidate, &fallback);
+
+        // Equal-ID overwrite and a new out-of-order ID retain the old lookup/split path.
+        let overwritten = pairs(10_000);
+        assert_eq!(
+            candidate.insert((100, 0), &overwritten),
+            fallback.bench_insert_fallback((100, 0), &overwritten)
+        );
+        let out_of_order = pairs(10_001);
+        assert_eq!(
+            candidate.insert((150, 1), &out_of_order),
+            fallback.bench_insert_fallback((150, 1), &out_of_order)
+        );
+        assert_same(&candidate, &fallback);
+
+        // Removing every entry leaves an empty node map; the next append must rebuild the exact
+        // first-node layout rather than assuming a surviving tail node.
+        let ids: Vec<(u64, u64)> = candidate.iter().map(|(id, _)| *id).collect();
+        for id in ids {
+            assert_eq!(candidate.remove(id), fallback.remove(id));
+        }
+        assert!(candidate.is_empty());
+        let after_empty = pairs(20_000);
+        assert_eq!(
+            candidate.insert((500, 0), &after_empty),
+            fallback.bench_insert_fallback((500, 0), &after_empty)
+        );
+        assert_same(&candidate, &fallback);
     }
 
     use indexmap::{IndexMap, IndexSet};

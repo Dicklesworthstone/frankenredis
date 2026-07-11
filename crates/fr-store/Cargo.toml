@@ -33,6 +33,12 @@ name = "zadd_encoding_refresh"
 harness = false
 required-features = ["bench-reference"]
 
+# Same-worker profile and null-gated A/B for the monotonic XADD append path.
+[[bench]]
+name = "xadd_append"
+harness = false
+required-features = ["bench-reference"]
+
 [[bench]]
 name = "glob_scan"
 harness = false

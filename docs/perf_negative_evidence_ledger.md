@@ -6792,3 +6792,71 @@ Behavior and fallback proof:
 
 Verdict: **FINAL KEEP**. The packed tier removes the measured scan while preserving the exact
 pre-change fallback wherever the storage representation does not prove the encoding result.
+
+## 2026-07-10 CobaltHarbor: FINAL KEEP — monotonic XADD append removes duplicate node lookup, median 0.163928214x instructions
+
+The selected family is streams, outside cc's SIMD/dispatch/encoding lane. The profile workload
+seeds one full packed-stream node, then appends strictly increasing IDs so it exercises the same
+storage primitive as the dominant XADD path while crossing node boundaries. On remote worker
+**vmi1149989**, the unmodified `PackedStreamLog::insert_new_span` had five `instructions:u`
+self-time samples of **39.20%, 38.31%, 47.25%, 29.12%, and 38.23%** (median **38.31%**,
+zero lost samples; baseline binary SHA-256
+**`9b7aae9ca3510c33b0d7c12f89e7c1aebbf40b9ddca6e7516822f5993242f9ec`**). Its B-tree range
+search had samples **21.75%, 25.86%, 17.79%, 23.74%, and 26.69%**, and the preceding
+`node_key_for` lookup had samples **1.17%, 3.39%, 7.11%, 12.34%, and 8.91%**. The lever therefore
+cleared the mandatory median-self-time attribution gate before source editing.
+
+ONE LEVER: after encoding the new field span, a stream ID strictly greater than the last entry is
+proven absent and belongs at the tail. `PackedStreamLog::insert` now uses one `last_entry` lookup to
+append to the tail node, or creates the next node when the tail is full, instead of first calling
+`node_key_for` and then repeating the B-tree search in `insert_new_span`. Equal, older, and new
+out-of-order IDs retain the exact pre-change lookup/split/overwrite fallback. The empty-stream case
+still creates the first node directly. The exact old insertion is exposed only under `test` or the
+non-default `bench-reference` feature for same-binary proof.
+
+The final same-binary command was:
+
+`RCH_WORKER=vmi1152480 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-store --features bench-reference --bench xadd_append`
+
+Both arms shared binary SHA-256
+**`ceafca2205d388a6224e2a483cdeaad7adc4eb15d1a43780df712219bbde6f4f`** on worker
+**vmi1149989**. The exact fallback helper had five self-time samples **58.27%, 62.06%, 56.19%,
+66.95%, and 60.54%** (median **60.54%**); the fallback B-tree range had samples **30.30%,
+21.45%, 24.59%, 27.18%, and 29.50%** (median **27.18%**). The candidate reported zero self-time
+for the fallback helper, `insert_new_span`, `node_key_for`, and the B-tree range above perf's
+**0.1%** reporting floor in all five trials. Every profile reported zero lost samples.
+
+The benchmark then ran 24 position-balanced, interleaved instruction rounds in that same
+invocation. The paired candidate/candidate null ratio had median **1.000012533**, p05
+**0.999830144**, p95 **1.000088078**, and CV **0.007471%**. Fallback/candidate had median
+**6.100231155x** and paired-ratio CV **0.003925%**; equivalently candidate/fallback was
+**0.163928214**, or **83.607179% fewer instructions**. The candidate median lies far outside the
+complete null band and clears the 1% keep ratchet.
+
+Behavior, fallback, and quality proof:
+
+- before measurement, both arms produced identical insert return values, length, first/last IDs,
+  ordered IDs, field names, and field values;
+- a focused structural regression crosses the 99/100/101-entry and second full-node boundaries,
+  then proves equal-ID overwrite, new out-of-order insertion, remove-to-empty, and the next append
+  preserve the exact arena, field dictionary, dead-byte accounting, length, decoded contents, node
+  keys, and node-entry layout of the old fallback;
+- focused remote stream coverage passed **89/89** selected tests, including the packed-stream
+  BTreeMap oracle and XADD/XLEN/XRANGE/XREVRANGE/XTRIM/XGROUP/XINFO/XREAD/XAUTOCLAIM surfaces;
+- the full remote `fr-conformance` package passed **194/194** library tests, every auxiliary and doc
+  target, **99/99** smoke cases, and **217/217** live Redis-oracle `core_stream` cases, preserving
+  RESP-observable replies and stream ordering;
+- remote workspace all-target check passed. Workspace Clippy remains blocked outside this lever by
+  the already-filed duplicate `#[inline]` attributes in `fr-persist` (`frankenredis-so1jq`); scoped
+  remote `fr-store` library/benchmark Clippy passed with `-D warnings` after allowing only those two
+  pre-existing dependency lint names;
+- direct Rust 2024 rustfmt and source/doc diff checks passed. UBS ran with Rust
+  build/lint/dependency categories 12-14 disabled, so it could not invoke local Cargo; its nonzero
+  output was whole-file legacy inventory plus intentional fail-closed benchmark panics and bounded
+  quantile indexes, with no new production defect identified;
+- all Cargo commands were fail-closed through `RCH_REQUIRE_REMOTE=1`. A retry on `hz2` surfaced
+  missing perf support, and `hz1` perf recording stalled and was cancelled; neither fell back to a
+  local build. The successful profile and median-gated A/B ran on the perf-capable worker above.
+
+Verdict: **FINAL KEEP**. Strictly monotonic XADD appends take the single tail-node tier; every
+ambiguous ID retains the exact old lookup and split behavior.
