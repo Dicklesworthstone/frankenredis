@@ -66,3 +66,9 @@ harness = false
 [[bench]]
 name = "hincrby_field_clone"
 harness = false
+
+# (frankenredis-smovefast) Same-binary null-gated A/B for SMOVE's dst add: sadd(&[member.to_vec()])
+# redundant member copy vs sadd(&[member]) borrowed (sadd is generic over AsRef<[u8]>).
+[[bench]]
+name = "smove_member_clone"
+harness = false

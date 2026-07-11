@@ -16734,7 +16734,12 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", &src_logical, src_db);
         }
         // Add to destination — "sadd" fires only on a genuinely new member.
-        let added = self.sadd(destination, &[member.to_vec()], now_ms)?;
+        // (frankenredis-smovefast) sadd is generic over AsRef<[u8]> and copies the member
+        // straight into the destination set via insert_borrowed, so the old member.to_vec()
+        // was a redundant intermediate allocation + copy of the member bytes (upstream
+        // t_set.c::smoveCommand adds the element without a second copy). Pass the borrowed
+        // member; byte-identical, and it halves the member-byte copying on large members.
+        let added = self.sadd(destination, &[member], now_ms)?;
         if added > 0 {
             let (dst_db, dst_logical) = match decode_db_key(destination) {
                 Some((db, lk)) => (db, lk.to_vec()),
