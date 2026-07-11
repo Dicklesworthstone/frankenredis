@@ -42,3 +42,9 @@ harness = false
 [[bench]]
 name = "quicklist_encode"
 harness = false
+
+# (CobaltHarbor) Crossover A/B for the crc64_redis pclmul-vs-slice-by-16 dispatch threshold:
+# fr_simd::crc64 (fold-by-4) vs crc64_redis_slice_table, across small sizes, null-gated.
+[[bench]]
+name = "crc64_threshold"
+harness = false

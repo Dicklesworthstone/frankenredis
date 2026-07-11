@@ -1356,10 +1356,26 @@ pub fn crc64_redis(data: &[u8]) -> u64 {
         // and the table is measured against slice-by-8 so the real crossover vs *this* table is a
         // little higher. 1 KiB stays safely on the winning side (≥1.6x vs slice-by-16 there, rising
         // to ~4.9x at 1 MiB) with no regression on small DUMPs.
-        if data.len() >= 1024 && std::arch::is_x86_feature_detected!("pclmulqdq") {
+        // Threshold 512: the pclmul kernel is now fold-by-4 (four independent accumulators,
+        // fr-simd 990cfe75c), which shifted the pclmul-vs-slice-by-16 crossover down from the
+        // fold-by-1 era. A same-binary A/B (`benches/crc64_threshold.rs`, fold4 vs this table,
+        // null-gated) placed the crossover below 512 B; 512 keeps margin while capturing the
+        // common medium-collection DUMP/RESTORE payload band (512..1024 B) that the old 1024
+        // threshold left on the slower table. Byte-identical either side (fold4 == table for all
+        // lengths, gated by `crc64_pclmul_matches_slice_table`).
+        if data.len() >= 512 && std::arch::is_x86_feature_detected!("pclmulqdq") {
             return fr_simd::crc64(data);
         }
     }
+    crc64_redis_slice_table(data)
+}
+
+/// Slice-by-16 table CRC-64/Jones — the `< threshold` / no-`pclmulqdq` arm of [`crc64_redis`], and
+/// the ORIG reference for the pclmul-vs-table threshold A/B in `benches/crc64_threshold.rs`.
+/// Byte-identical to [`crc64_redis`] (and to `fr_simd::crc64`) for every input.
+#[doc(hidden)]
+#[must_use]
+pub fn crc64_redis_slice_table(data: &[u8]) -> u64 {
     let mut crc = 0_u64;
     let (chunks, remainder) = data.as_chunks::<16>();
     for chunk in chunks {
@@ -2920,7 +2936,7 @@ impl LzfScratch {
 /// Byte-IDENTICAL to `a.iter().zip(b).take_while(|(x,y)| x==y).count()` but
 /// vectorized (LLVM does not reliably vectorize the take_while early-exit).
 /// Used for the lzf match-length tail scan. (frankenredis-g9h0v)
-#[inline]
+///
 /// Length of the common prefix of `a` and `b` — LZF's match-extension inner loop.
 ///
 /// Kept as an **inlined** word loop on purpose. An AVX2 kernel (`fr_simd::common_prefix_len`) wins
@@ -4272,7 +4288,10 @@ mod tests {
     /// The encoder must equal the reference form for EVERY score: render with `d2string`,
     /// then let `encode_listpack_entry` re-decide int-vs-string (upstream's own round trip).
     #[test]
-    #[allow(clippy::approx_constant)]
+    // The score probes are deliberate exact boundary values (2^62 = double2ll window, 2^63,
+    // the grisu2 plain-render edge 2^62+2^61, and 3.14) written at full precision to document
+    // the boundary they pin; they store the same f64 either way.
+    #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn zset_score_listpack_entry_equals_d2string_reference_form() {
         let mut scores: Vec<f64> = vec![
             0.0,
