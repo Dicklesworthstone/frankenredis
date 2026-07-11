@@ -16078,3 +16078,19 @@ variance, cv 12-18%) — run 1 had n2000 within its wide null band, run 2 gated 
 ~0.02, so the win is real. rpush_owned is a faithful mirror of rpush (no notifications/wakeup in the Store method —
 those live in fr-command). Rollback: revert the two arms to `rpush` + drop rpush_owned. VEIN likely EXHAUSTED now:
 hash/set/stream/zset/list RDB arms all owned-move; RdbValue::String already MOVEs (set_with_abs_expiry).
+
+### 2026-07-11 SHIPPED (SORT materialize + reply by move, not clone — 1.4-1.6x typical) — CreamPeak
+Found by profile-first code inspection (no bead). Plain SORT paid TWO heap allocs per element:
+`elements[*idx].clone()` to materialize the sorted window (3 arms: numeric-fast-BY, numeric, alpha) then
+`BulkString(Some(el.clone()))` to build the no-GET reply — both while `elements`/`sliced` are dropped
+immediately after. The window indices are a permutation (each taken once) and the source Vecs are dead
+afterward, so both clones are moves: `mem::take` the window slots + `into_iter` the sliced Vec into the reply.
+Threaded via `sort_generic::<const MOVE: bool>` (MOVE=false = the historical clone A/B reference; prod calls
+::<true>). Commit 604ee579a. GATE: `sort_move_matches_clone_reference` (byte-identical reply + STORE-dest DUMP
+across numeric/alpha/BY/GET/LIMIT/DESC/STORE) + 27 fr-command sort tests. Byte-identity is inherited parity:
+move==clone (test) and clone is the already-redis-parity-verified path. A/B (same-binary median, numeric SORT):
+1.592x (n=128) / 1.389x (n=1000) both WIN(move); n=5000 ~1.16x noise-dominated — the win SHRINKS with n because
+O(n log n) sort outgrows the O(n) clones, so it's sharpest at typical SORT sizes. Numeric is the best case (f64
+compares ~1ns, each element 2 mallocs). REUSABLE: a reply or intermediate built from a CONSUMABLE owned local Vec
+via `.iter().map(|x| ...x.clone())` should be `.into_iter().map(|x| ...x)`; a reordering that indexes a
+soon-dropped Vec by a permutation should `mem::take` not clone. Rollback: flip prod callers to ::<false>.
