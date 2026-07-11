@@ -35,3 +35,9 @@ harness = false
 name = "geosearchstore_bybox"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-sortmove) Same-binary A/B for SORT result move-not-clone: per-element clone
+# (materialize + reply) vs mem::take window + into_iter reply.
+[[bench]]
+name = "sort_move"
+harness = false

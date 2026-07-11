@@ -27357,7 +27357,7 @@ fn restore_cmd(
 }
 
 fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    sort_generic(argv, store, now_ms, /* readonly */ false, "SORT")
+    sort_generic::<true>(argv, store, now_ms, /* readonly */ false, "SORT")
 }
 
 /// Place exactly the elements that a full sort would put in `v[start..end]` into
@@ -27472,7 +27472,13 @@ pub fn sort_alpha_compare(
     }
 }
 
-fn sort_generic(
+// (frankenredis-sortmove) `MOVE` selects how the sorted window is materialised and how the
+// no-GET reply is built: `false` = the historical per-element `clone()` (the A/B reference),
+// `true` = `mem::take` the window slots out of the soon-dropped `elements` and `into_iter` the
+// `sliced` Vec into the reply. Both leave BYTE-IDENTICAL output (the window indices are a
+// permutation, each taken once; `sliced`/`elements` are dropped right after) — locked by the
+// sort differ + `sort_move_matches_clone_reference`. Production calls `::<true>`.
+fn sort_generic<const MOVE: bool>(
     argv: &[Vec<u8>],
     store: &mut Store,
     now_ms: u64,
@@ -27718,10 +27724,17 @@ fn sort_generic(
             } else {
                 partial_sort_window(&mut scored, start, end, &mut cmp);
             }
-            let reordered: Vec<Vec<u8>> = scored[start..end]
-                .iter()
-                .map(|(_, idx)| elements[*idx].clone())
-                .collect();
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| elements[*idx].clone())
+                    .collect()
+            };
             elements = reordered;
             // (frankenredis-wc0i6) `limit_offset`/`limit_count` are reset
             // UNCONDITIONALLY after this if/else-if/else chain (the shared
@@ -27770,10 +27783,17 @@ fn sort_generic(
             }
             // Materialise ONLY the window the LIMIT keeps; the rows outside
             // [start, end) were exactly what the later drain/truncate discards.
-            let reordered: Vec<Vec<u8>> = scored[start..end]
-                .iter()
-                .map(|(_, idx)| elements[*idx].clone())
-                .collect();
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| elements[*idx].clone())
+                    .collect()
+            };
             elements = reordered;
         } else {
             // Alpha (lexicographic) sort
@@ -27805,10 +27825,17 @@ fn sort_generic(
                 partial_sort_window(&mut indexed, start, end, &mut cmp);
             }
             // Materialise ONLY the window the LIMIT keeps (see numeric arm).
-            let reordered: Vec<Vec<u8>> = indexed[start..end]
-                .iter()
-                .map(|(idx, _)| elements[*idx].clone())
-                .collect();
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                indexed[start..end]
+                    .iter()
+                    .map(|(idx, _)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                indexed[start..end]
+                    .iter()
+                    .map(|(idx, _)| elements[*idx].clone())
+                    .collect()
+            };
             elements = reordered;
         }
 
@@ -27844,10 +27871,19 @@ fn sort_generic(
     // ── Build output with GET patterns ───────────────────────────────
     let use_store = store_dest.is_some();
     let output: Vec<RespFrame> = if get_patterns.is_empty() {
-        sliced
-            .iter()
-            .map(|el| RespFrame::BulkString(Some(el.clone())))
-            .collect()
+        if MOVE {
+            // `sliced` is not read after this arm (STORE consumes `output`, return wraps it),
+            // so move each element straight into its reply frame instead of cloning.
+            sliced
+                .into_iter()
+                .map(|el| RespFrame::BulkString(Some(el)))
+                .collect()
+        } else {
+            sliced
+                .iter()
+                .map(|el| RespFrame::BulkString(Some(el.clone())))
+                .collect()
+        }
     } else {
         // (frankenredis-5gisf GET-facet) Precompute each GET pattern's `*`/`->`
         // split ONCE (the pattern is constant across all elements) and reuse a
@@ -27930,7 +27966,19 @@ fn sort_ro_cmd(
     // so SORT_RO simply doesn't recognise STORE as a flag, which means
     // a literal 'STORE' token can validly land in a GET/BY pattern
     // slot. The previous pre-scan rejected those valid uses.
-    sort_generic(argv, store, now_ms, /* readonly */ true, "SORT_RO")
+    sort_generic::<true>(argv, store, now_ms, /* readonly */ true, "SORT_RO")
+}
+
+/// (frankenredis-sortmove) Same-binary A/B / equivalence hook: run SORT with the clone
+/// reference (`MOVE=false`) or the move candidate (`MOVE=true`). Both must return byte-identical
+/// replies and leave identical STORE state.
+#[doc(hidden)]
+pub fn bench_sort_generic<const MOVE: bool>(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    sort_generic::<MOVE>(argv, store, now_ms, /* readonly */ false, "SORT")
 }
 
 /// How a SORT `BY`/`GET` pattern resolves once its `*` and optional `->` hash
@@ -57651,6 +57699,82 @@ mod tests {
         let out = dispatch_argv(&[b"SORT".to_vec(), b"nokey".to_vec()], &mut store, 0)
             .expect("sort nonexistent");
         assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn sort_move_matches_clone_reference() {
+        // (frankenredis-sortmove) SORT with MOVE=true (mem::take the window + into_iter the reply)
+        // must return byte-identical replies AND leave identical STORE state as MOVE=false (the
+        // historical per-element clone), across numeric/alpha/BY/GET/LIMIT/DESC/STORE variants.
+        use super::bench_sort_generic;
+        fn seed() -> Store {
+            let mut s = Store::new();
+            for v in ["30", "1", "20", "3", "200", "10"] {
+                dispatch_argv(
+                    &[b"RPUSH".to_vec(), b"nums".to_vec(), v.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            for v in ["banana", "apple", "cherry", "date", "apple"] {
+                dispatch_argv(
+                    &[b"RPUSH".to_vec(), b"words".to_vec(), v.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            for (k, w, d) in [
+                ("1", "5", "one"),
+                ("20", "2", "twenty"),
+                ("3", "9", "three"),
+                ("200", "1", "twohundred"),
+                ("10", "7", "ten"),
+                ("30", "3", "thirty"),
+            ] {
+                dispatch_argv(
+                    &[b"SET".to_vec(), format!("weight_{k}").into_bytes(), w.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+                dispatch_argv(
+                    &[b"SET".to_vec(), format!("data_{k}").into_bytes(), d.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            s
+        }
+        let b = |x: &[u8]| x.to_vec();
+        let variants: Vec<Vec<Vec<u8>>> = vec![
+            vec![b(b"SORT"), b(b"nums")],
+            vec![b(b"SORT"), b(b"nums"), b(b"DESC")],
+            vec![b(b"SORT"), b(b"nums"), b(b"LIMIT"), b(b"1"), b(b"3")],
+            vec![b(b"SORT"), b(b"words"), b(b"ALPHA")],
+            vec![b(b"SORT"), b(b"words"), b(b"ALPHA"), b(b"DESC"), b(b"LIMIT"), b(b"0"), b(b"2")],
+            vec![b(b"SORT"), b(b"nums"), b(b"BY"), b(b"weight_*")],
+            vec![
+                b(b"SORT"), b(b"nums"), b(b"BY"), b(b"weight_*"), b(b"GET"), b(b"data_*"), b(b"GET"),
+                b(b"#"),
+            ],
+            vec![b(b"SORT"), b(b"nums"), b(b"STORE"), b(b"dest")],
+            vec![b(b"SORT"), b(b"words"), b(b"ALPHA"), b(b"STORE"), b(b"dest")],
+        ];
+        for argv in &variants {
+            let mut s_ref = seed();
+            let mut s_cand = seed();
+            let r_ref = bench_sort_generic::<false>(argv, &mut s_ref, 0).unwrap();
+            let r_cand = bench_sort_generic::<true>(argv, &mut s_cand, 0).unwrap();
+            assert_eq!(r_ref, r_cand, "SORT reply diverged for {argv:?}");
+            assert_eq!(
+                s_ref.dump_key(b"dest", 1),
+                s_cand.dump_key(b"dest", 1),
+                "SORT STORE dest diverged for {argv:?}"
+            );
+        }
     }
 
     #[test]
