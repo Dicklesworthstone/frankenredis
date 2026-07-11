@@ -1621,7 +1621,12 @@ const PACKED_STREAM_NODE_MAX_ENTRIES: usize = 100;
 #[derive(Clone, Debug, Default)]
 pub struct PackedStreamLog {
     arena: Vec<u8>,
+    /// Non-tail nodes indexed by their first entry id. The active tail is kept
+    /// separately so monotonic XADD mutates it without traversing the B-tree;
+    /// arbitrary insert/remove operations temporarily fold the tail back into
+    /// this exact general-purpose directory.
     nodes: std::collections::BTreeMap<(u64, u64), StreamNode>,
+    tail: Option<StreamNode>,
     /// (frankenredis-p8wd1 step 4 / Redis SAMEFIELDS) Interned field NAMES for
     /// this stream, indexed by the per-entry `[field_idx]` written into the
     /// arena. Stream schemas are near-always stable, so each name is stored ONCE
@@ -1799,6 +1804,25 @@ impl PackedStreamLog {
             .and_then(|(key, node)| node.position(id).is_ok().then_some(*key))
     }
 
+    fn flush_tail(&mut self) {
+        let Some(node) = self.tail.take() else {
+            return;
+        };
+        let key = node
+            .first_id()
+            .expect("active stream tail contains at least one entry");
+        assert!(
+            self.nodes.insert(key, node).is_none(),
+            "active stream tail is absent from the completed-node directory"
+        );
+    }
+
+    fn restore_tail(&mut self) {
+        if self.tail.is_none() {
+            self.tail = self.nodes.pop_last().map(|(_, node)| node);
+        }
+    }
+
     fn insert_new_span(&mut self, id: (u64, u64), span: FieldSpan) {
         if self.nodes.is_empty() {
             self.nodes.insert(id, StreamNode::with_entry(id, span));
@@ -1868,7 +1892,8 @@ impl PackedStreamLog {
     }
 
     fn insert_span_fallback(&mut self, id: (u64, u64), span: FieldSpan) -> bool {
-        if let Some(key) = self.node_key_for(id) {
+        self.flush_tail();
+        let replaced = if let Some(key) = self.node_key_for(id) {
             let old_len = {
                 let node = self.nodes.get_mut(&key).expect("node key came from map");
                 let pos = node.position(id).expect("node contains requested id");
@@ -1881,7 +1906,9 @@ impl PackedStreamLog {
         } else {
             self.insert_new_span(id, span);
             false
-        }
+        };
+        self.restore_tail();
+        replaced
     }
 
     /// Insert/overwrite `id`'s fields (packed into the arena). Returns `true` if
@@ -1904,24 +1931,23 @@ impl PackedStreamLog {
             count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
         };
 
-        // XADD appends IDs strictly above the stream watermark. In that dominant case the
-        // last node proves both absence and the insertion location, so do not run
-        // `node_key_for` and then repeat the B-tree search in `insert_new_span`. Direct store
-        // callers can still overwrite or insert out of order; those IDs take the exact old
-        // fallback below.
-        if self.nodes.is_empty() {
-            self.nodes.insert(id, StreamNode::with_entry(id, span));
+        // XADD appends IDs strictly above the stream watermark. Keep that active
+        // tail outside the B-tree so 99 of every 100 default-sized appends only
+        // touch the tail Vec. Direct callers that overwrite, insert out of order,
+        // or remove entries fold the tail into the exact B-tree fallback first.
+        if self.tail.is_none() {
+            debug_assert!(self.nodes.is_empty());
+            self.tail = Some(StreamNode::with_entry(id, span));
             self.len += 1;
             return false;
         }
 
         let mut strictly_after_last = false;
         let appended_to_last = {
-            let mut last_entry = self.nodes.last_entry().expect("stream index is non-empty");
-            let node = last_entry.get_mut();
+            let node = self.tail.as_mut().expect("stream tail is non-empty");
             let last_id = node
                 .last_id()
-                .expect("a stream index node contains at least one entry");
+                .expect("the active stream tail contains at least one entry");
             if id > last_id {
                 strictly_after_last = true;
                 if node.entries.len() < PACKED_STREAM_NODE_MAX_ENTRIES {
@@ -1939,7 +1965,17 @@ impl PackedStreamLog {
             return false;
         }
         if strictly_after_last {
-            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            let full_tail = self
+                .tail
+                .replace(StreamNode::with_entry(id, span))
+                .expect("stream tail is non-empty");
+            let key = full_tail
+                .first_id()
+                .expect("promoted stream node contains at least one entry");
+            assert!(
+                self.nodes.insert(key, full_tail).is_none(),
+                "promoted stream node key is unique"
+            );
             self.len += 1;
             return false;
         }
@@ -1967,6 +2003,24 @@ impl PackedStreamLog {
             count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
         };
         self.insert_span_fallback(id, span)
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn bench_node_layout(&self) -> Vec<((u64, u64), Vec<(u64, u64)>)> {
+        self.nodes
+            .values()
+            .chain(self.tail.iter())
+            .map(|node| {
+                (
+                    node.first_id()
+                        .expect("stream directory contains only non-empty nodes"),
+                    node.entries.iter().map(|entry| entry.id).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Bulk-build a log from entries supplied in **strictly id-ascending** order
@@ -2026,11 +2080,17 @@ impl PackedStreamLog {
             );
         }
         log.len = total;
+        log.restore_tail();
         log
     }
 
     #[must_use]
     pub fn get(&self, id: (u64, u64)) -> Option<FieldsRef<'_>> {
+        if let Some(node) = self.tail.as_ref()
+            && let Ok(pos) = node.position(id)
+        {
+            return Some(self.span_slice(&node.entries[pos].span));
+        }
         let key = self.node_key_for(id)?;
         let node = self.nodes.get(&key)?;
         let pos = node.position(id).ok()?;
@@ -2039,12 +2099,35 @@ impl PackedStreamLog {
 
     #[must_use]
     pub fn contains_key(&self, id: (u64, u64)) -> bool {
-        self.node_key_for(id).is_some()
+        self.tail
+            .as_ref()
+            .is_some_and(|node| node.position(id).is_ok())
+            || self.node_key_for(id).is_some()
     }
 
     /// Remove `id`; returns `true` if it existed. The freed span is marked dead
     /// and the arena compacted once dead bytes exceed half its length.
     pub fn remove(&mut self, id: (u64, u64)) -> bool {
+        if let Some(position) = self.tail.as_ref().and_then(|node| node.position(id).ok()) {
+            let removed = self
+                .tail
+                .as_mut()
+                .expect("stream tail is present")
+                .entries
+                .remove(position);
+            self.len -= 1;
+            self.dead += removed.span.len as usize;
+            if self
+                .tail
+                .as_ref()
+                .is_some_and(|node| node.entries.is_empty())
+            {
+                self.tail = self.nodes.pop_last().map(|(_, node)| node);
+            }
+            self.maybe_compact();
+            return true;
+        }
+
         let Some(key) = self.node_key_for(id) else {
             return false;
         };
@@ -2062,15 +2145,24 @@ impl PackedStreamLog {
 
     #[must_use]
     pub fn last_id(&self) -> Option<(u64, u64)> {
-        self.nodes
-            .values()
-            .next_back()
+        self.tail
+            .as_ref()
             .and_then(StreamNode::last_id)
+            .or_else(|| {
+                self.nodes
+                    .values()
+                    .next_back()
+                    .and_then(StreamNode::last_id)
+            })
     }
 
     #[must_use]
     pub fn first_id(&self) -> Option<(u64, u64)> {
-        self.nodes.values().next().and_then(StreamNode::first_id)
+        self.nodes
+            .values()
+            .next()
+            .and_then(StreamNode::first_id)
+            .or_else(|| self.tail.as_ref().and_then(StreamNode::first_id))
     }
 
     /// Smallest id with its fields (BTreeMap-compatible).
@@ -2079,6 +2171,7 @@ impl PackedStreamLog {
         self.nodes
             .values()
             .next()
+            .or(self.tail.as_ref())
             .and_then(|node| node.entries.first())
             .map(|entry| (&entry.id, self.span_slice(&entry.span)))
     }
@@ -2086,20 +2179,23 @@ impl PackedStreamLog {
     /// Largest id with its fields (BTreeMap-compatible).
     #[must_use]
     pub fn last_key_value(&self) -> Option<(&(u64, u64), FieldsRef<'_>)> {
-        self.nodes
-            .values()
-            .next_back()
+        self.tail
+            .as_ref()
+            .or_else(|| self.nodes.values().next_back())
             .and_then(|node| node.entries.last())
             .map(|entry| (&entry.id, self.span_slice(&entry.span)))
     }
 
     /// Iterate `(&id, FieldsRef)` in ascending id order.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
-        self.nodes.values().flat_map(move |node| {
-            node.entries
-                .iter()
-                .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
-        })
+        self.nodes
+            .values()
+            .chain(self.tail.iter())
+            .flat_map(move |node| {
+                node.entries
+                    .iter()
+                    .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
+            })
     }
 
     /// Iterate field views only (for the memory estimate).
@@ -2111,6 +2207,7 @@ impl PackedStreamLog {
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &(u64, u64)> {
         self.nodes
             .values()
+            .chain(self.tail.iter())
             .flat_map(|node| node.entries.iter().map(|entry| &entry.id))
     }
 
@@ -2130,7 +2227,9 @@ impl PackedStreamLog {
         };
         self.nodes
             .range(lower..)
-            .flat_map(move |(_, node)| {
+            .map(|(_, node)| node)
+            .chain(self.tail.iter())
+            .flat_map(move |node| {
                 node.entries
                     .iter()
                     .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
@@ -2147,7 +2246,7 @@ impl PackedStreamLog {
     /// Rebuild the arena from the live spans (in id order), dropping dead bytes.
     fn compact(&mut self) {
         let mut new_arena = Vec::with_capacity(self.arena.len().saturating_sub(self.dead));
-        for node in self.nodes.values_mut() {
+        for node in self.nodes.values_mut().chain(self.tail.iter_mut()) {
             for entry in &mut node.entries {
                 let start = entry.span.off;
                 let end = entry.span.off + entry.span.len as usize;
@@ -2158,6 +2257,291 @@ impl PackedStreamLog {
         }
         self.arena = new_arena;
         self.dead = 0;
+    }
+}
+
+/// Frozen pre-`frankenredis-5tjc0` all-nodes-in-B-tree stream directory. This
+/// type exists only so `xadd_append` can execute both layouts in one benchmark
+/// binary; production code never contains or branches on the reference layout.
+#[cfg(any(test, feature = "bench-reference"))]
+#[derive(Clone, Debug, Default)]
+#[doc(hidden)]
+pub struct PackedStreamLogBTreeReference {
+    arena: Vec<u8>,
+    nodes: std::collections::BTreeMap<(u64, u64), StreamNode>,
+    field_dict: Vec<Box<[u8]>>,
+    dead: usize,
+    len: usize,
+}
+
+#[cfg(any(test, feature = "bench-reference"))]
+impl PackedStreamLogBTreeReference {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn span_slice(&self, span: &FieldSpan) -> FieldsRef<'_> {
+        FieldsRef {
+            buf: &self.arena[span.off..span.off + span.len as usize],
+            dict: &self.field_dict,
+            count: span.count,
+        }
+    }
+
+    fn intern_field(&mut self, name: &[u8]) -> usize {
+        if let Some(index) = self
+            .field_dict
+            .iter()
+            .position(|candidate| &**candidate == name)
+        {
+            index
+        } else {
+            self.field_dict.push(name.into());
+            self.field_dict.len() - 1
+        }
+    }
+
+    fn node_key_for(&self, id: (u64, u64)) -> Option<(u64, u64)> {
+        self.nodes
+            .range(..=id)
+            .next_back()
+            .and_then(|(key, node)| node.position(id).is_ok().then_some(*key))
+    }
+
+    fn insert_new_span(&mut self, id: (u64, u64), span: FieldSpan) {
+        if self.nodes.is_empty() {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return;
+        }
+
+        if let Some(key) = self.nodes.range(..=id).next_back().map(|(key, _)| *key) {
+            let node_len = self.nodes.get(&key).map_or(0, |node| node.entries.len());
+            let node_last = self.nodes.get(&key).and_then(StreamNode::last_id);
+            if node_last.is_some_and(|last_id| id > last_id) {
+                if node_len >= PACKED_STREAM_NODE_MAX_ENTRIES {
+                    self.nodes.insert(id, StreamNode::with_entry(id, span));
+                } else if let Some(node) = self.nodes.get_mut(&key) {
+                    node.entries.push(StreamNodeEntry { id, span });
+                }
+                self.len += 1;
+                return;
+            }
+
+            let mut node = self.nodes.remove(&key).expect("node key came from B-tree");
+            let position = node
+                .position(id)
+                .expect_err("new stream id was checked absent before insertion");
+            node.entries.insert(position, StreamNodeEntry { id, span });
+            self.reinsert_node_after_insert(node, position);
+            self.len += 1;
+            return;
+        }
+
+        let first_key = self
+            .nodes
+            .keys()
+            .next()
+            .copied()
+            .expect("non-empty stream index has a first node");
+        let mut node = self.nodes.remove(&first_key).expect("first key exists");
+        node.entries.insert(0, StreamNodeEntry { id, span });
+        self.reinsert_node_after_insert(node, 0);
+        self.len += 1;
+    }
+
+    fn reinsert_node_after_insert(&mut self, mut node: StreamNode, inserted_pos: usize) {
+        if node.entries.len() > PACKED_STREAM_NODE_MAX_ENTRIES {
+            let split_at = if inserted_pos == node.entries.len() - 1 {
+                PACKED_STREAM_NODE_MAX_ENTRIES
+            } else {
+                node.entries.len() / 2
+            };
+            let right_entries = node.entries.split_off(split_at);
+            let right = StreamNode {
+                entries: right_entries,
+            };
+            if let Some(left_key) = node.first_id() {
+                self.nodes.insert(left_key, node);
+            }
+            let right_key = right
+                .first_id()
+                .expect("split right node contains at least one entry");
+            self.nodes.insert(right_key, right);
+        } else {
+            let key = node
+                .first_id()
+                .expect("reinserted stream node contains at least one entry");
+            self.nodes.insert(key, node);
+        }
+    }
+
+    fn insert_span_fallback(&mut self, id: (u64, u64), span: FieldSpan) -> bool {
+        if let Some(key) = self.node_key_for(id) {
+            let old_len = {
+                let node = self.nodes.get_mut(&key).expect("node key came from B-tree");
+                let position = node.position(id).expect("node contains requested id");
+                let old = std::mem::replace(&mut node.entries[position].span, span);
+                old.len as usize
+            };
+            self.dead += old_len;
+            self.maybe_compact();
+            true
+        } else {
+            self.insert_new_span(id, span);
+            false
+        }
+    }
+
+    pub fn insert<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        id: (u64, u64),
+        pairs: &[(F, V)],
+    ) -> bool {
+        let off = self.arena.len();
+        for (field, value) in pairs {
+            let index = self.intern_field(field.as_ref());
+            write_varint(&mut self.arena, index);
+            write_varint(&mut self.arena, value.as_ref().len());
+            self.arena.extend_from_slice(value.as_ref());
+        }
+        let span = FieldSpan {
+            off,
+            len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
+            count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+        };
+        if self.nodes.is_empty() {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return false;
+        }
+
+        let mut strictly_after_last = false;
+        let appended_to_last = {
+            let mut last_entry = self.nodes.last_entry().expect("stream index is non-empty");
+            let node = last_entry.get_mut();
+            let last_id = node
+                .last_id()
+                .expect("a stream index node contains at least one entry");
+            if id > last_id {
+                strictly_after_last = true;
+                if node.entries.len() < PACKED_STREAM_NODE_MAX_ENTRIES {
+                    node.entries.push(StreamNodeEntry { id, span });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if appended_to_last {
+            self.len += 1;
+            return false;
+        }
+        if strictly_after_last {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return false;
+        }
+
+        self.insert_span_fallback(id, span)
+    }
+
+    pub fn remove(&mut self, id: (u64, u64)) -> bool {
+        let Some(key) = self.node_key_for(id) else {
+            return false;
+        };
+        let mut node = self.nodes.remove(&key).expect("node key came from B-tree");
+        let position = node.position(id).expect("node contains requested id");
+        let removed = node.entries.remove(position);
+        self.len -= 1;
+        self.dead += removed.span.len as usize;
+        if let Some(new_key) = node.first_id() {
+            self.nodes.insert(new_key, node);
+        }
+        self.maybe_compact();
+        true
+    }
+
+    fn maybe_compact(&mut self) {
+        if self.arena.len() > 64 && self.dead > self.arena.len() / 2 {
+            let mut new_arena = Vec::with_capacity(self.arena.len().saturating_sub(self.dead));
+            for node in self.nodes.values_mut() {
+                for entry in &mut node.entries {
+                    let start = entry.span.off;
+                    let end = entry.span.off + entry.span.len as usize;
+                    let new_off = new_arena.len();
+                    new_arena.extend_from_slice(&self.arena[start..end]);
+                    entry.span.off = new_off;
+                }
+            }
+            self.arena = new_arena;
+            self.dead = 0;
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn first_id(&self) -> Option<(u64, u64)> {
+        self.nodes.values().next().and_then(StreamNode::first_id)
+    }
+
+    #[must_use]
+    pub fn last_id(&self) -> Option<(u64, u64)> {
+        self.nodes
+            .values()
+            .next_back()
+            .and_then(StreamNode::last_id)
+    }
+
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn contents(&self) -> Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> {
+        self.nodes
+            .values()
+            .flat_map(|node| {
+                node.entries
+                    .iter()
+                    .map(|entry| (entry.id, self.span_slice(&entry.span).to_pairs()))
+            })
+            .collect()
+    }
+
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn layout(&self) -> Vec<((u64, u64), Vec<(u64, u64)>)> {
+        self.nodes
+            .iter()
+            .map(|(key, node)| (*key, node.entries.iter().map(|entry| entry.id).collect()))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn range_ids<R: std::ops::RangeBounds<(u64, u64)>>(&self, bounds: R) -> Vec<(u64, u64)> {
+        let lower = match bounds.start_bound() {
+            std::ops::Bound::Included(id) | std::ops::Bound::Excluded(id) => self
+                .nodes
+                .range(..=*id)
+                .next_back()
+                .map_or(*id, |(key, _)| *key),
+            std::ops::Bound::Unbounded => (0, 0),
+        };
+        self.nodes
+            .range(lower..)
+            .flat_map(|(_, node)| node.entries.iter().map(|entry| entry.id))
+            .filter(|id| stream_id_in_bounds(&bounds, id))
+            .collect()
     }
 }
 
@@ -4613,12 +4997,13 @@ mod tests {
         assert_eq!(log.first_id(), oracle.keys().next().copied());
         assert_eq!(log.last_id(), oracle.keys().next_back().copied());
         assert!(
-            log.nodes.len() < oracle.len(),
+            log.nodes.len() + usize::from(log.tail.is_some()) < oracle.len(),
             "stream entries are grouped into nodes"
         );
         assert!(
             log.nodes
                 .values()
+                .chain(log.tail.iter())
                 .all(|node| node.entries.len() <= PACKED_STREAM_NODE_MAX_ENTRIES),
             "each stream node obeys Redis's default stream-node-max-entries cap"
         );
@@ -4638,16 +5023,30 @@ mod tests {
         let oracle_iter: Vec<((u64, u64), Pairs)> =
             oracle.iter().map(|(id, p)| (*id, p.clone())).collect();
         assert_eq!(log_iter, oracle_iter, "iter equivalence");
-        // A couple of inclusive / exclusive ranges (XRANGE / XREVRANGE).
-        let lo = (300, 0);
-        let hi = (700, 0);
-        let log_range: Vec<(u64, u64)> = log.range(lo..=hi).map(|(id, _)| *id).collect();
-        let oracle_range: Vec<(u64, u64)> = oracle.range(lo..=hi).map(|(id, _)| *id).collect();
-        assert_eq!(log_range, oracle_range, "inclusive range");
-        let log_rev: Vec<(u64, u64)> = log.range(lo..=hi).rev().map(|(id, _)| *id).collect();
-        let mut oracle_rev = oracle_range.clone();
-        oracle_rev.reverse();
-        assert_eq!(log_rev, oracle_rev, "reversed range (XREVRANGE)");
+        // XRANGE/XREVRANGE boundary shapes, including ranges entirely outside
+        // the stream and bounds that start in an inter-entry gap.
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let range_cases = [
+            ("unbounded", (Unbounded, Unbounded)),
+            ("below-first", (Included((0, 0)), Excluded((1, 0)))),
+            ("included", (Included((300, 0)), Included((700, 0)))),
+            ("excluded-gap", (Excluded((300, 0)), Excluded((700, 0)))),
+            ("gap-start", (Included((350, 1)), Included((700, 0)))),
+            ("above-last", (Excluded((2_000, 0)), Unbounded)),
+        ];
+        for (label, bounds) in range_cases {
+            let log_range: Vec<(u64, u64)> = log.range(bounds).map(|(id, _)| *id).collect();
+            let oracle_range: Vec<(u64, u64)> = oracle.range(bounds).map(|(id, _)| *id).collect();
+            assert_eq!(log_range, oracle_range, "{label} forward range");
+            assert_eq!(
+                log.range(bounds)
+                    .rev()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                oracle_range.into_iter().rev().collect::<Vec<_>>(),
+                "{label} reversed range"
+            );
+        }
         // Arena did not leak unbounded dead bytes after all the churn.
         assert!(
             log.arena.len()
@@ -4676,21 +5075,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             assert_eq!(contents(candidate), contents(fallback));
-            let layout = |log: &PackedStreamLog| {
-                log.nodes
-                    .iter()
-                    .map(|(key, node)| {
-                        (
-                            *key,
-                            node.entries
-                                .iter()
-                                .map(|entry| entry.id)
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(layout(candidate), layout(fallback));
+            assert_eq!(candidate.bench_node_layout(), fallback.bench_node_layout());
         };
 
         let mut candidate = PackedStreamLog::new();
@@ -4705,11 +5090,17 @@ mod tests {
         }
         assert_same(&candidate, &fallback);
 
-        // Equal-ID overwrite and a new out-of-order ID retain the old lookup/split path.
+        // Equal-ID overwrite plus front and full-middle insertions retain the
+        // exact B-tree lookup/split fallback and node boundaries.
         let overwritten = pairs(10_000);
         assert_eq!(
             candidate.insert((100, 0), &overwritten),
             fallback.bench_insert_fallback((100, 0), &overwritten)
+        );
+        let front = pairs(10_001);
+        assert_eq!(
+            candidate.insert((0, 0), &front),
+            fallback.bench_insert_fallback((0, 0), &front)
         );
         let out_of_order = pairs(10_001);
         assert_eq!(

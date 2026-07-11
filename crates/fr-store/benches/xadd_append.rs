@@ -1,7 +1,7 @@
-//! Same-binary profile and A/B harness for the monotonic stream-append path used by XADD.
+//! Same-binary profile and A/B harness for XADD's grouped stream-node directory.
 //!
-//! The candidate uses the last stream node to prove that a strictly increasing ID is new and to
-//! append it. The fallback is the exact pre-change `node_key_for` + `insert_new_span` path.
+//! The candidate keeps the mutable rightmost node outside the B-tree; the
+//! reference freezes the exact pre-change all-nodes-in-B-tree implementation.
 
 use std::{
     env,
@@ -11,10 +11,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fr_store::StreamEntries;
+use fr_store::{PackedStreamLogBTreeReference, StreamEntries};
 
 const SEED_ENTRIES: usize = 100;
-const PROFILE_REPEATS: usize = 500_000;
+const PROFILE_REPEATS: usize = 2_000_000;
 const PROFILE_TRIALS: usize = 5;
 const STAT_REPEATS: usize = 20_000;
 const STAT_ROUNDS: usize = 24;
@@ -24,55 +24,97 @@ const NULL_HI: f64 = 0.95;
 #[derive(Clone, Copy, Debug)]
 enum Arm {
     Candidate,
-    Fallback,
+    Reference,
 }
 
 impl Arm {
     const fn name(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
-            Self::Fallback => "fallback",
+            Self::Reference => "reference",
         }
     }
 
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "candidate" => Ok(Self::Candidate),
-            "fallback" => Ok(Self::Fallback),
+            "reference" => Ok(Self::Reference),
             _ => Err(format!("unknown child arm {value:?}")),
         }
     }
 }
 
-fn insert(
+#[inline(never)]
+fn insert_candidate(
     entries: &mut StreamEntries,
-    arm: Arm,
     id: (u64, u64),
     fields: &[(Vec<u8>, Vec<u8>)],
 ) -> bool {
-    match arm {
-        Arm::Candidate => entries.insert(black_box(id), black_box(fields)),
-        Arm::Fallback => entries.bench_insert_fallback(black_box(id), black_box(fields)),
-    }
+    entries.insert(black_box(id), black_box(fields))
 }
 
-fn seed_entries(arm: Arm) -> StreamEntries {
+#[inline(never)]
+fn insert_reference(
+    entries: &mut PackedStreamLogBTreeReference,
+    id: (u64, u64),
+    fields: &[(Vec<u8>, Vec<u8>)],
+) -> bool {
+    entries.insert(black_box(id), black_box(fields))
+}
+
+fn seed_candidate() -> StreamEntries {
     let mut entries = StreamEntries::new();
     let fields = [(b"field".to_vec(), b"value".to_vec())];
     for sequence in 1..=SEED_ENTRIES {
-        assert!(!insert(&mut entries, arm, (1, sequence as u64), &fields));
+        assert!(!insert_candidate(
+            &mut entries,
+            (1, sequence as u64),
+            &fields
+        ));
     }
     entries
 }
 
-fn run_append_loop(arm: Arm, repeats: usize) {
-    let mut entries = seed_entries(arm);
+fn seed_reference() -> PackedStreamLogBTreeReference {
+    let mut entries = PackedStreamLogBTreeReference::new();
+    let fields = [(b"field".to_vec(), b"value".to_vec())];
+    for sequence in 1..=SEED_ENTRIES {
+        assert!(!insert_reference(
+            &mut entries,
+            (1, sequence as u64),
+            &fields
+        ));
+    }
+    entries
+}
+
+fn run_candidate_loop(repeats: usize) {
+    let mut entries = seed_candidate();
     let fields = [(b"field".to_vec(), b"value".to_vec())];
     for offset in 1..=repeats {
-        black_box(insert(&mut entries, arm, (2, offset as u64), &fields));
+        black_box(insert_candidate(&mut entries, (2, offset as u64), &fields));
     }
     black_box(entries.len());
     black_box(entries.last_id());
+    std::mem::forget(entries);
+}
+
+fn run_reference_loop(repeats: usize) {
+    let mut entries = seed_reference();
+    let fields = [(b"field".to_vec(), b"value".to_vec())];
+    for offset in 1..=repeats {
+        black_box(insert_reference(&mut entries, (2, offset as u64), &fields));
+    }
+    black_box(entries.len());
+    black_box(entries.last_id());
+    std::mem::forget(entries);
+}
+
+fn run_append_loop(arm: Arm, repeats: usize) {
+    match arm {
+        Arm::Candidate => run_candidate_loop(repeats),
+        Arm::Reference => run_reference_loop(repeats),
+    }
 }
 
 fn child_args() -> Result<Option<(Arm, usize)>, String> {
@@ -109,10 +151,10 @@ fn binary_sha256(executable: &Path) -> Result<String, String> {
 
 #[derive(Clone, Copy, Debug)]
 struct ProfileRows {
-    fallback_self_pct: f64,
-    insert_new_span_self_pct: f64,
-    node_key_for_self_pct: f64,
-    btree_range_self_pct: f64,
+    candidate_wrapper_self_pct: f64,
+    reference_wrapper_self_pct: f64,
+    reference_insert_self_pct: f64,
+    btree_insert_self_pct: f64,
 }
 
 fn self_pct(stdout: &str, needle: &str) -> f64 {
@@ -194,12 +236,15 @@ fn profile_trial(executable: &Path, arm: Arm, trial: usize) -> Result<ProfileRow
         arm.name()
     );
     Ok(ProfileRows {
-        fallback_self_pct: self_pct(stdout.as_ref(), "PackedStreamLog>::insert_span_fallback"),
-        insert_new_span_self_pct: self_pct(stdout.as_ref(), "PackedStreamLog>::insert_new_span"),
-        node_key_for_self_pct: self_pct(stdout.as_ref(), "PackedStreamLog>::node_key_for"),
-        btree_range_self_pct: self_pct(
+        candidate_wrapper_self_pct: self_pct(stdout.as_ref(), "xadd_append::insert_candidate"),
+        reference_wrapper_self_pct: self_pct(stdout.as_ref(), "xadd_append::insert_reference"),
+        reference_insert_self_pct: self_pct(
             stdout.as_ref(),
-            "BTreeMap<(u64, u64), fr_store::packed_set::StreamNode>>::range",
+            "<fr_store::packed_set::PackedStreamLogBTreeReference>::insert",
+        ),
+        btree_insert_self_pct: self_pct(
+            stdout.as_ref(),
+            "BTreeMap<(u64, u64), fr_store::packed_set::StreamNode>>::insert",
         ),
     })
 }
@@ -223,7 +268,7 @@ fn run_profile(executable: &Path) -> Result<(), String> {
     println!("WORKER_ID {hostname}");
     println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
 
-    for arm in [Arm::Fallback, Arm::Candidate] {
+    for arm in [Arm::Reference, Arm::Candidate] {
         let warm = Command::new(executable)
             .args(["--child", arm.name(), "10000"])
             .status()
@@ -233,55 +278,63 @@ fn run_profile(executable: &Path) -> Result<(), String> {
         }
     }
 
-    let mut fallback_core = Vec::with_capacity(PROFILE_TRIALS);
-    let mut fallback_insert = Vec::with_capacity(PROFILE_TRIALS);
-    let mut fallback_node_key = Vec::with_capacity(PROFILE_TRIALS);
-    let mut fallback_range = Vec::with_capacity(PROFILE_TRIALS);
-    for arm in [Arm::Fallback, Arm::Candidate] {
+    let mut reference_wrapper = Vec::with_capacity(PROFILE_TRIALS);
+    let mut reference_insert = Vec::with_capacity(PROFILE_TRIALS);
+    let mut reference_btree_insert = Vec::with_capacity(PROFILE_TRIALS);
+    let mut candidate_wrapper = Vec::with_capacity(PROFILE_TRIALS);
+    let mut candidate_btree_insert = Vec::with_capacity(PROFILE_TRIALS);
+    for arm in [Arm::Reference, Arm::Candidate] {
         for trial in 1..=PROFILE_TRIALS {
             let rows = profile_trial(executable, arm, trial)?;
             println!(
-                "PROFILE_SELF arm={} trial={trial} fallback_self_pct={:.4} \
-insert_new_span_self_pct={:.4} node_key_for_self_pct={:.4} btree_range_self_pct={:.4}",
+                "PROFILE_SELF arm={} trial={trial} candidate_wrapper_self_pct={:.4} \
+reference_wrapper_self_pct={:.4} reference_insert_self_pct={:.4} btree_insert_self_pct={:.4}",
                 arm.name(),
-                rows.fallback_self_pct,
-                rows.insert_new_span_self_pct,
-                rows.node_key_for_self_pct,
-                rows.btree_range_self_pct
+                rows.candidate_wrapper_self_pct,
+                rows.reference_wrapper_self_pct,
+                rows.reference_insert_self_pct,
+                rows.btree_insert_self_pct
             );
             match arm {
-                Arm::Fallback => {
-                    fallback_core.push(rows.fallback_self_pct);
-                    fallback_insert.push(rows.insert_new_span_self_pct);
-                    fallback_node_key.push(rows.node_key_for_self_pct);
-                    fallback_range.push(rows.btree_range_self_pct);
+                Arm::Reference => {
+                    reference_wrapper.push(rows.reference_wrapper_self_pct);
+                    reference_insert.push(rows.reference_insert_self_pct);
+                    reference_btree_insert.push(rows.btree_insert_self_pct);
                 }
-                Arm::Candidate
-                    if rows.fallback_self_pct > 0.1
-                        || rows.insert_new_span_self_pct > 0.1
-                        || rows.node_key_for_self_pct > 0.1 =>
-                {
-                    return Err(format!("candidate still reaches old lookup path: {rows:?}"));
+                Arm::Candidate if rows.reference_wrapper_self_pct > 0.1 => {
+                    return Err(format!(
+                        "candidate unexpectedly reaches the frozen reference wrapper: {rows:?}"
+                    ));
                 }
-                Arm::Candidate => {}
+                Arm::Candidate => {
+                    candidate_wrapper.push(rows.candidate_wrapper_self_pct);
+                    candidate_btree_insert.push(rows.btree_insert_self_pct);
+                }
             }
         }
     }
-    let core_median = median(&mut fallback_core);
-    let insert_median = median(&mut fallback_insert);
-    let node_key_median = median(&mut fallback_node_key);
-    let range_median = median(&mut fallback_range);
+    let reference_wrapper_median = median(&mut reference_wrapper);
+    let reference_insert_median = median(&mut reference_insert);
+    let reference_btree_insert_median = median(&mut reference_btree_insert);
+    let candidate_wrapper_median = median(&mut candidate_wrapper);
+    let candidate_btree_insert_median = median(&mut candidate_btree_insert);
     println!(
-        "PROFILE_SELF_SUMMARY arm=fallback trials={PROFILE_TRIALS} \
-fallback_median_self_pct={core_median:.4} fallback_samples={fallback_core:?} \
-insert_new_span_median_self_pct={insert_median:.4} insert_samples={fallback_insert:?} \
-node_key_for_median_self_pct={node_key_median:.4} node_key_samples={fallback_node_key:?} \
-btree_range_median_self_pct={range_median:.4} range_samples={fallback_range:?} \
-candidate_fallback_reported_self_pct=0.0000 report_floor_pct=0.1000"
+        "PROFILE_SELF_SUMMARY trials={PROFILE_TRIALS} \
+reference_wrapper_median_self_pct={reference_wrapper_median:.4} reference_wrapper_samples={reference_wrapper:?} \
+reference_insert_median_self_pct={reference_insert_median:.4} reference_insert_samples={reference_insert:?} \
+reference_btree_insert_median_self_pct={reference_btree_insert_median:.4} reference_btree_insert_samples={reference_btree_insert:?} \
+candidate_wrapper_median_self_pct={candidate_wrapper_median:.4} candidate_wrapper_samples={candidate_wrapper:?} \
+candidate_btree_insert_median_self_pct={candidate_btree_insert_median:.4} candidate_btree_insert_samples={candidate_btree_insert:?} \
+report_floor_pct=0.1000"
     );
-    if core_median <= 0.1 {
+    if reference_wrapper_median <= 0.1 {
         return Err(format!(
-            "median fallback self-time {core_median:.4}% does not clear the 0.1% attribution floor"
+            "median reference wrapper self-time {reference_wrapper_median:.4}% does not clear the 0.1% execution floor"
+        ));
+    }
+    if candidate_wrapper_median <= 0.1 {
+        return Err(format!(
+            "median candidate wrapper self-time {candidate_wrapper_median:.4}% does not clear the 0.1% execution floor"
         ));
     }
     Ok(())
@@ -332,36 +385,91 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn correctness_gate() {
-    let mut candidate = seed_entries(Arm::Candidate);
-    let mut fallback = seed_entries(Arm::Fallback);
+    let mut candidate = seed_candidate();
+    let mut reference = seed_reference();
     let fields = [(b"field".to_vec(), b"value".to_vec())];
     for offset in 1..=250_u64 {
         assert_eq!(
-            insert(&mut candidate, Arm::Candidate, (2, offset), &fields),
-            insert(&mut fallback, Arm::Fallback, (2, offset), &fields)
+            insert_candidate(&mut candidate, (2, offset * 2), &fields),
+            insert_reference(&mut reference, (2, offset * 2), &fields)
         );
     }
     let overwrite = [(b"field".to_vec(), b"overwrite".to_vec())];
     assert_eq!(
-        insert(&mut candidate, Arm::Candidate, (2, 100), &overwrite),
-        insert(&mut fallback, Arm::Fallback, (2, 100), &overwrite)
+        insert_candidate(&mut candidate, (2, 200), &overwrite),
+        insert_reference(&mut reference, (2, 200), &overwrite)
     );
     let out_of_order = [(b"field".to_vec(), b"out-of-order".to_vec())];
-    assert_eq!(
-        insert(&mut candidate, Arm::Candidate, (1, 10_000), &out_of_order),
-        insert(&mut fallback, Arm::Fallback, (1, 10_000), &out_of_order)
-    );
+    // Before the first node, inside a full middle node, and in an inter-node gap.
+    for id in [(0, 1), (2, 199), (1, 10_000)] {
+        assert_eq!(
+            insert_candidate(&mut candidate, id, &out_of_order),
+            insert_reference(&mut reference, id, &out_of_order)
+        );
+    }
+
+    for id in [(0, 1), (2, 199), (2, 500)] {
+        assert_eq!(candidate.remove(id), reference.remove(id));
+    }
+
     let contents = |entries: &StreamEntries| {
         entries
             .iter()
             .map(|(id, fields)| (*id, fields.to_pairs()))
             .collect::<Vec<_>>()
     };
-    assert_eq!(candidate.len(), fallback.len());
-    assert_eq!(candidate.first_id(), fallback.first_id());
-    assert_eq!(candidate.last_id(), fallback.last_id());
-    assert_eq!(contents(&candidate), contents(&fallback));
-    println!("CORRECTNESS_GATE insert_results_len_ids_order_fields=identical");
+    let assert_same = |candidate: &StreamEntries, reference: &PackedStreamLogBTreeReference| {
+        assert_eq!(candidate.len(), reference.len());
+        assert_eq!(candidate.first_id(), reference.first_id());
+        assert_eq!(candidate.last_id(), reference.last_id());
+        assert_eq!(contents(candidate), reference.contents());
+        assert_eq!(candidate.bench_node_layout(), reference.layout());
+    };
+    assert_same(&candidate, &reference);
+
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    let range_cases = [
+        (Unbounded, Unbounded),
+        (Included((0, 0)), Excluded((1, 0))),
+        (Included((1, 50)), Included((2, 250))),
+        (Excluded((1, 50)), Excluded((2, 250))),
+        (Included((1, 10_001)), Included((2, 250))),
+        (Excluded((3, 0)), Unbounded),
+    ];
+    for bounds in range_cases {
+        assert_eq!(
+            candidate
+                .range(bounds)
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            reference.range_ids(bounds)
+        );
+        let mut reference_reverse = reference.range_ids(bounds);
+        reference_reverse.reverse();
+        assert_eq!(
+            candidate
+                .range(bounds)
+                .rev()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            reference_reverse
+        );
+    }
+
+    let remaining_ids = candidate.keys().copied().collect::<Vec<_>>();
+    for id in remaining_ids {
+        assert_eq!(candidate.remove(id), reference.remove(id));
+    }
+    assert!(candidate.is_empty());
+    assert!(reference.is_empty());
+    assert_eq!(
+        insert_candidate(&mut candidate, (9, 9), &fields),
+        insert_reference(&mut reference, (9, 9), &fields)
+    );
+    assert_same(&candidate, &reference);
+    println!(
+        "CORRECTNESS_GATE append_overwrite_front_middle_gap_remove_empty_reinsert_ranges=identical"
+    );
 }
 
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {
@@ -375,17 +483,17 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         }
         for slot in order {
             let arm = if slot == 2 {
-                Arm::Fallback
+                Arm::Reference
             } else {
                 Arm::Candidate
             };
             counts[slot] = perf_instructions(executable, arm)?;
         }
-        let null_ratio = counts[0] as f64 / counts[1] as f64;
+        let null_ratio = counts[1] as f64 / counts[0] as f64;
         let speedup = counts[2] as f64 / counts[0] as f64;
         println!(
-            "INSTRUCTIONS round={} order={order:?} candidate_a={} candidate_b={} fallback={} \
-null_ratio={null_ratio:.9} fallback_over_candidate={speedup:.9}",
+            "INSTRUCTIONS round={} order={order:?} candidate_a={} candidate_b={} reference={} \
+candidate_b_over_a={null_ratio:.9} reference_over_candidate={speedup:.9}",
             round + 1,
             counts[0],
             counts[1],
@@ -404,7 +512,7 @@ null_ratio={null_ratio:.9} fallback_over_candidate={speedup:.9}",
     println!(
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} \
 null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} \
-fallback_over_candidate_median={speedup_median:.9} speedup_cv_pct={speedup_cv_pct:.6}"
+reference_over_candidate_median={speedup_median:.9} speedup_cv_pct={speedup_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
         return Err(format!(

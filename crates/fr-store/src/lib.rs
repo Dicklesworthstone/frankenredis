@@ -9,6 +9,9 @@ mod packed_set;
 // when it replaces `entries` it deletes `ordered_keys` + `random_key_slots`.
 #[allow(dead_code)]
 mod keyspace_dict;
+#[cfg(any(test, feature = "bench-reference"))]
+#[doc(hidden)]
+pub use packed_set::PackedStreamLogBTreeReference;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
     PackedZSetIter, RestoredListNode, RetainedListpackChunk,
@@ -235,7 +238,7 @@ pub fn keyspace_events_to_string(flags: u32) -> String {
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
 /// A whole stream's entries: a single shared arena plus a sorted
-/// `BTreeMap<StreamId, FieldSpan>` index ([`PackedStreamLog`]) — instead of a
+/// grouped-node directory ([`PackedStreamLog`]) — instead of a
 /// `BTreeMap<StreamId, PackedStreamFields>` that paid a separate heap allocation
 /// AND a 28-byte (`Vec` header + count) value PER entry (frankenredis-p8wd1
 /// step 3). The per-entry field bytes are byte-identical to the old
@@ -4076,9 +4079,9 @@ pub enum Value {
     /// behaviour unchanged (zset ops auto-deref the box). (frankenredis-w2t01)
     SortedSet(Box<SortedSet>),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
-    /// Boxed because [`PackedStreamLog`] (arena `Vec` + index `BTreeMap` + dead
-    /// counter = 48B) would otherwise size every `Value`/`Entry`, even a tiny
-    /// string. Boxing keeps `Value` at 32B; stream ops auto-deref the box.
+    /// Boxed because [`PackedStreamLog`] (arena, field dictionary, grouped
+    /// B-tree directory, and active tail) would otherwise size every
+    /// `Value`/`Entry`, even a tiny string. Stream ops auto-deref the box.
     /// (frankenredis-p8wd1)
     Stream(Box<StreamEntries>),
 }

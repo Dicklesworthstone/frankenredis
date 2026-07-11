@@ -6974,3 +6974,77 @@ Behavior, fallback, and quality proof:
 
 Verdict: **FINAL KEEP**. Ordinary heap-backed strings take the consuming MOVE relink tier; every
 ambiguous representation or side-state condition retains the exact old copy-then-delete path.
+
+## 2026-07-11 CreamPeak: FINAL KEEP — active stream tail leaves the B-tree, median 0.896513849x instructions
+
+The selected family is streams, outside cc's SIMD/dispatch lane. The workload seeds one full
+default-sized 100-entry stream node, then appends strictly increasing IDs while repeatedly crossing
+node boundaries. This is the dominant XADD storage primitive and includes periodic full-node
+rollover. The frozen pre-change wrapper had `instructions:u` self-time samples of **73.17%,
+75.76%, 76.00%, 81.16%, and 84.58%** (median **76.00%**); the candidate wrapper samples were
+**74.08%, 74.36%, 76.91%, 80.53%, and 85.70%** (median **76.91%**). Every profile reported zero
+lost samples, so both arms cleared the mandatory execution-attribution floor.
+
+ONE LEVER: `PackedStreamLog` keeps its greatest mutable node outside the existing B-tree as an
+active tail. Strictly increasing XADD pushes into that tail directly; when the default 100-entry
+node fills, the old tail enters the B-tree once and a new active tail is created. Equal-ID
+overwrite and older/out-of-order insertion fold the tail into the exact historical B-tree
+lookup/split/overwrite path, then restore the greatest node as the tail. Removals address the tail
+directly or retain the historical B-tree remove/rekey path for non-tail nodes. Reads, compaction,
+bulk restore, forward iteration, and reverse/ranged iteration chain the same ordered logical nodes.
+The exact pre-change all-nodes-in-B-tree implementation exists only under `test` or the non-default
+`bench-reference` feature for same-binary proof.
+
+The final same-binary command was:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-store --features bench-reference --bench xadd_append`
+
+Both arms shared binary SHA-256
+**`f27800bffab460845cc6b528fcaacea3385eea419789a9ca42f007e07b6161be`** on remote worker
+**vmi1227854**. The reference/candidate wrapper medians were **76.00%** and **76.91%** self-time,
+respectively. `BTreeMap::insert` remained an informational rollover subframe rather than the gate:
+both implementations legitimately insert one node per 100 monotonic entries.
+
+The benchmark then ran 24 position-balanced, within-routine interleaved instruction rounds in that
+same invocation. The paired candidate/candidate B/A null ratio had median **0.999993278**, p05
+**0.999802692**, p95 **1.000124568**, and CV **0.009959%**. Reference/candidate had median
+**1.115431737x** with paired-ratio CV **0.008747%**; equivalently candidate/reference was
+**0.896513849**, or **10.348615% fewer instructions**. The candidate median lies far outside the
+complete null band and clears the 1% keep gate.
+
+Behavior, fallback, and quality proof:
+
+- before measurement, both arms produced identical insert/remove return values, length,
+  first/last IDs, ordered decoded fields, and grouped-node boundaries;
+- the same-binary correctness gate covered monotonic appends, equal-ID overwrite, insertion before
+  the first node, insertion into a full middle node, insertion in an inter-node gap, removal from
+  tail and non-tail nodes, removal to empty, reinsertion, and forward/reverse included, excluded,
+  unbounded, gap-start, below-stream, and above-stream ranges;
+- the monotonic tier changes no stream ID or field bytes. Tuple ordering is unchanged, and there is
+  no floating-point, tie-breaking, or RNG surface. Arbitrary IDs retain the historical B-tree
+  fallback, so malformed descending RESTORE input and large XDEL/XTRIM avoid a flat-directory
+  quadratic path;
+- the full remote `fr-store` package passed **760/760** library tests with **13** deliberate ignores,
+  plus every integration, metamorphic, and doc target. This includes DUMP/RESTORE, AOF, XRANGE,
+  XREVRANGE, XDEL, XTRIM, XGROUP, XINFO, XREAD, PEL, and node-boundary coverage;
+- remote `fr-conformance` `conformance_core_stream` passed **1/1**. The remote-only command used the
+  repository's documented `FR_ALLOW_STUB_COMMANDS=1` tier because the vendored command metadata is
+  excluded from RCH transfer; the stream test itself is independent of ACL/COMMAND metadata;
+- remote workspace all-target check passed. Remote `fr-store` all-target Clippy passed with
+  `-D warnings` after allowing only the three pre-existing sorted-set test-literal findings under
+  `clippy::excessive_precision` and `clippy::approx_constant`; the initial strict run surfaced only
+  those unrelated lines after the lever-specific lint was fixed;
+- direct Rust 2024 rustfmt and `git diff --check` passed. UBS ran on the three changed Rust files
+  with Cargo-backed categories 12-14 disabled, so it could not invoke local Cargo. Its nonzero
+  output was whole-file legacy inventory plus intentional fail-closed harness panics, symmetric
+  child-process `mem::forget`, bounded median/percentile indexes, and test assertions; no new
+  production defect was identified;
+- every Cargo command was fail-closed through `RCH_REQUIRE_REMOTE=1`. RCH reported degraded
+  **9/12** worker health and twice refused the first full-test request because no worker was
+  admissible; `-j 2` then reserved `ovh-b` and completed remotely. No command fell back locally.
+  Agent Mail also remained read-only because its durability queue/database was corrupt, so Git,
+  Beads, and the isolated worktree supplied the coordination truth.
+
+Verdict: **FINAL KEEP**. Strictly increasing XADD mutates the active tail without a per-append
+B-tree traversal; every ambiguous ID retains the exact historical B-tree lookup, split, overwrite,
+and removal behavior.
