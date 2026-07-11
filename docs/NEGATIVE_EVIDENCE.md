@@ -16112,3 +16112,23 @@ OVERLAPS the already-shipped 1.17-1.35x move gain — estimated 1.05-1.12x, bord
 a just-shipped arm for a guessed marginal win. REMAINING frontier = structural (hm95r RESTORE lazy-spans), claimed
 (ohsk5 dispatch chain = the dominant profiled hotspot, 20-34% process_buffered_frames self; cc packet fast-paths),
 or rejected (LZF codec 43-58% self = already-optimal / AVX2 sub-gate). No clean UNCLAIMED lever this sweep.
+
+### 2026-07-11 MEASURED-SUBGATE (list DUMP-encode single-parse fusion — byte-identical but no measurable win; REVERTED) — CreamPeak
+Picked up c92f6's un-shipped "~1.4x single-pass fusion" sub-lever: `encode_dump_quicklist2`'s packed-node
+fallback computed each element's encoded byte count with a separate `listpack_entry_encoded_len` pass (a
+`parse_listpack_integer` per item) THEN re-parsed inside `encode_listpack_entry`. Implemented the fusion
+(made `encode_listpack_entry` return its appended length; the loop takes entry_bytes from that = one parse
+per item) behind `encode_dump_quicklist2::<const FUSED: bool>` for a same-binary A/B. BYTE-IDENTICAL confirmed
+(encode_dump_quicklist2_fused_matches_twoparse + 63 fr-store dump/quicklist + 10 fr-conformance dump/restore/
+core_list + live_redis rdb oracle all pass). But the A/B measured INDISTINGUISHABLE on every shape: 1.000x
+(256 all-int) / 0.990x (1000 int) / 0.991x (1000 mixed) / 1.007x (1000 str), all inside the null band.
+ROOT CAUSE: the redundant `listpack_entry_encoded_len` is a cheap length/parse pass; the DUMP payload cost is
+dominated by the actual listpack byte-writes + the CRC64 over the whole payload. CRC is constant in BOTH A/B
+arms (same payload) so it dilutes the ratio; the parse delta is <5% = below noise. c92f6's "~1.4x" was almost
+certainly the encode loop measured IN ISOLATION (no CRC/write context), which is not the real DUMP scenario.
+Per gate-on-MEDIAN: REVERTED (byte-identical but sub-gate; won't ship). NOTE: the sibling RDB-SAVE encoder
+`encode_compact_list_quicklist2` (fr-persist) has NO per-key CRC (RDB computes one CRC over the whole file), so
+the same fusion there is NOT CRC-diluted and MIGHT gate — but list RDB SAVE is already the structural
+ChunkedList-not-listpack-backed slow path (project_list_restore_gap_architectural), a bigger fish. Rollback: n/a
+(reverted). LESSON: a redundant-parse elision only gates where the parse is a real fraction of the whole op;
+CRC/LZF/byte-write-dominated paths dilute it below the noise floor.
