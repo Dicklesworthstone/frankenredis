@@ -488,6 +488,16 @@ const CRC64_FOLD_K_LO: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(191));
 /// Fold constant for the high 64 bits (multiplied via `clmul` imm `0x11`): `reflect(x^127 mod P)`.
 const CRC64_FOLD_K_HI: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(127));
 
+/// Fold constants for a **4-block (512-bit) advance**, used by the fold-by-4 main loop that keeps
+/// four independent 128-bit accumulators so the ~4-cycle-latency `PCLMULQDQ` on the fold's critical
+/// path is hidden behind independent work (a single-accumulator fold is latency-bound). Same
+/// reflected form as the single-block constants, exponents shifted up by three blocks: a `D`-block
+/// advance uses `(x^(63 + D·128), x^(-1 + D·128))`, so `D=1` gives `(191, 127)` and `D=4` gives
+/// `(575, 511)`. A software-`clmul` model verified fold-by-4 with these constants `== crc64_scalar`
+/// for all lengths `0..=1200`; the exhaustive dispatch test then gates `0..=2048`.
+const CRC64_FOLD4_K_LO: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(575));
+const CRC64_FOLD4_K_HI: u64 = crc64_reflect_u64(crc64_x_pow_mod_p(511));
+
 /// Reference kernel: safe, portable bit-wise reflected CRC-64/Jones. The oracle every fold arm is
 /// tested against, and the fallback on non-`x86_64` / non-`pclmulqdq` hosts.
 #[inline]
@@ -522,10 +532,27 @@ pub fn crc64(data: &[u8]) -> u64 {
     crc64_scalar(0, data)
 }
 
-/// PCLMULQDQ carry-less fold. A verbatim port of the software-clmul model that was verified
-/// `== crc64_scalar` for all lengths `0..=1000` × 3 seeds: fold 16 bytes per step into a 128-bit
-/// accumulator (`acc = clmul(acc.lo, K_LO) ^ clmul(acc.hi, K_HI) ^ next`), then reduce by running
-/// the scalar CRC over the accumulator's 16 bytes and the `< 16`-byte tail.
+/// One reflected carry-less fold: `(acc.lo · k.lo) ^ (acc.hi · k.hi) ^ next`. A macro rather than a
+/// fn so it always inlines inside the `#[target_feature]` kernels — `#[inline(always)]` is rejected
+/// on `#[target_feature]` fns, and a non-inlined call per fold would erase the fold-by-4 win. The
+/// caller's `use` brings `_mm_clmulepi64_si128` / `_mm_xor_si128` into scope.
+#[cfg(target_arch = "x86_64")]
+macro_rules! crc64_fold {
+    ($acc:expr, $k:expr, $next:expr) => {{
+        let lo = _mm_clmulepi64_si128($acc, $k, 0x00);
+        let hi = _mm_clmulepi64_si128($acc, $k, 0x11);
+        _mm_xor_si128(_mm_xor_si128(lo, hi), $next)
+    }};
+}
+
+/// PCLMULQDQ carry-less **fold-by-4**. Folds 16 bytes per accumulator per step into four
+/// independent 128-bit accumulators, so the ~4-cycle `PCLMULQDQ` latency on the fold's critical
+/// path is hidden behind the other three lanes (a single accumulator is latency-bound and leaves
+/// the unit idle). The four accumulators are then collapsed into one 128-bit residue with three
+/// single-block folds — `r = a0·x^(3·128) ^ a1·x^(2·128) ^ a2·x^128 ^ a3` — after which the residue
+/// and the `< 16`-byte tail reduce via the scalar CRC (no Barrett constant needed). Below 8 blocks
+/// the parallel loop cannot amortize its combine, so it folds by one (byte-identical, no regression
+/// on 64..127-byte inputs). Verified `== crc64_scalar` by the exhaustive dispatch test.
 ///
 /// # Safety
 /// The CPU must support `pclmulqdq`; `data.len() >= 16`.
@@ -540,26 +567,102 @@ unsafe fn crc64_pclmul(data: &[u8]) -> u64 {
     let blocks = data.len() / 16;
     let mut folded = [0u8; 16];
 
-    // SAFETY: all intrinsics are pclmulqdq/sse2, guaranteed by the caller. Each load reads 16 bytes
-    // at `i*16 < blocks*16 <= data.len()`; the store targets a local 16-byte array whose size
+    // SAFETY: all intrinsics are pclmulqdq/sse2, guaranteed by the caller. Every load reads 16 bytes
+    // at an offset `< blocks*16 <= data.len()`; the store targets a local 16-byte array whose size
     // matches the register width.
     unsafe {
-        // K = [high = K_HI, low = K_LO]; imm 0x00 = acc.lo·K_LO, imm 0x11 = acc.hi·K_HI.
-        let k = _mm_set_epi64x(CRC64_FOLD_K_HI as i64, CRC64_FOLD_K_LO as i64);
-        let mut acc = _mm_loadu_si128(data.as_ptr() as *const __m128i); // first block; init crc = 0
+        // k = [high = K_HI, low = K_LO]; imm 0x00 = acc.lo·K_LO, imm 0x11 = acc.hi·K_HI.
+        let k1 = _mm_set_epi64x(CRC64_FOLD_K_HI as i64, CRC64_FOLD_K_LO as i64);
+        let acc = if blocks >= 8 {
+            let k4 = _mm_set_epi64x(CRC64_FOLD4_K_HI as i64, CRC64_FOLD4_K_LO as i64);
+            let mut a0 = _mm_loadu_si128(data.as_ptr() as *const __m128i);
+            let mut a1 = _mm_loadu_si128(data.as_ptr().add(16) as *const __m128i);
+            let mut a2 = _mm_loadu_si128(data.as_ptr().add(32) as *const __m128i);
+            let mut a3 = _mm_loadu_si128(data.as_ptr().add(48) as *const __m128i);
+            let mut i = 4usize;
+            while i + 4 <= blocks {
+                // Four independent loads + folds — no cross-lane dependency, so the units stay busy.
+                let n0 = _mm_loadu_si128(data.as_ptr().add(i * 16) as *const __m128i);
+                let n1 = _mm_loadu_si128(data.as_ptr().add((i + 1) * 16) as *const __m128i);
+                let n2 = _mm_loadu_si128(data.as_ptr().add((i + 2) * 16) as *const __m128i);
+                let n3 = _mm_loadu_si128(data.as_ptr().add((i + 3) * 16) as *const __m128i);
+                a0 = crc64_fold!(a0, k4, n0);
+                a1 = crc64_fold!(a1, k4, n1);
+                a2 = crc64_fold!(a2, k4, n2);
+                a3 = crc64_fold!(a3, k4, n3);
+                i += 4;
+            }
+            // Collapse the four accumulators (a0 leads a3 by three blocks) into one residue.
+            let mut r = a0;
+            r = crc64_fold!(r, k1, a1);
+            r = crc64_fold!(r, k1, a2);
+            r = crc64_fold!(r, k1, a3);
+            // Fold any full blocks past the last group of four (0..3 of them).
+            while i < blocks {
+                let next = _mm_loadu_si128(data.as_ptr().add(i * 16) as *const __m128i);
+                r = crc64_fold!(r, k1, next);
+                i += 1;
+            }
+            r
+        } else {
+            let mut acc = _mm_loadu_si128(data.as_ptr() as *const __m128i); // first block; init crc = 0
+            let mut i = 1usize;
+            while i < blocks {
+                let next = _mm_loadu_si128(data.as_ptr().add(i * 16) as *const __m128i);
+                acc = crc64_fold!(acc, k1, next);
+                i += 1;
+            }
+            acc
+        };
+        _mm_storeu_si128(folded.as_mut_ptr() as *mut __m128i, acc);
+    }
+
+    let crc = crc64_scalar(0, &folded);
+    crc64_scalar(crc, &data[blocks * 16..])
+}
+
+/// Pre-`fold-by-4` reference: the single-accumulator fold, retained **only** as the ORIG arm of the
+/// same-binary A/B in `benches/crc64.rs` (methodology §3 — keep the pre-change impl bench-faithful).
+/// Byte-identical to [`crc64`] for every input; not on any production path.
+#[doc(hidden)]
+#[must_use]
+pub fn crc64_fold1_reference(data: &[u8]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if data.len() >= 64 && std::arch::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: pclmulqdq (and SSE2 baseline) confirmed present; data.len() >= 16.
+            return unsafe { crc64_pclmul_fold1(data) };
+        }
+    }
+    crc64_scalar(0, data)
+}
+
+/// The single-accumulator fold body backing [`crc64_fold1_reference`]. Identical math to the shipped
+/// kernel's `< 8`-block arm.
+///
+/// # Safety
+/// The CPU must support `pclmulqdq`; `data.len() >= 16`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "pclmulqdq,sse2")]
+unsafe fn crc64_pclmul_fold1(data: &[u8]) -> u64 {
+    use std::arch::x86_64::{
+        __m128i, _mm_clmulepi64_si128, _mm_loadu_si128, _mm_set_epi64x, _mm_storeu_si128,
+        _mm_xor_si128,
+    };
+    let blocks = data.len() / 16;
+    let mut folded = [0u8; 16];
+    // SAFETY: as `crc64_pclmul` — pclmulqdq/sse2 present, loads in bounds, local store.
+    unsafe {
+        let k1 = _mm_set_epi64x(CRC64_FOLD_K_HI as i64, CRC64_FOLD_K_LO as i64);
+        let mut acc = _mm_loadu_si128(data.as_ptr() as *const __m128i);
         let mut i = 1usize;
         while i < blocks {
             let next = _mm_loadu_si128(data.as_ptr().add(i * 16) as *const __m128i);
-            let lo = _mm_clmulepi64_si128(acc, k, 0x00);
-            let hi = _mm_clmulepi64_si128(acc, k, 0x11);
-            acc = _mm_xor_si128(_mm_xor_si128(lo, hi), next);
+            acc = crc64_fold!(acc, k1, next);
             i += 1;
         }
         _mm_storeu_si128(folded.as_mut_ptr() as *mut __m128i, acc);
     }
-
-    // Reduce the 128-bit residue, then continue through the < 16-byte tail. Both are byte-exact
-    // scalar steps (no Barrett constant needed).
     let crc = crc64_scalar(0, &folded);
     crc64_scalar(crc, &data[blocks * 16..])
 }
@@ -730,16 +833,22 @@ mod tests {
     /// exhaustive and the crate's most safety-critical test.
     #[test]
     fn crc64_pclmul_matches_scalar_and_check_value() {
-        use super::{crc64, crc64_scalar};
+        use super::{crc64, crc64_fold1_reference, crc64_scalar};
         assert_eq!(crc64(b"123456789"), 0xe9c6_d914_c4b8_d9ca, "CRC-64/Jones check value");
         let mut buf = vec![0u8; 2048];
         for seed in [1u64, 0xdead_beef, 0x0f0f_0f0f_f0f0_f0f0] {
             fill(&mut buf, seed);
             for len in 0..=2048usize {
+                let scalar = crc64_scalar(0, &buf[..len]);
+                // The shipped fold-by-4 dispatch AND the retained fold-by-1 A/B reference must both
+                // equal the scalar oracle — a wrong 4-block constant, a broken combine, or a stale
+                // reference all fail here (the 8-block boundary, every 0..3 remainder, and the
+                // 4..7-block fold-by-1 fallback are all exercised across this length sweep).
+                assert_eq!(crc64(&buf[..len]), scalar, "fold4 != scalar at len={len} seed={seed}");
                 assert_eq!(
-                    crc64(&buf[..len]),
-                    crc64_scalar(0, &buf[..len]),
-                    "dispatch != scalar at len={len} seed={seed}"
+                    crc64_fold1_reference(&buf[..len]),
+                    scalar,
+                    "fold1 reference != scalar at len={len} seed={seed}"
                 );
             }
         }
@@ -751,6 +860,7 @@ mod tests {
                 }
                 let s = &buf[start..start + len];
                 assert_eq!(crc64(s), crc64_scalar(0, s), "start={start} len={len}");
+                assert_eq!(crc64(s), crc64_fold1_reference(s), "fold4 != fold1 start={start} len={len}");
             }
         }
     }

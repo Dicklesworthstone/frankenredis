@@ -1,28 +1,34 @@
-//! Same-binary A/B for CRC-64/Jones: PCLMULQDQ fold vs a slice-by-8 table (the shipped baseline's
-//! class), null-gated on the median.
+//! Same-binary A/B for CRC-64/Jones isolating the **fold-by-4** kernel: PCLMULQDQ fold-by-1
+//! (single accumulator, latency-bound) vs fold-by-4 (four independent accumulators that hide the
+//! ~4-cycle `PCLMULQDQ` latency), null-gated on the median.
 //!
 //! Substrate identical to the other `fr-simd` benches: ONE binary / ONE invocation, adjacent-pair
 //! interleaving (order swapped on odd rounds), `black_box` on inputs, reps calibrated per size,
 //! median of paired per-round ratios, gated on the candidate median lying outside the null
 //! control's p5..p95 spread (`cv` reported, never gated).
 //!
-//! ORIG = a slice-by-8 table CRC (representative of `fr-persist`'s slice-by-16 table baseline; the
-//! bench builds the tables at startup so it needs no cross-crate access).
-//! CAND = `fr_simd::crc64` (PCLMULQDQ where available).
-//! Both are asserted byte-identical before timing.
+//! ORIG = `fr_simd::crc64_fold1_reference` (the pre-change single-accumulator PCLMULQDQ fold).
+//! CAND = `fr_simd::crc64` (fold-by-4 where available).
+//! A slice-by-8 table CRC (built at startup, no cross-crate access) is the independent byte-identity
+//! oracle: both arms are asserted equal to it before timing.
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use fr_simd::crc64;
+use fr_simd::{crc64, crc64_fold1_reference};
 
 const CRC64_POLY_REFLECTED: u64 = 0x95AC_9329_AC4B_C9B5; // reflect(0xAD93D23594C935A9)
 const ROUNDS: usize = 41;
 const TARGET_SEGMENT_SECS: f64 = 0.003;
-const SIZES: [usize; 6] = [256, 512, 1024, 2048, 4096, 8192];
+// Span the wired range (`crc64_redis` dispatches to pclmul at >=1024 B) up to whole-RDB-file sizes;
+// small sizes show the crossover where fold-by-4's fixed combine is still amortized.
+const SIZES: [usize; 6] = [512, 1024, 4096, 16384, 65536, 262144];
 const NULL_LO: f64 = 0.05;
 const NULL_HI: f64 = 0.95;
 
+// The slice-by-8 table math is clearest indexed (`t[k][n]` folds `t[k-1][n]`); iterator form would
+// obscure it and needs disjoint borrows of the same array.
+#[allow(clippy::needless_range_loop)]
 fn build_tables() -> [[u64; 256]; 8] {
     let mut t = [[0u64; 256]; 8];
     for n in 0..256usize {
@@ -87,9 +93,11 @@ fn main() {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             *b = (s >> 33) as u8;
         }
-        assert_eq!(crc64(&buf), table_crc(&tables, &buf), "CAND != table baseline");
+        let oracle = table_crc(&tables, &buf);
+        assert_eq!(crc64(&buf), oracle, "CAND (fold4) != table oracle");
+        assert_eq!(crc64_fold1_reference(&buf), oracle, "ORIG (fold1) != table oracle");
 
-        let base = |d: &[u8]| table_crc(&tables, d);
+        let base = |d: &[u8]| crc64_fold1_reference(d);
         let cand = |d: &[u8]| crc64(d);
         let time = |f: &dyn Fn(&[u8]) -> u64, reps: usize| -> f64 {
             let start = Instant::now();
