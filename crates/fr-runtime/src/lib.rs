@@ -43048,9 +43048,13 @@ fn apply_rdb_entries_to_store(
             RdbValue::String(value) => {
                 store.set_with_abs_expiry(key, value, entry_expire_ms, now_ms);
             }
-            RdbValue::List(ref items) => {
+            RdbValue::List(items) => {
+                // (frankenredis-listrdbmove) MOVE the owned elements into the list via
+                // rpush_owned instead of the borrowed rpush, whose AsRef append clones every
+                // element (`push_back(bytes.to_vec())`). Byte-identical (rpush_owned_matches_
+                // rpush_for_rdb_load_shapes); mirrors the zset zadd_plain_owned wiring.
                 store
-                    .rpush(&key, items, now_ms)
+                    .rpush_owned(&key, items, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -43069,8 +43073,11 @@ fn apply_rdb_entries_to_store(
                         items.push(span.as_bytes(node).to_vec());
                     }
                 }
+                // (frankenredis-listrdbmove) The spans were already `to_vec`'d into owned
+                // `items`; MOVE them in (rpush_owned) instead of `rpush(&items)` re-cloning
+                // every element. Byte-identical.
                 store
-                    .rpush(&key, &items, now_ms)
+                    .rpush_owned(&key, items, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(

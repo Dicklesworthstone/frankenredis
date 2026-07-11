@@ -13834,6 +13834,81 @@ impl Store {
         }
     }
 
+    /// (frankenredis-listrdbmove) Owned-input twin of [`Self::rpush`] for the RDB / bulk-load
+    /// path, which already OWNS its element `Vec<u8>`s. `rpush` is `AsRef<[u8]>`-generic so its
+    /// append is `l.push_back(bytes.to_vec())` — it CLONES every element even when handed owned
+    /// buffers (`RdbValue::List` borrowed them; `ListQuicklist2Packed` had already `to_vec`'d each
+    /// span, so `rpush(&items)` was a second copy). This moves each element straight into the list
+    /// via `ListValue::push_back(Vec<u8>)`. Byte-identical to `rpush` on the same elements (same
+    /// push_back / note_command_grow / bookkeeping; only the per-element clone is gone) — locked by
+    /// `rpush_owned_matches_rpush_for_rdb_load_shapes`. Mirrors zset's zadd_plain_owned wiring.
+    pub fn rpush_owned(
+        &mut self,
+        key: &[u8],
+        values: Vec<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let n = values.len();
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let lp_pre = l.listpack_byte_len();
+                        let mut raw_add = 0u64;
+                        for v in values {
+                            raw_add += v.len() as u64;
+                            l.push_back(v);
+                        }
+                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
+                        let len = l.len();
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
+                        self.dirty = self.dirty.saturating_add(n as u64);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                let mut l = ListValue::default();
+                let mut raw_add = 0u64;
+                for v in values {
+                    raw_add += v.len() as u64;
+                    l.push_back(v);
+                }
+                l.note_command_grow(
+                    ListValue::empty_listpack_bytes(),
+                    raw_add,
+                    self.list_max_listpack_size,
+                );
+                let len = l.len();
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::List(Box::new(l)), now_ms),
+                );
+                self.dirty = self.dirty.saturating_add(n as u64);
+                Ok(len)
+            }
+        }
+    }
+
     pub fn lpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: LPOP records
         // no keyspace stat and the `get_mut` below re-probes, so drop's no-TTL fast-exit
@@ -44741,6 +44816,61 @@ mod tests {
                 "n={n} long={long}: modification_count diverged"
             );
             assert_eq!(borrowed.dirty, owned.dirty, "n={n} long={long}: dirty diverged");
+        }
+    }
+
+    #[test]
+    fn rpush_owned_matches_rpush_for_rdb_load_shapes() {
+        // (frankenredis-listrdbmove) The list RDB-load arms switched from the borrowed `rpush`
+        // (which CLONES every element via `push_back(bytes.to_vec())`) to `rpush_owned` (which
+        // MOVES each `Vec<u8>` in). Must be BYTE-IDENTICAL across every list encoding the RDB
+        // loader produces — the DUMP payload is what RDB round-trip / MIGRATE compare. Covers
+        // listpack (small) and quicklist (large by count / wide by value) encodings, int-encodable
+        // and string elements, and empty-ish shapes.
+        fn shape(n: usize, w: usize) -> Vec<Vec<u8>> {
+            (0..n)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        format!("{}", i * 7 + 1).into_bytes() // int-encodable listpack element
+                    } else {
+                        let mut e = format!("elem{i:05}:").into_bytes();
+                        e.resize(w.max(e.len()), b'q');
+                        e
+                    }
+                })
+                .collect()
+        }
+        // (n, w): small listpack, boundary, large quicklist by count, wide-value quicklist.
+        for (n, w) in [(1usize, 4), (8, 8), (128, 8), (600, 8), (40, 96)] {
+            let items = shape(n, w);
+
+            let mut borrowed = Store::new(); // OLD RDB path
+            let added_b = borrowed.rpush(b"l", &items, 0).unwrap();
+            let mut owned = Store::new(); // NEW RDB path
+            let added_o = owned.rpush_owned(b"l", items.clone(), 0).unwrap();
+
+            assert_eq!(added_b, added_o, "n={n} w={w}: length");
+            assert_eq!(
+                borrowed.dump_key(b"l", 1),
+                owned.dump_key(b"l", 1),
+                "n={n} w={w}: DUMP payload diverged"
+            );
+            assert_eq!(
+                borrowed.object_encoding(b"l", 1),
+                owned.object_encoding(b"l", 1),
+                "n={n} w={w}: OBJECT ENCODING diverged"
+            );
+            assert_eq!(
+                borrowed.lrange(b"l", 0, -1, 1).unwrap(),
+                owned.lrange(b"l", 0, -1, 1).unwrap(),
+                "n={n} w={w}: LRANGE diverged"
+            );
+            assert_eq!(
+                borrowed.entries.get(b"l".as_slice()).unwrap().modification_count,
+                owned.entries.get(b"l".as_slice()).unwrap().modification_count,
+                "n={n} w={w}: modification_count diverged"
+            );
+            assert_eq!(borrowed.dirty, owned.dirty, "n={n} w={w}: dirty diverged");
         }
     }
 

@@ -128,3 +128,9 @@ harness = false
 [[bench]]
 name = "zset_rdb_load_move"
 harness = false
+
+# (frankenredis-listrdbmove) Same-binary A/B for the list RDB-load element-clone elision:
+# borrowed rpush (push_back(bytes.to_vec()) clone) vs owned rpush_owned (push_back move).
+[[bench]]
+name = "list_rdb_load_move"
+harness = false
