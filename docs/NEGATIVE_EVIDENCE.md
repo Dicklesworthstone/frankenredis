@@ -16094,3 +16094,21 @@ O(n log n) sort outgrows the O(n) clones, so it's sharpest at typical SORT sizes
 compares ~1ns, each element 2 mallocs). REUSABLE: a reply or intermediate built from a CONSUMABLE owned local Vec
 via `.iter().map(|x| ...x.clone())` should be `.into_iter().map(|x| ...x)`; a reordering that indexes a
 soon-dropped Vec by a permutation should `mem::take` not clone. Rollback: flip prod callers to ::<false>.
+
+### 2026-07-11 SURFACE (clone-elision / bulk-build / reply-move vein EXHAUSTED after 4 ships) — CreamPeak
+Following 99fwc (list DUMP cache) + zsetrdbmove + listrdbmove + sortmove, swept the whole "clone where a move
+works / build where a bulk-move works" vein and found everything else already optimal. VERIFIED-OPTIMAL this pass
+(not gaps): fr-command replies already `.into_iter()`-move (hgetall/lrange/smembers/hkeys/hvals/spop/srandmember/
+zpopmin/zpopmax/hrandfield); read-and-remove already move-out (SPOP/GETDEL done per memory; ZPOPMIN/ZPOPMAX
+bulk-drain via pop_min_n/pop_max_n); every zset STORE command uses the no-dedup-HashMap bulk build
+`store_sorted_set_from_pairs`/`zstore_from_pairs` = `from_unique_pairs_with_limits` directly (ZRANGESTORE,
+ZDIFFSTORE, ZINTERSTORE/ZUNIONSTORE, GEOSEARCHSTORE); SINTERCARD is min-set + LIMIT early-stop (no
+materialize); LPOS is a single `iter().position()`; MEMORY USAGE is memoized (mem_estimate_cache).
+ONE documented residual, DEFERRED as borderline-sub-gate + churn-risk: RDB zset load (zadd_plain_owned, shipped
+zsetrdbmove) still MOVES members through a dedup `HashMap` that the STORE path skips (RDB members are unique, so
+`from_unique_pairs_with_limits` directly would work, canonicalize_zero_score preserved). But the HashMap build is
+a fraction-of-a-fraction of end-to-end RDB load (~10-15%; from_unique_pairs' O(n log n) sort + decode dominate) and
+OVERLAPS the already-shipped 1.17-1.35x move gain — estimated 1.05-1.12x, borderline/sub-gate; not worth re-wiring
+a just-shipped arm for a guessed marginal win. REMAINING frontier = structural (hm95r RESTORE lazy-spans), claimed
+(ohsk5 dispatch chain = the dominant profiled hotspot, 20-34% process_buffered_frames self; cc packet fast-paths),
+or rejected (LZF codec 43-58% self = already-optimal / AVX2 sub-gate). No clean UNCLAIMED lever this sweep.
