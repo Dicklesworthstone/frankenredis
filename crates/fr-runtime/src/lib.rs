@@ -51848,6 +51848,59 @@ mod tests {
     }
 
     #[test]
+    fn move_heap_string_emits_cross_db_notifications_in_order() {
+        let mut rt = Runtime::default_strict();
+        let subscriber = rt.new_session();
+
+        let mover = rt.swap_session(subscriber);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"Eg"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PSUBSCRIBE", b"__keyevent@*__:move_*"]), 1,),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"__keyevent@*__:move_*".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        let subscriber = rt.swap_session(mover);
+
+        let value = vec![b'v'; 64 * 1024];
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"SET", b"move:key", value.as_slice(), b"PX", b"60000"]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MOVE", b"move:key", b"1"]), 3),
+            RespFrame::Integer(1)
+        );
+
+        assert_eq!(
+            rt.drain_pubsub_for_client(subscriber.client_id),
+            vec![
+                fr_store::PubSubMessage::PMessage {
+                    pattern: b"__keyevent@*__:move_*".to_vec(),
+                    channel: b"__keyevent@0__:move_from".to_vec(),
+                    data: b"move:key".to_vec(),
+                },
+                fr_store::PubSubMessage::PMessage {
+                    pattern: b"__keyevent@*__:move_*".to_vec(),
+                    channel: b"__keyevent@1__:move_to".to_vec(),
+                    data: b"move:key".to_vec(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn copy_in_cluster_mode_rejects_only_when_db_is_nonzero() {
         let mut rt = Runtime::default_strict();
         rt.server.store.cluster_enabled = true;

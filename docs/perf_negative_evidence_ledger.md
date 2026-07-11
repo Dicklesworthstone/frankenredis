@@ -6949,21 +6949,25 @@ Behavior, fallback, and quality proof:
   MOVE cases, DB-size balance, and **9 runtime/persistence tests**. Its borrowed-vs-generic case now
   uses a 64 KiB value with TTL and compares exact replies, values, PTTL, OBJECT ENCODING, hit/miss
   counters, and dirty count;
+- a dedicated 64 KiB heap-string runtime regression passed remotely on **vmi1264463** and proved a
+  successful MOVE emits source-DB `move_from` followed by destination-DB `move_to`, with the exact
+  keyevent channels and payload;
 - the full remote `fr-conformance` library reached **192/194** passes, including
   `conformance_core_generic`, which carries MOVE. The only failures were ACL CAT and COMMAND INFO
   fixtures that necessarily see empty metadata under the repository's documented
   `FR_ALLOW_STUB_COMMANDS=1` remote-build tier; the vendored live oracle is excluded by `.rchignore`;
-- remote workspace `cargo check --workspace --all-targets` passed. Touched production libraries and
-  the new benchmark both passed scoped remote Clippy with `-D warnings`; workspace all-target Clippy
-  stopped only on three pre-existing `fr-store` test-literal `approx_constant` /
-  `excessive_precision` lints around line 52344;
+- remote workspace `cargo check --workspace --all-targets` passed. Touched production libraries,
+  the new benchmark, and the final `fr-runtime` test target passed scoped remote Clippy with
+  `-D warnings`; workspace all-target Clippy stopped only on three pre-existing `fr-store`
+  test-literal `approx_constant` / `excessive_precision` lints around line 52344;
 - `cargo fmt --check` fail-closed with **RCH-E301** because RCH classifies fmt as non-compilation.
   Direct Rust 2024 rustfmt found the new benchmark and command/runtime files clean and reported only
   pre-existing unrelated drift in `fr-store/src/lib.rs`; `git diff --check` passed;
 - UBS ran with Rust build/lint/dependency categories 12-14 disabled, so it could not invoke local
   Cargo. The four-file scan hit the bounded 300-second timeout without producing a file finding;
   a targeted benchmark scan completed and reported only intentional fail-closed harness panics,
-  checked quantile/column indexes, child-process argument parsing, and diagnostic printing;
+  checked quantile/column indexes, child-process argument parsing, and diagnostic printing. A
+  final targeted runtime scan found only the test's intentional `assert_eq!` calls;
 - every Cargo command was fail-closed through `RCH_REQUIRE_REMOTE=1`. RCH surfaced degraded fleet
   capacity, one no-admissible-slot refusal, and two expected missing-command-metadata failures before
   the explicit remote stub was placed inside the remote command. None fell back to a local build.
