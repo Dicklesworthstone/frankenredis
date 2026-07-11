@@ -86,3 +86,21 @@ harness = false
 name = "move_key_relink"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-lbmk6) Same-binary A/B for the set-listpack DUMP encode: pre-lbmk6
+# clone-into-Vec<Vec<u8>> + encode_listpack_strings vs direct-emit encode_set_listpack_dump.
+[[bench]]
+name = "set_listpack_dump"
+harness = false
+
+# (frankenredis-k1wcp) Same-binary A/B for the quicklist2 DUMP-fallback packed-node encode:
+# current direct-emit vs buffered roster (the fr-persist-reverted-to path, b89361c13).
+[[bench]]
+name = "quicklist_dump_fallback"
+harness = false
+
+# (frankenredis-bssrh) Same-binary A/B for the listpack-sizing canonical-int probe:
+# to_string round-trip (alloc) vs allocation-free listpack_int_bytes_are_canonical predicate.
+[[bench]]
+name = "listpack_int_probe"
+harness = false

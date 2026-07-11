@@ -28918,6 +28918,75 @@ fn encode_set_listpack_dump(set: &SetValue) -> Option<Vec<u8>> {
     finish_listpack_entries(encoded_entries, entry_count)
 }
 
+// ── (frankenredis-lbmk6 A/B, bench-only) ──────────────────────────────────────
+// Same-binary A/B for the set-listpack DUMP encode. NEW = `encode_set_listpack_dump`
+// (streams members straight into the listpack finalizer: generic sets borrow member
+// bytes, intsets stack-render each i64). ORIG = the pre-lbmk6 path (clone every member
+// into a `Vec<Vec<u8>>`, stage a `Vec<&[u8]>`, then `encode_listpack_strings`) — mirrored
+// here from commit 2cf3d5e5c so the reconstruction stays next to the code it shadows. The
+// opaque holder lets the bench build the `SetValue` ONCE (excluded from timing) without
+// making the two private encoders raw-`pub`. Both arms emit byte-identical listpacks (the
+// bench asserts it before timing), so the ratio isolates the eliminated per-DUMP allocs.
+#[doc(hidden)]
+pub struct BenchSetListpackDump(SetValue);
+
+#[doc(hidden)]
+#[must_use]
+pub fn bench_set_listpack_dump_strings(members: &[Vec<u8>]) -> BenchSetListpackDump {
+    BenchSetListpackDump(SetValue::Generic(GenericSet::from_unique_str_members(members)))
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn bench_set_listpack_dump_ints(ints: Vec<i64>) -> BenchSetListpackDump {
+    BenchSetListpackDump(SetValue::Int(ints))
+}
+
+impl BenchSetListpackDump {
+    /// NEW (lbmk6): direct-emit — borrow generic members / stack-render intset ints.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn encode_new(&self) -> Option<Vec<u8>> {
+        encode_set_listpack_dump(&self.0)
+    }
+
+    /// ORIG (pre-lbmk6): clone members into `Vec<Vec<u8>>`, stage `Vec<&[u8]>`, encode.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn encode_orig(&self) -> Option<Vec<u8>> {
+        let members: Vec<Vec<u8>> = self.0.iter().map(|m| m.into_owned()).collect();
+        let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+        encode_listpack_strings(&refs)
+    }
+}
+
+// ── (frankenredis-k1wcp A/B, bench-only) ──────────────────────────────────────
+// The quicklist2 DUMP-fallback packed-node encode strategy, isolated per node.
+// BUFFERED = build a `Vec<&[u8]>` roster, then `encode_listpack_strings` (which length-
+// presizes exactly, encodes, finishes) — the approach fr-persist's
+// `encode_compact_list_quicklist2` was REVERTED TO after direct-emit measured 6.6% slower
+// (b89361c13). DIRECT = stream each item into a fixed-8192-presized buffer then
+// `finish_listpack_entries` — exactly what `encode_dump_quicklist2`'s fallback does today
+// (k1wcp `3986ca7ad`, never A/B'd). Both take the list's OWNED `Vec<u8>` items so BUFFERED
+// pays the roster build (as the real DUMP fallback would, from `list.iter()`). Byte-identical
+// listpack (the bench asserts it), so the ratio is pure roster+presize vs stream cost.
+#[doc(hidden)]
+#[must_use]
+pub fn bench_quicklist_node_buffered(items: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let refs: Vec<&[u8]> = items.iter().map(Vec::as_slice).collect();
+    encode_listpack_strings(&refs)
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn bench_quicklist_node_direct(items: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut packed_entries = Vec::with_capacity(8192);
+    for item in items {
+        encode_listpack_entry(&mut packed_entries, item);
+    }
+    finish_listpack_entries(packed_entries, items.len())
+}
+
 fn encode_hash_listpack_dump(hash: &HashFieldMap) -> Option<Vec<u8>> {
     let mut encoded_entries = Vec::with_capacity(hash.len().saturating_mul(32));
     let mut entry_count = 0usize;

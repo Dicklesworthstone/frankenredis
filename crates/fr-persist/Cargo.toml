@@ -48,3 +48,9 @@ harness = false
 [[bench]]
 name = "crc64_threshold"
 harness = false
+
+# (frankenredis-knzdi) Same-binary A/B for listpack RDB decode string materialization:
+# ListpackEntry::to_bytes (clone) vs into_bytes (move) after decode_listpack.
+[[bench]]
+name = "listpack_decode_move"
+harness = false
