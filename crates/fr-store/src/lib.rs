@@ -54973,6 +54973,36 @@ mod tests {
             s.ltrim(b"l", 1, 3, 10).unwrap();
         });
 
+        // Two-key moves (rpoplpush/lmove): BOTH the shrinking source AND the growing dest must
+        // invalidate. Populate both caches, move an element, then DUMP both and compare to a
+        // fresh store — proving neither key serves a stale payload after the cross-key mutation.
+        fn build_pair(s: &mut Store) {
+            build_base(s); // source "l"
+            s.rpush(b"d", &[b"x".to_vec(), b"yy".to_vec(), b"zzz".to_vec()], 1)
+                .unwrap(); // dest "d"
+        }
+        fn check_move(name: &str, mv: impl Fn(&mut Store)) {
+            let mut cached = Store::new();
+            build_pair(&mut cached);
+            let _ = cached.dump_key(b"l", 5);
+            let _ = cached.dump_key(b"d", 5);
+            mv(&mut cached);
+            let src_c = cached.dump_key(b"l", 6);
+            let dst_c = cached.dump_key(b"d", 6);
+
+            let mut fresh = Store::new();
+            build_pair(&mut fresh);
+            mv(&mut fresh);
+            assert_eq!(src_c, fresh.dump_key(b"l", 6), "source DUMP cache stale after {name}");
+            assert_eq!(dst_c, fresh.dump_key(b"d", 6), "dest DUMP cache stale after {name}");
+        }
+        check_move("rpoplpush", |s| {
+            s.rpoplpush(b"l", b"d", 10).unwrap();
+        });
+        check_move("lmove_left_right", |s| {
+            s.lmove(b"l", b"d", b"LEFT", b"RIGHT", 10).unwrap();
+        });
+
         // Repeated DUMP with NO mutation is a stable cache HIT and equals a fresh encode.
         let mut s = Store::new();
         build_base(&mut s);
