@@ -15995,3 +15995,23 @@ WAIT/WAITAOF GETACK (bead 97shd, fully specced + gated by scripts/wait_getack_ga
 Remaining high-value work is NOT differential-findable: the WAIT/GETACK fix + KeyDict
 wiring (-35% keyspace RAM, feature-complete/RAM-proven) — both scoped for dedicated
 reservations-up coding sessions. Rollback: n/a.
+
+### 2026-07-11 SHIPPED (list DUMP-payload cache — resolves the 2026-07-03 "zset-only, correctness-multi-part" concern) — CreamPeak
+Directly closes the 2026-07-03 MEASURED-CORRECTION above ("list DUMP 0.38x is a CACHE-COVERAGE gap, fixable
+but correctness-multi-part"). Extended the DUMP-payload memoization cache (previously ZSET-ONLY) to lists:
+the `Value::List` arm of `dump_key` now sets `cache_dump_payload = true` after `encode_dump_quicklist2`, and
+the cache carries `list_max_listpack_size` in both the struct and the validity filter (list wire encoding
+depends on it). Cache is keyed by modification_count, so any list write invalidates it. The ledger's 4-part
+recipe reduced to 3 in practice: item (1) "add modification_count bumps to all ~10 list writes" was ALREADY
+DONE — every list-write path (rpush/lpush/lpop/rpop/lset/linsert_before/lrem/ltrim + two-key rpoplpush/lmove)
+bumps modification_count today (the 2026-07-03 note that "ltrim/lrem/touch_write don't bump" is now stale).
+PROVEN by `list_dump_cache_invalidates_on_every_list_mutation` (fr-store lib.rs): for all 10 write paths the
+cached DUMP byte-equals a fresh-store DUMP of the mutated state (two-key ops assert BOTH source and dest
+caches invalidate) — so no stale-DUMP -> RESTORE/MIGRATE corruption is possible. Byte-identical (cached bytes
+ARE the freshly-encoded bytes; live_redis container DUMP/RESTORE roundtrip vs 7.2.4 passes). A/B (same-binary
+median, reencode vs cache-hit clone): 46x/129x/210x/197x/97x across n16..n512, all WIN(cache), null medians
+~1.0. SCOPE as the ledger predicted: helps REPEATED DUMP (replication/tooling/benchmarks); the once-per-key
+MIGRATE path is a cache miss and still pays the one re-encode (that part IS architectural — ChunkedList is
+not listpack-backed; the separate pass222/q5ody chunk-sealing lever addresses cold DUMP). Mirrors the
+already-shipped zset DUMP cache exactly. Commits 973b78b64 (lever) + 7657c4e7f (full 10-path gate).
+Rollback: revert both; cache reverts to zset-only, no behavior change.
