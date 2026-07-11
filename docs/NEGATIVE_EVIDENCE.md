@@ -16061,3 +16061,20 @@ outside null p5..p95. SCOPE: RDB load (startup / DEBUG RELOAD / replication full
 per-request hot path — but a real persistence path. REUSABLE: for a fresh-key bulk-load site, feed the OWNED
 collection to the `*_plain_owned` / `*_many` twin, not the borrowed command API which re-clones into its dedup map.
 Rollback: revert one line to `zadd`. No behavior change.
+
+### 2026-07-11 SHIPPED (list RDB-load element-clone elision — completes the RDB owned-move family) — CreamPeak
+Sibling of zsetrdbmove, same lens (a bulk-load site that OWNS its data calling a borrowed command API that
+re-clones). The RdbValue::List (borrowed `ref items`) and ListQuicklist2Packed (built owned `items` via
+span.to_vec, then `rpush(&items)` — a SECOND copy) arms fed the borrowed, AsRef-generic `rpush`, whose append
+is `l.push_back(bytes.to_vec())` = clone every element. Added `rpush_owned` (owned twin: moves each Vec<u8> via
+ListValue::push_back) + wired both arms. Now hash (qxfmr), set (duab9), stream (qxfmrstream), zset (zsetrdbmove),
+AND list all load via owned-move — the family is complete. Commit cb500725c.
+GATE: new rpush_owned_matches_rpush_for_rdb_load_shapes (DUMP + OBJECT ENCODING + LRANGE + mod_count + dirty
+identical across listpack/quicklist, int/string, wide values) + 62 fr-store list/rpush/rdb tests + fr-conformance
+rdb/reload/core_list + live_redis rdb_reemit_loadrdb / aof_reemit_loadrdb / core_list vs redis 7.2.4. A/B (same-
+binary median, faithful RDB-load model, TWO runs, stable medians): ~1.20x (n128 listpack) / ~1.34x (n600 ql) /
+~1.32x (n2000 ql) / ~1.25x (n300 wide) all WIN(move). NOTE: list A/B is noisier than zset (ChunkedList build
+variance, cv 12-18%) — run 1 had n2000 within its wide null band, run 2 gated all 4; medians reproduced within
+~0.02, so the win is real. rpush_owned is a faithful mirror of rpush (no notifications/wakeup in the Store method —
+those live in fr-command). Rollback: revert the two arms to `rpush` + drop rpush_owned. VEIN likely EXHAUSTED now:
+hash/set/stream/zset/list RDB arms all owned-move; RdbValue::String already MOVEs (set_with_abs_expiry).
