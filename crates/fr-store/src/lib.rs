@@ -5614,6 +5614,13 @@ struct DumpPayloadCache {
     // invalidate. Checked for every cached entry — an unrelated-type config change over-invalidates
     // rarely and harmlessly.
     list_max_listpack_size: i64,
+    // (frankenredis-hsdumpcache) The small (listpack/intset) HASH and SET DUMP encodings are now
+    // cached too; each re-derives its encoding from the collection config, so a config change must
+    // invalidate the cached bytes exactly as for list/zset.
+    hash_max_listpack_entries: usize,
+    hash_max_listpack_value: usize,
+    set_max_intset_entries: usize,
+    set_max_listpack_entries: usize,
     payload: Vec<u8>,
 }
 
@@ -27274,6 +27281,10 @@ impl Store {
                 && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
                 && cache.zset_max_listpack_value == self.zset_max_listpack_value
                 && cache.list_max_listpack_size == self.list_max_listpack_size
+                && cache.hash_max_listpack_entries == self.hash_max_listpack_entries
+                && cache.hash_max_listpack_value == self.hash_max_listpack_value
+                && cache.set_max_intset_entries == self.set_max_intset_entries
+                && cache.set_max_listpack_entries == self.set_max_listpack_entries
         }) {
             return Some(cache.payload.clone());
         }
@@ -27348,6 +27359,17 @@ impl Store {
                         encode_rdb_string(&mut buf, member.as_ref());
                     }
                 }
+                // (frankenredis-hsdumpcache) Memoize only the SMALL intset/listpack encodings
+                // (bounded size), mirroring the zset listpack path — a large hashtable SET DUMP is
+                // left uncached to keep the payload cache small. Any SET write bumps
+                // modification_count (sadd/srem/spop/smove) and any set-config change is in the
+                // cache validity filter, so the cached bytes never go stale. Byte-identical.
+                if matches!(
+                    buf.first(),
+                    Some(&RDB_TYPE_SET_LISTPACK | &RDB_TYPE_SET_INTSET)
+                ) {
+                    cache_dump_payload = true;
+                }
             }
             Value::Hash(h) => {
                 if h.len() <= self.hash_max_listpack_entries
@@ -27358,6 +27380,11 @@ impl Store {
                 {
                     buf.push(RDB_TYPE_HASH_LISTPACK);
                     encode_rdb_string(&mut buf, &encode_hash_listpack_dump(h)?);
+                    // (frankenredis-hsdumpcache) Memoize the small listpack HASH DUMP (bounded);
+                    // a large hashtable HASH is left uncached. hset/hdel/hincrby/hincrbyfloat/hsetnx
+                    // all bump modification_count and hash config is in the validity filter, so the
+                    // cached bytes never go stale. Byte-identical.
+                    cache_dump_payload = true;
                 } else {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
@@ -27457,6 +27484,10 @@ impl Store {
                     zset_max_listpack_entries: self.zset_max_listpack_entries,
                     zset_max_listpack_value: self.zset_max_listpack_value,
                     list_max_listpack_size: self.list_max_listpack_size,
+                    hash_max_listpack_entries: self.hash_max_listpack_entries,
+                    hash_max_listpack_value: self.hash_max_listpack_value,
+                    set_max_intset_entries: self.set_max_intset_entries,
+                    set_max_listpack_entries: self.set_max_listpack_entries,
                     payload: buf.clone(),
                 },
             );
@@ -29249,6 +29280,43 @@ impl Store {
     #[must_use]
     pub fn bench_dump_list_cache_get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.dump_payload_cache.get(key).map(|c| c.payload.clone())
+    }
+
+    /// (frankenredis-hsdumpcache) ORIG re-encode of a small listpack HASH DUMP (the cost the
+    /// cache removes). Byte-identical to `dump_key`'s listpack-hash arm. No cache interaction, so
+    /// it can be interleaved against `bench_dump_list_cache_get` in the A/B.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_dump_hash_reencode(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let entry = self.entries.get(key)?;
+        let Value::Hash(h) = &entry.value else {
+            return None;
+        };
+        let mut buf = Vec::new();
+        buf.push(RDB_TYPE_HASH_LISTPACK);
+        encode_rdb_string(&mut buf, &encode_hash_listpack_dump(h)?);
+        buf.extend_from_slice(&RDB_DUMP_VERSION.to_le_bytes());
+        let crc = fr_persist::crc64_redis(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        Some(buf)
+    }
+
+    /// (frankenredis-hsdumpcache) ORIG re-encode of a small listpack SET DUMP. Byte-identical to
+    /// `dump_key`'s SET_LISTPACK arm (string-member set). No cache interaction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_dump_set_reencode(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let entry = self.entries.get(key)?;
+        let Value::Set(s) = &entry.value else {
+            return None;
+        };
+        let mut buf = Vec::new();
+        buf.push(RDB_TYPE_SET_LISTPACK);
+        encode_rdb_string(&mut buf, &encode_set_listpack_dump(s)?);
+        buf.extend_from_slice(&RDB_DUMP_VERSION.to_le_bytes());
+        let crc = fr_persist::crc64_redis(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        Some(buf)
     }
 }
 
@@ -55115,6 +55183,138 @@ mod tests {
             "bitfield_write u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
             ref_ns / new_ns
         );
+    }
+
+    #[test]
+    fn hash_set_dump_cache_invalidates_on_writes_and_config() {
+        // (frankenredis-hsdumpcache) The small listpack/intset HASH+SET DUMP payloads are now
+        // cached. The cache MUST never serve stale bytes: after any hash/set write OR a relevant
+        // config change, a DUMP from a store that pre-populated the cache must byte-equal a fresh-
+        // store DUMP of the same final state.
+        fn build_hash(s: &mut Store) {
+            for (f, v) in [("f1", "v1"), ("f2", "22"), ("f3", "vvv"), ("f4", "4")] {
+                s.hset(b"h", f.as_bytes().to_vec(), v.as_bytes().to_vec(), 1)
+                    .unwrap();
+            }
+        }
+        fn check_hash(name: &str, mutate: impl Fn(&mut Store)) {
+            let mut cached = Store::new();
+            build_hash(&mut cached);
+            let _ = cached.dump_key(b"h", 5);
+            mutate(&mut cached);
+            let after = cached.dump_key(b"h", 6);
+            let mut fresh = Store::new();
+            build_hash(&mut fresh);
+            mutate(&mut fresh);
+            assert_eq!(after, fresh.dump_key(b"h", 6), "hash DUMP cache stale after {name}");
+        }
+        check_hash("hset_insert", |s| {
+            s.hset(b"h", b"f5".to_vec(), b"55".to_vec(), 10).unwrap();
+        });
+        check_hash("hset_overwrite", |s| {
+            s.hset(b"h", b"f1".to_vec(), b"NEWVAL".to_vec(), 10).unwrap();
+        });
+        check_hash("hdel", |s| {
+            s.hdel(b"h", &[b"f2"], 10).unwrap();
+        });
+        check_hash("hincrby", |s| {
+            s.hincrby(b"h", b"f4", 10, 10).unwrap();
+        });
+        check_hash("hsetnx", |s| {
+            s.hsetnx(b"h", b"f9".to_vec(), b"nx".to_vec(), 10).unwrap();
+        });
+
+        fn build_set(s: &mut Store) {
+            s.sadd(
+                b"s",
+                &[
+                    b"a".to_vec(),
+                    b"bb".to_vec(),
+                    b"ccc".to_vec(),
+                    b"42".to_vec(),
+                    b"7".to_vec(),
+                ],
+                1,
+            )
+            .unwrap();
+        }
+        fn check_set(name: &str, mutate: impl Fn(&mut Store)) {
+            let mut cached = Store::new();
+            build_set(&mut cached);
+            let _ = cached.dump_key(b"s", 5);
+            mutate(&mut cached);
+            let after = cached.dump_key(b"s", 6);
+            let mut fresh = Store::new();
+            build_set(&mut fresh);
+            mutate(&mut fresh);
+            assert_eq!(after, fresh.dump_key(b"s", 6), "set DUMP cache stale after {name}");
+        }
+        check_set("sadd_str", |s| {
+            s.sadd(b"s", &[b"zzz".to_vec()], 10).unwrap();
+        });
+        check_set("sadd_int", |s| {
+            s.sadd(b"s", &[b"99".to_vec()], 10).unwrap();
+        });
+        check_set("srem", |s| {
+            s.srem(b"s", &[b"a"], 10).unwrap();
+        });
+        check_set("smove_out", |s| {
+            s.smove(b"s", b"dst", b"bb", 10).unwrap();
+        });
+
+        // Also a pure intset (all-integer) set, so the RDB_TYPE_SET_INTSET arm is cache-exercised.
+        {
+            let mut cached = Store::new();
+            cached
+                .sadd(b"is", &[b"1".to_vec(), b"2".to_vec(), b"30".to_vec()], 1)
+                .unwrap();
+            let _ = cached.dump_key(b"is", 5);
+            cached.sadd(b"is", &[b"4".to_vec()], 10).unwrap();
+            let after = cached.dump_key(b"is", 6);
+            let mut fresh = Store::new();
+            fresh
+                .sadd(b"is", &[b"1".to_vec(), b"2".to_vec(), b"30".to_vec(), b"4".to_vec()], 1)
+                .unwrap();
+            assert_eq!(after, fresh.dump_key(b"is", 6), "intset DUMP cache stale after sadd");
+        }
+
+        // Config-change invalidation: shrinking hash-max-listpack-entries flips a cached listpack
+        // hash to the (uncached) hashtable encoding; the cache must re-derive, not serve stale bytes.
+        {
+            let mut cached = Store::new();
+            for i in 0..10u32 {
+                cached
+                    .hset(b"hc", format!("f{i}").into_bytes(), b"v".to_vec(), 1)
+                    .unwrap();
+            }
+            let _ = cached.dump_key(b"hc", 5); // cached as listpack (10 <= default 128)
+            cached.hash_max_listpack_entries = 4; // 10 > 4 -> hashtable
+            let after = cached.dump_key(b"hc", 6);
+            let mut fresh = Store::new();
+            for i in 0..10u32 {
+                fresh
+                    .hset(b"hc", format!("f{i}").into_bytes(), b"v".to_vec(), 1)
+                    .unwrap();
+            }
+            fresh.hash_max_listpack_entries = 4;
+            assert_eq!(after, fresh.dump_key(b"hc", 6), "hash DUMP cache stale after config change");
+        }
+        // Same for a set: shrinking set-max-listpack-entries flips listpack -> hashtable.
+        {
+            let mut cached = Store::new();
+            for i in 0..10u32 {
+                cached.sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1).unwrap();
+            }
+            let _ = cached.dump_key(b"sc", 5);
+            cached.set_max_listpack_entries = 4;
+            let after = cached.dump_key(b"sc", 6);
+            let mut fresh = Store::new();
+            for i in 0..10u32 {
+                fresh.sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1).unwrap();
+            }
+            fresh.set_max_listpack_entries = 4;
+            assert_eq!(after, fresh.dump_key(b"sc", 6), "set DUMP cache stale after config change");
+        }
     }
 
     #[test]

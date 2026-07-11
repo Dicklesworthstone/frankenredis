@@ -134,3 +134,9 @@ harness = false
 [[bench]]
 name = "list_rdb_load_move"
 harness = false
+
+# (frankenredis-hsdumpcache) Same-binary A/B for small HASH/SET DUMP payload memoization:
+# listpack re-encode vs cache-hit Vec::clone of an unchanged small hash/set.
+[[bench]]
+name = "hash_set_dump_cache"
+harness = false
