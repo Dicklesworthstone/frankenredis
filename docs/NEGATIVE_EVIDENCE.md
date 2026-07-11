@@ -16015,3 +16015,31 @@ MIGRATE path is a cache miss and still pays the one re-encode (that part IS arch
 not listpack-backed; the separate pass222/q5ody chunk-sealing lever addresses cold DUMP). Mirrors the
 already-shipped zset DUMP cache exactly. Commits 973b78b64 (lever) + 7657c4e7f (full 10-path gate).
 Rollback: revert both; cache reverts to zset-only, no behavior change.
+
+### 2026-07-11 SURFACE (frontier re-sweep — every bounded lever swarm-claimed; hm95r refined to a sanitize-dump-payload config-parity + modest-perf tradeoff, NOT a drive-by) — CreamPeak
+Third consecutive frontier sweep (negative-ledger-first + bv triage + full open-perf-bead enumeration). CONFIRMED no clean
+UNCLAIMED bounded lever exists: (1) the ~27 "byte-prefix fast-path packet" perf beads (imuor/ken99/t9w2a/5w5kb/ldpk9/... single-
+key GET-mirror packets) are ALL assigned to `cc` — a coordinated dispatch campaign (+ exactly the >8 exact-N dispatch-cliff
+territory, project_exact_n_borrowed_parser_dispatch_cliff); (2) CLIENT/CLUSTER parity bugs (b1urj/q3rts/3kr0t/61iis/rd96p/...)
+are cod-a/cod-b claimed AND low-EV (each notes the RUNTIME path is already byte-exact; only a non-production "direct dispatch"
+path diverges); (3) dz3i3 (MGET 4-key parser) = cod-b; (4) 6lgnu/uhthd/b1o02 = CoralOx/cod structural; (5) gu5nf = CrimsonFalcon.
+Re-verified DONE (not gaps): set-algebra STORE (direct SetValue, BlackThrush), notify-key to_vec (EXPIRE shipped; remainder cold
+AOF), single-lookup collapse (62 methods incl value_type), collection borrow-scan (LRANGE/HGETALL/SMEMBERS borrowed fast paths +
+borrow-encode), ZSCAN mid-scan-deletion (ZScanResume shipped, e3y73 OPEN = br-sync drift, test passes), zadd members.to_vec
+(test-only path). Stream DUMP cache (99fwc sibling): UNSOUND — xclaim/xautoclaim/xgroup*/xreadgroup don't bump modification_count
+yet change the serialized DUMP → stale-DUMP corruption; correctness-multi-part + PackedStreamLog-contended.
+
+hm95r REFINED (the sole unclaimed real lever): it is NOT purely perf. fr EXPOSES `sanitize-dump-payload` (fr-runtime:1680,
+default "no") but ALWAYS deep-validates RESTORE regardless (decode_value_spans rejects any malformed interior via
+TruncatedEntry/MissingTerminator/ElementCountMismatch). Under the DEFAULT config redis does lpValidateIntegrity(deep=0) and
+ACCEPTS valid-CRC corrupt-interior payloads where fr REJECTS (the "eager_signature" my scripts/restore_corrupt_interior_differ.py
+documents). So hm95r = honor sanitize=no (accept + attach-raw, lazy span-decode) → fixes a config-parity divergence AND recovers
+~13% RESTORE (decode_value_spans 9.36% + entry_len_with_backlen 4.26% self, 96x40B quicklist2). CAVEATS that make it a scoped
+multi-turn effort, not a drive-by: (a) the divergence is only reachable via ADVERSARIALLY-crafted valid-CRC-corrupt-interior
+payloads (random corruption breaks CRC → both reject before the walk) — theoretical in normal replication/MIGRATE/RESTORE; (b) the
+lazy decode MUST be panic-free on garbage (current decode assumes valid); (c) the HM95R_LAZY acceptance gate must RELAX from
+"read-back byte-equal to redis" to "panic-free + valid-payload byte-exact" — redis's corrupt-payload read-back is undefined
+(garbage/segfault), so garbage-parity is unsatisfiable and undesirable; (d) pre-sizing decode_value_spans was already tried+
+REVERTED (uhthd, 0.635x→0.603x WORSENED) so there is NO byte-exact bounded increment — it is all-or-nothing lazy-attach.
+NET: modest-EV (non-hot RESTORE, theoretical parity edge, safety-sensitive) scoped multi-turn lever; recommend a dedicated
+reservations-up session (or cod co-dev) rather than jamming. Rollback: n/a (analysis only). No code change this sweep.
