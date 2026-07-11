@@ -116,3 +116,9 @@ harness = false
 [[bench]]
 name = "bitfield_apply_ops"
 harness = false
+
+# (frankenredis-99fwc) Same-binary A/B for the list DUMP payload memoization: re-encode the
+# quicklist2 wire payload every DUMP vs cache-hit Vec::clone of an unchanged list.
+[[bench]]
+name = "list_dump_cache"
+harness = false

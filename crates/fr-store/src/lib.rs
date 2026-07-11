@@ -5609,6 +5609,11 @@ struct DumpPayloadCache {
     modification_count: u64,
     zset_max_listpack_entries: usize,
     zset_max_listpack_value: usize,
+    // (frankenredis-99fwc) The encoded DUMP depends on the LIST config too (a `list` payload
+    // re-derives listpack↔quicklist split from list-max-listpack-size), so a config change must
+    // invalidate. Checked for every cached entry — an unrelated-type config change over-invalidates
+    // rarely and harmlessly.
+    list_max_listpack_size: i64,
     payload: Vec<u8>,
 }
 
@@ -27193,11 +27198,12 @@ impl Store {
             cache.modification_count == modification_count
                 && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
                 && cache.zset_max_listpack_value == self.zset_max_listpack_value
+                && cache.list_max_listpack_size == self.list_max_listpack_size
         }) {
             return Some(cache.payload.clone());
         }
         let mut buf = Vec::new();
-        let mut cache_compact_zset_dump = false;
+        let mut cache_dump_payload = false;
         match &entry.value {
             Value::String(v) => {
                 buf.push(RDB_TYPE_STRING);
@@ -27210,6 +27216,12 @@ impl Store {
             Value::List(l) => {
                 buf.push(RDB_TYPE_LIST_QUICKLIST_2);
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
+                // (frankenredis-99fwc) Memoize the list DUMP: fr re-encodes ChunkedList/PackedList
+                // to the redis listpack wire format every DUMP (redis keeps the raw listpack), so a
+                // repeated DUMP of an unchanged list re-pays the whole re-encode. Cache it like the
+                // zset payload; any list write bumps modification_count (touch_write) and thus
+                // invalidates. Byte-identical: the cached bytes ARE the freshly-encoded bytes.
+                cache_dump_payload = true;
             }
             Value::Set(s) => {
                 if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
@@ -27325,7 +27337,7 @@ impl Store {
                         entry_count += 2;
                     }
                     encode_rdb_string(&mut buf, &finish_listpack_entries(encoded, entry_count)?);
-                    cache_compact_zset_dump = true;
+                    cache_dump_payload = true;
                 } else {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
@@ -27362,13 +27374,14 @@ impl Store {
         // Compute and append CRC64 over all preceding bytes
         let crc = fr_persist::crc64_redis(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
-        if cache_compact_zset_dump {
+        if cache_dump_payload {
             self.insert_dump_payload_cache(
                 key,
                 DumpPayloadCache {
                     modification_count,
                     zset_max_listpack_entries: self.zset_max_listpack_entries,
                     zset_max_listpack_value: self.zset_max_listpack_value,
+                    list_max_listpack_size: self.list_max_listpack_size,
                     payload: buf.clone(),
                 },
             );
@@ -29126,6 +29139,41 @@ impl BenchSetListpackDump {
         let members: Vec<Vec<u8>> = self.0.iter().map(|m| m.into_owned()).collect();
         let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
         encode_listpack_strings(&refs)
+    }
+}
+
+// ── (frankenredis-99fwc A/B, bench-only) ──────────────────────────────────────
+// Same-binary A/B for the list DUMP payload memoization. Before 99fwc, `dump_key` re-encoded
+// the whole quicklist2 wire payload (ChunkedList/PackedList -> listpack nodes + CRC64) on EVERY
+// DUMP of an unchanged list. Now the payload is cached (keyed by modification_count + config),
+// so a repeated DUMP is a `Vec::clone` of the cached bytes. These two hooks call the SAME encode
+// as the production List arm, minus the keyspace bookkeeping, so the ratio isolates exactly the
+// eliminated re-encode. `dump_key` populates the cache; `bench_dump_list_cache_get` clones it.
+impl Store {
+    /// ORIG (pre-99fwc): re-encode the list DUMP payload from scratch — the per-DUMP cost the
+    /// cache removes. Byte-identical to `dump_key`'s List arm (same encode + footer + CRC).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_dump_list_reencode(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let entry = self.entries.get(key)?;
+        let Value::List(l) = &entry.value else {
+            return None;
+        };
+        let mut buf = Vec::new();
+        buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+        encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
+        buf.extend_from_slice(&RDB_DUMP_VERSION.to_le_bytes());
+        let crc = fr_persist::crc64_redis(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        Some(buf)
+    }
+
+    /// CAND (post-99fwc, steady state): the cache-hit clone. Call `dump_key` once first to
+    /// populate; every subsequent DUMP of the unchanged list is this clone.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_dump_list_cache_get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.dump_payload_cache.get(key).map(|c| c.payload.clone())
     }
 }
 
@@ -54872,6 +54920,68 @@ mod tests {
             "bitfield_write u64: per-bit loop={ref_ns:.2} ns | byte-wise={new_ns:.2} ns = {:.2}x",
             ref_ns / new_ns
         );
+    }
+
+    #[test]
+    fn list_dump_cache_invalidates_on_every_list_mutation() {
+        // (frankenredis-99fwc) The list DUMP payload is now memoized. The cache MUST never serve
+        // stale bytes: after any list mutation, a DUMP from a store that pre-populated the cache
+        // must byte-equal a DUMP from a fresh store (no cache) of the same final state. If a
+        // mutation path failed to bump modification_count, the cached DUMP would diverge.
+        fn build_base(s: &mut Store) {
+            s.rpush(
+                b"l",
+                &[
+                    b"a".to_vec(),
+                    b"bb".to_vec(),
+                    b"a".to_vec(),
+                    b"ccc".to_vec(),
+                    b"a".to_vec(),
+                    b"dddd".to_vec(),
+                ],
+                1,
+            )
+            .unwrap();
+        }
+        fn check(name: &str, mutate: impl Fn(&mut Store)) {
+            let mut cached = Store::new();
+            build_base(&mut cached);
+            let _ = cached.dump_key(b"l", 5); // populate the cache
+            mutate(&mut cached);
+            let after_cached = cached.dump_key(b"l", 6);
+
+            let mut fresh = Store::new();
+            build_base(&mut fresh);
+            mutate(&mut fresh); // never DUMP'd before mutating -> no cache
+            let after_fresh = fresh.dump_key(b"l", 6);
+
+            assert_eq!(after_cached, after_fresh, "list DUMP cache stale after {name}");
+        }
+        check("rpush", |s| {
+            s.rpush(b"l", &[b"zz".to_vec()], 10).unwrap();
+        });
+        check("lpop", |s| {
+            s.lpop(b"l", 10).unwrap();
+        });
+        check("lset", |s| {
+            s.lset(b"l", 0, b"WWWWWW".to_vec(), 10).unwrap();
+        });
+        check("lrem", |s| {
+            s.lrem(b"l", 0, b"a", 10).unwrap();
+        });
+        check("ltrim", |s| {
+            s.ltrim(b"l", 1, 3, 10).unwrap();
+        });
+
+        // Repeated DUMP with NO mutation is a stable cache HIT and equals a fresh encode.
+        let mut s = Store::new();
+        build_base(&mut s);
+        let d1 = s.dump_key(b"l", 5);
+        let d2 = s.dump_key(b"l", 6);
+        assert_eq!(d1, d2, "repeated list DUMP (cache hit) diverged");
+        let mut fresh = Store::new();
+        build_base(&mut fresh);
+        assert_eq!(d2, fresh.dump_key(b"l", 6), "cached list DUMP != fresh encode");
     }
 
     #[test]
