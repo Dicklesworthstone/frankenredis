@@ -5,3 +5,9 @@ edition = "2024"
 
 [dev-dependencies]
 proptest.workspace = true
+
+# (frankenredis-e4fu8) Same-binary A/B for RESP decimal digit-count on the reply hot path:
+# div-by-10 loop vs branchless ilog10 (decimal_u64_len/decimal_usize_len/decimal_i64_len).
+[[bench]]
+name = "decimal_len_ilog10"
+harness = false
