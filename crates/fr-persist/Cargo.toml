@@ -54,3 +54,9 @@ harness = false
 [[bench]]
 name = "listpack_decode_move"
 harness = false
+
+# (frankenredis-tgr69/ef928/087qq) Same-binary A/B for i64->decimal render: to_string (fmt+alloc)
+# vs write_u64_digits stack scratch (the shipped itoa2 path).
+[[bench]]
+name = "int_render_itoa2"
+harness = false
