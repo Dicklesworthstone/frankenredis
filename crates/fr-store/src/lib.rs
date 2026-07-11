@@ -54960,11 +54960,20 @@ mod tests {
         check("rpush", |s| {
             s.rpush(b"l", &[b"zz".to_vec()], 10).unwrap();
         });
+        check("lpush", |s| {
+            s.lpush(b"l", &[b"FRONT".to_vec()], 10).unwrap();
+        });
         check("lpop", |s| {
             s.lpop(b"l", 10).unwrap();
         });
+        check("rpop", |s| {
+            s.rpop(b"l", 10).unwrap();
+        });
         check("lset", |s| {
             s.lset(b"l", 0, b"WWWWWW".to_vec(), 10).unwrap();
+        });
+        check("linsert_before", |s| {
+            s.linsert_before(b"l", b"ccc", b"INS".to_vec(), 10).unwrap();
         });
         check("lrem", |s| {
             s.lrem(b"l", 0, b"a", 10).unwrap();
