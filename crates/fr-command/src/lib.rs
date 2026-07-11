@@ -25747,18 +25747,10 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if !store.exists_no_stat(&source, now_ms) || store.exists_no_stat(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
-    let dirty_before = store.dirty;
-    store
-        .copy_no_stat(&source, &destination, false, now_ms)
+    let moved = store
+        .move_existing_no_stat(&source, &destination, now_ms)
         .map_err(CommandError::Store)?;
-    store.del(&[source], now_ms);
-    // (frankenredis-movedirty) Upstream db.c::moveCommand does `server.dirty++`
-    // exactly once for the whole transfer. fr implements MOVE as copy + del,
-    // and each helper bumps the dirty counter, so the move double-counted —
-    // diverging rdb_changes_since_last_save and the auto-save threshold from
-    // vendored. Normalize to a single dirty unit.
-    store.dirty = dirty_before.saturating_add(1);
-    Ok(RespFrame::Integer(1))
+    Ok(RespFrame::Integer(i64::from(moved)))
 }
 
 fn latency_graph(event: &str, samples: &[fr_store::LatencySample]) -> String {
@@ -55360,7 +55352,13 @@ mod tests {
         // actually move keys between databases (not silently no-op
         // as the prior stub did). (frankenredis-w9yzb)
         let mut store = Store::new();
-        store.set(fr_store::encode_db_key(0, b"foo"), b"bar".to_vec(), None, 0);
+        let value = vec![b'v'; 64 * 1024];
+        store.set(
+            fr_store::encode_db_key(0, b"foo"),
+            value.clone(),
+            Some(60_000),
+            0,
+        );
         assert!(store.exists(&fr_store::encode_db_key(0, b"foo"), 0));
 
         let out = dispatch_argv(
@@ -55372,6 +55370,16 @@ mod tests {
         assert_eq!(out, RespFrame::Integer(1));
         assert!(!store.exists(&fr_store::encode_db_key(0, b"foo"), 0));
         assert!(store.exists(&fr_store::encode_db_key(1, b"foo"), 0));
+        assert_eq!(
+            store
+                .get(&fr_store::encode_db_key(1, b"foo"), 0)
+                .expect("moved value"),
+            Some(value)
+        );
+        assert_eq!(
+            store.pttl(&fr_store::encode_db_key(1, b"foo"), 0),
+            fr_store::PttlValue::Remaining(60_000)
+        );
     }
 
     #[test]

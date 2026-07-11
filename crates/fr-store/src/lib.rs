@@ -4677,11 +4677,24 @@ impl Entry {
         self.clear_entry_flags();
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
         let mut entry = Self::new(self.value.clone(), now_ms);
         entry.entry_flags = self.entry_flags;
         // (frankenredis-gt318) A COPY destination is a private (non-shared)
         // duplicate — OBJECT REFCOUNT must report 1 even for a shared-range int.
+        entry.set_flag(ENTRY_INT_COPY_NOT_SHARED, true);
+        entry
+    }
+
+    /// Consuming twin of [`Self::duplicate_for_copy`]. MOVE's heap-string tier
+    /// immediately deletes the source, so it can transfer the owned `Value`
+    /// while preserving every observable metadata choice made by the old
+    /// copy-then-delete path (fresh db-add clocks and identical entry flags).
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn into_duplicate_for_copy(self, now_ms: u64) -> Self {
+        let mut entry = Self::new(self.value, now_ms);
+        entry.entry_flags = self.entry_flags;
         entry.set_flag(ENTRY_INT_COPY_NOT_SHARED, true);
         entry
     }
@@ -25315,6 +25328,94 @@ impl Store {
         self.copy_inner(source, destination, replace, now_ms)
     }
 
+    /// Complete a MOVE after the caller's source-then-destination no-stat
+    /// existence probes have succeeded.
+    ///
+    /// Heap-backed strings are re-keyed without cloning their payload. Every
+    /// other value stays on the exact historical `copy_no_stat` + `del`
+    /// fallback, keeping collection/stream side-state semantics outside this
+    /// single optimization lever. The consuming tier deliberately recreates
+    /// the destination `Entry` exactly as `duplicate_for_copy` did; only the
+    /// owned string buffer changes from cloned to moved.
+    pub fn move_existing_no_stat(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        debug_assert!(self.entries.contains_key(source));
+        // Keep the historical copy_inner destination recheck. Current MOVE
+        // callers already probed it, but this preserves replace=false behavior
+        // for every direct caller in release builds too.
+        if self.entries.contains_key(destination) {
+            return Ok(false);
+        }
+
+        // COPY historically transfers stream side-map rows from source to
+        // destination and DEL clears part of the source state even if a stale
+        // row is attached to a non-stream entry. Preserve that cleanup exactly
+        // by keeping either affected key on the fallback tier.
+        let stream_side_maps_empty = self.stream_groups.is_empty()
+            && self.stream_last_ids.is_empty()
+            && self.stream_entries_added.is_empty()
+            && self.stream_max_deleted_ids.is_empty();
+        let has_stream_side_state = !stream_side_maps_empty
+            && [source, destination].into_iter().any(|key| {
+                self.stream_groups.contains_key(key)
+                    || self.stream_last_ids.contains_key(key)
+                    || self.stream_entries_added.contains_key(key)
+                    || self.stream_max_deleted_ids.contains_key(key)
+            });
+        let can_relink = !has_stream_side_state
+            && self
+                .entries
+                .get(source)
+                .is_some_and(|entry| matches!(&entry.value, Value::String(SmallStr::Heap(_))));
+        if !can_relink {
+            let dirty_before = self.dirty;
+            let copied = self.copy_no_stat(source, destination, false, now_ms)?;
+            if copied {
+                self.del(&[source.to_vec()], now_ms);
+                self.dirty = dirty_before.saturating_add(1);
+            }
+            return Ok(copied);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+        let source_expiry = self.expiry_ms(source);
+        let Some(source_entry) = self.entries.get_mut(source) else {
+            return Ok(false);
+        };
+        if lfu_tracking_enabled {
+            source_entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        source_entry.touch(now_ms);
+
+        // The old copy-first ordering made the digest stale before source
+        // deletion. Preserve that property without adding a third mutation
+        // tick, so removal never hashes the O(value) payload after DEBUG DIGEST.
+        self.digest_stale = true;
+        self.last_del_removed.clear();
+        let Some(entry) = self.internal_entries_remove(source) else {
+            return Ok(false);
+        };
+        self.last_del_removed.push(source.to_vec());
+        self.internal_entries_insert_with_expiry(
+            destination.to_vec(),
+            entry.into_duplicate_for_copy(now_ms),
+            source_expiry,
+        );
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(true)
+    }
+
     fn copy_inner(
         &mut self,
         source: &[u8],
@@ -33054,7 +33155,7 @@ mod tests {
         RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
         RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
         RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES,
-        REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue, Store, StoreError,
+        REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue, SmallStr, Store, StoreError,
         StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
         StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
         decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
@@ -37447,6 +37548,147 @@ mod tests {
             "COPY/MOVE guard: elided 2 keyspace probes ≈ {:.2} ns total (2 × {probe:.2} ns)",
             2.0 * probe
         );
+    }
+
+    #[test]
+    fn move_heap_string_relink_matches_copy_delete_fallback() {
+        fn reference_move(store: &mut Store, source: &[u8], destination: &[u8], now_ms: u64) {
+            assert!(store.exists_no_stat(source, now_ms));
+            assert!(!store.exists_no_stat(destination, now_ms));
+            let dirty_before = store.dirty;
+            assert!(
+                store
+                    .copy_no_stat(source, destination, false, now_ms)
+                    .unwrap()
+            );
+            assert_eq!(store.del(&[source.to_vec()], now_ms), 1);
+            store.dirty = dirty_before.saturating_add(1);
+        }
+
+        fn heap_pointer(store: &Store, key: &[u8]) -> *const u8 {
+            let entry = store.entries.get(key).expect("heap-string entry");
+            let Value::String(SmallStr::Heap(bytes)) = &entry.value else {
+                panic!("expected heap string"); // ubs:ignore -- test invariant
+            };
+            bytes.as_ptr()
+        }
+
+        let source = encode_db_key(0, b"move:key");
+        let destination = encode_db_key(1, b"move:key");
+        for lfu in [false, true] {
+            let build = || {
+                let mut store = Store::new();
+                if lfu {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                }
+                store.set(source.clone(), vec![b'x'; 64 * 1024], Some(50_000), 1_000);
+                // Force the running digest clean before MOVE. The relink must
+                // not re-hash the 64 KiB value on removal.
+                let _ = store.state_digest();
+                store
+            };
+            let mut candidate = build();
+            let mut fallback = build();
+            let candidate_source_pointer = heap_pointer(&candidate, &source);
+            let fallback_source_pointer = heap_pointer(&fallback, &source);
+
+            assert!(candidate.exists_no_stat(&source, 2_000));
+            assert!(!candidate.exists_no_stat(&destination, 2_000));
+            assert!(
+                candidate
+                    .move_existing_no_stat(&source, &destination, 2_000)
+                    .unwrap()
+            );
+            reference_move(&mut fallback, &source, &destination, 2_000);
+
+            assert_eq!(
+                heap_pointer(&candidate, &destination),
+                candidate_source_pointer,
+                "candidate must retain the heap allocation"
+            );
+            assert_ne!(
+                heap_pointer(&fallback, &destination),
+                fallback_source_pointer,
+                "reference must deep-copy before deleting the source"
+            );
+            assert_eq!(candidate.entries, fallback.entries);
+            assert_eq!(candidate.expiry_deadlines, fallback.expiry_deadlines);
+            assert_eq!(candidate.db_key_counts, fallback.db_key_counts);
+            assert_eq!(candidate.db_expires_counts, fallback.db_expires_counts);
+            assert_eq!(candidate.expires_count, fallback.expires_count);
+            assert_eq!(candidate.keyspace_generation, fallback.keyspace_generation);
+            assert_eq!(candidate.digest_mutations, fallback.digest_mutations);
+            assert_eq!(candidate.last_del_removed, fallback.last_del_removed);
+            assert_eq!(candidate.rng_seed, fallback.rng_seed);
+            assert_eq!(candidate.dirty, fallback.dirty);
+            assert_eq!(candidate.stat_keyspace_hits, fallback.stat_keyspace_hits);
+            assert_eq!(
+                candidate.stat_keyspace_misses,
+                fallback.stat_keyspace_misses
+            );
+            assert_eq!(candidate.state_digest(), fallback.state_digest());
+            assert_eq!(
+                candidate.pttl(&destination, 2_000),
+                fallback.pttl(&destination, 2_000)
+            );
+        }
+
+        // Inline strings and collections stay on the exact fallback tier.
+        for seed in [
+            Value::String(SmallStr::from_slice(b"inline")),
+            Value::List(Box::default()),
+        ] {
+            let build = || {
+                let mut store = Store::new();
+                store.internal_entries_insert(source.clone(), Entry::new(seed.clone(), 1_000));
+                store
+            };
+            let mut candidate = build();
+            let mut fallback = build();
+            assert!(candidate.exists_no_stat(&source, 2_000));
+            assert!(!candidate.exists_no_stat(&destination, 2_000));
+            assert!(
+                candidate
+                    .move_existing_no_stat(&source, &destination, 2_000)
+                    .unwrap()
+            );
+            reference_move(&mut fallback, &source, &destination, 2_000);
+            assert_eq!(candidate.entries, fallback.entries);
+            assert_eq!(candidate.state_digest(), fallback.state_digest());
+            assert_eq!(candidate.dirty, fallback.dirty);
+        }
+
+        // Stale stream side rows on either physical key must retain the old
+        // COPY+DEL cleanup/transfer behavior, even when the value is a heap
+        // string that would otherwise qualify for relinking.
+        let build_with_stream_side_state = || {
+            let mut store = Store::new();
+            store.set(source.clone(), vec![b'x'; 64 * 1024], None, 1_000);
+            store.stream_entries_added.insert(source.clone(), 7);
+            store.stream_entries_added.insert(destination.clone(), 9);
+            store
+        };
+        let mut candidate = build_with_stream_side_state();
+        let mut fallback = build_with_stream_side_state();
+        let candidate_source_pointer = heap_pointer(&candidate, &source);
+        assert!(
+            candidate
+                .move_existing_no_stat(&source, &destination, 2_000)
+                .unwrap()
+        );
+        reference_move(&mut fallback, &source, &destination, 2_000);
+        assert_ne!(
+            heap_pointer(&candidate, &destination),
+            candidate_source_pointer,
+            "stream side state must force the cloning fallback"
+        );
+        assert_eq!(candidate.entries, fallback.entries);
+        assert_eq!(
+            candidate.stream_entries_added,
+            fallback.stream_entries_added
+        );
+        assert_eq!(candidate.state_digest(), fallback.state_digest());
+        assert_eq!(candidate.dirty, fallback.dirty);
     }
 
     // (CrimsonHawk) XPENDING summary/entries is_stream collapse: byte-identical key-lookup

@@ -13687,7 +13687,7 @@ impl Runtime {
     /// generic runtime handler exactly under the plain write gate: cluster mode is
     /// rejected before DB parsing, DB-index errors keep Redis' i32/range wording,
     /// same-DB errors happen before key lookup, source/destination probes are
-    /// no-stat, and successful copy+delete normalizes `dirty` to one increment.
+    /// no-stat, and successful transfer increments `dirty` exactly once.
     pub fn execute_plain_move_borrowed(
         &mut self,
         key: &[u8],
@@ -13742,18 +13742,12 @@ impl Runtime {
                         if self.server.store.exists_no_stat(&destination, now_ms) {
                             RespFrame::Integer(0)
                         } else {
-                            let dirty_before = self.server.store.dirty;
-                            match self.server.store.copy_no_stat(
+                            match self.server.store.move_existing_no_stat(
                                 source.as_ref(),
                                 &destination,
-                                false,
                                 now_ms,
                             ) {
-                                Ok(_) => {
-                                    self.server.store.del(&[source.into_owned()], now_ms);
-                                    self.server.store.dirty = dirty_before.saturating_add(1);
-                                    RespFrame::Integer(1)
-                                }
+                                Ok(moved) => RespFrame::Integer(i64::from(moved)),
                                 Err(err) => CommandError::Store(err).to_resp(),
                             }
                         }
@@ -40746,18 +40740,12 @@ impl Runtime {
         if self.server.store.exists_no_stat(&destination, now_ms) {
             return Ok(RespFrame::Integer(0));
         }
-        let dirty_before = self.server.store.dirty;
-        self.server
+        let moved = self
+            .server
             .store
-            .copy_no_stat(source.as_ref(), &destination, false, now_ms)
+            .move_existing_no_stat(source.as_ref(), &destination, now_ms)
             .map_err(CommandError::Store)?;
-        self.server.store.del(&[source.into_owned()], now_ms);
-        // (frankenredis-movedirty) Upstream db.c::moveCommand does
-        // `server.dirty++` exactly once; the copy + del helpers each bump the
-        // counter, double-counting. Normalize to a single dirty unit so
-        // rdb_changes_since_last_save / the auto-save threshold match vendored.
-        self.server.store.dirty = dirty_before.saturating_add(1);
-        Ok(RespFrame::Integer(1))
+        Ok(RespFrame::Integer(i64::from(moved)))
     }
 
     fn handle_copy_command(
@@ -51772,8 +51760,12 @@ mod tests {
     #[test]
     fn plain_move_borrowed_matches_generic_runtime_path() {
         fn prepare(rt: &mut Runtime) {
+            let value = vec![b'v'; 64 * 1024];
             assert_eq!(
-                rt.execute_frame(command(&[b"SET", b"present", b"value"]), 0),
+                rt.execute_frame(
+                    command(&[b"SET", b"present", value.as_slice(), b"PX", b"60000"]),
+                    0,
+                ),
                 RespFrame::SimpleString("OK".to_string())
             );
             assert_eq!(
@@ -51826,6 +51818,16 @@ mod tests {
                         direct.execute_frame(command(&[b"GET", probe]), 21),
                         generic.execute_frame(command(&[b"GET", probe]), 21),
                         "db={db_index} key={probe:?}"
+                    );
+                    assert_eq!(
+                        direct.execute_frame(command(&[b"PTTL", probe]), 22),
+                        generic.execute_frame(command(&[b"PTTL", probe]), 22),
+                        "PTTL db={db_index} key={probe:?}"
+                    );
+                    assert_eq!(
+                        direct.execute_frame(command(&[b"OBJECT", b"ENCODING", probe]), 23),
+                        generic.execute_frame(command(&[b"OBJECT", b"ENCODING", probe]), 23),
+                        "OBJECT ENCODING db={db_index} key={probe:?}"
                     );
                 }
             }

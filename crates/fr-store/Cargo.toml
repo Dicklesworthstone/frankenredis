@@ -78,3 +78,10 @@ harness = false
 [[bench]]
 name = "bitfield_incrby_fuse"
 harness = false
+
+# (frankenredis-ek8p9) Profile-first, same-binary median-gated A/B for MOVE's
+# heap-string value transfer: deep-copy + delete fallback vs O(1) relink.
+[[bench]]
+name = "move_key_relink"
+harness = false
+required-features = ["bench-reference"]

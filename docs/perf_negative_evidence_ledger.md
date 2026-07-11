@@ -6901,3 +6901,72 @@ popcount multi-accumulator REJECTED" row does NOT generalize here: that was a re
 (throughput-bound); clmul folding is latency-bound, where multi-accumulator is the textbook fix.
 NOTE: agent-mail DB was corruption-circuit-broken this session (reads only); fr-simd was uncontended
 so reservation absence was safe. Retry-condition: n/a (shipped, gated).
+
+## 2026-07-11 CreamPeak: FINAL KEEP — MOVE heap-string relink, median 0.265604818x instructions
+
+This lane is cross-DB `MOVE`, outside cc's sorted-set/geo/stream/pubsub work. The focused workload
+alternates one 64 KiB heap-backed string, with an absolute TTL, between two physical DB keys. Before
+editing, the exact successful `copy_no_stat` + `del` path was profiled on remote worker
+**vmi1149989**: `Entry::duplicate_for_copy` had three `instructions:u` self-time samples **0.27%,
+1.20%, and 2.34%** (median **1.20%**, zero lost samples; baseline binary SHA-256
+**`eea7bcb734a3ee61264bb32fbd5b842576be6f0a86ab8adbb7b3f8f3e154680f`**). The clone therefore
+cleared the mandatory median self-time attribution floor before the lever was implemented.
+
+ONE LEVER: `Store::move_existing_no_stat` consumes and re-keys an owned `SmallStr::Heap` payload
+instead of cloning it immediately before deleting the source. It recreates the destination entry
+metadata exactly as the old COPY half did, preserves the absolute expiry, LFU/RNG sequence, digest
+mutation accounting, deletion bookkeeping, and MOVE's single dirty increment. Inline strings,
+integers, hashes, lists, sets, sorted sets, streams, missing/occupied keys, and any heap string with
+source/destination stream side-map state retain the exact historical `copy_no_stat` + `del`
+fallback. The destination is rechecked with `replace=false` semantics inside the primitive. COPY is
+unchanged.
+
+The final same-binary command was:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release-perf -p fr-store --features bench-reference --bench move_key_relink`
+
+Both arms shared binary SHA-256
+**`45b829c4dba5b46cce5204685ed562bb5589492a6fd87aacefd318ac9ff6f98d`** on remote worker
+**vmi1227854**. The exact fallback's `Entry::duplicate_for_copy` self-time samples were **0.38%,
+0.71%, and 0.91%** (median **0.71%**); the candidate reported **0%** for that clone frame in all
+three profiles above perf's **0.1%** reporting floor. Every profile reported zero lost samples.
+
+The benchmark then ran 24 position-balanced, within-routine interleaved instruction rounds in that
+same invocation. The paired candidate/candidate null ratio had median **1.000000739**, p05
+**0.999987141**, p95 **1.000012102**, and CV **0.000833%**. Fallback/candidate had median
+**3.764991943x** with paired-ratio CV **0.000549%**; equivalently candidate/fallback was
+**0.265604818**, or **73.439518% fewer instructions**. The candidate median lies far outside the
+complete null band and clears the 1% keep gate.
+
+Behavior, fallback, and quality proof:
+
+- before measurement, both arms produced identical MOVE result, 64 KiB value bytes, remaining TTL,
+  OBJECT ENCODING, state digest, and dirty count;
+- the focused store regression passed remotely and proved allocation identity for the relink tier,
+  exact default/LFU/RNG/digest/expiry/DB-count parity, exact inline-string/list fallback parity, and
+  forced fallback when stale stream side state is attached to either physical key;
+- the remote MOVE-filtered command/runtime run passed **15 command tests**, the **8/8** metamorphic
+  MOVE cases, DB-size balance, and **9 runtime/persistence tests**. Its borrowed-vs-generic case now
+  uses a 64 KiB value with TTL and compares exact replies, values, PTTL, OBJECT ENCODING, hit/miss
+  counters, and dirty count;
+- the full remote `fr-conformance` library reached **192/194** passes, including
+  `conformance_core_generic`, which carries MOVE. The only failures were ACL CAT and COMMAND INFO
+  fixtures that necessarily see empty metadata under the repository's documented
+  `FR_ALLOW_STUB_COMMANDS=1` remote-build tier; the vendored live oracle is excluded by `.rchignore`;
+- remote workspace `cargo check --workspace --all-targets` passed. Touched production libraries and
+  the new benchmark both passed scoped remote Clippy with `-D warnings`; workspace all-target Clippy
+  stopped only on three pre-existing `fr-store` test-literal `approx_constant` /
+  `excessive_precision` lints around line 52344;
+- `cargo fmt --check` fail-closed with **RCH-E301** because RCH classifies fmt as non-compilation.
+  Direct Rust 2024 rustfmt found the new benchmark and command/runtime files clean and reported only
+  pre-existing unrelated drift in `fr-store/src/lib.rs`; `git diff --check` passed;
+- UBS ran with Rust build/lint/dependency categories 12-14 disabled, so it could not invoke local
+  Cargo. The four-file scan hit the bounded 300-second timeout without producing a file finding;
+  a targeted benchmark scan completed and reported only intentional fail-closed harness panics,
+  checked quantile/column indexes, child-process argument parsing, and diagnostic printing;
+- every Cargo command was fail-closed through `RCH_REQUIRE_REMOTE=1`. RCH surfaced degraded fleet
+  capacity, one no-admissible-slot refusal, and two expected missing-command-metadata failures before
+  the explicit remote stub was placed inside the remote command. None fell back to a local build.
+
+Verdict: **FINAL KEEP**. Ordinary heap-backed strings take the consuming MOVE relink tier; every
+ambiguous representation or side-state condition retains the exact old copy-then-delete path.
