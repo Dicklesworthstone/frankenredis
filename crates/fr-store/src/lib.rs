@@ -12734,6 +12734,29 @@ impl Store {
         }
     }
 
+    /// (frankenredis-hincrfast bench) Isolate the HINCRBY field-key handling: overwrite an
+    /// EXISTING hash field's value the OLD way (`insert(field.to_vec(), value)` — allocates an
+    /// owned field key and extracts the old value) vs the borrowed way (`insert_borrowed`).
+    /// Bench-only A/B substrate; the map type is private so the harness cannot reach it directly.
+    #[doc(hidden)]
+    pub fn bench_hash_field_set_owned(&mut self, key: &[u8], field: &[u8], value: Vec<u8>) {
+        if let Some(entry) = self.entries.get_mut(key)
+            && let Value::Hash(m) = &mut entry.value
+        {
+            m.insert(field.to_vec(), value);
+        }
+    }
+
+    /// (frankenredis-hincrfast bench) Borrowed-field counterpart of `bench_hash_field_set_owned`.
+    #[doc(hidden)]
+    pub fn bench_hash_field_set_borrowed(&mut self, key: &[u8], field: &[u8], value: Vec<u8>) {
+        if let Some(entry) = self.entries.get_mut(key)
+            && let Value::Hash(m) = &mut entry.value
+        {
+            m.insert_borrowed(field, value);
+        }
+    }
+
     pub fn hincrby(
         &mut self,
         key: &[u8],
@@ -12770,7 +12793,13 @@ impl Store {
                 let res = match current_res {
                     Ok(current) => match current.checked_add(delta) {
                         Some(next) => {
-                            m.insert(field.to_vec(), next.to_string().into_bytes());
+                            // (frankenredis-hincrfast) Borrowed-field upsert: HINCRBY on an
+                            // existing counter field is the steady state, and insert_borrowed
+                            // overwrites the value slot in place without allocating an owned
+                            // field key (nor extracting the old value) — byte-identical to
+                            // insert(field.to_vec(), ..). Mirrors redis hashTypeSet (keeps the
+                            // field sds). Same promotion condition as insert. See hsetfast.
+                            m.insert_borrowed(field, next.to_string().into_bytes());
                             touched = true;
                             Ok(next)
                         }
@@ -12934,7 +12963,8 @@ impl Store {
 
                 let res = match current_res {
                     Ok(next) => {
-                        m.insert(field.to_vec(), next.clone());
+                        // (frankenredis-hincrfast) Borrowed-field upsert — see HINCRBY above.
+                        m.insert_borrowed(field, next.clone());
                         touched = true;
                         Ok(next)
                     }

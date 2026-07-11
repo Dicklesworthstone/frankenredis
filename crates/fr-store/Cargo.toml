@@ -60,3 +60,9 @@ harness = false
 [[bench]]
 name = "set_no_ttl_insert"
 harness = false
+
+# (frankenredis-hincrfast) Same-binary null-gated A/B for HINCRBY/HINCRBYFLOAT existing-field
+# upsert: insert(field.to_vec()) owned-key alloc vs insert_borrowed in-place value overwrite.
+[[bench]]
+name = "hincrby_field_clone"
+harness = false
