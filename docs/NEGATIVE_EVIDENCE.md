@@ -16043,3 +16043,21 @@ lazy decode MUST be panic-free on garbage (current decode assumes valid); (c) th
 REVERTED (uhthd, 0.635x→0.603x WORSENED) so there is NO byte-exact bounded increment — it is all-or-nothing lazy-attach.
 NET: modest-EV (non-hot RESTORE, theoretical parity edge, safety-sensitive) scoped multi-turn lever; recommend a dedicated
 reservations-up session (or cod co-dev) rather than jamming. Rollback: n/a (analysis only). No code change this sweep.
+
+### 2026-07-11 SHIPPED (zset RDB-load member-clone elision — the qxfmr/duab9/qxfmrstream sibling still owed to zset) — CreamPeak
+Found by code inspection (no bead): the RdbValue::SortedSet loader (fr-runtime apply_rdb_entries_to_store ~43168)
+fed its OWNED (score,member) pairs to the borrowed `zadd`, whose fresh-key path CLONES every member into its
+collapse `HashMap<Vec<u8>,f64>` (`member.clone()`, lib.rs ~17209) — N allocs+copies per zset on RDB load. Hash
+(qxfmr hset_many), set (duab9 bulk sadd), and stream (qxfmrstream) already load via owned bulk methods; zset was
+the ONLY laggard (the cc rdb-apply-move comment moved RdbValue->pairs but missed that zadd re-clones internally).
+FIX: call `zadd_plain_owned` (the owned-input ZADD fast path the ZADD *command* already uses, 10288/10443) which
+MOVES each member in. One-line wiring + already-proven byte-identical method. Commit d1657c806.
+GATE: new `zadd_plain_owned_matches_zadd_for_rdb_load_shapes` (DUMP payload + OBJECT ENCODING + ordered members +
+modification_count + dirty identical across listpack/skiplist, int/float/-0.0 scores, long members) + 54 fr-store
+zset/zadd/rdb tests + fr-conformance rdb/reload/zset + live_redis rdb_reemit_loadrdb / aof_reemit_loadrdb /
+core_zset vs redis 7.2.4. A/B (same-binary median, faithful RDB-load model = DEL+clone-template+insert per rep):
+1.352x (n128 listpack) / 1.193x (n600 sk) / 1.207x (n2000 sk) / 1.173x (n300 w80 sk), all WIN(move), each median
+outside null p5..p95. SCOPE: RDB load (startup / DEBUG RELOAD / replication full-sync / BGSAVE-reload), not a
+per-request hot path — but a real persistence path. REUSABLE: for a fresh-key bulk-load site, feed the OWNED
+collection to the `*_plain_owned` / `*_many` twin, not the borrowed command API which re-clones into its dedup map.
+Rollback: revert one line to `zadd`. No behavior change.
