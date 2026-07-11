@@ -1424,7 +1424,7 @@ mod tests {
             &entry_6bit_str(b"m005"),
             &entry_6bit_str(b"-2.5"), // score -2.5 (str)
             &entry_7bit_uint(7),      // integer MEMBER
-            &entry_6bit_str(b"3.14159"),
+            &entry_6bit_str(b"1.375"), // exact binary fraction (11/8)
         ]);
         let new = decode_zset_listpack_pairs(&lp).expect("new decode");
         let orig = decode_zset_listpack_pairs_orig(&lp).expect("orig decode");
@@ -1432,7 +1432,7 @@ mod tests {
         assert_eq!(new[3].0, b"m003");
         assert!(new[3].1.is_infinite() && new[3].1 > 0.0);
         assert_eq!(new[6].0, b"7"); // int member 7 renders to "7"
-        assert_eq!(new[6].1, 3.14159);
+        assert_eq!(new[6].1, 1.375);
     }
 
     #[test]
