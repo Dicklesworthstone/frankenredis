@@ -11328,11 +11328,14 @@ impl Store {
                 }
             }
             None => {
-                // A SET without a new TTL clears any prior deadline. The original ran this
-                // remove whenever `expiry_key` was `Some` — which it always is for an
-                // existing/created key — and a remove on an absent key is a no-op, so an
-                // unconditional remove here is byte-identical.
-                self.expiry_deadlines.remove(key.as_slice());
+                // A SET without a new TTL clears any prior deadline. (cc_fr) Guard the probe on
+                // expires_count: with no TTL-bearing key anywhere the deadline map is empty, so this
+                // key can't be in it and the remove is a guaranteed no-op — skip the foldhash on the
+                // common no-TTL SET/insert. Byte-identical (absent-key remove is a no-op); mirrors the
+                // expires_count no-TTL guards on drop_if_expired.
+                if self.expires_count != 0 {
+                    self.expiry_deadlines.remove(key.as_slice());
+                }
             }
         }
         self.update_expiry_deadline(old_expiry, new_expiry.map(std::num::NonZeroU64::get));
