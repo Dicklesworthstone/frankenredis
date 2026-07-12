@@ -12034,7 +12034,29 @@ impl Store {
         // digest-stale bookkeeping touches a disjoint Store field, so it runs
         // after the entry borrow ends and only when the field was written —
         // byte-identical to the previous in-arm placement.
-        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        let entry = if lfu_tracking_enabled {
+            // Under LFU the `should_bump_lfu` check above already probed presence
+            // (`should_bump_lfu == contains_key` here, since `lfu` is true), and only
+            // `next_rand` ran since — so reuse it to skip `internal_entry`'s redundant
+            // `contains_key`: one `get_mut` (present) or insert + `get_mut` (absent).
+            if should_bump_lfu {
+                self.entries
+                    .get_mut(key)
+                    .expect("hash entry present at LFU probe is still present")
+            } else {
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Hash(Box::default()), now_ms),
+                );
+                self.entries
+                    .get_mut(key)
+                    .expect("hash entry inserted above must exist")
+            }
+        } else {
+            // No LFU: the `&&` short-circuited the presence probe above, so let
+            // `internal_entry` do its own single get-or-create.
+            self.internal_entry(key, || Value::Hash(Box::default()), now_ms)
+        };
         if should_bump_lfu {
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
@@ -12391,7 +12413,28 @@ impl Store {
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        // Under LFU the `should_bump_lfu` probe above already resolved presence
+        // (`should_bump_lfu == contains_key` here, since `lfu` is true), and only
+        // `next_rand` ran since — so reuse it to skip `internal_entry`'s redundant
+        // `contains_key`: one `get_mut` (present) or insert + `get_mut` (absent). No
+        // LFU ⇒ the `&&` short-circuited the probe, so `internal_entry` does its own.
+        let entry = if lfu_tracking_enabled {
+            if should_bump_lfu {
+                self.entries
+                    .get_mut(key)
+                    .expect("hash entry present at LFU probe is still present")
+            } else {
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Hash(Box::default()), now_ms),
+                );
+                self.entries
+                    .get_mut(key)
+                    .expect("hash entry inserted above must exist")
+            }
+        } else {
+            self.internal_entry(key, || Value::Hash(Box::default()), now_ms)
+        };
         if should_bump_lfu {
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }

@@ -16626,3 +16626,20 @@ API, so left alone). The eliminated lookup's isolated magnitude is the already-m
 primitive (one foldhash probe removed); end-to-end it is a small fraction, since the map build + field inserts
 dominate HSET-many. Shipped as a clean byte-identical micro-elision, consistent with the ZADD (a5e0b0b35) /
 BITFIELD (7308a28e5) redundant-keyspace-probe vein. Rollback: restore the single `internal_entry` call.
+
+### 2026-07-12 SHIPPED (single-field HSET/HMSET reuse the LFU presence probe — one fewer keyspace lookup)
+Follow-on to the HSET-many LFU elision above, for the single-field write paths `hset_borrowed` (owned value,
+`m.insert`) and its `insert_borrowed` sibling. Both compute `should_bump_lfu = lfu_tracking_enabled &&
+entries.contains_key(key)` (the LFU counter only advances for a PRE-EXISTING key), then call `internal_entry`
+which re-probes with its own `contains_key` + `get_mut`. On the LFU-ON path that is 3 lookups: the
+`should_bump_lfu` `contains_key` == presence (since `lfu` is true there), and only `next_rand` runs between it
+and the get-or-create — so reuse it: present -> one `get_mut`; absent -> `internal_entries_insert` + `get_mut`
+(exactly `internal_entry`'s insert arm). The no-LFU path is UNCHANGED — the `&&` already short-circuits the
+probe, so `internal_entry` still does its own single get-or-create (no regression on the common default path).
+3 -> 2 lookups per single-field HSET under an LFU policy. Byte-identical: `hset_existing_hash_bumps_lfu_frequency`
++ `hsetnx_existing_hash_bumps_lfu_frequency` (exercise the exact bump/PRNG path) + 7 `hset*` + all 87 fr-store
+`lfu` lib tests green. HONEST SCOPE (same as the -many entry): LFU-ON path only; isolated one-lookup delta
+(`bitfield_resolve_lookup` primitive), a small end-to-end fraction. NOT applied to the three HINCRBY-family
+sites (13191/13260/13361) — those use `internal_entry` as a bare ensure-exists STATEMENT followed by
+`with_mutated_entry` (a different, 4-lookup shape) and are a separate, more delicate elision. Rollback: restore
+the single `internal_entry` call at each of the two sites.
