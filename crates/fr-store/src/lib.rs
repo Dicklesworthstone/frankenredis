@@ -9398,7 +9398,8 @@ impl Store {
             ));
         }
 
-        let had_expiry = self.key_has_expiry(key);
+        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
+        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
         if let Some(entry) = self.entries.get_mut(key) {
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
@@ -9482,7 +9483,8 @@ impl Store {
         }
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
-        let had_expiry = self.key_has_expiry(key);
+        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
+        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
         if let Some(entry) = self.entries.get_mut(key) {
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
@@ -9617,7 +9619,8 @@ impl Store {
             }
         }
         let has_write = ops.iter().any(BitfieldOp::is_write);
-        let had_expiry = self.key_has_expiry(key);
+        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
+        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
 
         // Resolve the key ONCE — a single `get_mut` (the old `get(..).is_some()` + `get_mut(..)`
         // did two keyspace lookups; `present` was used nowhere else). WrongType (present non-string)
