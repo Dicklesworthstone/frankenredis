@@ -17023,3 +17023,24 @@ stream side-maps — all verified optimal. The ONLY remaining perf work is the s
 (multi-day, reserved worktree, all-or-nothing — isolated pieces sub-gate), which is a MODE CHANGE from one-turn
 drive-bys, not a lever pickable "this turn". No further one-turn clean wins exist in the validatable surface.
 [[project_fr_store_driveby_saturated_getmut_first]]
+
+### 2026-07-12 SHIPPED (with_mutated_entry fresh-digest path: 3 keyspace lookups -> 1 — overturns "rare path" dismissal)
+Re-examined the with_mutated_entry NON-stale (fresh-digest) path I'd twice dismissed as rare, and found it is NOT
+rare for a whole workload class: `update_digest_hashes` sets `digest_stale = false` on that path, so a pure
+with_mutated_entry workload (HINCRBY/SETBIT/HDEL/APPEND/SETRANGE on a set of counters/bitmaps, with NO interleaved
+mark-stale write like SET/HSET/SADD/DEL) STAYS on the incremental path — paying, per op, `current_entry_digest`'s
+`get` + `get_mut` + `refresh_entry_digest`'s `get` = THREE keyspace lookups + two `expiry_ms` reads + two
+`entry_state_digest` FNV hashes. Fused the THREE lookups into ONE `get_mut`, hashing the entry in place
+before/after the mutation. KEY correctness fact: the TTL lives OUTSIDE the `Entry` (in `expiry_deadlines`), so the
+`&mut Entry` closure PHYSICALLY cannot change it — one `expiry_ms(key)` read is valid for both the old and new
+hash (robust even for future callers). Byte-identical: same old/new `entry_state_digest` fed to the same
+`update_digest_hashes`. Benefits ALL direct with_mutated_entry callers (SETBIT/HDEL/APPEND/SETRANGE); for small
+values the 3 saved lookups are a real per-op fraction (the FNV hashes still cost, so it is not multiplicative).
+GATED: new `with_mutated_entry_fresh_path_maintains_full_scan_digest` asserts the fused incremental `running_digest`
+EXACTLY equals a stale-forced full-scan recompute after HDEL+APPEND on a fresh digest (catches any wrong-entry /
+wrong-expiry hashing); + 6 digest + 2 hdel + 3 setbit + 12 append + 4 setrange + 73 bumps_lfu (incl. append/hdel/
+setbit LFU-freq) green. Kept the incremental-digest STRATEGY (did NOT switch to always-lazy — that would be a
+non-Pareto tradeoff regressing DEBUG-DIGEST-heavy reads to O(N); this is a pure Pareto lookup-fusion). No fresh
+bench (lookup-elision primitive, gated 1.75x isolated). FOLLOW-UP: with_mutated_or_created_entry (hincrby-family)
+has the same fusable non-stale create-path. LESSON: "rare path" is workload-dependent — a self-fresh-keeping digest
+path is COMMON for pure-mutate workloads. Rollback: restore current_entry_digest + separate get_mut + refresh.

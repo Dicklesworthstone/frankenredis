@@ -10932,15 +10932,20 @@ impl Store {
             self.bump_digest_mutations();
             return Some(result);
         }
-        let old_hash = self.current_entry_digest(key)?;
-        let result = {
-            let entry = self
-                .entries
-                .get_mut(key)
-                .expect("entry hash captured above");
-            mutate(entry)
-        };
-        self.refresh_entry_digest(key, old_hash);
+        // (perf) Non-stale (fresh-digest) path — `update_digest_hashes` keeps `digest_stale = false`
+        // here, so a pure with_mutated_entry workload (HINCRBY/SETBIT/HDEL/APPEND on a set of
+        // counters, no interleaved mark-stale write) STAYS on this path. Fuse the three keyspace
+        // lookups (`current_entry_digest`'s get + `get_mut` + `refresh_entry_digest`'s get) into ONE
+        // `get_mut`, hashing the entry in place before/after the mutation. The TTL lives OUTSIDE the
+        // `Entry` (in `expiry_deadlines`), so the `&mut Entry` closure cannot change it — one
+        // `expiry_ms` read is valid for both hashes. Byte-identical: identical old/new entry-state
+        // digests fed to the identical `update_digest_hashes`.
+        let expiry = self.expiry_ms(key);
+        let entry = self.entries.get_mut(key)?;
+        let old_hash = Self::entry_state_digest(key, entry, expiry);
+        let result = mutate(entry);
+        let new_hash = Self::entry_state_digest(key, entry, expiry);
+        self.update_digest_hashes(Some(old_hash), Some(new_hash));
         Some(result)
     }
 
@@ -43398,6 +43403,30 @@ mod tests {
             other => return Err(format!("HMGET should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn with_mutated_entry_fresh_path_maintains_full_scan_digest() {
+        // Gate the fused non-stale (fresh-digest) `with_mutated_entry` path: its in-place old/new
+        // entry-state hashing must maintain `running_digest` EXACTLY equal to a full-scan recompute.
+        // Route HDEL + APPEND (direct with_mutated_entry callers) on a FRESH digest, then compare
+        // the incremental digest against a stale-forced full scan.
+        let mut s = Store::new();
+        s.hset_borrowed(b"h", b"f", b"10".to_vec(), 1).unwrap();
+        s.hset_borrowed(b"h", b"g", b"gv".to_vec(), 1).unwrap();
+        s.set(b"str".to_vec(), b"hello".to_vec(), None, 1);
+        let _ = s.state_digest(); // reset to a FRESH digest
+        assert!(!s.digest_stale, "fresh after state_digest");
+        // with_mutated_entry commands on the fresh digest -> the fused incremental path:
+        s.hdel(b"h", &[b"g" as &[u8]], 2).unwrap();
+        s.append(b"str", b" world", 2).unwrap();
+        let incremental = s.state_digest(); // fresh -> the incrementally-maintained running_digest
+        s.digest_stale = true;
+        let full_scan = s.state_digest(); // forced full recompute
+        assert_eq!(
+            incremental, full_scan,
+            "fused fresh-path running_digest must equal the full scan"
+        );
     }
 
     #[test]
