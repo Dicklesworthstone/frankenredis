@@ -12335,6 +12335,29 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.hset_impl::<true>(key, field, value, now_ms)
+    }
+
+    /// Bench-only baseline: owned `hset` with the O(n) re-scanning encoding refresh (`INCR=false`)
+    /// instead of the O(1) incremental one. Byte-identical result; isolates the per-HSET rescan.
+    #[doc(hidden)]
+    pub fn hset_rescan(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hset_impl::<false>(key, field, value, now_ms)
+    }
+
+    fn hset_impl<const INCR: bool>(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
         // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
         // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
@@ -12382,11 +12405,17 @@ impl Store {
         let result = match &mut entry.value {
             Value::Hash(m) => {
                 let is_new = !m.contains_key(&field);
+                // (cc_fr) Capture lengths before the move; drive the O(1) incremental refresh.
+                let field_len = field.len();
+                let value_len = value.len();
                 m.insert(field, value);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
-                // (frankenredis-yp503) Lock the encoding into hashtable
-                // once the hash crosses either listpack threshold.
-                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                // (frankenredis-yp503) Lock the encoding into hashtable once the hash crosses either
+                // listpack threshold. (cc_fr) O(1) incremental: only the entry count + this new
+                // field/value can promote a listpack hash — no O(n) rescan of existing fields.
+                Self::refresh_hash_encoding_after_insert::<INCR>(
+                    entry, field_len, value_len, max_entries, max_value,
+                );
                 Ok(is_new)
             }
             _ => Err(StoreError::WrongType),
@@ -44189,6 +44218,68 @@ mod tests {
         ] {
             let (ra, mut a) = build(Store::hincrbyfloat_text, case);
             let (rb, mut b) = build(Store::hincrbyfloat_text_rescan, case);
+            assert_eq!(ra, rb, "result @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
+            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
+            assert_eq!(
+                a.object_encoding(b"h", 3),
+                b.object_encoding(b"h", 3),
+                "encoding @ {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn hset_owned_incremental_refresh_matches_rescan() {
+        // Gate the owned `hset`'s O(1) incremental post-insert encoding refresh (INCR=true) against
+        // the O(n) `refresh_hash_encoding_flag` re-scan (INCR=false). Byte-identical result + digest
+        // bookkeeping + OBJECT ENCODING across every promotion trigger: fresh single field,
+        // idempotent overwrite (no count change), count-driven (>512 fields), new-value-oversized
+        // (>64B), new-field-oversized (>64B), and a hash already promoted to hashtable.
+        type Hset = fn(&mut Store, &[u8], Vec<u8>, Vec<u8>, u64) -> Result<bool, StoreError>;
+        let big = || vec![b'x'; 80]; // > hash_max_listpack_value (64)
+        let build = |h: Hset, case: &str| -> (Result<bool, StoreError>, Store) {
+            let mut s = Store::new();
+            let r = match case {
+                "new_key" => h(&mut s, b"h", b"f".to_vec(), b"v".to_vec(), 2),
+                "existing_overwrite" => {
+                    h(&mut s, b"h", b"f".to_vec(), b"old".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", b"f".to_vec(), b"new".to_vec(), 2)
+                }
+                "count_promote" => {
+                    for i in 0..512u32 {
+                        s.hset_borrowed(b"h", format!("f{i:04}").as_bytes(), b"0".to_vec(), 1)
+                            .unwrap();
+                    }
+                    h(&mut s, b"h", b"fnew".to_vec(), b"v".to_vec(), 2) // 513th crosses 512
+                }
+                "value_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"0".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", b"f".to_vec(), big(), 2)
+                }
+                "field_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"0".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", big(), b"v".to_vec(), 2)
+                }
+                "already_promoted" => {
+                    s.hset_borrowed(b"h", b"big", big(), 1).unwrap(); // hashtable-encoded
+                    h(&mut s, b"h", b"f".to_vec(), b"v".to_vec(), 2)
+                }
+                _ => unreachable!(),
+            };
+            (r, s)
+        };
+        for case in [
+            "new_key",
+            "existing_overwrite",
+            "count_promote",
+            "value_promote",
+            "field_promote",
+            "already_promoted",
+        ] {
+            let (ra, mut a) = build(Store::hset, case);
+            let (rb, mut b) = build(Store::hset_rescan, case);
             assert_eq!(ra, rb, "result @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
             assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
