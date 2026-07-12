@@ -1,7 +1,8 @@
 //! Same-binary A/B for `expire_milliseconds` re-setting a TTL on an existing key (the hot
-//! EXPIRE/PEXPIRE/SETEX path): the pre-streamline original (two `expiry_ms` peeks + a `to_vec`
-//! for the keyspace-notify) vs the streamlined version (one peek reused as `old_expiry` +
-//! borrowed `logical_key`), null-gated on the median.
+//! EXPIRE/PEXPIRE path): the current-head reference re-probes `entries` through an empty
+//! `with_mutated_entry`, while the candidate directly performs the identical digest-mutation
+//! bump after key presence has already been proven. This isolates one redundant keyspace lookup
+//! (and, when the digest is fresh, two unchanged whole-entry hashes), null-gated on the median.
 //!
 //! Substrate matches the other cc benches: ONE binary / ONE invocation, adjacent-pair interleaving
 //! (order swapped on odd rounds), `black_box`, reps calibrated once, median of paired per-round
@@ -10,16 +11,16 @@
 //!
 //! Re-setting the SAME TTL is idempotent (same deadline, same expires_count), so each store stays
 //! in a stable state across all reps — the timing reflects the per-call work only. Both arms leave
-//! byte-identical observable state (asserted by the `expire_milliseconds_streamlined_matches_orig`
-//! unit test); this bench measures only the elided peek + allocation.
+//! byte-identical observable state (asserted by the
+//! `expire_digest_direct_bump_matches_entry_lookup_reference` unit test); this bench measures only
+//! the digest-bookkeeping lookup elision.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{env, hint::black_box, process::Command, time::Instant};
 
 use fr_store::Store;
 
 const ROUNDS: usize = 41;
-const TARGET_SEGMENT_SECS: f64 = 0.003;
+const TARGET_SEGMENT_SECS: f64 = 0.010;
 const NULL_LO: f64 = 0.05;
 const NULL_HI: f64 = 0.95;
 const KEY: &[u8] = b"expire:key";
@@ -34,7 +35,7 @@ fn build_store() -> Store {
 }
 
 fn expire_orig(s: &mut Store) -> bool {
-    s.expire_milliseconds_orig(black_box(KEY), black_box(100_000), black_box(2_000))
+    s.expire_milliseconds_digest_lookup_ref(black_box(KEY), black_box(100_000), black_box(2_000))
 }
 fn expire_new(s: &mut Store) -> bool {
     s.expire_milliseconds(black_box(KEY), black_box(100_000), black_box(2_000))
@@ -63,6 +64,24 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn main() {
+    let executable = env::current_exe().expect("current benchmark executable");
+    let sha = Command::new("sha256sum")
+        .arg(&executable)
+        .output()
+        .expect("run sha256sum");
+    assert!(sha.status.success(), "sha256sum failed");
+    let sha = String::from_utf8_lossy(&sha.stdout)
+        .split_whitespace()
+        .next()
+        .expect("sha256sum digest")
+        .to_owned();
+    let hostname = Command::new("hostname").output().expect("run hostname");
+    assert!(hostname.status.success(), "hostname failed");
+    println!(
+        "WORKER_ID {}\nBINARY_SHA256 one_binary_both_arms={sha}",
+        String::from_utf8_lossy(&hostname.stdout).trim()
+    );
+
     let mut store_o = build_store();
     let mut store_n = build_store();
 

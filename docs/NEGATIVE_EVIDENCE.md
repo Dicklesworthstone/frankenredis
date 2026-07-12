@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — EXPIRE re-arm records its digest mutation without re-probing the proven-present key; 1.32x, byte-identical
+
+The profiled `store_read` frontier had already identified `expire_existing` / `expireat_existing`
+as ~5x GET outliers (162/156 ns in the original profile), and the preceding TTL-map re-arm change
+made the remaining redundant keyspace work visible. `expire_milliseconds` and
+`expire_at_milliseconds` first proved `entries.contains_key(key)`, then called
+`with_mutated_entry(key, |_| {})`: a second `entries.get_mut` whose empty closure changed no entry.
+Its only durable effect was one `digest_mutations` bump. On a fresh digest it additionally hashed
+the unchanged entry before and after (the equal hashes cancel), immediately before the TTL update
+marked the digest stale.
+
+ONE LEVER: after the already-successful presence check, bump `digest_mutations` directly and proceed
+with the unchanged TTL-update tail. A const-generic reference retains the exact old empty-entry
+lookup for the one-binary A/B. This removes one foldhash keyspace lookup on every positive EXPIRE /
+PEXPIRE / EXPIREAT / PEXPIREAT re-arm, plus two whole-entry hashes when DEBUG DIGEST had materialized
+a fresh digest.
+
+BYTE-IDENTICAL: `expire_digest_direct_bump_matches_entry_lookup_reference` compares candidate vs
+the old lookup over BOTH stale and fresh digest states, asserting return, expiry map, global/per-DB
+expiry counts, dirty, `digest_mutations`, `digest_stale`, `running_digest`, notifications, and final
+`state_digest`; focused remote test passed. Same-binary, position-balanced `expire_reset` A/B on
+worker `vmi1293453` reproduced **1.339x** then **1.321x** after lengthening segments. The provenance
+rerun on `vmi1149989` reproduced **1.301x**, null median **0.9874**, p5..p95 **[0.843, 1.222]**, cv
+**12.08%**; one-binary SHA256
+`be210140d13d66fbef5e0ffb6c040c4357d827b98ea00371cb4edcc25c830f81`. All three candidate medians
+clear their invocation's observed null floor. Rollback: call
+`record_proven_existing_entry_mutation::<false>` in the two production expiry setters.
+
 ## 2026-07-12: SHIPPED — ZADD skips a wasted contains_key on the common (no-XX/no-LFU) path; byte-identical
 
 ZADD computed `let key_existed = self.entries.contains_key(key)` UNCONDITIONALLY, but `key_existed`

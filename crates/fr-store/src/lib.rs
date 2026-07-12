@@ -8222,6 +8222,27 @@ impl Store {
     }
 
     pub fn expire_milliseconds(&mut self, key: &[u8], milliseconds: i64, now_ms: u64) -> bool {
+        self.expire_milliseconds_impl::<true>(key, milliseconds, now_ms)
+    }
+
+    /// Same-binary benchmark reference for the pre-change digest bookkeeping, which re-probed
+    /// `entries` through an empty [`Self::with_mutated_entry`] call after key presence was proven.
+    #[doc(hidden)]
+    pub fn expire_milliseconds_digest_lookup_ref(
+        &mut self,
+        key: &[u8],
+        milliseconds: i64,
+        now_ms: u64,
+    ) -> bool {
+        self.expire_milliseconds_impl::<false>(key, milliseconds, now_ms)
+    }
+
+    fn expire_milliseconds_impl<const DIRECT_DIGEST_BUMP: bool>(
+        &mut self,
+        key: &[u8],
+        milliseconds: i64,
+        now_ms: u64,
+    ) -> bool {
         // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired (return discarded): for a
         // live/absent key it is a pure no-op probe, so peek the deadline and only invoke it
         // when actually due, eliding the redundant `entries.get` before the `contains_key`
@@ -8256,7 +8277,7 @@ impl Store {
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
         let old_expiry = peeked_expiry;
         let added_expiry = old_expiry.is_none();
-        if self.with_mutated_entry(key, |_| {}).is_some() {
+        if self.record_proven_existing_entry_mutation::<DIRECT_DIGEST_BUMP>(key) {
             self.set_existing_expiry_ms(key, Some(expires_at_ms));
             if added_expiry {
                 self.expires_count = self.expires_count.saturating_add(1);
@@ -8273,6 +8294,24 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
         }
         true
+    }
+
+    /// Record the digest mutation for an expiry change after the caller has already proved that
+    /// `key` exists and performed no intervening keyspace mutation.
+    ///
+    /// The old empty `with_mutated_entry` call only bumped `digest_mutations`: on the stale path it
+    /// did that directly after a `get_mut`, while on the fresh path its identical before/after entry
+    /// hashes cancelled. The following `set_existing_expiry_ms` marks the digest stale because the
+    /// TTL itself lives outside `Entry`. Production can therefore bump directly and skip the second
+    /// keyspace lookup (plus two whole-entry hashes on the fresh-digest path). `DIRECT=false` retains
+    /// the exact old operation for the same-binary A/B and differential gate.
+    fn record_proven_existing_entry_mutation<const DIRECT: bool>(&mut self, key: &[u8]) -> bool {
+        if DIRECT {
+            self.bump_digest_mutations();
+            true
+        } else {
+            self.with_mutated_entry(key, |_| {}).is_some()
+        }
     }
 
     pub fn expire_at_milliseconds(&mut self, key: &[u8], when_ms: i64, now_ms: u64) -> bool {
@@ -8314,7 +8353,7 @@ impl Store {
         let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
         let old_expiry = peeked_expiry;
         let added_expiry = old_expiry.is_none();
-        if self.with_mutated_entry(key, |_| {}).is_some() {
+        if self.record_proven_existing_entry_mutation::<true>(key) {
             self.set_existing_expiry_ms(key, Some(expires_at_ms));
             if added_expiry {
                 self.expires_count = self.expires_count.saturating_add(1);
@@ -35808,6 +35847,48 @@ mod tests {
                 "notifications for {:?}/{ms}",
                 String::from_utf8_lossy(key)
             );
+        }
+    }
+
+    #[test]
+    fn expire_digest_direct_bump_matches_entry_lookup_reference() {
+        // The candidate replaces only the empty `with_mutated_entry` call after the key's
+        // existence has already been proven. Exercise both digest modes: stale takes the old
+        // get_mut+bump path, while fresh used to hash the unchanged entry before and after.
+        for fresh_digest in [false, true] {
+            let build = || {
+                let mut store = Store::new();
+                store.notify_keyspace_events =
+                    super::NOTIFY_KEYSPACE | super::NOTIFY_KEYEVENT | super::NOTIFY_GENERIC;
+                store.set(b"k".to_vec(), vec![b'x'; 256], None, 1_000);
+                assert!(store.expire_milliseconds(b"k", 5_000, 1_000));
+                let _ = store.drain_keyspace_notifications();
+                store
+            };
+            let mut candidate = build();
+            let mut reference = build();
+            if fresh_digest {
+                assert_eq!(candidate.state_digest(), reference.state_digest());
+                assert!(!candidate.digest_stale);
+                assert!(!reference.digest_stale);
+            }
+
+            assert_eq!(
+                candidate.expire_milliseconds(b"k", 9_000, 2_000),
+                reference.expire_milliseconds_digest_lookup_ref(b"k", 9_000, 2_000)
+            );
+            assert_eq!(candidate.expiry_deadlines, reference.expiry_deadlines);
+            assert_eq!(candidate.expires_count, reference.expires_count);
+            assert_eq!(candidate.db_expires_counts, reference.db_expires_counts);
+            assert_eq!(candidate.dirty, reference.dirty);
+            assert_eq!(candidate.digest_mutations, reference.digest_mutations);
+            assert_eq!(candidate.digest_stale, reference.digest_stale);
+            assert_eq!(candidate.running_digest, reference.running_digest);
+            assert_eq!(
+                candidate.drain_keyspace_notifications(),
+                reference.drain_keyspace_notifications()
+            );
+            assert_eq!(candidate.state_digest(), reference.state_digest());
         }
     }
 
