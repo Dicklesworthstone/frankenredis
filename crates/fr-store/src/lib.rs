@@ -24795,14 +24795,18 @@ impl Store {
         //     removed; on a key with no TTL it is a pure read (no event, no
         //     dirty), matching removeExpire()'s return-value gate upstream.
         if let Some(exp) = new_expires_at_ms {
-            let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk.to_vec()),
-                None => (0, key.to_vec()),
+            // (cc_fr) `logical_key` BORROWS `key` (a `&[u8]` param, not `self`) for the
+            // keyspace-notify, which is a no-op when notifications are off (the default). `key`
+            // outlives every `self` mutation below, so the old `to_vec` was a wasted per-GETEX
+            // heap alloc. Matches the borrowed logical_key on the EXPIRE/SET/DEL paths.
+            let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk),
+                None => (0, key),
             };
             let old_expiry = self.expiry_ms(key);
             match exp {
                 Some(deadline) if deadline <= now_ms => {
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
                     self.dirty = self.dirty.saturating_add(1);
@@ -24821,7 +24825,7 @@ impl Store {
                     self.mark_volatile_keys_dirty();
                     self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
                 }
                 None => {
                     if old_expiry.is_some() {
@@ -24835,7 +24839,7 @@ impl Store {
                                 self.db_expires_counts[db].saturating_sub(1);
                         }
                         self.dirty = self.dirty.saturating_add(1);
-                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", &logical_key, db);
+                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", logical_key, db);
                     }
                 }
             }
