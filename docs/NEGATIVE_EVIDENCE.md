@@ -16775,3 +16775,20 @@ idletime(1) lib tests green (cover present/absent/empty/WRONGTYPE/expired + the 
 _no_stat size probes). Same primitive as bitfield_resolve_lookup (1.75x isolated); no fresh gate. NOTE: SPOP /
 SPOP_COUNT (write, RNG-per-pop) + XINFO / BITFIELD-GET-batch (different single-lookup shape) deliberately excluded
 from the sweep. This EXHAUSTS the drop_if_expired-return-used read family. Rollback: restore each unconditional guard.
+
+### 2026-07-12 SHIPPED (ZADD-INCR/ZINCRBY reuse the XX/LFU presence probe for get-or-create)
+The zset sibling of the HSET reuse-presence fusions. `zincrby_with_options` (single-member ZADD with NX/XX/GT/LT
++ ZINCRBY) computes `key_existed = (opts.xx || lfu_tracking_enabled) && entries.contains_key(key)` (already gated,
+a5e0b0b35 — the common no-XX/no-LFU ZADD short-circuits it), then calls `internal_entry` (contains_key + get_mut)
+to get-or-create the sorted set. On the XX/LFU path `key_existed` already resolved presence and nothing mutates
+`entries` between it and the get-or-create (only the XX-absent early-return + `next_rand`), so `internal_entry`'s
+`contains_key` is redundant: reuse `key_existed` — present -> one `get_mut`; absent -> insert + `get_mut` (this
+absent branch is LFU-only, since XX+absent already returned Ok(None) above). The common no-XX/no-LFU default path
+is UNCHANGED (`internal_entry` does its own single get-or-create — `&&` short-circuited the probe, no regression).
+XX/LFU path: 3 keyspace probes -> 2. Byte-identical incl. RNG (rand_sample still drawn at the same point; the
+absent branch draws none as `lfu && key_existed` is false): 8 `zadd` + 4 `zincrby` + 73 `bumps_lfu` (incl.
+`zincrby_existing_zset_bumps_lfu_frequency`, the exact bump/PRNG/presence path) + 2 `zscore` lib tests green.
+Same vein + honest scope as the HSET (345cf4897) / HINCRBY (86205d20f) LFU-probe elisions: XX-or-LFU path only,
+isolated one-lookup delta (bitfield_resolve_lookup primitive). Completes the reuse-presence family across the hot
+listpack/skiplist write commands (HSET x2, HINCRBY/HINCRBYFLOAT/HSETNX, ZADD-INCR). Rollback: restore the plain
+`internal_entry` call.

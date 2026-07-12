@@ -19387,8 +19387,28 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
+            // (perf) Under XX or LFU, `key_existed` above already probed presence (only the XX
+            // early-return + `next_rand` ran since — no `entries` mutation), so reuse it: create
+            // only when absent (XX-absent already returned above, so that path is LFU-only),
+            // skipping `internal_entry`'s redundant `contains_key`. The common no-XX/no-LFU ZADD
+            // keeps `internal_entry` (its `&&` short-circuited the probe). Byte-identical.
+            let entry = if opts.xx || lfu_tracking_enabled {
+                if key_existed {
+                    self.entries
+                        .get_mut(key)
+                        .expect("zset entry present at probe is still present")
+                } else {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
+                    );
+                    self.entries
+                        .get_mut(key)
+                        .expect("zset entry inserted above must exist")
+                }
+            } else {
+                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms)
+            };
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
