@@ -7896,7 +7896,12 @@ impl Store {
 
     /// Returns the current absolute expiry timestamp for a key, if any.
     pub fn get_expires_at_ms(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
+        // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
+        // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         self.expiry_ms(key)
     }
 
@@ -12099,7 +12104,12 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
+        // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
+        // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -24164,7 +24174,12 @@ impl Store {
         new_expires_at_ms: Option<Option<u64>>,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
+        // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
+        // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;

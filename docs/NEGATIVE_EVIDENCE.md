@@ -16844,3 +16844,18 @@ per-command dedicated turn — inline the use-block into both if-let arms (NLL f
 non-LFU only (LFU rand-order forces a presence probe), gated by an internal_entry-ref differential test. NEXT in
 the vein: hincrby-family (via with_mutated_entry), zincrby common path (secondary). Rollback: hset_borrowed ->
 ::<false> + drop the ref/impl/test/bench.
+
+### 2026-07-12 SHIPPED (GETEX/HSET-owned/TTL-PTTL guard their bare no-TTL reap probe — 3 hot single-key holdouts)
+Small clean sweep after finding the get_mut-first vein's remaining candidates marginal (zincrby = medium refactor
+for a secondary/sub-gate result; hincrby-family = delicate with_mutated_entry digest create-case). Re-enumerated
+the unguarded bare-statement `drop_if_expired(key, now_ms);` sites and found 3 HOT single-key holdouts still paying
+the discarded no-TTL contains_key probe (the DEL-class the loop/read families already got): `getex` (GETEX), the
+owned-field `hset` (the sibling of the already-guarded `hset_borrowed`), and `get_expires_at_ms` (TTL/PTTL). Each
+does a bare `drop_if_expired` whose return is discarded, then resolves presence via the following `get_mut`
+(GETEX/HSET create-or-find) or `expiry_ms` (TTL) — so guard the reap on `expires_count != 0`: when nothing is
+volatile the drop degrades to a wasted probe, and nothing can be evicted. 2 keyspace probes -> 1 per no-TTL call.
+Byte-identical incl. RNG (the LFU `should_bump = lfu && contains_key` gate does its own probe after, unaffected by
+the discarded drop): 3 getex + 14 ttl + 8 hset + 14 expired lib tests green (expired-interplay confirms reap
+preserved). Same primitive as bitfield_resolve_lookup (1.75x isolated); no fresh gate. LEFT (case-by-case, lower
+EV): the zset-range read family (zrange*/zrevrange*/zrangebylex* — O(range)-dwarfed for big ranges), stream group
+prechecks, HLL DEBUG (cold), MEMORY USAGE / RESTORE (drop is a tiny fraction). Rollback: unwrap each guard.
