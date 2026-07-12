@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (sub-gate, reverted) — zset-listpack score ENCODE per-entry render Vec hoist
+
+NEGATIVE-LEDGER-FIRST: `encode_zset_score_listpack_entry` (fr-persist) allocates a fresh
+`Vec::with_capacity(24)` per NON-integer score (`Str`/`Reparse` arms), renders the d2string ASCII
+into it, copies into the blob, and drops it — one alloc+free per fractional score on the RDB-save /
+DUMP zset-listpack path. Integer scores never allocate. Candidate: reuse ONE hoisted scratch buffer
+across the whole blob (`clear()` per entry). Byte-identical (same render + entry encoders), strictly
+`<=` allocations, so Pareto-safe — but the question is whether the alloc+free is a gateable fraction
+under mimalloc.
+
+MEASURED (same-binary null-gated A/B, worker vmi1149989, contended null cv 9–16%): `frac_128`
+**1.117x**, `frac_512` **1.113x**, `mixed_128` **1.127x** — a consistent positive trend across three
+fractional/mixed shapes — but EVERY case sits INSIDE its noisy null p5..p95 (p95 ≈ 1.14–1.21), so
+none is gate-decided. `int_128` guard neutral (0.953x, inside null). Byte-identical confirmed (the
+A/B correctness gate asserts `::<false>` == `::<true>` on all 4 shapes before timing). Unlike the LZF
+match-tail ship the same day (a decisive 1.6x gate-clear on run-heavy), NO zset case clears the strict
+p95 gate — a ~1.1x effect below the ~cv-6% noise floor this worker allows. Matches the prior
+mimalloc-defeats-small-alloc-elision proxy (zsetlpscore `int_96` ~1.05x, set/hash decode intermediate
+-Vec sub-gate). REVERTED (scaffolding removed). A quiet-worker re-measure (cv < 5%) could resolve the
++11–13% trend if a future turn wants to revisit; not worth the churn now.
+
 ## 2026-07-12: SHIPPED — LZF match-tail routes >=128 B tails through fr_simd AVX2; gate-cleared 1.6x on run-heavy DUMP, byte-identical, Pareto-safe
 
 NEGATIVE-LEDGER-FIRST / PROFILE-FIRST: fr-persist's `common_prefix_len` carried a standing SURFACE
