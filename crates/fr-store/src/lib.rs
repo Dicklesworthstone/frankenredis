@@ -9728,7 +9728,12 @@ impl Store {
         // upstream WRONGTYPE-before-argv-parse precedence (oss8i). Counting again
         // here double-bumped keyspace_hits for a present key (2 vs redis's 1).
         // drop_if_expired keeps the expiry-reap + missing -> 0 behavior, no stat.
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired degrades to a discarded contains_key,
+        // and the get_mut below already re-probes presence — its `None => Ok(0)` arm is exactly
+        // this early return. Fuse them: only reap when a key can actually expire. Byte-identical
+        // (with no TTL nothing evicts; an absent key falls to the get_mut None arm). One fewer
+        // keyspace probe per no-TTL BITCOUNT.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -9841,7 +9846,10 @@ impl Store {
         // store.key_type precheck (run for the missing-key short-circuit + the
         // WRONGTYPE-before-argv-parse precedence), so counting here too double-
         // bumped keyspace_hits for a present key. Same class as the BITCOUNT fix.
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) Same fusion as BITCOUNT: on the no-TTL fast path the drop is a discarded
+        // contains_key and the get_mut below re-probes presence — its `None` arm returns this
+        // exact value. Only reap when a key can actually expire. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return if bit { Ok(-1) } else { Ok(0) };
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();

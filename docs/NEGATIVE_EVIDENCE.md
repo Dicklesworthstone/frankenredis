@@ -16739,3 +16739,22 @@ the exact bump/PRNG/presence path. Same vein + honest scope as the HSET LFU-prob
 only, isolated one-lookup delta (bitfield_resolve_lookup primitive), small end-to-end fraction. This exhausts the
 `should_bump_lfu`-reuse micro-vein — all five single-field hash write/counter paths (2x HSET + HINCRBY +
 HINCRBYFLOAT + HSETNX) now reuse their LFU presence probe. Rollback: restore the plain `ensure_entry` call at each.
+
+### 2026-07-12 SHIPPED (BITCOUNT/BITPOS fuse the no-TTL reap into the value lookup — common-path, 2->1 probe)
+Fresh common-path lever after confirming the hash-write / keyspace veins saturated. BITCOUNT and BITPOS use the
+NO-STAT `drop_if_expired` (frankenredis-9s4ls: they must NOT bump keyspace stats, so they can't use the stat-
+bumping read fast path `lookup_live_for_read_mut`) as `if !drop_if_expired(key) { return <default> }` — presence
+for the missing-key short-circuit — then a SEPARATE `get_mut(key)` for the value. On the no-TTL fast path
+(`expires_count == 0`) `drop_if_expired` degrades to a discarded `contains_key`, and the `get_mut` already
+re-probes presence: its `None` arm returns the EXACT same default (`Ok(0)` for BITCOUNT; `if bit {Ok(-1)} else
+{Ok(0)}` for BITPOS — verified identical to each early return). So guard the reap on `expires_count != 0` and let
+the `get_mut` `None` arm handle the absent/no-TTL case. UNLIKE the recent LFU-secondary elisions, this fires on
+EVERY no-TTL BITCOUNT/BITPOS (the common workload) regardless of maxmemory-policy: 2 keyspace probes -> 1.
+Byte-identical incl. RNG (an absent key drew no rand before — it returned pre-rand-block; still draws none: the
+`lfu && contains_key` gate is false) and stats (both probes are no-stat): 4 `bitcount` + 11 `bitpos` + 10 `bit_`
+lib tests green (cover present / absent / empty / WRONGTYPE / expired). No fresh gate — the eliminated primitive
+is the `contains_key` already gated at 1.75x isolated (bitfield_resolve_lookup); end-to-end a fraction that shrinks
+as the popcount range grows, but always >0 and on the common path. Rollback: restore the unconditional
+`drop_if_expired` guard at each. REUSABLE: a read command that uses `drop_if_expired`'s RETURN for a missing-key
+short-circuit AND has a following `get_mut` whose `None` arm returns the SAME default can guard the reap on
+`expires_count` and fold presence into the lookup (works only when the two defaults match exactly).
