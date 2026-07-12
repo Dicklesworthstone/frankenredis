@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (presize vein fully characterized + mined) — presize wins ONLY when per-element work ≈ a pointer-move
+
+Swept the sibling result-`Vec` builders after the LPOP/RPOP presize win (below). The reusable RULE that
+falls out: pre-sizing a grown result `Vec` wins meaningfully ONLY when the per-element work is ≈ an O(1)
+pointer-move, so the outer `Vec`'s ~2N amortized realloc-copies are a real fraction. When the
+per-element work is EXPENSIVE, the realloc growth is negligible and the presize is a marginal wash:
+- **LMPOP / ZMPOP already covered**: `lmpop`/`zmpop` delegate to `lpop_count`/`rpop_count` /
+  `zpopmin_count` (→ `drain_first_n` + `collect_drained`), all already presized (LPOP/RPOP shipped
+  below; the Full-zset drain presizes to `n.min(keys.len())`).
+- **Marginal (per-element work dominates the result-grow), skipped**: KEYS (per key = an owned CLONE),
+  zpop-Packed (`pop_min` = O(len) listpack SHIFT per pop, so O(count·len)), SPOP-count (a keyspace
+  LOOKUP + O(len) intset/packed shift per pop), SMISMEMBER (a hashset membership CHECK per element).
+  In each, presizing the outer `Vec` saves ~a pointer-copy per element out of ~30 ns+ of real work
+  → sub-noise; not a clean win.
+
+The one remaining REAL lever here is the previously-surfaced **SPOP-count lookup fusion** (`spop_count`
+loops `self.spop` = O(count) `get_mut`; redis does one), but it stays deferred: a fused version must
+precompute the exact `next_rand()` sequence (rand_val + LFU-conditional lfu_rand per pop, plus one
+wasted rand_val on the `count > set_len` break) and replicate the per-pop LFU-bump/touch/dirty/
+digest-stale bookkeeping, gated by an RNG-state-after-SPOP differential test — a medium refactor, not a
+small increment. No code shipped this turn.
+
 ## 2026-07-12: SHIPPED — LPOP/RPOP count result Vec pre-sized (exact count); 2.58x small-count, byte-identical
 
 AMENDS the "upper-bound, not exact" note below: LPOP/RPOP with count LOOKED like an upper-bound
