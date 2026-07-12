@@ -11379,7 +11379,12 @@ impl Store {
         if let Some(entry) = self.entries.remove(key) {
             self.invalidate_write_side_caches(key);
             self.mark_ordered_keys_dirty();
-            self.expiry_deadlines.remove(key);
+            // (cc_fr) `old_expiry` came from `expiry_ms` == `expiry_deadlines.get(key)`, so
+            // is_none() means the key is absent from the map — skip the foldhash probe on the
+            // no-TTL removal (the common case). Byte-identical: an absent key's remove is a no-op.
+            if old_expiry.is_some() {
+                self.expiry_deadlines.remove(key);
+            }
             // RANDOMKEY's per-db vector is a lazy cache; dropping any key in the
             // DB invalidates the cache and the next RANDOMKEY rebuilds it from
             // the canonical `entries` map.
