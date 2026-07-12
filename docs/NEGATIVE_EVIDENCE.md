@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (memset-elision vein now fully mined) — no clean drive-by remains; next byte-level lever is deferred/complex
+
+After four memset-elision wins (BITOP 2-op collect, HLL decode, HLL merge-accum, BITOP NOT) a
+negative-ledger-first sweep this turn found no further clean `vec![0u8; N]`-then-overwrite drive-by:
+- Remaining `vec![0; N]` / `resize(N, 0)` sites are LOAD-BEARING padding, not waste: SETBIT/SETRANGE
+  new-bitmap + gap-fill (only the target bits are set; the rest must stay 0 — redis zero-fills too),
+  BITFIELD grow, BITOP AND/OR/XOR result tails (implicit-0 operand), the sparse-HLL register buffer
+  (ZERO/XZERO runs rely on it), and the general BITOP path already seeds from the first operand.
+- `listpack_blob_with_header` + all fr-persist RDB decode/encode already use `Vec::with_capacity`+push.
+- HLL dense ENCODE was MEASURED NEUTRAL (below) — the 3-byte-stride rebuild eats the saving.
+
+Other veins checked-and-clean this turn: BITCOUNT bit-range (AVX2 `popcount_bytes` + O(1) edge mask),
+the write-path keyspace-notify key (already borrows `&[u8]`, off-by-default), COPY's value clone
+(`duplicate_for_copy` — a deep copy is PARITY with redis `dupStringObject`; MOVE has a consuming twin),
+and the AOF-rewrite `logical_key.to_vec()` (cold path).
+
+The one remaining concrete byte-level lever is the **HLL 6-bit dense unpack** (`hll_decode_dense_
+registers`'s compute, complementing the shipped alloc win): SIMD-able via a base64-style 3→4
+shuffle+multiply codec, but PFMERGE / multi-key PFCOUNT already run **3.4–3.6x faster than redis
+7.2.4**, so the marginal value is low, and the shuffle-mask/multiply-constant codec is high-risk to
+land byte-exact in one slow-iteration turn. Deferred as scoped, not a drive-by. The remaining real
+frontier is peer-contended dispatch (P3 byte-prefix-packet beads) or multi-day structural. No code
+shipped this turn.
+
 ## 2026-07-12: SHIPPED — BITOP NOT builds the result one-pass into uninit (drops the memset); 1.33–1.59x all sizes, byte-identical
 
 The `BITOP NOT` result was `vec![0u8; max_len]` (alloc_zeroed memset) then `bitnot_into` overwrote
