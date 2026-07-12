@@ -23227,7 +23227,7 @@ impl Store {
             };
         }
 
-        let mut merged = vec![0u8; HLL_REGISTERS];
+        let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
         for &key in keys {
             self.drop_if_expired(key, now_ms);
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
@@ -23252,10 +23252,10 @@ impl Store {
                     .get(key)
                     .filter(|cache| cache.modification_count == modification_count)
                 {
-                    hll_merge_registers(&mut merged, cache.registers.as_slice());
+                    hll_merge_fold(&mut merged, cache.registers.as_slice());
                 } else {
                     let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
-                    hll_merge_registers(&mut merged, &registers);
+                    hll_merge_fold(&mut merged, &registers);
                     cache_insert = Some((
                         key.to_vec(),
                         hll_register_cache(registers, modification_count),
@@ -23267,6 +23267,7 @@ impl Store {
                 self.hll_register_cache.insert(key, cache);
             }
         }
+        hll_merge_finalize(&mut merged);
         Ok(hll_estimate(&merged))
     }
 
@@ -23279,7 +23280,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let mut merged = vec![0u8; HLL_REGISTERS];
+        let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
         let mut saw_dense_input = false;
 
         // Include dest if it already holds an HLL, and preserve its TTL
@@ -23293,7 +23294,7 @@ impl Store {
             // overflow the register set (trailing VAL garbage tolerated). (frankenredis-yiu5p)
             let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
             saw_dense_input |= encoding == HllEncoding::Dense;
-            hll_merge_registers(&mut merged, &registers);
+            hll_merge_fold(&mut merged, &registers);
         }
 
         // Merge all sources
@@ -23305,10 +23306,11 @@ impl Store {
                 };
                 let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
                 saw_dense_input |= encoding == HllEncoding::Dense;
-                hll_merge_registers(&mut merged, &registers);
+                hll_merge_fold(&mut merged, &registers);
             }
         }
 
+        hll_merge_finalize(&mut merged);
         let dest_encoding =
             if saw_dense_input || hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes) {
                 HllEncoding::Dense
@@ -32101,6 +32103,29 @@ fn hll_merge_registers(merged: &mut [u8], registers: &[u8]) {
     // 16384-register array — the PFMERGE / multi-key PFCOUNT hot loop. Byte-identical.
     let n = merged.len().min(registers.len());
     fr_simd::max_bytes_inplace(&mut merged[..n], &registers[..n]);
+}
+
+/// Fold `registers` into the growable `merged` accumulator (PFMERGE / multi-key PFCOUNT). The
+/// FIRST fold seeds `merged` by copying `registers` — register-wise max against the implicit
+/// all-zero accumulator IS a copy — which lets the caller start from an empty
+/// `Vec::with_capacity(N)` instead of `vec![0u8; N]`, eliding both the 16 KiB `alloc_zeroed`
+/// memset AND the wasted first max pass. Later folds take the register-wise max. Byte-identical to
+/// zero-init-then-max-all. Pair with [`hll_merge_finalize`] before reading `merged`.
+fn hll_merge_fold(merged: &mut Vec<u8>, registers: &[u8]) {
+    if merged.is_empty() {
+        merged.extend_from_slice(registers);
+    } else {
+        hll_merge_registers(merged, registers);
+    }
+}
+
+/// Zero-pad the accumulator to a full register set before it is read/encoded, covering the
+/// "no source contributed" case (empty `merged`) and any short first fold. A no-op once a
+/// full-length source has been folded (the common path).
+fn hll_merge_finalize(merged: &mut Vec<u8>) {
+    if merged.len() < HLL_REGISTERS {
+        merged.resize(HLL_REGISTERS, 0);
+    }
 }
 
 fn hll_encode_sparse_create_from_pfadd<T: AsRef<[u8]>>(

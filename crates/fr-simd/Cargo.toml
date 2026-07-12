@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "hll_decode_zeroinit"
 harness = false
+
+[[bench]]
+name = "hll_merge_accum"
+harness = false

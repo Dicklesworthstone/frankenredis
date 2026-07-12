@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — HLL merge accumulator skips the alloc_zeroed memset AND the first max pass; 2-source 1.53x, byte-identical
+
+PFMERGE and multi-key PFCOUNT built the union in `merged = vec![0u8; 16384]` (alloc_zeroed memset)
+then register-wise-max'd EVERY source into it. But `max(0, src) == src`, so the first max against the
+all-zero accumulator is just a copy — the memset AND that first max pass are both waste. ONE LEVER:
+`merged = Vec::with_capacity(16384)`, and fold via a shared `hll_merge_fold` — the FIRST source is
+`extend_from_slice`'d (copy-seed), later sources take the AVX2 register max; `hll_merge_finalize`
+zero-pads before read for the "no source contributed" case. Centralised in two helpers next to
+`hll_merge_registers`, wired at all 4 call sites (2 PFCOUNT-multi, 2 PFMERGE).
+
+BYTE-IDENTICAL (copy-seed == max-against-zeros; finalize reproduces the all-zero empty result): all
+**29** fr-store PF tests pass incl. `pfcount_empty_key_is_zero` (the empty-merged→zero-pad edge),
+`pfcount_multi_key_register_cache_*` (cache-hit fold), `pfmerge_combines_two_hlls`, and the
+metamorphic `mr_hll_pfmerge_{single_source,union_bound,commutative}` / `mr_hll_pfcount_multi_equals_
+merge` gates. The A/B bench also asserts `accum_zeroed == accum_fold` for 2/4/8 sources.
+
+MEASURED (same-binary null-gated A/B `benches/hll_merge_accum.rs`, fresh accumulator per iter,
+byte-identity asserted): **2 sources 1.528x** (the common case — skips memset + 1 of 2 max passes),
+**4 sources 1.153x**, 8 sources 1.073x indistinguishable (memset+first-max shrink as a fraction with
+more sources). Complements the shipped per-source decode memset-elision; together the dense-HLL union
+does one fewer 16 KiB memset per call plus one fewer max pass.
+
 ## 2026-07-12: NEGATIVE (measured neutral, reverted) — the memset-elision does NOT generalize to HLL dense ENCODE
 
 Applied the shipped decode memset-elision (below) to its twin `hll_encode_dense_registers`: it also
