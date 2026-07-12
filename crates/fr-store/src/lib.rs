@@ -13698,7 +13698,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<true>(key, field, value, now_ms)
+        self.hsetnx_impl::<true, true>(key, field, value, now_ms)
     }
 
     /// Bench/test-only reference: the pre-`get_mut`-first HSETNX (`ensure_entry` +
@@ -13711,10 +13711,23 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<false>(key, field, value, now_ms)
+        self.hsetnx_impl::<false, true>(key, field, value, now_ms)
     }
 
-    fn hsetnx_impl<const GETMUT_FIRST: bool>(
+    /// Bench-only baseline: HSETNX with the O(n) re-scanning encoding refresh (`INCR=false`)
+    /// instead of the O(1) incremental one. Byte-identical result; isolates the per-HSETNX rescan.
+    #[doc(hidden)]
+    pub fn hsetnx_rescan(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hsetnx_impl::<true, false>(key, field, value, now_ms)
+    }
+
+    fn hsetnx_impl<const GETMUT_FIRST: bool, const INCR: bool>(
         &mut self,
         key: &[u8],
         field: Vec<u8>,
@@ -13741,10 +13754,17 @@ impl Store {
                 return Err(StoreError::WrongType);
             };
             if !m.contains_key(&field) {
+                // (cc_fr) Capture lengths before the move; drive the O(1) incremental refresh.
+                let field_len = field.len();
+                let value_len = value.len();
                 m.insert(field, value);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
-                // (frankenredis-yp503) Lock hashtable encoding if threshold crossed.
-                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                // (frankenredis-yp503) Lock hashtable encoding if threshold crossed. (cc_fr) O(1)
+                // incremental: only the entry count + this new field/value can promote a listpack
+                // hash — no O(n) rescan of the guaranteed-small existing fields.
+                Self::refresh_hash_encoding_after_insert::<INCR>(
+                    entry, field_len, value_len, max_entries, max_value,
+                );
                 Ok(true)
             } else {
                 Ok(false)
@@ -44030,6 +44050,68 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(store.hget(b"h", b"f", 0).unwrap(), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn hsetnx_incremental_refresh_matches_rescan() {
+        // Gate HSETNX's O(1) incremental post-insert encoding refresh (INCR=true) against the O(n)
+        // `refresh_hash_encoding_flag` re-scan (INCR=false). Byte-identical result + digest
+        // bookkeeping + OBJECT ENCODING across every HSETNX promotion trigger: no-op on an existing
+        // field (no insert, no refresh), fresh single field, count-driven (>512 fields),
+        // new-value-oversized (>64B), new-field-oversized (>64B), already-promoted hashtable.
+        type Hsetnx = fn(&mut Store, &[u8], Vec<u8>, Vec<u8>, u64) -> Result<bool, StoreError>;
+        let big = || vec![b'x'; 80]; // > hash_max_listpack_value (64)
+        let build = |h: Hsetnx, case: &str| -> (Result<bool, StoreError>, Store) {
+            let mut s = Store::new();
+            let r = match case {
+                "new_key" => h(&mut s, b"h", b"f".to_vec(), b"v".to_vec(), 2),
+                "existing_field_noop" => {
+                    h(&mut s, b"h", b"f".to_vec(), b"old".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", b"f".to_vec(), b"new".to_vec(), 2) // absent-check fails, no insert
+                }
+                "count_promote" => {
+                    for i in 0..512u32 {
+                        s.hset_borrowed(b"h", format!("f{i:04}").as_bytes(), b"0".to_vec(), 1)
+                            .unwrap();
+                    }
+                    h(&mut s, b"h", b"fnew".to_vec(), b"v".to_vec(), 2) // 513th field crosses 512
+                }
+                "value_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"0".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", b"f".to_vec(), big(), 2)
+                }
+                "field_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"0".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", big(), b"v".to_vec(), 2)
+                }
+                "already_promoted" => {
+                    s.hset_borrowed(b"h", b"big", big(), 1).unwrap(); // hashtable-encoded
+                    h(&mut s, b"h", b"f".to_vec(), b"v".to_vec(), 2)
+                }
+                _ => unreachable!(),
+            };
+            (r, s)
+        };
+        for case in [
+            "new_key",
+            "existing_field_noop",
+            "count_promote",
+            "value_promote",
+            "field_promote",
+            "already_promoted",
+        ] {
+            let (ra, mut a) = build(Store::hsetnx, case);
+            let (rb, mut b) = build(Store::hsetnx_rescan, case);
+            assert_eq!(ra, rb, "result @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
+            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
+            assert_eq!(
+                a.object_encoding(b"h", 3),
+                b.object_encoding(b"h", 3),
+                "encoding @ {case}"
+            );
+        }
     }
 
     #[test]

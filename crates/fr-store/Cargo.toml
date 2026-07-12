@@ -182,6 +182,11 @@ harness = false
 name = "hincrby_encoding_refresh"
 harness = false
 
+# (cc_fr) Same A/B for HSETNX: O(n^2) vs O(n) building a hash one absent field at a time.
+[[bench]]
+name = "hsetnx_encoding_refresh"
+harness = false
+
 # (6lgnu validation) Quantify the lazy rank-treap's per-ZADD maintenance tax: identical N-member
 # builds with the treap cold (never queried) vs warm (queried once, maintained on every later ZADD).
 [[bench]]
