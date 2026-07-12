@@ -32094,14 +32094,12 @@ fn hll_register_cache(registers: Vec<u8>, modification_count: u64) -> HllRegiste
 }
 
 fn hll_merge_registers(merged: &mut [u8], registers: &[u8]) {
-    // (CrimsonHawk) Use an UNCONDITIONAL max store, not `if src > *dst { *dst = src }`.
-    // LLVM does not autovectorize the conditional-store form (it sees a predicated
-    // store), but `*dst = (*dst).max(src)` lowers to SIMD u8 max (`pmaxub`, 16+ regs
-    // per instruction). Byte-identical (register-wise max). Measured -93.9% (16.3x)
-    // on the 16384-register merge — the PFMERGE / multi-key PFCOUNT hot loop.
-    for (dst, &src) in merged.iter_mut().zip(registers) {
-        *dst = (*dst).max(src);
-    }
+    // (CrimsonHawk) Register-wise unsigned byte max. The scalar `(*dst).max(src)` loop lowers
+    // to SSE2 `pmaxub` (16 B/instr, -93.9% / 16.3x over the conditional-store form). The
+    // explicit AVX2 kernel (`_mm256_max_epu8`, 32 B/instr) is faster still on the L1/L2-resident
+    // 16384-register array — the PFMERGE / multi-key PFCOUNT hot loop. Byte-identical.
+    let n = merged.len().min(registers.len());
+    fr_simd::max_bytes_inplace(&mut merged[..n], &registers[..n]);
 }
 
 fn hll_encode_sparse_create_from_pfadd<T: AsRef<[u8]>>(

@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — HLL dense-register merge (PFMERGE/PFCOUNT) wired to AVX2 max; 1.14–1.56x, byte-identical
+
+Same LLVM-SSE2-loop → explicit-AVX2 pattern as the BITOP wins. `hll_merge_registers` did register-wise
+unsigned byte max via the scalar `*dst = (*dst).max(src)` loop, which LLVM lowers to SSE2 `pmaxub`
+(16 B/instr, already 16.3x over a conditional store). ONE LEVER: added `fr_simd::max_bytes_inplace`
+(AVX2 `_mm256_max_epu8`, 32 B/instr, dispatch `avx2 → scalar`) and wired the merge to it — the wider
+sibling, same as `pand → vpand` for bitand.
+
+BYTE-IDENTICAL (register-wise max is deterministic; `_mm256_max_epu8` == `u8::max` per lane, min
+prefix): new fr-simd test `max_bytes_matches_scalar_and_naive_all_lengths_alignments_and_unequal`
+(AVX2 == scalar == naive over 34x34 alignments x 10 lengths + unequal) + fr-store
+`pfmerge_combines_two_hlls` / `pfmerge_uses_dense_encoding_when_any_source_is_dense` + the metamorphic
+`mr_hll_pfmerge_{single_source,union_bound,commutative}` gates, all green.
+
+MEASURED (same-binary null-gated A/B `benches/hll_max_scalar_vs_avx2.rs`, scalar-pmaxub replica vs
+AVX2, `avx2_detected=true`, byte-identity asserted; contended worker cv ~18%): **16 KiB (= the 16384
+-register array, the real PFMERGE/PFCOUNT workload) 1.558x, 64 KiB 1.311x, 512 KiB 1.141x** — all above
+null p95; 4 MiB 1.128x indistinguishable (bandwidth-bound). The 16 KiB point is the one that matters:
+the HLL dense register array is exactly 16384 bytes (L1-resident), the strong-AVX2 regime.
+
+HONEST SCOPE: the win is the dense-register merge on the PFMERGE / multi-key PFCOUNT hot loop (a real
++56% on that 16 KiB step). It does not touch sparse HLL, the hash/rho compute, or single-key PFCOUNT
+(cache hit). Byte-identical, no downside.
+
 ## 2026-07-12: SHIPPED — BITOP NOT wired to AVX2 fr_simd::bitnot_into; 1.02–2.16x, byte-identical (completes the BITOP AVX2 family)
 
 Follow-on to the BITOP AND/OR/XOR AVX2 wiring earlier today. `Store::bitop`'s NOT path used the

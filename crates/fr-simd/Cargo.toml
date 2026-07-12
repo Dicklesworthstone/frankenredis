@@ -32,3 +32,7 @@ harness = false
 [[bench]]
 name = "bitnot_swar_vs_avx2"
 harness = false
+
+[[bench]]
+name = "hll_max_scalar_vs_avx2"
+harness = false
