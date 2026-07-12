@@ -7928,7 +7928,14 @@ impl Store {
         // accounting and result vs the record_keyspace_lookup + expiry_ms pair.
         // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries that do NOT
         // update access time (no RNG consumed, LFU-independent), so the collapse is exact.
-        let deadline = self.expiry_ms(key);
+        // (cc_fr) expires_count-guard the expiry_deadlines foldhash: with no TTL-bearing key
+        // anywhere, this key can't have a deadline, so expiry_ms would return None. Byte-identical
+        // (every `deadline` reuse below is correct with None when expires_count==0).
+        let deadline = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, deadline).should_evict {
             self.drop_if_expired(key, now_ms);
             self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -8075,7 +8082,15 @@ impl Store {
         // drops the redundant `entries.get` + a second expiry probe. Byte-identical: a
         // non-expired key's `drop_if_expired` had no side effect, and an evicted key falls
         // to the create branch below where `has_existing_expiry` is unused.
-        let deadline = self.expiry_ms(key);
+        // (cc_fr) Skip the expiry_deadlines foldhash on the no-TTL counter hot path (INCR/DECR/
+        // INCRBY): with no TTL-bearing key anywhere, this key can't carry a deadline, so expiry_ms
+        // would return None. Byte-identical (expires_count==0 ⇒ no eviction, has_existing_expiry
+        // stays false) — mirrors the expires_count read-path guards.
+        let deadline = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, deadline).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -8718,7 +8733,14 @@ impl Store {
         // redundant entries probe and the second expiry read — and the live deadline is
         // reused as the TTL to preserve on the re-insert. Byte-identical: an evicted key
         // falls to the None create branch (expires_at_ms = None) exactly as before.
-        let deadline = self.expiry_ms(key);
+        // (cc_fr) expires_count-guard the expiry_deadlines foldhash: with no TTL-bearing key
+        // anywhere, this key can't have a deadline, so expiry_ms would return None. Byte-identical
+        // (every `deadline` reuse below is correct with None when expires_count==0).
+        let deadline = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, deadline).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -10018,7 +10040,14 @@ impl Store {
         // a second `expiry_ms`. Skips drop_if_expired's redundant `entries.get` + the second
         // expiry probe. Byte-identical: an evicted key would have read `expiry_ms == None`
         // and returned false anyway; a non-evicted key's deadline is unchanged.
-        let deadline = self.expiry_ms(key);
+        // (cc_fr) expires_count-guard the expiry_deadlines foldhash: with no TTL-bearing key
+        // anywhere, this key can't have a deadline, so expiry_ms would return None. Byte-identical
+        // (every `deadline` reuse below is correct with None when expires_count==0).
+        let deadline = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, deadline).should_evict {
             self.drop_if_expired(key, now_ms);
             return false;
