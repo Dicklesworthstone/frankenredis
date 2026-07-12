@@ -748,6 +748,56 @@ unsafe fn binop_collect_avx2<const OP: u8>(a: &[u8], b: &[u8], dst: *mut u8) {
     }
 }
 
+/// One-pass build of `out[i] = !src[i]` — the 1-operand `BITOP NOT` where the result is a fresh
+/// `Vec`. AVX2-wide (`_mm256_xor_si256` with 0xFF lanes) straight into the `Vec`'s uninitialised
+/// capacity, so it elides the `vec![0u8; N]` alloc_zeroed memset that `NOT`-into-a-zeroed-buffer
+/// paid. Bit-identical to `src.iter().map(|b| !b).collect()`.
+#[inline]
+pub fn bitnot_collect(src: &[u8]) -> Vec<u8> {
+    let n = src.len();
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            let mut out = Vec::<u8>::with_capacity(n);
+            // SAFETY: avx2 present; the kernel writes exactly `n` bytes into `out`'s spare
+            // capacity (cap >= n), after which `set_len(n)` marks them initialised.
+            unsafe {
+                bitnot_collect_avx2(src, out.as_mut_ptr());
+                out.set_len(n);
+            }
+            return out;
+        }
+    }
+    src.iter().map(|b| !b).collect()
+}
+
+/// # Safety
+/// `avx2` must be present; `dst` must point to at least `src.len()` writable bytes (the caller
+/// `set_len`s afterward). Writes exactly `src.len()` bytes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bitnot_collect_avx2(src: &[u8], dst: *mut u8) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_set1_epi8, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+    let n = src.len();
+    let full = n / 32 * 32;
+    // SAFETY: caller guarantees avx2 + `dst` has >= n writable bytes and `src` has n readable
+    // bytes; every load/store spans `[off, off+32) ⊆ [0, full) ⊆ [0, n)`.
+    unsafe {
+        let ones = _mm256_set1_epi8(-1); // 0xFF lanes; `s ^ 0xFF == !s`
+        let mut off = 0usize;
+        while off < full {
+            let s = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+            _mm256_storeu_si256(dst.add(off) as *mut __m256i, _mm256_xor_si256(s, ones));
+            off += 32;
+        }
+        for i in full..n {
+            *dst.add(i) = !src[i];
+        }
+    }
+}
+
 // ───────────────────────────── CRC-64/Jones (Redis) ─────────────────────────────
 //
 // Redis's DUMP/RESTORE/RDB checksum: CRC-64/Jones, poly 0xAD93D23594C935A9, refin=refout=true,
@@ -1381,5 +1431,24 @@ mod tests {
         // Unequal lengths: result length is the min.
         assert_eq!(bitand_collect(&[0xff; 40], &[0x0f; 10]), vec![0x0f; 10]);
         assert_eq!(bitxor_collect(&[0xaa; 5], &[0xff; 12]), vec![0x55; 5]);
+    }
+
+    #[test]
+    fn bitnot_collect_matches_naive_all_lengths_alignments() {
+        use super::bitnot_collect;
+        let mut sa = vec![0u8; 320];
+        fill(&mut sa, 0x0f1e_2d3c_4b5a_6978);
+        for sstart in 0..34usize {
+            for len in [0usize, 1, 15, 16, 31, 32, 33, 63, 64, 65, 100, 255] {
+                if sstart + len > sa.len() {
+                    continue;
+                }
+                let s = &sa[sstart..sstart + len];
+                let naive: Vec<u8> = s.iter().map(|b| !b).collect();
+                assert_eq!(bitnot_collect(s), naive, "NOT s={sstart} len={len}");
+            }
+        }
+        assert!(bitnot_collect(&[]).is_empty());
+        assert_eq!(bitnot_collect(&[0x00, 0xff, 0xaa]), vec![0xff, 0x00, 0x55]);
     }
 }

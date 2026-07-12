@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "hll_merge_accum"
 harness = false
+
+[[bench]]
+name = "bitnot_collect_vs_zeroinit"
+harness = false

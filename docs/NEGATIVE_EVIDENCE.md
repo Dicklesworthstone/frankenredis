@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — BITOP NOT builds the result one-pass into uninit (drops the memset); 1.33–1.59x all sizes, byte-identical
+
+The `BITOP NOT` result was `vec![0u8; max_len]` (alloc_zeroed memset) then `bitnot_into` overwrote
+every byte — the zero-init was pure waste. ONE LEVER: new `fr_simd::bitnot_collect(src)` builds
+`!src` one-pass AVX2 (`_mm256_xor_si256` with 0xFF lanes) straight into the `Vec`'s uninitialised
+capacity, no memset; the NOT path calls it for a present operand (a missing key still yields the
+empty `max_len == 0` result). Twin of the 2-operand `bitand_collect`; completes the BITOP
+collect-into-uninit set (2-op AND/OR/XOR + NOT).
+
+BYTE-IDENTICAL: new fr-simd `bitnot_collect_matches_naive_all_lengths_alignments` (== `iter().map(!)`
+over 34 alignments × 12 lengths, exercising the uninit path) + fr-store `swar_bitop_matches_scalar_
+and_reports_ab_ratio` oracle + metamorphic `mr_bitop_not_invertive`. The A/B bench also asserts
+`zeroinit_then_not == bitnot_collect`.
+
+MEASURED (same-binary null-gated A/B `benches/bitnot_collect_vs_zeroinit.rs`, `avx2_detected=true`,
+byte-identity asserted): **8 KiB 1.454x, 64 KiB 1.464x, 512 KiB 1.335x, 4 MiB 1.587x** — WIN at every
+size, unlike AND/OR/XOR (which go bandwidth-neutral at RAM). NOT is a 2-stream op (read src / write
+dst), so the elided memset (a whole extra write stream) is a proportionally larger, size-independent
+saving.
+
 ## 2026-07-12: SHIPPED — HLL merge accumulator skips the alloc_zeroed memset AND the first max pass; 2-source 1.53x, byte-identical
 
 PFMERGE and multi-key PFCOUNT built the union in `merged = vec![0u8; 16384]` (alloc_zeroed memset)

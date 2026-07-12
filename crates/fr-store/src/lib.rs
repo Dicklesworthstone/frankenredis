@@ -23992,13 +23992,13 @@ impl Store {
             if keys.len() != 1 {
                 return Err(StoreError::WrongType);
             }
-            let mut result = vec![0u8; max_len];
-            // `result` is `max_len == values[0].len()` zeros; NOT every byte via the AVX2
-            // kernel (1.1-1.7x on cache-resident bitmaps; byte-identical `dst[i] = !src[i]`).
-            if let Some(v) = operand!(keys[0]) {
-                fr_simd::bitnot_into(&mut result, &v);
+            // A present operand fills every byte, so build `!v` one-pass into fresh capacity
+            // (no `vec![0u8; N]` alloc_zeroed memset). A missing operand yields the empty result
+            // (`max_len == 0`). Byte-identical to zero-init-then-`bitnot_into`.
+            match operand!(keys[0]) {
+                Some(v) => fr_simd::bitnot_collect(&v),
+                None => vec![0u8; max_len],
             }
-            result
         } else {
             let is_and = eq_ascii_ci(op, b"AND");
             let is_or = eq_ascii_ci(op, b"OR");
