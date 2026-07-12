@@ -24003,23 +24003,24 @@ impl Store {
             let is_xor = eq_ascii_ci(op, b"XOR");
 
             if keys.len() == 2 && (is_and || is_or || is_xor) {
-                // (CrimsonHawk) 2-operand fast path (the common BITOP shape): a single-pass
-                // `zip().map().collect()` that LLVM auto-vectorizes — one pass (read a, read b, write
-                // result), matching redis's single-pass compute, vs the general path's copy-first +
-                // in-place fold (two passes). Measured 1.47x on a 20KB AND at the store level. Byte-
-                // identical: `[0..min)` = a OP b; the tail `[min..max)` is 0 for AND (implicit-0 operand)
-                // or the longer operand's bytes for OR/XOR (OP with implicit 0).
+                // (CrimsonHawk) 2-operand fast path (the common BITOP shape): a single-pass build
+                // (read a, read b, write result), matching redis's single-pass compute, vs the
+                // general path's copy-first + in-place fold. The build now uses fr_simd's one-pass
+                // AVX2 collect (`_mm256_{and,or,xor}_si256` straight into the Vec's uninit capacity,
+                // no memset), which beats LLVM's SSE2 `zip().map().collect()` ~1.2-1.7x on
+                // cache-resident bitmaps. Byte-identical: `[0..min)` = a OP b; the tail `[min..max)`
+                // is 0 for AND (implicit-0 operand) or the longer operand's bytes for OR/XOR.
                 let ca = operand!(keys[0]).unwrap_or(std::borrow::Cow::Borrowed(&[]));
                 let cb = operand!(keys[1]).unwrap_or(std::borrow::Cow::Borrowed(&[]));
                 let a = ca.as_ref();
                 let b = cb.as_ref();
                 let n = a.len().min(b.len());
                 let mut result: Vec<u8> = if is_and {
-                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x & y).collect()
+                    fr_simd::bitand_collect(a, b)
                 } else if is_or {
-                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x | y).collect()
+                    fr_simd::bitor_collect(a, b)
                 } else {
-                    a[..n].iter().zip(&b[..n]).map(|(x, y)| x ^ y).collect()
+                    fr_simd::bitxor_collect(a, b)
                 };
                 if is_and {
                     result.resize(max_len, 0);

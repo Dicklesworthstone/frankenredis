@@ -664,6 +664,90 @@ unsafe fn max_bytes_inplace_avx2(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+/// One-pass build of `out[i] = a[i] OP b[i]` for `i in 0..min(a,b)` — the 2-operand `BITOP`
+/// shape (`AND`/`OR`/`XOR`) where the result is a fresh `Vec`, not an in-place fold. Same
+/// three memory streams as the LLVM-SSE2 `zip().map().collect()` it replaces, but AVX2-wide
+/// (32 B/instr) with no extra memset/copy pass (writes straight into the `Vec`'s uninitialised
+/// capacity). Bit-identical to `a.iter().zip(b).map(|(x,y)| x OP y).collect()`. `OP`: 0=AND,
+/// 1=OR, 2=XOR.
+#[inline]
+fn binop_collect<const OP: u8>(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let n = a.len().min(b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            let mut out = Vec::<u8>::with_capacity(n);
+            // SAFETY: avx2 present; the kernel writes exactly `n` bytes into the first `n`
+            // slots of `out`'s spare capacity (cap >= n), after which `set_len(n)` marks
+            // them initialised.
+            unsafe {
+                binop_collect_avx2::<OP>(&a[..n], &b[..n], out.as_mut_ptr());
+                out.set_len(n);
+            }
+            return out;
+        }
+    }
+    match OP {
+        0 => a[..n].iter().zip(&b[..n]).map(|(x, y)| x & y).collect(),
+        1 => a[..n].iter().zip(&b[..n]).map(|(x, y)| x | y).collect(),
+        _ => a[..n].iter().zip(&b[..n]).map(|(x, y)| x ^ y).collect(),
+    }
+}
+
+/// `AND` build. See [`binop_collect`].
+#[inline]
+pub fn bitand_collect(a: &[u8], b: &[u8]) -> Vec<u8> {
+    binop_collect::<0>(a, b)
+}
+/// `OR` build. See [`binop_collect`].
+#[inline]
+pub fn bitor_collect(a: &[u8], b: &[u8]) -> Vec<u8> {
+    binop_collect::<1>(a, b)
+}
+/// `XOR` build. See [`binop_collect`].
+#[inline]
+pub fn bitxor_collect(a: &[u8], b: &[u8]) -> Vec<u8> {
+    binop_collect::<2>(a, b)
+}
+
+/// # Safety
+/// `avx2` must be present; `a.len() == b.len() == n`; `dst` must point to at least `n` writable
+/// bytes (the caller `set_len(n)`s afterward). Writes exactly `n` bytes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn binop_collect_avx2<const OP: u8>(a: &[u8], b: &[u8], dst: *mut u8) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_storeu_si256,
+        _mm256_xor_si256,
+    };
+    let n = a.len();
+    let full = n / 32 * 32;
+    // SAFETY: caller guarantees avx2 + `dst` has >= n writable bytes and a/b have n readable
+    // bytes; every load/store spans `[off, off+32) ⊆ [0, full) ⊆ [0, n)`.
+    unsafe {
+        let mut off = 0usize;
+        while off < full {
+            let av = _mm256_loadu_si256(a.as_ptr().add(off) as *const __m256i);
+            let bv = _mm256_loadu_si256(b.as_ptr().add(off) as *const __m256i);
+            let rv = match OP {
+                0 => _mm256_and_si256(av, bv),
+                1 => _mm256_or_si256(av, bv),
+                _ => _mm256_xor_si256(av, bv),
+            };
+            _mm256_storeu_si256(dst.add(off) as *mut __m256i, rv);
+            off += 32;
+        }
+        for i in full..n {
+            let r = match OP {
+                0 => a[i] & b[i],
+                1 => a[i] | b[i],
+                _ => a[i] ^ b[i],
+            };
+            *dst.add(i) = r;
+        }
+    }
+}
+
 // ───────────────────────────── CRC-64/Jones (Redis) ─────────────────────────────
 //
 // Redis's DUMP/RESTORE/RDB checksum: CRC-64/Jones, poly 0xAD93D23594C935A9, refin=refout=true,
@@ -1268,5 +1352,34 @@ mod tests {
         max_bytes_inplace(&mut d, &[0x0fu8, 0x99, 0x30, 0x31, 0x2f]);
         assert_eq!(&d[..5], &[0x30, 0x99, 0x30, 0x31, 0x30]);
         assert_eq!(&d[5..], &orig[5..], "MAX bytes past src.len() untouched");
+    }
+
+    #[test]
+    fn bit_collect_matches_naive_all_lengths_alignments_and_unequal() {
+        use super::{bitand_collect, bitor_collect, bitxor_collect};
+        let mut aa = vec![0u8; 320];
+        let mut bb = vec![0u8; 320];
+        fill(&mut aa, 0x1357_9bdf_2468_ace0);
+        fill(&mut bb, 0xfdb9_7531_0eca_8642);
+        for astart in 0..34usize {
+            for bstart in 0..34usize {
+                for len in [0usize, 1, 15, 16, 31, 32, 33, 63, 64, 65, 100, 255] {
+                    if astart + len > aa.len() || bstart + len > bb.len() {
+                        continue;
+                    }
+                    let a = &aa[astart..astart + len];
+                    let b = &bb[bstart..bstart + len];
+                    let and_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x & y).collect();
+                    let or_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x | y).collect();
+                    let xor_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x ^ y).collect();
+                    assert_eq!(bitand_collect(a, b), and_n, "AND a={astart} b={bstart} len={len}");
+                    assert_eq!(bitor_collect(a, b), or_n, "OR a={astart} b={bstart} len={len}");
+                    assert_eq!(bitxor_collect(a, b), xor_n, "XOR a={astart} b={bstart} len={len}");
+                }
+            }
+        }
+        // Unequal lengths: result length is the min.
+        assert_eq!(bitand_collect(&[0xff; 40], &[0x0f; 10]), vec![0x0f; 10]);
+        assert_eq!(bitxor_collect(&[0xaa; 5], &[0xff; 12]), vec![0x55; 5]);
     }
 }

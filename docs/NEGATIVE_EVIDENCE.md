@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — 2-operand BITOP build wired to one-pass AVX2 collect; 1.22–1.96x L1/L2, byte-identical
+
+The last BITOP AVX2 piece. `Store::bitop`'s 2-operand fast path (the common shape) built the
+result via `a.iter().zip(b).map(|(x,y)| x OP y).collect()` — LLVM lowers that to a one-pass SSE2
+build. ONE LEVER: `fr_simd::{bitand,bitor,bitxor}_collect` do the same one-pass build but AVX2-wide
+(`_mm256_{and,or,xor}_si256`) writing straight into the `Vec`'s UNINITIALISED capacity (`with_capacity`
++ kernel writes exactly `n` bytes + `set_len(n)`), so there is no memset/copy pass — same three memory
+streams as the SSE2 collect, just 32 B/instr. Wired the 2-operand AND/OR/XOR build to them; the tail
+(`resize(max_len,0)` for AND / `extend_from_slice(longer[n..])` for OR/XOR) is unchanged.
+
+BYTE-IDENTICAL: new fr-simd test `bit_collect_matches_naive_all_lengths_alignments_and_unequal`
+(collect == `zip().map().collect()` for AND/OR/XOR over 34x34 alignments x {0,1,15,16,31,32,33,63,64,
+65,100,255} + unequal — also exercises the unsafe uninit path at every alignment) + fr-store
+`swar_bitop_matches_scalar_and_reports_ab_ratio` (the u64-SWAR oracle cross-checks the real 2-operand
+bitop byte-for-byte). `cargo clippy -p fr-simd --benches --tests -- -D warnings` clean (the uninit /
+`set_len` / const-generic kernel is sound and lint-free).
+
+MEASURED (same-binary null-gated A/B `benches/bitop_collect_scalar_vs_avx2.rs`, SSE2-collect replica vs
+AVX2-collect, `avx2_detected=true`, byte-identity asserted; cv 6-9%): **8 KiB (L1) 1.957x, 64 KiB (L2)
+1.220x** (above null p95), 512 KiB 0.995x and 4 MiB 1.053x indistinguishable. Cache-resident bitmaps
+(the overwhelmingly common BITOP size) win big; L3/RAM is bandwidth+alloc-bound so the compute width
+washes out (no regression). BITOP AVX2 coverage is now complete: 2-operand build + 3+-operand
+accumulate + NOT, AND/OR/XOR/NOT throughout.
+
 ## 2026-07-12: SHIPPED — HLL dense-register merge (PFMERGE/PFCOUNT) wired to AVX2 max; 1.14–1.56x, byte-identical
 
 Same LLVM-SSE2-loop → explicit-AVX2 pattern as the BITOP wins. `hll_merge_registers` did register-wise
