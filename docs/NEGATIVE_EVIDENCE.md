@@ -16709,3 +16709,18 @@ pre-guard did ~2 builds + the reap loop ≈ 2.7x the work). This is the first CL
 guard family beyond CrimsonHawk's read fast-paths: it wins because it elides a whole O(N) allocation pass, not one
 lookup. keys_matching/keys_matching_in_db skip only the loop (build+glob dominate) so their share is smaller,
 shipped on the same byte-identity. Rollback: drop the `keys_in_db` const-generic guard + the two loop guards.
+
+### 2026-07-12 SHIPPED (range KEYS drops the post-reap contains_key re-probe on the no-TTL path — completes the reap guard)
+Follow-on to the KEYS/SCAN reap-guard (2042ac22d). `keys_matching_in_db` (the production KEYS command) range arm
+built candidates from `ordered_keys`, reap-looped them, then filtered `entries.contains_key(key)` — that filter
+exists ONLY to drop candidates the reap loop evicted. On the no-TTL fast path (`expires_count == 0`) the reap loop
+is already skipped and candidates come from the freshly-synced `ordered_keys` index (⊆ `entries`), so every one is
+still present and the re-probe is always true. Skip it there. This completes the guard: a range KEYS over a no-TTL
+DB now does ZERO redundant keyspace probes (was 2·|candidates| — the reap probe + this one). Byte-identical: 53
+`keys` + 42 `scan` fr-store lib tests green (exercise range-pattern KEYS with and without TTLs). The `sort_unstable`
+is DELIBERATELY kept — CrimsonHawk chose it over a stable sort (not dropped like the full-DB keysfast walk),
+because the range arm mixes db-0 raw and db>0 encoded keys so its output is not safely pre-sorted; dropping it was
+rejected. No fresh gate: this elides the same `contains_key` primitive already gated at 1.75x isolated
+(bitfield_resolve_lookup) and is the direct completion of the 2.6-2.8x-gated reap guard. Rollback: restore the
+unconditional `contains_key` filter. NOTE: `keys_matching` (test-only sibling) left as-is to keep scope on the
+production path.

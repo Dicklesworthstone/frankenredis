@@ -10705,9 +10705,16 @@ impl Store {
         // (cc_fr) Classify the glob ONCE for the range-pruned candidates (byte-identical
         // to per-candidate `glob_match`).
         let pg = glob_prepare(pattern);
+        // (perf) The `contains_key` filter exists ONLY to drop candidates the reap loop above
+        // evicted. On the no-TTL fast path that loop is skipped (`expires_count == 0`) and the
+        // candidates come from the freshly-synced `ordered_keys` index (⊆ `entries`), so every
+        // one is still present — the re-probe is always true. Skip it there; this completes the
+        // no-TTL guard so a range KEYS over a no-TTL DB does ZERO redundant keyspace probes
+        // (was 2·|candidates|: the reap probe + this one). Byte-identical.
+        let no_ttl = self.expires_count == 0;
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
-            .filter(|key| self.entries.contains_key(key.as_slice()))
+            .filter(|key| no_ttl || self.entries.contains_key(key.as_slice()))
             .filter_map(|key| {
                 let logical = decode_db_key(&key)
                     .map(|(_, logical)| logical)
