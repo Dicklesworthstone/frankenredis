@@ -140,3 +140,9 @@ harness = false
 [[bench]]
 name = "hash_set_dump_cache"
 harness = false
+
+# (spop-fusion) Same-binary A/B for SPOP count: the count-x-spop loop (one get_mut per pop) vs the
+# fused spop_count (one get_mut + replayed RNG). Byte-identical; measures the eliminated lookups.
+[[bench]]
+name = "spop_count_fusion"
+harness = false

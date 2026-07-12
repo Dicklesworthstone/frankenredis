@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — SPOP-count fuses the keyspace lookup (O(count) get_mut → 1); 1.34–1.44x pop-all, byte-identical
+
+The previously-deferred lever, landed with a differential test as the gate. `spop_count` did `count`×
+`self.spop(key)`, one `get_mut` PER pop. ONE LEVER: when LFU is off (the default) do ONE `get_mut` and
+replay the exact `next_rand()` sequence `spop` makes — one draw per popped member, and (the trap the
+test caught) NONE for a missing/expired key or the drained-then-removed final call, because `spop`
+opens with `drop_if_expired` which early-returns BEFORE the draw. LFU-on keeps the exact loop
+(`spop_count_loop_ref`, rare config).
+
+BYTE-IDENTICAL: new `spop_count_fused_matches_spop_loop` runs the fused path and the reference loop on
+two seed-identical stores and asserts EVERY observable equal — result, residual set, `dirty`, digest
+state (`digest_mutations`/`digest_stale`), and the RNG state (`rng_seed`, a deterministic LCG) — across
+set sizes {1,4,10,50} × counts {0,1,n/2,n-1,n,n+3} plus missing-key, wrong-type, and count==0. (First
+draft added a bogus "wasted" final-call draw + a missing-key draw; the RNG-state assertion flagged it
+at n=1/count=4 — `drop_if_expired` short-circuits both.) All 8 fr-store `spop` tests still pass.
+
+MEASURED (same-binary null-gated A/B `benches/spop_count_fusion.rs`, fresh set built per rep OUTSIDE
+the timed pop, cv 7–11%): `n1000/all` (SPOP 1000 on a 1000-set — drain/large-count, the win case)
+**1.340x**, `n256/all` **1.439x** (both above null p95); `n1000/c256` 1.068x and `n64/all` 1.155x are
+positive but inside the null (fewer lookups saved relative to the pop+rebuild work). The win scales
+with how much of the set is drained — biggest for "SPOP key <large count>" / bulk random sampling.
+
 ## 2026-07-12: NEGATIVE (small-clean drive-by frontier exhausted) — even the HOTTEST Vec-build is already presized; next lever is medium/structural
 
 Closed the last open presize question — the HOTTEST result `Vec`: `parse_command_args_borrowed_into`

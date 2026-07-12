@@ -16718,7 +16718,99 @@ impl Store {
     }
 
     /// SPOP key count — pop up to `count` members from a set.
+    ///
+    /// (perf) The historical `count`× `self.spop(key)` loop did one keyspace `get_mut` PER pop.
+    /// When LFU is enabled the per-pop `contains_key`/LFU-rand draw makes that sequence delicate, so
+    /// keep the loop there (LFU is off by default). Otherwise do ONE `get_mut` and replay the exact
+    /// `next_rand()` draws `spop` makes — one per popped member; NONE for a missing/expired key (its
+    /// `drop_if_expired` early-returns before the draw) nor for the drained-then-removed final call;
+    /// one for a present wrong-type/empty-set key. Byte-identical result, `dirty`, digest state,
+    /// residual set, and RNG state (gated by `spop_count_fused_matches_spop_loop`).
     pub fn spop_count(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        if self.lfu_tracking_enabled() {
+            return self.spop_count_loop_ref(key, count, now_ms);
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        // `spop` opens with `drop_if_expired`; a missing/expired key early-returns Ok(None) BEFORE
+        // it draws rand_val, so the loop makes NO draw for it — and none for the final failed call
+        // after the set is drained + the key removed. Hence there is no "wasted" draw to replay.
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(Vec::new());
+        }
+        let s_len = match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s.len(),
+                _ => {
+                    let _ = self.next_rand(); // drop passed, rand_val drawn, then WRONGTYPE on the type
+                    return Err(StoreError::WrongType);
+                }
+            },
+            None => return Ok(Vec::new()), // defensive: not present after drop_if_expired == true
+        };
+        if s_len == 0 {
+            let _ = self.next_rand(); // defensive present-but-empty set: rand_val, then is_empty → None
+            return Ok(Vec::new());
+        }
+        let pops = count.min(s_len);
+        let mut picks: Vec<u64> = Vec::with_capacity(pops);
+        for _ in 0..pops {
+            picks.push(self.next_rand());
+        }
+        let mut result: Vec<Vec<u8>> = Vec::with_capacity(pops);
+        let mut emptied = false;
+        if let Some(entry) = self.entries.get_mut(key) {
+            for &pick in &picks {
+                let member;
+                let this_emptied;
+                {
+                    let s = match &mut entry.value {
+                        Value::Set(s) => s,
+                        _ => break, // unreachable: type checked above
+                    };
+                    if s.is_empty() {
+                        break; // unreachable: pops <= s_len
+                    }
+                    let idx = (pick as usize) % s.len();
+                    member = s.pop_index(idx);
+                    this_emptied = s.is_empty();
+                }
+                if let Some(m) = member {
+                    result.push(m);
+                }
+                // Match `spop`'s per-pop bookkeeping: digest is marked stale for every pop that did
+                // NOT empty the set; `touch_write` runs for every successful pop.
+                if !this_emptied {
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                }
+                entry.touch_write(now_ms, false);
+                if this_emptied {
+                    emptied = true;
+                    break;
+                }
+            }
+        }
+        if emptied {
+            self.internal_entries_remove(key);
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+        }
+        self.dirty = self.dirty.saturating_add(result.len() as u64);
+        Ok(result)
+    }
+
+    /// Pre-fusion reference: `count`× `spop`. Kept for the LFU path and the differential gate.
+    #[doc(hidden)]
+    pub fn spop_count_loop_ref(
         &mut self,
         key: &[u8],
         count: usize,
@@ -43494,6 +43586,75 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn spop_count_fused_matches_spop_loop() {
+        // The fused `spop_count` (one get_mut + replayed RNG) must be byte-identical to the
+        // pre-fusion `count`x `spop` loop across EVERY observable: result, residual set, dirty,
+        // digest state, and the RNG state (`rng_seed`, a deterministic LCG). LFU is off by default,
+        // so `spop_count` takes the fused path while `spop_count_loop_ref` is the reference loop.
+        fn build(n: usize) -> Store {
+            let mut s = Store::new();
+            let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
+            s.sadd(b"s", &members, 1).unwrap();
+            s
+        }
+        for n in [1usize, 4, 10, 50] {
+            for &count in &[0usize, 1, n / 2, n.saturating_sub(1), n, n + 3] {
+                let mut a = build(n);
+                let mut b = build(n);
+                let ra = a.spop_count(b"s", count, 2).unwrap();
+                let rb = b.spop_count_loop_ref(b"s", count, 2).unwrap();
+                assert_eq!(ra, rb, "result n={n} count={count}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed n={n} count={count}");
+                assert_eq!(a.dirty, b.dirty, "dirty n={n} count={count}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest n={n} count={count}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale n={n} count={count}");
+                let mut ma = a.smembers(b"s", 3).unwrap();
+                ma.sort();
+                let mut mb = b.smembers(b"s", 3).unwrap();
+                mb.sort();
+                assert_eq!(ma, mb, "residual n={n} count={count}");
+                assert_eq!(
+                    a.scard(b"s", 3).unwrap(),
+                    b.scard(b"s", 3).unwrap(),
+                    "scard n={n} count={count}"
+                );
+            }
+        }
+        // Missing key: `spop`'s first call draws one rand_val before returning None.
+        {
+            let mut a = Store::new();
+            let mut b = Store::new();
+            assert_eq!(
+                a.spop_count(b"nope", 5, 2).unwrap(),
+                b.spop_count_loop_ref(b"nope", 5, 2).unwrap()
+            );
+            assert_eq!(a.rng_seed, b.rng_seed, "missing-key rng_seed");
+        }
+        // count == 0 on a missing key: the loop never runs, no draw, no error.
+        {
+            let mut a = Store::new();
+            let mut b = Store::new();
+            assert_eq!(a.spop_count(b"nope", 0, 2).unwrap(), b.spop_count_loop_ref(b"nope", 0, 2).unwrap());
+            assert_eq!(a.rng_seed, b.rng_seed, "count0 rng_seed");
+        }
+        // Wrong type: rand_val drawn before the type check, then WRONGTYPE.
+        {
+            let mut a = Store::new();
+            a.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            let mut b = Store::new();
+            b.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            assert_eq!(
+                a.spop_count(b"str", 3, 2).is_err(),
+                b.spop_count_loop_ref(b"str", 3, 2).is_err()
+            );
+            assert_eq!(a.rng_seed, b.rng_seed, "wrongtype rng_seed");
+            // count == 0 wrong type: loop never runs => Ok(empty), no error, no draw.
+            assert!(a.spop_count(b"str", 0, 2).unwrap().is_empty());
+            assert_eq!(a.rng_seed, b.rng_seed, "wrongtype count0 rng_seed");
+        }
     }
 
     #[test]
