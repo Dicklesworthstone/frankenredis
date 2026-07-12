@@ -8317,7 +8317,14 @@ impl Store {
             if self.lookup_live_for_read_mut(key, now_ms).is_none() {
                 return PttlValue::KeyMissing;
             }
-            let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
+            // (cc_fr) expires_count-guard the second expiry_deadlines probe: no TTL anywhere ⇒
+            // this key has none, so expiry_ms is None. Byte-identical (NoExpiry).
+            let expiry = if self.expires_count != 0 {
+                self.expiry_ms(key)
+            } else {
+                None
+            };
+            let decision = evaluate_expiry(now_ms, expiry);
             return if decision.remaining_ms == -1 {
                 PttlValue::NoExpiry
             } else {
@@ -8333,7 +8340,13 @@ impl Store {
         let Some(_entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
+        // (cc_fr) expires_count-guard the second expiry_deadlines probe (no TTL ⇒ None; NoExpiry).
+        let expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let decision = evaluate_expiry(now_ms, expiry);
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
@@ -10206,7 +10219,13 @@ impl Store {
         {
             return PttlValue::KeyMissing;
         }
-        let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
+        // (cc_fr) expires_count-guard the second expiry_deadlines probe (no TTL ⇒ None; NoExpiry).
+        let expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let decision = evaluate_expiry(now_ms, expiry);
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
