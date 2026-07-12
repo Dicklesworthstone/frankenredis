@@ -13461,6 +13461,29 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.hsetnx_impl::<true>(key, field, value, now_ms)
+    }
+
+    /// Bench/test-only reference: the pre-`get_mut`-first HSETNX (`ensure_entry` +
+    /// `with_mutated_entry`). Byte-identical to [`Self::hsetnx`]; for the differential gate.
+    #[doc(hidden)]
+    pub fn hsetnx_ensure_entry_ref(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hsetnx_impl::<false>(key, field, value, now_ms)
+    }
+
+    fn hsetnx_impl<const GETMUT_FIRST: bool>(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -13471,47 +13494,46 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
-        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
-        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
-        if lfu_tracking_enabled {
-            if !should_bump_lfu {
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(Box::default()), now_ms),
-                );
-            }
-        } else {
-            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
-        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let result = self
-            .with_mutated_entry(key, |entry| {
-                if should_bump_lfu {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        let apply = |entry: &mut Entry| -> Result<bool, StoreError> {
+            if should_bump_lfu {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            let Value::Hash(m) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            if !m.contains_key(&field) {
+                m.insert(field, value);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                // (frankenredis-yp503) Lock hashtable encoding if threshold crossed.
+                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        };
+        let result = if GETMUT_FIRST {
+            self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
+        } else {
+            if lfu_tracking_enabled {
+                if !should_bump_lfu {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::Hash(Box::default()), now_ms),
+                    );
                 }
-                let Value::Hash(m) = &mut entry.value else {
-                    return Err(StoreError::WrongType);
-                };
-                if !m.contains_key(&field) {
-                    m.insert(field, value);
-                    entry.touch_write(now_ms, lfu_tracking_enabled);
-                    // (frankenredis-yp503) Lock hashtable encoding if
-                    // threshold crossed.
-                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            })
-            .expect("hash entry was ensured");
+            } else {
+                self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+            }
+            self.with_mutated_entry(key, apply)
+                .expect("hash entry was ensured")
+        };
         if matches!(result, Ok(true)) {
             self.dirty = self.dirty.saturating_add(1);
         }
         result
     }
-
     pub fn hstrlen(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<usize, StoreError> {
         // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
         if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
@@ -13573,9 +13595,34 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
+        self.hincrbyfloat_text_impl::<true>(key, field, delta_text, delta, now_ms)
+    }
+
+    /// Bench/test-only reference: the pre-`get_mut`-first HINCRBYFLOAT (`ensure_entry` +
+    /// `with_mutated_entry`). Byte-identical to [`Self::hincrbyfloat_text`]; for the differential gate.
+    #[doc(hidden)]
+    pub fn hincrbyfloat_text_ensure_entry_ref(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta_text: &[u8],
+        delta: f64,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.hincrbyfloat_text_impl::<false>(key, field, delta_text, delta, now_ms)
+    }
+
+    fn hincrbyfloat_text_impl<const GETMUT_FIRST: bool>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta_text: &[u8],
+        delta: f64,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, StoreError> {
         // (CrimsonHawk) Conditional drop: for a live key drop_if_expired is a pure no-op
-        // entries probe, and `internal_entry` below re-probes entries anyway — read the
-        // deadline once and only drop when actually due, eliding the redundant probe.
+        // entries probe, and the entry access below re-probes anyway — read the deadline once
+        // and only drop when actually due, eliding the redundant probe.
         if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -13584,54 +13631,53 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
-        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
-        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
-        if lfu_tracking_enabled {
-            if !should_bump_lfu {
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(Box::default()), now_ms),
-                );
-            }
-        } else {
-            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
-        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let (res, is_empty) = self
-            .with_mutated_entry(key, |entry| {
-                if should_bump_lfu {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        let apply = |entry: &mut Entry| -> (Result<Vec<u8>, StoreError>, bool) {
+            if should_bump_lfu {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            let Value::Hash(m) = &mut entry.value else {
+                return (Err(StoreError::WrongType), false);
+            };
+            let mut touched = false;
+            let current_res = match m.get(field) {
+                Some(v) => add_float_text(v, delta_text, delta),
+                None => add_float_text(b"0", delta_text, delta),
+            };
+            let res = match current_res {
+                Ok(next) => {
+                    // (frankenredis-hincrfast) Borrowed-field upsert — see HINCRBY above.
+                    m.insert_borrowed(field, next.clone());
+                    touched = true;
+                    Ok(next)
                 }
-                let Value::Hash(m) = &mut entry.value else {
-                    return (Err(StoreError::WrongType), false);
-                };
-                let mut touched = false;
-                let current_res = match m.get(field) {
-                    Some(v) => add_float_text(v, delta_text, delta),
-                    None => add_float_text(b"0", delta_text, delta),
-                };
-
-                let res = match current_res {
-                    Ok(next) => {
-                        // (frankenredis-hincrfast) Borrowed-field upsert — see HINCRBY above.
-                        m.insert_borrowed(field, next.clone());
-                        touched = true;
-                        Ok(next)
-                    }
-                    Err(e) => Err(e),
-                };
-                let is_empty = m.is_empty();
-                if touched {
-                    entry.touch_write(now_ms, lfu_tracking_enabled);
-                    // (frankenredis-yp503) Float result text may exceed
-                    // hash-max-listpack-value, promoting to hashtable.
-                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                Err(e) => Err(e),
+            };
+            let is_empty = m.is_empty();
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                // (frankenredis-yp503) Float result text may exceed hash-max-listpack-value.
+                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+            }
+            (res, is_empty)
+        };
+        let (res, is_empty) = if GETMUT_FIRST {
+            self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
+        } else {
+            if lfu_tracking_enabled {
+                if !should_bump_lfu {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::Hash(Box::default()), now_ms),
+                    );
                 }
-                (res, is_empty)
-            })
-            .expect("hash entry was ensured");
+            } else {
+                self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+            }
+            self.with_mutated_entry(key, apply)
+                .expect("hash entry was ensured")
+        };
         if res.is_ok() {
             self.dirty = self.dirty.saturating_add(1);
         }
@@ -13640,7 +13686,6 @@ impl Store {
         }
         res
     }
-
     pub fn hrandfield(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is
         // volatile, and the hash-field drop when no field TTLs exist anywhere. Byte-identical
@@ -43353,6 +43398,85 @@ mod tests {
             other => return Err(format!("HMGET should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn hsetnx_getmut_first_matches_ensure_entry_ref() {
+        // get_mut-first (with_mutated_or_created_entry) vs ensure_entry ref, across BOTH digest
+        // states (stale + fresh incremental-digest create-case).
+        type Hsetnx = fn(&mut Store, &[u8], Vec<u8>, Vec<u8>, u64) -> Result<bool, StoreError>;
+        let build = |h: Hsetnx, case: &str, fresh: bool| -> (Result<bool, StoreError>, Store) {
+            let mut s = Store::new();
+            s.set(b"other".to_vec(), b"v".to_vec(), None, 1);
+            match case {
+                "new_key" => {}
+                "existing_field" => {
+                    s.hset_borrowed(b"h", b"f", b"old".to_vec(), 1).unwrap();
+                }
+                "new_field_existing_hash" => {
+                    s.hset_borrowed(b"h", b"g", b"gv".to_vec(), 1).unwrap();
+                }
+                "wrongtype" => {
+                    s.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                _ => unreachable!(),
+            }
+            if fresh {
+                let _ = s.state_digest();
+            }
+            let r = h(&mut s, b"h", b"f".to_vec(), b"nv".to_vec(), 2);
+            (r, s)
+        };
+        for case in ["new_key", "existing_field", "new_field_existing_hash", "wrongtype"] {
+            for fresh in [false, true] {
+                let (ra, mut a) = build(Store::hsetnx, case, fresh);
+                let (rb, mut b) = build(Store::hsetnx_ensure_entry_ref, case, fresh);
+                assert_eq!(ra, rb, "result @ {case} fresh={fresh}");
+                assert_eq!(a.dirty, b.dirty, "dirty @ {case} fresh={fresh}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digmut @ {case} fresh={fresh}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digstale @ {case} fresh={fresh}");
+                assert_eq!(a.state_digest(), b.state_digest(), "digest @ {case} fresh={fresh}");
+            }
+        }
+    }
+
+    #[test]
+    fn hincrbyfloat_getmut_first_matches_ensure_entry_ref() {
+        // get_mut-first vs ensure_entry ref for HINCRBYFLOAT, across BOTH digest states.
+        type Hif = fn(&mut Store, &[u8], &[u8], &[u8], f64, u64) -> Result<Vec<u8>, StoreError>;
+        let build = |h: Hif, case: &str, fresh: bool| -> (Result<Vec<u8>, StoreError>, Store) {
+            let mut s = Store::new();
+            s.set(b"other".to_vec(), b"v".to_vec(), None, 1);
+            match case {
+                "new_key" => {}
+                "existing_counter" => {
+                    h(&mut s, b"h", b"f", b"1.5", 1.5, 1).unwrap();
+                }
+                "wrongtype" => {
+                    s.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                "non_float_field" => {
+                    s.hset_borrowed(b"h", b"f", b"abc".to_vec(), 1).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if fresh {
+                let _ = s.state_digest();
+            }
+            let r = h(&mut s, b"h", b"f", b"2.25", 2.25, 2);
+            (r, s)
+        };
+        for case in ["new_key", "existing_counter", "wrongtype", "non_float_field"] {
+            for fresh in [false, true] {
+                let (ra, mut a) = build(Store::hincrbyfloat_text, case, fresh);
+                let (rb, mut b) = build(Store::hincrbyfloat_text_ensure_entry_ref, case, fresh);
+                assert_eq!(ra, rb, "result @ {case} fresh={fresh}");
+                assert_eq!(a.dirty, b.dirty, "dirty @ {case} fresh={fresh}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digmut @ {case} fresh={fresh}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digstale @ {case} fresh={fresh}");
+                assert_eq!(a.state_digest(), b.state_digest(), "digest @ {case} fresh={fresh}");
+            }
+        }
     }
 
     #[test]

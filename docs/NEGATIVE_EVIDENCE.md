@@ -16979,3 +16979,17 @@ digest_mutations + digest_stale; + 6 hincr + 5 digest + 73 bumps_lfu (incl. hinc
 No fresh bench: same get_mut-first probe-elision primitive (hset 1.03-1.18x SUB-GATE; gated bitfield_resolve_lookup
 1.75x). COMPLETES the single-item-write get_mut-first vein. FOLLOW-UP (quick, same helper): hincrbyfloat + hsetnx
 also do ensure_entry + with_mutated_entry -> can now use with_mutated_or_created_entry. Rollback: hincrby -> ::<false>.
+
+### 2026-07-12 SHIPPED (HSETNX + HINCRBYFLOAT get_mut-first — COMPLETES the single-item-write vein)
+Quick follow-on to HINCRBY (d432f7483): HSETNX and HINCRBYFLOAT had the IDENTICAL `ensure_entry` +
+`with_mutated_entry` two-probe shape, so both now use the proven `with_mutated_or_created_entry` helper (get-or-
+create + mutate in one probe on the common stale-digest path). Same const-generic + `#[doc(hidden)] *_ensure_entry_
+ref` + shared `apply` closure (should_bump_lfu captured = original presence). Non-LFU HSETNX / HINCRBYFLOAT: 2
+probes -> 1. Byte-identical: `hsetnx_getmut_first_matches_ensure_entry_ref` (new/existing-field/new-field-existing-
+hash/WRONGTYPE) + `hincrbyfloat_getmut_first_matches_ensure_entry_ref` (new/existing/WRONGTYPE/non-float-field),
+each x BOTH digest states (stale + fresh-via-state_digest exercising the incremental-digest create-case), asserting
+result + DEBUG DIGEST + dirty + digest_mutations + digest_stale; + 3 hsetnx + 4 hincrbyfloat + 5 digest + 73
+bumps_lfu (incl. both LFU-freq) green. Same sub-gate probe primitive (no fresh bench). This COMPLETES the get_mut-
+first vein: EVERY single-item write (zadd_plain bulk, hset_borrowed, zincrby, hincrby, hincrbyfloat, hsetnx) now
+resolves the entry in one probe on the common path, matching what the bulk commands (sadd/lpush) always did.
+Rollback: hsetnx/hincrbyfloat_text -> ::<false>.
