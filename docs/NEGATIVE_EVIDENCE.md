@@ -16643,3 +16643,17 @@ probe, so `internal_entry` still does its own single get-or-create (no regressio
 sites (13191/13260/13361) — those use `internal_entry` as a bare ensure-exists STATEMENT followed by
 `with_mutated_entry` (a different, 4-lookup shape) and are a separate, more delicate elision. Rollback: restore
 the single `internal_entry` call at each of the two sites.
+
+### 2026-07-12 SHIPPED (HINCRBY/HINCRBYFLOAT/HSETNX drop a discarded get_mut — one fewer lookup on ALL paths)
+The three single-field hash commands that mutate through `with_mutated_entry` (HINCRBY, HINCRBYFLOAT text,
+HSETNX) called `internal_entry(key, || Hash, now_ms)` as a bare STATEMENT purely to ensure the entry EXISTS —
+then discarded its `&mut Entry` return and re-accessed the key via `with_mutated_entry` (the `.expect("hash entry
+was ensured")` spells out the intent). `internal_entry` is `contains_key` + insert-if-absent + `get_mut`; when
+the caller throws away the entry, that trailing `get_mut` is a pure wasted probe. New `ensure_entry` helper does
+just `contains_key` + insert-if-absent (same `internal_entries_insert`, identical existence guarantee and
+`entries` state) — one fewer hashmap lookup per call. UNLIKE the two prior HSET LFU-probe elisions, this fires on
+EVERY call regardless of maxmemory-policy (the wasted `get_mut` was unconditional), so it helps the common
+default path. Byte-identical: 5 `hincr*` (incl. HINCRBY/HINCRBYFLOAT LFU-frequency) + 2 `hsetnx` (incl. LFU-freq)
++ 5 `digest` fr-store lib tests green; the `with_mutated_entry` digest path is unaffected (it does its own lookup
+either way). Isolated one-lookup delta (`bitfield_resolve_lookup` primitive); end-to-end a fraction, but on the
+hot HINCRBY steady state. Rollback: revert the 3 `ensure_entry` calls to `internal_entry` + drop the helper.

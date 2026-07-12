@@ -10785,6 +10785,18 @@ impl Store {
             .expect("entry must exist after internal insertion")
     }
 
+    /// Get-or-create that does NOT return the entry, for callers that only need it
+    /// to EXIST before re-accessing it through [`Self::with_mutated_entry`]. At those
+    /// sites `internal_entry`'s trailing `get_mut` is a discarded probe, so this drops
+    /// it: one `contains_key` + insert-if-absent. Identical existence guarantee and
+    /// `entries` state (both create via the same `internal_entries_insert`), one fewer
+    /// hashmap lookup on every call.
+    fn ensure_entry(&mut self, key: &[u8], default_value: impl FnOnce() -> Value, now_ms: u64) {
+        if !self.entries.contains_key(key) {
+            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+        }
+    }
+
     fn bump_digest_mutations(&mut self) {
         self.digest_mutations = self.digest_mutations.wrapping_add(1);
     }
@@ -13161,7 +13173,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -13230,7 +13242,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -13331,7 +13343,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
