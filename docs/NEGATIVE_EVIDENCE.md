@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — decode_value_spans (RESTORE hot path) pre-sizes its spans Vec; 1.03–1.68x, byte-identical
+
+AMENDS the "no clean drive-by remains" note below: I'd been grepping for `vec![0; N]` memsets and
+missed a `Vec::new()`-grow. `decode_value_spans` — the RESTORE decoder (hash/zset/set/list
+`*_from_listpack_spans`; **9.50% self** in the c92f6 RESTORE profile, and RESTORE is a real
+vs-redis gap at 0.425x) — collected its spans by growing from empty (`Vec::new()`, ~log2(n)
+realloc+copies), while its siblings `decode_listpack` / `decode_zset_listpack_pairs` already
+pre-size from the listpack header's element count. ONE LEVER: pre-size `Vec::with_capacity(numele)`
+for the common compact case (header count != the UNKNOWN 65535 sentinel), mirroring `decode_listpack`.
+
+BYTE-IDENTICAL: capacity never affects content (same pushes). The A/B bench asserts the grow and
+presize decodes produce identical `Vec<ListpackValueSpan>` on every shape; `decode_value_spans_
+borrows_strings_and_formats_ints` passes. Refactored to a `decode_value_spans_impl::<const PRESIZE>`
+with a `#[doc(hidden)] bench_decode_value_spans` A/B hook; production calls `::<true>`.
+
+MEASURED (same-binary null-gated A/B `benches/value_spans_presize.rs`, byte-identity asserted, cv
+5.7-7%): **n16 1.675x** (the common small hash/set/zset listpack — grow does ~5 reallocs, presize
+does 1), n64 1.099x, n128 1.146x, n512 1.034x — WIN at every size, above null p95. Speeds every
+RESTORE / DEBUG RELOAD of a listpack-backed hash/set/zset/quicklist node.
+
 ## 2026-07-12: NEGATIVE (memset-elision vein now fully mined) — no clean drive-by remains; next byte-level lever is deferred/complex
 
 After four memset-elision wins (BITOP 2-op collect, HLL decode, HLL merge-accum, BITOP NOT) a

@@ -914,10 +914,34 @@ pub fn decode_string_ranges_if_all_strings(
 /// without allocating one `Vec<u8>` per element while preserving normal list
 /// iteration semantics.
 pub fn decode_value_spans(data: &[u8]) -> Result<Vec<ListpackValueSpan>, ListpackError> {
+    decode_value_spans_impl::<true>(data)
+}
+
+/// Same-binary A/B hook: `PRESIZE == true` is the production path (pre-size the spans `Vec` from the
+/// header's element count); `PRESIZE == false` is the pre-change baseline that grows from empty.
+#[doc(hidden)]
+pub fn bench_decode_value_spans<const PRESIZE: bool>(
+    data: &[u8],
+) -> Result<Vec<ListpackValueSpan>, ListpackError> {
+    decode_value_spans_impl::<PRESIZE>(data)
+}
+
+fn decode_value_spans_impl<const PRESIZE: bool>(
+    data: &[u8],
+) -> Result<Vec<ListpackValueSpan>, ListpackError> {
     let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1;
     let mut cursor = LISTPACK_HEADER_SIZE;
-    let mut values = Vec::new();
+    // Pre-size from the header's exact element count (the common compact case) so the spans are
+    // collected in one allocation instead of growing from empty (~log2(n) realloc+copies per
+    // decode) — this is the RESTORE hot path (hash/zset/set/list `*_from_listpack_spans`). The
+    // UNKNOWN sentinel (> 65534 elements) keeps the default. Capacity never affects content, so
+    // the decoded spans are byte-identical. Mirrors `decode_listpack`.
+    let mut values = if PRESIZE && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::with_capacity(usize::from(num_elements))
+    } else {
+        Vec::new()
+    };
     while cursor < end {
         let (value, consumed) = decode_entry_value_span(data, cursor)?;
         values.push(value);

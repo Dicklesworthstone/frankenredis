@@ -74,3 +74,9 @@ harness = false
 [[bench]]
 name = "lzf_prefix_simd"
 harness = false
+
+# (RESTORE presize) A/B for decode_value_spans: grow-from-empty vs pre-size from the listpack
+# header element count. Byte-identical spans; WIN = elided realloc growth on the RESTORE path.
+[[bench]]
+name = "value_spans_presize"
+harness = false
