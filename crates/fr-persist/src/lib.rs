@@ -2827,8 +2827,24 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 ///
 /// (br-frankenredis-1uin)
 pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
-    LZF_SCRATCH
-        .with(|scratch| lzf_compress_with_scratch(input, out_budget, &mut scratch.borrow_mut()))
+    // SIMD == true routes `>= 128 B` match tails through `fr_simd`'s AVX2 kernel
+    // (see `lzf_match_tail_len`): byte-identical output, Pareto-safe (short matches
+    // stay on the inlined local loop), a measured win on run-heavy payloads
+    // (sparse-bitmap / zero-run / repeated-large-value DUMP). (g9h0v follow-up)
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_with_scratch::<true>(input, out_budget, &mut scratch.borrow_mut())
+    })
+}
+
+/// Same-binary A/B hook for the LZF match-tail SIMD routing (`lzf_match_tail_len`).
+/// `SIMD == false` is byte-for-byte the production path; `SIMD == true` routes
+/// `>= 128 B` match tails through `fr_simd`'s AVX2 kernel. Both produce identical
+/// compressed bytes (the kernel is bit-identical to the scalar loop).
+#[doc(hidden)]
+pub fn bench_lzf_compress<const SIMD: bool>(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_with_scratch::<SIMD>(input, out_budget, &mut scratch.borrow_mut())
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2939,12 +2955,12 @@ impl LzfScratch {
 ///
 /// Length of the common prefix of `a` and `b` — LZF's match-extension inner loop.
 ///
-/// Kept as an **inlined** word loop on purpose. An AVX2 kernel (`fr_simd::common_prefix_len`) wins
-/// 1.5–1.8x on ≥128 B compares, but LZF calls this overwhelmingly with SHORT matches, and routing
-/// the hot path through a cross-crate dispatch loses the inlining the word loop gets here — a
-/// measured ~2x per-call overhead on 16–64 B, which the isolated microbench cannot net against the
-/// long-match win without an end-to-end `lzf_compress` A/B. Not routed through fr-simd until that
-/// net is proven. (see the SURFACE entry in docs/perf_negative_evidence_ledger.md)
+/// Kept as an **inlined** word loop for SHORT match tails (`< 128 B`), where routing through the
+/// cross-crate `fr_simd::common_prefix_len` dispatch would lose this inlining (a measured ~2x
+/// per-call overhead on 16–64 B). LONG tails (`>= 128 B`) now route to `fr_simd`'s AVX2 kernel via
+/// [`lzf_match_tail_len`], gated so short matches never pay the dispatch — Pareto-safe and
+/// byte-identical. The end-to-end `lzf_compress` A/B (`benches/lzf_prefix_simd.rs`) settled the net:
+/// gate-cleared 1.6x on run-heavy payloads, guard-neutral on short-match/text, no regression.
 #[inline]
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
@@ -2967,7 +2983,23 @@ fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     n
 }
 
-fn lzf_compress_with_scratch(
+/// Match-tail length dispatch for LZF. Short tails (`< 128 B`) keep the
+/// zero-overhead INLINED local word loop; only long tails (`>= 128 B`, i.e. highly
+/// repetitive runs) cross into `fr_simd::common_prefix_len`, whose AVX2 arm is
+/// bit-identical to the word loop but 1.8–2.9x faster from 128 B up. Gating HERE
+/// (not inside `fr_simd`) preserves the local inline for the common short match, so
+/// the routing is Pareto-safe: byte-identical LZF output, never a regression on
+/// short matches, a win only where AVX2 is decidably ahead. `SIMD == false` is
+/// verbatim the original always-local behavior (the A/B control). (g9h0v follow-up)
+#[inline]
+fn lzf_match_tail_len<const SIMD: bool>(a: &[u8], b: &[u8]) -> usize {
+    if SIMD && a.len().min(b.len()) >= 128 {
+        return fr_simd::common_prefix_len(a, b);
+    }
+    common_prefix_len(a, b)
+}
+
+fn lzf_compress_with_scratch<const SIMD: bool>(
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
@@ -3087,7 +3119,7 @@ fn lzf_compress_with_scratch(
                     if len + 1 < maxlen {
                         let a = &input[r + len + 1..r + maxlen];
                         let b = &input[ip + len + 1..ip + maxlen];
-                        len += 1 + common_prefix_len(a, b);
+                        len += 1 + lzf_match_tail_len::<SIMD>(a, b);
                     } else {
                         len += 1;
                     }
@@ -6249,6 +6281,58 @@ mod tests {
         assert!(compressed.len() < payload.len() / 4);
         let restored = lzf_decompress(&compressed, payload.len()).expect("decompress");
         assert_eq!(restored, payload);
+    }
+
+    #[test]
+    fn lzf_match_tail_simd_routing_is_byte_identical() {
+        // The production LZF path routes `>= 128 B` match tails through fr_simd's
+        // AVX2 kernel (`lzf_match_tail_len::<true>`); it MUST produce byte-for-byte
+        // the same compressed stream as the always-local word loop (`::<false>`),
+        // because `fr_simd::common_prefix_len` is bit-identical to the scalar loop.
+        // Cover the long-tail (AVX2) regime, short matches, structured data,
+        // pseudo-random (incompressible), and MAX_REF/128 B boundary sizes.
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        payloads.push(vec![b'x'; 8192]); // pure run -> long AVX2 tails
+        payloads.push(vec![0u8; 4096]); // zeroed bitmap
+        {
+            let mut p = Vec::new();
+            for _ in 0..64 {
+                p.extend_from_slice(&(0u8..=255).collect::<Vec<u8>>()); // repeated 256 B block
+            }
+            payloads.push(p);
+        }
+        {
+            let mut p = Vec::new();
+            for i in 0..512u32 {
+                p.extend_from_slice(format!("member:{i:05}:tag\n").as_bytes());
+            }
+            payloads.push(p);
+        }
+        {
+            let mut s: u32 = 0xC0FF_EE00; // pseudo-random / incompressible
+            let mut p = Vec::with_capacity(3000);
+            for _ in 0..3000 {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                p.push((s >> 24) as u8);
+            }
+            payloads.push(p);
+        }
+        for n in [120usize, 127, 128, 129, 145, 263, 264, 265, 512, 1000] {
+            payloads.push(vec![b'q'; n]); // boundary run lengths around 128 & MAX_REF
+        }
+
+        for p in &payloads {
+            for budget in [p.len(), p.len().saturating_sub(4), p.len() * 2 + 64] {
+                let local = super::bench_lzf_compress::<false>(p, budget);
+                let simd = super::bench_lzf_compress::<true>(p, budget);
+                assert_eq!(
+                    local,
+                    simd,
+                    "SIMD match-tail routing diverged (len={}, budget={budget})",
+                    p.len()
+                );
+            }
+        }
     }
 
     #[test]

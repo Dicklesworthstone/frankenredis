@@ -4,6 +4,41 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — LZF match-tail routes >=128 B tails through fr_simd AVX2; gate-cleared 1.6x on run-heavy DUMP, byte-identical, Pareto-safe
+
+NEGATIVE-LEDGER-FIRST / PROFILE-FIRST: fr-persist's `common_prefix_len` carried a standing SURFACE
+note that routing LZF's match-extension tail through the AVX2 `fr_simd::common_prefix_len` was
+net-unproven ("wins 1.5-1.8x on >=128 B compares, but LZF calls it overwhelmingly with short matches;
+the isolated microbench cannot net the long-match win without an end-to-end `lzf_compress` A/B"). This
+turn settled it with that A/B. LZF is ~79% of list/value DUMP CPU (g9h0v).
+
+ONE LEVER: a new `lzf_match_tail_len::<const SIMD>` gates IN fr-persist — short tails (`< 128 B`) keep
+the inlined local scalar word loop (zero cross-crate dispatch), only long tails (`>= 128 B`, i.e.
+highly repetitive runs) cross into `fr_simd::common_prefix_len` (AVX2). Production `lzf_compress` now
+calls `::<true>`. Gating in the caller (not inside fr_simd, whose own 128 B gate would still pay the
+dispatch on short matches) preserves the short-match inline, so the routing is Pareto-safe: it can
+never regress the common short match, and takes the SIMD path only where AVX2 is decidably ahead.
+
+BYTE-IDENTICAL: `fr_simd::common_prefix_len` is bit-identical to the scalar word loop for every input
+(same little-endian first-difference semantics), so the compressed stream is unchanged. Proven by (a)
+a new unit test `lzf_match_tail_simd_routing_is_byte_identical` asserting `::<false>` == `::<true>`
+across run-heavy / zeroed-bitmap / repeated-256B-block / structured / pseudo-random / 120..1000 B
+boundary payloads x 3 budgets, and (b) the bench's per-shape correctness gate (all 5 shapes identical).
+
+MEASURED (same-binary null-gated A/B `benches/lzf_prefix_simd.rs`, worker vmi1149989, contended null
+cv 11-18%, 2 runs): `onebyte_8k` (pure byte run — the sparse-bitmap / zero-run DUMP class) **1.593x
+then 1.639x**, decidably above null p95 (1.368/1.380) BOTH runs. Repeated-large-value `runs_256x24`
+1.173x/1.209x and `runs_512x12` 1.103x/1.133x — a consistent positive trend, but inside the noisy
+null (not gate-decided on this contended worker). Guards flat: `structured_512` 1.003x/1.008x,
+`textish_8k` 1.006x/1.011x (short matches -> local loop, no regression).
+
+HONEST SCOPE: the gate-cleared win is on run-heavy payloads (long zero/byte runs — sparse bitmaps,
+zero-padded values, HLL zero-runs) where LZF feeds `>= 128 B` match tails. Repeated-large-value DUMP
+payloads gain a modest, consistent +10-21% (worker-noise-limited, not formally gated). Short-match /
+text / structured payloads are unchanged by construction (the 128 B gate). No claim beyond
+LZF-compressible DUMP/RDB output. The change has zero downside (byte-identical, cannot regress) and a
+real measured upside, so it ships even though only the run-heavy case cleared the strict p95 gate.
+
 ## 2026-07-11 cod_fr: SHIPPED — GEOSEARCHSTORE BYBOX bbox-guided borrowed full traversal uses 82.299% fewer instructions
 
 NEGATIVE-LEDGER-FIRST / PROFILE-FIRST: after reading this ledger and live `bv --robot-triage`,

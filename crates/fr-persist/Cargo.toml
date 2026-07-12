@@ -67,3 +67,10 @@ harness = false
 [[bench]]
 name = "zset_lp_score_decode"
 harness = false
+
+# (frankenredis-g9h0v follow-up) Same-binary A/B for LZF match-tail routing: always-local word loop
+# vs routing >= 128 B tails through fr_simd's AVX2 kernel (bit-identical). Byte-identical compressed
+# output; WIN on long-run payloads, guard-neutral on short-match/text. Null-gated.
+[[bench]]
+name = "lzf_prefix_simd"
+harness = false
