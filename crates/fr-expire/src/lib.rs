@@ -6,6 +6,11 @@ pub struct ExpiryDecision {
     pub remaining_ms: i64,
 }
 
+// (cc_fr) `#[inline]` so downstream crates (fr-store calls this on EVERY guarded expiry check —
+// GET/SET/INCR/…) can inline this tiny fn across the crate boundary WITHOUT relying on LTO, and so
+// the compiler can DCE the `remaining_ms` computation for the many `should_evict`-only callers.
+// Byte-identical (codegen hint only); no-op under the release-perf thin-LTO the gauntlet measures.
+#[inline]
 #[must_use]
 pub fn evaluate_expiry(now_ms: u64, expires_at_ms: Option<u64>) -> ExpiryDecision {
     match expires_at_ms {
