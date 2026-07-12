@@ -171,6 +171,12 @@ harness = false
 name = "hset_getmut_first"
 harness = false
 
+# (cc_fr) Same-binary A/B for the post-insert hash encoding refresh: O(1) incremental (count +
+# new field/value) vs the O(n) refresh_hash_encoding_flag re-scan of every existing field.
+[[bench]]
+name = "hset_encoding_refresh"
+harness = false
+
 # (6lgnu validation) Quantify the lazy rank-treap's per-ZADD maintenance tax: identical N-member
 # builds with the treap cold (never queried) vs warm (queried once, maintained on every later ZADD).
 [[bench]]
