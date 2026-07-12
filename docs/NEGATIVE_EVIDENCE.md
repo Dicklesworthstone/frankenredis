@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (measured neutral, reverted) — the memset-elision does NOT generalize to HLL dense ENCODE
+
+Applied the shipped decode memset-elision (below) to its twin `hll_encode_dense_registers`: it also
+did `vec![0u8; 12288]` (`alloc_zeroed`) then wrote every payload byte, so the memset looked equally
+wasted. Rewrote it as `Vec::with_capacity(12288)` + `extend(register_chunks.flat_map(|r| [3 bytes]))`
+(+ a pad `resize`, no-op for full input). Byte-identical (bench asserted `encode_zeroed ==
+encode_uninit`).
+
+MEASURED (same-binary null-gated A/B `hll_encode_zeroinit.rs`, fresh alloc+build+drop per iter):
+**cand/orig 0.993x, indistinguishable** (null p5..p95 [0.872, 1.200], cv 14.5%). Reverted.
+
+WHY it wins for DECODE (1.58x) but NOT encode: the removable memset is smaller (12 KiB payload vs the
+decode's 16 KiB register array), AND — the decisive factor — the encode's `flat_map` yields **3-byte**
+groups (odd stride, poor `extend` autovectorization) whereas the decode yields **4-byte** groups that
+pack to an aligned `u32` write. The slower 3-byte `extend` write offsets the smaller memset saving →
+net wash. REFINES the banked "alloc_zeroed→with_capacity+extend" vein: it wins only when the overwrite
+build is ALSO efficient (power-of-two / word-aligned element groups); an odd-stride rebuild can eat the
+saving. Encode is left on the pre-sized `as_chunks_mut::<3>` loop (indexed byte stores vectorize better
+than a 3-byte `extend`).
+
 ## 2026-07-12: SHIPPED — HLL dense-register decode drops the alloc_zeroed memset; 1.58x, byte-identical
 
 AMENDS the "vein exhausted" note below: while the 6-bit-unpack *compute* is a complex/low-value SIMD
