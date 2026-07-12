@@ -62,6 +62,12 @@ harness = false
 name = "set_no_ttl_insert"
 harness = false
 
+# (cc_fr) Same-binary null-gated A/B for SET ... EX RE-ARMING a live-TTL key: always-clone owned
+# key (GATE=false) vs in-place get_mut deadline update eliding the discarded clone (GATE=true).
+[[bench]]
+name = "set_ex_rearm"
+harness = false
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]

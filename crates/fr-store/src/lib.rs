@@ -11427,12 +11427,18 @@ impl Store {
             None
         };
         // (cc_fr) The cloned owned key is consumed ONLY by the `expiry_deadlines.insert`
-        // below — i.e. only when this write sets a TTL. A SET without a TTL (the common
-        // case) took a `StoreKey` (`Box<[u8]>`) clone here, plus a `get_key_value` lookup
-        // on an overwrite, that was then dropped unused. Skip it entirely when there is no
-        // new TTL. `GATE` is const: production (`true`) monomorphizes to the guarded form;
-        // the bench baseline (`false`) keeps the unconditional clone.
-        let expiry_key: Option<StoreKey> = if !GATE || new_expiry.is_some() {
+        // below — i.e. only when this write sets a TTL AND the key is not already in the
+        // deadline map. A SET without a TTL (the common case) took a `StoreKey`
+        // (`Box<[u8]>`) clone here, plus a `get_key_value` lookup on an overwrite, then
+        // dropped it unused. RE-ARMING a TTL on a key that already had one (SET ... EX on a
+        // live-TTL key) is the same waste: the key is already in `expiry_deadlines`, so
+        // `insert` would keep the existing key and discard the fresh clone — the re-arm
+        // updates the deadline IN PLACE below instead. `old_expiry.is_some()` ⟺ the key is in
+        // `expiry_deadlines` (and implies !is_new_key). Skip the clone in both cases. `GATE`
+        // is const: production (`true`) monomorphizes to the guarded form; the bench baseline
+        // (`false`) keeps the unconditional clone (so `set_no_ttl_insert`/re-arm A/B measure it).
+        let is_ttl_rearm = new_expiry.is_some() && old_expiry.is_some() && !is_new_key;
+        let expiry_key: Option<StoreKey> = if !GATE || (new_expiry.is_some() && !is_ttl_rearm) {
             canonical_key.as_ref().map_or_else(
                 || {
                     self.entries
@@ -11465,7 +11471,13 @@ impl Store {
         };
         match new_expiry {
             Some(deadline) => {
-                if let Some(expiry_key) = expiry_key {
+                // (cc_fr) get_mut-first: a re-arm (key already in expiry_deadlines) updates the
+                // deadline in place — which is why the clone above was skipped for it. New /
+                // newly-volatile keys fall through to insert the freshly-cloned canonical key.
+                // Byte-identical final map state (insert on an existing key keeps its key too).
+                if let Some(slot) = self.expiry_deadlines.get_mut(key.as_slice()) {
+                    *slot = deadline;
+                } else if let Some(expiry_key) = expiry_key {
                     self.expiry_deadlines.insert(expiry_key, deadline);
                 }
             }
@@ -42110,15 +42122,16 @@ mod tests {
             (b"fresh", b"v1", None, false),      // new, no TTL
             (b"fresh", b"v2", Some(5_000), false), // new, with TTL
             (b"seed", b"v3", None, true),        // overwrite (had no TTL), no TTL
-            (b"seed", b"v4", Some(7_000), true), // overwrite, add TTL
+            (b"seed", b"v4", Some(7_000), true), // overwrite (had no TTL), add TTL (new deadline)
             (b"seedttl", b"v5", None, true),     // overwrite that CLEARS a prior TTL
+            (b"rearm", b"v6", Some(9_000), true), // overwrite that RE-ARMS a prior TTL (get_mut path)
         ];
         for &(key, val, ttl, prior) in cases {
             let build = || {
                 let mut s = Store::new();
                 if prior {
                     s.set(key.to_vec(), b"old".to_vec(), None, 1_000);
-                    if key == b"seedttl" {
+                    if key == b"seedttl" || key == b"rearm" {
                         s.expire_milliseconds(key, 50_000, 1_000);
                     }
                 }
@@ -42141,6 +42154,12 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
             assert_eq!(s_new.expires_count, s_orig.expires_count, "expires_count");
+            assert_eq!(
+                s_new.state_digest(),
+                s_orig.state_digest(),
+                "state_digest for {:?}",
+                String::from_utf8_lossy(key)
+            );
         }
     }
 
