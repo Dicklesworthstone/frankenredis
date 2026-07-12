@@ -7938,7 +7938,19 @@ impl Store {
         let mut removed = 0_u64;
         self.last_del_removed.clear();
         for key in keys {
-            self.drop_if_expired(key, now_ms);
+            // (perf) DEL's per-key work is purely keyspace lookups. When no key in the DB
+            // carries a TTL (`expires_count == 0`), `drop_if_expired` degrades to a discarded
+            // `contains_key` while `internal_entries_remove` below does the real removal
+            // lookup — so the probe is wasted. Skip it (byte-identical: with no TTL nothing is
+            // evictable). Extends the CrimsonHawk no-TTL guard (already on SINTERCARD / HSET /
+            // HINCRBY / SADD / BITFIELD-SET / LTRIM) to DEL. Isolated end-to-end A/B: a
+            // consistent directional ~+10% but inside a noisy null band (DEL's destructive
+            // per-rep rebuild caps precision, unlike non-destructive SINTERCARD's clean +3-4%);
+            // the eliminated per-key lookup is itself gated at 1.75x isolated
+            // (bitfield_resolve_lookup).
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             if self.internal_entries_remove(key.as_slice()).is_some() {
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());

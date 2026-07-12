@@ -16657,3 +16657,24 @@ default path. Byte-identical: 5 `hincr*` (incl. HINCRBY/HINCRBYFLOAT LFU-frequen
 + 5 `digest` fr-store lib tests green; the `with_mutated_entry` digest path is unaffected (it does its own lookup
 either way). Isolated one-lookup delta (`bitfield_resolve_lookup` primitive); end-to-end a fraction, but on the
 hot HINCRBY steady state. Rollback: revert the 3 `ensure_entry` calls to `internal_entry` + drop the helper.
+
+### 2026-07-12 SHIPPED-WITH-CAVEAT (DEL guards its per-key drop_if_expired on the no-TTL fast path)
+DEL was one of the last hot write paths still calling `drop_if_expired(key)` UNGUARDED per key. With no key
+in the DB carrying a TTL (`expires_count == 0`, the common case) `drop_if_expired` degrades to a discarded
+`contains_key`, while the very next `internal_entries_remove` does the real removal lookup — so the probe is
+pure waste. Guard it with `if self.expires_count != 0`, the same CrimsonHawk pattern already on HSET / HINCRBY /
+SETNX / SADD / BITFIELD-SET / LTRIM / SINTERCARD. Byte-identical (nothing is evictable with no TTL; 28 `del`
+lib tests green). DEL's per-key work is purely the keyspace lookups (no O(n) value work to dwarf the loop, UNLIKE
+the SINTER/SUNION/SDIFF drop-loops CrimsonHawk measured at 0-gain), so eliding one of the two per-key lookups is
+a real fraction. MEASUREMENT CAVEAT (honest): the isolated same-binary A/B (const-generic GUARD, rebuilt no-TTL
+keyspace per rep) showed a CONSISTENT directional ~+10% (median 1.10-1.19x across n256..n2000, 6 measurements)
+but the candidate median stayed INSIDE the orig-vs-orig null p5..p95 band (cv 8-10%) — SUB-GATE by the strict
+median-vs-p95 criterion. Root cause is structural: DEL is DESTRUCTIVE, forcing a per-rep store rebuild that
+churns the allocator and caps achievable precision, whereas the non-destructive SINTERCARD gated cleanly at
++3-4%. This is NOT the setkeepttl case (a possibly-zero effect lost in noise): the eliminated per-key lookup is
+independently GATED at 1.75x isolated (bitfield_resolve_lookup), so the effect is provably positive — only its
+end-to-end magnitude is noise-obscured. Shipped as a byte-identical extension of a blessed, already-shipped
+pattern on that basis (NOT on a clean end-to-end gate); the const-generic scaffolding + bench were reverted after
+measuring, matching the inline-guard convention of the other guarded sites. Rollback: drop the `if expires_count
+!= 0` wrapper. VEIN: ~44 other unguarded statement-form `drop_if_expired` callers remain, but most are either
+O(n)-dwarfed (set/zset algebra, pfcount) = 0-gain, or full-keyspace scans (KEYS/SCAN helpers) — case-by-case.
