@@ -738,11 +738,16 @@ impl HashFieldMap {
 
     /// Insert/overwrite, returning the previous value (matches `IndexMap::insert`).
     pub fn insert(&mut self, field: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+        // (cc_fr) Test the O(1) promotion PRECONDITION (at entry cap / oversized field or value)
+        // before the O(n) `contains_key` locate scan: promotion is impossible below all caps, so a
+        // steady-state small-hash HSET short-circuits and skips this scan entirely — collapsing the
+        // packed HSET's two locate scans (this guard + insert's own) to one. `&&` reorder;
+        // `contains_key` is a pure read, so the promotion decision is byte-identical.
         if let HashFieldMap::Packed(p) = self
-            && !p.contains_key(&field)
             && (p.len() >= PACKED_MAX_ENTRIES
                 || field.len() > PACKED_MAX_VALUE
                 || value.len() > PACKED_MAX_VALUE)
+            && !p.contains_key(&field)
         {
             self.promote();
         }
@@ -764,11 +769,15 @@ impl HashFieldMap {
     /// a single `get_mut`. The promotion check fires under the identical condition
     /// as `insert` (new field only), so the encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        // (cc_fr) O(1) promotion precondition before the O(n) `contains_key` locate scan (see
+        // `insert`): the steady-state small-hash HSET (below all caps) short-circuits and skips
+        // this scan, so a packed HSET does ONE locate (insert_borrowed's) instead of two. `&&`
+        // reorder; `contains_key` is a pure read ⇒ byte-identical promotion decision.
         if let HashFieldMap::Packed(p) = self
-            && !p.contains_key(field)
             && (p.len() >= PACKED_MAX_ENTRIES
                 || field.len() > PACKED_MAX_VALUE
                 || value.len() > PACKED_MAX_VALUE)
+            && !p.contains_key(field)
         {
             self.promote();
         }
