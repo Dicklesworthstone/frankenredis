@@ -7597,7 +7597,7 @@ impl Store {
         if !self.lfu_tracking_enabled() {
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(None);
@@ -8530,7 +8530,8 @@ impl Store {
         // due — eliding the redundant `entries.get` before the `contains_key` existence
         // check. SETNX on an EXISTING key (the contended-lock case) does no mutation, so
         // this saves ~half its cost. Byte-identical (return of drop_if_expired is discarded).
-        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+        // (cc_fr) expires_count-guard the peek: no TTL anywhere ⇒ should_evict is already false.
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
         if self.entries.contains_key(key) {
@@ -13751,7 +13752,8 @@ impl Store {
         // (CrimsonHawk) Conditional drop: for a live key drop_if_expired is a pure no-op
         // entries probe, and the entry access below re-probes anyway — read the deadline once
         // and only drop when actually due, eliding the redundant probe.
-        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+        // (cc_fr) expires_count-guard the peek: no TTL anywhere ⇒ should_evict is already false.
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -23879,7 +23881,8 @@ impl Store {
     /// digest-stale, and may-replicate propagation).
     #[must_use]
     pub fn pfcount_cache_hittable(&self, key: &[u8], now_ms: u64) -> bool {
-        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+        // (cc_fr) expires_count-guard the peek: no TTL anywhere ⇒ should_evict already false.
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             return false;
         }
         let Some(entry) = self.entries.get(key) else {
