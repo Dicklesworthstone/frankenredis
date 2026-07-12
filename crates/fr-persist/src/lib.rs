@@ -650,6 +650,9 @@ pub fn encode_aof_stream(records: &[AofRecord]) -> Vec<u8> {
     // copied it into `out` (3 allocs+copies per record). Byte-identical to the
     // RespFrame::Array(BulkString…) form. Measured -67.6% (3.1x) on a 10k-record AOF
     // rewrite chunk (isolated A/B).
+    // (aofpresize REJECTED 2026-07-12) Pre-sizing `out` to sum(encoded_resp_len) MEASURED a
+    // regression (~0.8x, below null p5): mimalloc reallocs the growing buffer cheaply (often
+    // in-place), so the sizing pass costs more than the elided reallocs save. Left growing.
     let mut out = Vec::new();
     for record in records {
         fr_protocol::encode_aggregate_header(record.argv.len(), false, &mut out);
