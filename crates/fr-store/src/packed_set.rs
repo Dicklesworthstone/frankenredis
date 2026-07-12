@@ -4556,13 +4556,23 @@ impl PackedZSet {
         (&self.buf[m_start..m_end], score, m_end + 8)
     }
 
-    /// `(record_start, record_end, score)` for `member`, or None.
+    /// `(record_start, record_end, score)` for `member`, or None. Decodes the 8-byte score
+    /// (a bounds-checked load) ONLY for the matching record; non-matching records are skipped by
+    /// arithmetic past the member + fixed 8-byte score. `record_at` (used by the score-consuming
+    /// scans: iter / insert_offset / index_slice) always decodes the score, so `locate`'s
+    /// member-only search paid N score loads to use ONE — pure waste on the ZADD/ZSCORE/ZREM/ZRANK
+    /// hot path. Byte-identical: the returned `(pos, end, score)` for the match is unchanged and
+    /// non-matching scores were never read.
     fn locate(&self, member: &[u8]) -> Option<(usize, usize, f64)> {
         let mut pos = 0;
         while pos < self.buf.len() {
-            let (m, score, end) = self.record_at(pos);
-            if m == member {
-                return Some((pos, end, score));
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            let m_end = m_start + mlen;
+            let end = m_end + 8;
+            if self.buf[m_start..m_end] == *member {
+                let mut score_bytes = [0; 8];
+                score_bytes.copy_from_slice(&self.buf[m_end..end]);
+                return Some((pos, end, f64::from_le_bytes(score_bytes)));
             }
             pos = end;
         }

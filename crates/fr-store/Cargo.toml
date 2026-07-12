@@ -68,6 +68,12 @@ harness = false
 name = "set_ex_rearm"
 harness = false
 
+# (cc_fr) Instruction-count microbench for PackedZSet::locate's per-record score-decode skip
+# (ZSCORE-miss full scan). Measured before/after via git stash + perf stat -e instructions:u.
+[[bench]]
+name = "packed_zset_locate"
+harness = false
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]
