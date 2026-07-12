@@ -7782,8 +7782,7 @@ impl Store {
         }
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.stream_entries_added.remove(key);
             self.stream_max_deleted_ids.remove(key);
         }
@@ -8160,8 +8159,7 @@ impl Store {
         if milliseconds <= 0 {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.stream_max_deleted_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
             return true;
@@ -8221,8 +8219,7 @@ impl Store {
             // sibling expire_milliseconds above.
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.dirty = self.dirty.saturating_add(1);
             return true;
         }
@@ -8270,8 +8267,7 @@ impl Store {
         if milliseconds <= 0 {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.stream_max_deleted_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
             return true;
@@ -8779,8 +8775,7 @@ impl Store {
         let Some(entry) = self.internal_entries_remove(key) else {
             return Ok(None);
         };
-        self.stream_groups.remove(key);
-        self.stream_last_ids.remove(key);
+        self.drop_stream_side_metadata(key);
         self.dirty = self.dirty.saturating_add(1);
         self.adjust_cached_memory_usage_after_remove(key, &entry);
         match entry.value {
@@ -11364,6 +11359,21 @@ impl Store {
         }
     }
 
+    /// (cc_fr) Guarded cleanup of the stream side-maps on a key removal. `stream_groups` /
+    /// `stream_last_ids` only ever hold STREAM keys, so removing a non-stream key (GETDEL string,
+    /// LPOP/RPOP/SPOP-empty list/set, …) probes them for nothing. Guard each on `!is_empty()` so a
+    /// stream-free DB (the common case) skips the foldhash entirely — the same shape as the
+    /// `expires_count` no-TTL guard. Byte-identical: `remove` on an empty map is a no-op, and a
+    /// non-empty map is still probed (handles a leaked side-map entry after a type change).
+    fn drop_stream_side_metadata(&mut self, key: &[u8]) {
+        if !self.stream_groups.is_empty() {
+            self.stream_groups.remove(key);
+        }
+        if !self.stream_last_ids.is_empty() {
+            self.stream_last_ids.remove(key);
+        }
+    }
+
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         let old_expiry = self.expiry_ms(key);
         if let Some(entry) = self.entries.remove(key) {
@@ -11493,8 +11503,7 @@ impl Store {
         if became_empty {
             // Upstream behavior: a hash with no fields is removed entirely.
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         reaped
     }
@@ -11531,8 +11540,7 @@ impl Store {
         }
         if became_empty {
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         removed
     }
@@ -12910,8 +12918,7 @@ impl Store {
         }
         if is_empty {
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         Ok(removed)
     }
@@ -14434,8 +14441,7 @@ impl Store {
                         }
                         if l.is_empty() {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if val.is_some() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -14493,8 +14499,7 @@ impl Store {
                         }
                         if l.is_empty() {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if !result.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -14537,8 +14542,7 @@ impl Store {
                         }
                         if l.is_empty() {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if val.is_some() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -14596,8 +14600,7 @@ impl Store {
                         }
                         if l.is_empty() {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if !result.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -15332,8 +15335,7 @@ impl Store {
                             self.dirty = self.dirty.saturating_add(removed);
                             if l.is_empty() {
                                 self.internal_entries_remove(key);
-                                self.stream_groups.remove(key);
-                                self.stream_last_ids.remove(key);
+                                self.drop_stream_side_metadata(key);
                             } else {
                                 Self::mark_digest_stale_fields(
                                     &mut self.digest_stale,
@@ -15505,8 +15507,7 @@ impl Store {
                         let removed = old_len - l.len();
                         if l.is_empty() {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if removed > 0 {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -16010,8 +16011,7 @@ impl Store {
                             // (internal_entries_remove signals it); only reached when
                             // removed > 0.
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else if removed > 0 {
                             entry.bump_mod_count();
                             Self::mark_digest_stale_fields(
@@ -17201,8 +17201,7 @@ impl Store {
         }?;
         if should_remove_key {
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         // (frankenredis-bbutt) A successful pop mutates the keyspace and must
         // bump the dirty counter — otherwise SPOP is invisible to RDB/AOF
@@ -17299,8 +17298,7 @@ impl Store {
         }
         if emptied {
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         self.dirty = self.dirty.saturating_add(result.len() as u64);
         Ok(result)
@@ -18216,8 +18214,7 @@ impl Store {
         }
         if is_empty {
             self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
         }
         Ok(removed)
     }
@@ -19900,8 +19897,7 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             if is_empty {
                 self.internal_entries_remove(key);
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
+                self.drop_stream_side_metadata(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
@@ -19946,8 +19942,7 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             if is_empty {
                 self.internal_entries_remove(key);
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
+                self.drop_stream_side_metadata(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
@@ -19997,8 +19992,7 @@ impl Store {
             self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
+                self.drop_stream_side_metadata(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
@@ -20045,8 +20039,7 @@ impl Store {
             self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
+                self.drop_stream_side_metadata(key);
             } else {
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
@@ -20914,8 +20907,7 @@ impl Store {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
                         if is_empty {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -20968,8 +20960,7 @@ impl Store {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
                         if is_empty {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -21027,8 +21018,7 @@ impl Store {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
                         if is_empty {
                             self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
+                            self.drop_stream_side_metadata(key);
                         } else {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -23190,8 +23180,7 @@ impl Store {
             if !mkstream {
                 return Err(StoreError::KeyNotFound);
             }
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.stream_entries_added.insert(key.to_vec(), 0);
             self.internal_entries_insert(
                 key.to_vec(),
@@ -24240,8 +24229,7 @@ impl Store {
         let exists = entry.is_some();
         let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
         if should_evict && self.internal_entries_remove(key).is_some() {
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+            self.drop_stream_side_metadata(key);
             self.dirty = self.dirty.saturating_add(1);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
             // (frankenredis-1d2xf) Record the db-encoded key so the runtime can
@@ -24587,8 +24575,7 @@ impl Store {
                 Some(deadline) if deadline <= now_ms => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
                     self.internal_entries_remove(key);
-                    self.stream_groups.remove(key);
-                    self.stream_last_ids.remove(key);
+                    self.drop_stream_side_metadata(key);
                     self.dirty = self.dirty.saturating_add(1);
                 }
                 Some(deadline) => {
@@ -28785,8 +28772,7 @@ impl Store {
             // clear per-object sidecars that belong to the old value.
             self.hash_field_ttl_clear_for_key(key);
             if old_was_stream {
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
+                self.drop_stream_side_metadata(key);
                 self.stream_entries_added.remove(key);
                 self.stream_max_deleted_ids.remove(key);
             }
