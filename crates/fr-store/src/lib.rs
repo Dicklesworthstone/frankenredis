@@ -13225,7 +13225,19 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
+        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
+        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
+        if lfu_tracking_enabled {
+            if !should_bump_lfu {
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Hash(Box::default()), now_ms),
+                );
+            }
+        } else {
+            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -13294,7 +13306,19 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
+        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
+        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
+        if lfu_tracking_enabled {
+            if !should_bump_lfu {
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Hash(Box::default()), now_ms),
+                );
+            }
+        } else {
+            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -13395,7 +13419,19 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
+        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
+        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
+        if lfu_tracking_enabled {
+            if !should_bump_lfu {
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Hash(Box::default()), now_ms),
+                );
+            }
+        } else {
+            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self

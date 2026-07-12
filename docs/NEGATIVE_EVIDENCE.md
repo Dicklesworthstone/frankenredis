@@ -16724,3 +16724,18 @@ rejected. No fresh gate: this elides the same `contains_key` primitive already g
 (bitfield_resolve_lookup) and is the direct completion of the 2.6-2.8x-gated reap guard. Rollback: restore the
 unconditional `contains_key` filter. NOTE: `keys_matching` (test-only sibling) left as-is to keep scope on the
 production path.
+
+### 2026-07-12 SHIPPED (HINCRBY/HINCRBYFLOAT/HSETNX reuse the LFU presence probe for their ensure-exists)
+Completes the ensure_entry work (5aefd2459). The three single-field hash-counter commands do
+`should_bump_lfu = lfu_tracking_enabled && entries.contains_key(key)` (the LFU counter only advances for a
+pre-existing key), then `ensure_entry` (`contains_key` + insert-if-absent) to guarantee the entry before
+`with_mutated_entry`. On the LFU-ON path the `should_bump_lfu` probe already resolved presence and nothing mutates
+`entries` between it and the ensure-exists (only `next_rand`), so `ensure_entry`'s `contains_key` is redundant:
+reuse `should_bump_lfu` — create only when absent (`!should_bump_lfu`), skip the probe when present. The no-LFU
+default path is UNCHANGED (`&&` already short-circuited the probe, so `ensure_entry` still does its own single
+get-or-create — no regression on the common path). LFU-ON: 3 keyspace probes -> 2 per call. Byte-identical: 5
+`hincr*` + 2 `hsetnx` lib tests green, including the HINCRBY/HINCRBYFLOAT/HSETNX LFU-frequency tests that exercise
+the exact bump/PRNG/presence path. Same vein + honest scope as the HSET LFU-probe elisions (345cf4897): LFU-ON
+only, isolated one-lookup delta (bitfield_resolve_lookup primitive), small end-to-end fraction. This exhausts the
+`should_bump_lfu`-reuse micro-vein — all five single-field hash write/counter paths (2x HSET + HINCRBY +
+HINCRBYFLOAT + HSETNX) now reuse their LFU presence probe. Rollback: restore the plain `ensure_entry` call at each.
