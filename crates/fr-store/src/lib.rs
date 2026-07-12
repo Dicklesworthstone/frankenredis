@@ -19761,7 +19761,12 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -19957,7 +19962,12 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20062,7 +20072,12 @@ impl Store {
         min: f64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20101,7 +20116,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20200,7 +20220,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20249,7 +20274,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20356,7 +20386,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -20393,7 +20428,12 @@ impl Store {
         min: f64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         // (frankenredis-xc0ty) Guard against inverted bounds before
         // hitting BTreeMap::range — `min > max` after the caller's
         // intended (max, min) swap would panic the range walker.
@@ -20438,7 +20478,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;

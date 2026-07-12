@@ -16859,3 +16859,20 @@ the discarded drop): 3 getex + 14 ttl + 8 hset + 14 expired lib tests green (exp
 preserved). Same primitive as bitfield_resolve_lookup (1.75x isolated); no fresh gate. LEFT (case-by-case, lower
 EV): the zset-range read family (zrange*/zrevrange*/zrangebylex* — O(range)-dwarfed for big ranges), stream group
 prechecks, HLL DEBUG (cold), MEMORY USAGE / RESTORE (drop is a tiny fraction). Rollback: unwrap each guard.
+
+### 2026-07-12 SHIPPED (zset-range reads guard their bare no-TTL reap probe — 9 commands)
+Swept the zset-range read family (the "case-by-case, lower EV" holdouts flagged in 2a141137a) with the DEL-class
+no-TTL guard: ZRANGE-WITHSCORES / ZREVRANGE-WITHSCORES / ZREVRANGEBYSCORE(+withscores) / ZRANGEBYLEX (plain /
+withscores / limited / withscores-limited) / ZREVRANGEBYLEX — 9 public commands (`zrange_withscores`,
+`zrevrange_withscores`, `zrevrangebyscore`, `zrevrangebyscore_withscores`, `zrangebylex`, `zrangebylex_withscores`,
+`zrangebylex_limited`, `zrangebylex_withscores_limited`, `zrevrangebylex`). Each did a bare `drop_if_expired(key)`
+whose return is discarded, then resolved presence via `get_mut`'s miss arm (verified `None => Ok(Vec::new())` /
+default) — guard the reap on `expires_count != 0`. Byte-identical incl. RNG (the LFU `should_bump = lfu &&
+contains_key` gate probes independently after; an absent no-TTL key draws no rand either way): 13 zrange + 3
+zrevrange + 4 zrangebylex + 5 zrangebyscore + 39 zset_ + 14 expired lib tests green. HONEST EV: these are
+O(range)-dwarfed for large ranges (sub-gate), but help the common small-range query (ZRANGE k 0 9 leaderboard
+top-N) and NEVER regress (the guard only skips a wasted probe); shipped byte-identical on the gated
+bitfield_resolve_lookup primitive, not a fresh gate. EXCLUDED: the two internal iter helpers `zset_for_each_asc` /
+`zset_for_each_in_score_ranges` (they also drop — potential double-drop with callers, a separate elision), and
+ZRANGEBYSCORE plain / non-withscores ZRANGE (route through `lookup_live_for_read_mut`, already fused). This closes
+the bare-statement no-TTL guard vein for the zset reads. Rollback: unwrap each of the 9 guards.
