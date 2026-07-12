@@ -11208,15 +11208,31 @@ impl Store {
     }
 
     fn set_existing_expiry_ms(&mut self, key: &[u8], expires_at_ms: Option<u64>) {
-        let Some((canonical_key, _)) = self.entries.get_key_value(key) else {
-            return;
-        };
         match expires_at_ms.and_then(std::num::NonZeroU64::new) {
             Some(deadline) => {
-                self.expiry_deadlines
-                    .insert(canonical_key.clone(), deadline);
+                // (cc_fr) Hot TTL re-arm path (EXPIRE/PEXPIRE/EXPIREAT re-setting an existing TTL):
+                // the key is already in `expiry_deadlines`, so update the deadline IN PLACE —
+                // skipping the `entries.get_key_value` probe AND the fresh canonical-key clone that
+                // `insert` allocates then discards on an already-present key. `expiry_deadlines ⊆
+                // entries` (internal_entries_remove clears the deadline on delete), so a hit proves
+                // the key is present. Only a genuinely NEW TTL falls through to fetch the canonical
+                // key to clone in — and keeps the original entries-presence gate (absent key ⇒
+                // no-op, digest untouched). Byte-identical final map state + digest_stale.
+                if let Some(slot) = self.expiry_deadlines.get_mut(key) {
+                    *slot = deadline;
+                } else {
+                    let Some((canonical_key, _)) = self.entries.get_key_value(key) else {
+                        return;
+                    };
+                    self.expiry_deadlines.insert(canonical_key.clone(), deadline);
+                }
             }
             None => {
+                // Removing a TTL: original gated on entries-presence before touching the deadline
+                // map + marking the digest stale (absent key ⇒ no-op, digest untouched).
+                if !self.entries.contains_key(key) {
+                    return;
+                }
                 self.expiry_deadlines.remove(key);
             }
         }
