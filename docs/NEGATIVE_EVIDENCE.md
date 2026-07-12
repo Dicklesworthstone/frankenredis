@@ -16876,3 +16876,24 @@ bitfield_resolve_lookup primitive, not a fresh gate. EXCLUDED: the two internal 
 `zset_for_each_in_score_ranges` (they also drop — potential double-drop with callers, a separate elision), and
 ZRANGEBYSCORE plain / non-withscores ZRANGE (route through `lookup_live_for_read_mut`, already fused). This closes
 the bare-statement no-TTL guard vein for the zset reads. Rollback: unwrap each of the 9 guards.
+
+### 2026-07-12 SHIPPED (zset for_each iter helpers guard their bare no-TTL reap) + DEFER zincrby/hincrby get_mut-first
+Completed the zset-range no-TTL guard family (ad88e04c1) with the 2 remaining bare-statement holdouts: the streaming
+iter helpers `zset_for_each_asc` / `zset_for_each_in_score_ranges` (the ZRANGEBYSCORE/ZRANGEBYLEX streaming path
+fr-command uses for large ranges — standalone pub entry points, no fr-store callers, so NOT a double-drop). Same
+DEL-class guard: bare `drop_if_expired(key)` (discarded) + LFU probe + `get_mut` (None => Ok(false)) → guard the reap
+on `expires_count != 0`. Byte-identical incl. RNG (independent LFU contains_key): 5 zrangebyscore + 6 zscan + 13
+zrange lib tests green. Same bitfield_resolve_lookup primitive; no fresh gate. This CLOSES the bare-statement no-TTL
+guard vein across fr-store (reads + writes + zset ranges + streaming iters).
+
+DELIBERATELY DEFERRED (documented so it is not re-litigated): the get_mut-first common-path conversion for the
+REMAINING single-item writes — `zincrby_with_options` (ZINCRBY/ZADD-INCR) and the hincrby-family. Assessed over
+several turns and judged BELOW the drive-by threshold: (a) MEDIUM effort — the ~40-line score/digest USE block must
+be factored into a `&mut Entry` helper + const-generic + internal_entry-ref + differential test (can't
+`let entry=<get_mut-first>` — NLL wall); (b) KNOWN sub-gate — a single constant-factor probe (hset measured
+1.03-1.18x, DEL-class), so medium effort for a sub-gate return; (c) ZINCRBY is secondary to plain ZADD (already
+get_mut-first via zadd_plain), and hincrby adds the `with_mutated_entry` incremental-digest create-case
+(absent→empty→populated running-digest consistency = delicate); (d) the shared tree is actively racing (peer GETSET
+WIP → modified-since-read), raising the risk of a large multi-hunk refactor. NET: fr-store clean-drive-by frontier
+is SATURATED; the next REAL levers are structural (borrowed/Arc RdbValue, b1o02 hash-listpack RESTORE) — multi-day,
+reserved worktree, NOT a shared-tree drive-by. [[project_fr_store_driveby_saturated_getmut_first]]

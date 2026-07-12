@@ -19881,7 +19881,12 @@ impl Store {
         now_ms: u64,
         mut f: impl FnMut(&[u8], f64),
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -19926,7 +19931,12 @@ impl Store {
         now_ms: u64,
         mut f: impl FnMut(&[u8], f64),
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
+        // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
+        // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
