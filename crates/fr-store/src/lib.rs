@@ -11649,11 +11649,13 @@ impl Store {
                         &evicted_entry,
                     );
                     // Emit evicted keyspace notification (use logical key)
+                    // (cc_fr) borrow the logical key from the local `candidate` (used only in
+                    // this by-ref notify, its last use) — the owned copy was redundant.
                     let (db, logical_key) = match decode_db_key(&candidate) {
-                        Some((db, lk)) => (db, lk.to_vec()),
-                        None => (0, candidate.clone()),
+                        Some((db, lk)) => (db, lk),
+                        None => (0, candidate.as_slice()),
                     };
-                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", &logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", logical_key, db);
                 }
             }
 
@@ -11774,11 +11776,14 @@ impl Store {
             let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
             if should_evict {
                 // Emit expired notification before removal (use logical key)
+                // (cc_fr) borrow the logical key from the `keys_to_check` element (used only in
+                // this by-ref notify) — no owned copy needed; internal_entries_remove below only
+                // shared-borrows `key`, not `self`, so the borrow stays valid.
                 let (db, logical_key) = match decode_db_key(key) {
-                    Some((db, lk)) => (db, lk.to_vec()),
-                    None => (0, key.clone()),
+                    Some((db, lk)) => (db, lk),
+                    None => (0, key.as_slice()),
                 };
-                self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", &logical_key, db);
+                self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
