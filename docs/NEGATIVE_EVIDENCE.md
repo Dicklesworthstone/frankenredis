@@ -17010,3 +17010,16 @@ remaining real lever is the structural borrowed/Arc `RdbValue` — MULTI-DAY, al
 measure sub-gate; needs the fr-store consumer to stop copying too), a dedicated effort in a RESERVED worktree, NOT
 a one-turn drive-by. There are no further one-turn clean perf wins in the validatable surface.
 [[project_fr_store_driveby_saturated_getmut_first]]
+
+### 2026-07-12 NEGATIVE (XADD/stream verified optimal — one-turn frontier DEFINITIVELY closed, 3rd confirmation)
+Checked a fresh, previously-unexamined hot command (XADD) as a final probe of the one-turn frontier: already
+optimal — guarded `drop_if_expired`, `get_mut`-FIRST on `entries` (single probe), and the stream side-maps
+(`stream_last_ids`, `stream_entries_added`) use `get_mut`-first with a defensive `entry(key.to_vec())` fallback so
+the common path pays NO wasted key clone. Every pattern this session's 22 lands established (get_mut-first, no-TTL
+guard, no-wasted-alloc) is ALREADY applied there. This is the 3rd independent confirmation (after the get_mut-first
+vein completion + the mutate-existing verification) that the validatable one-turn clean-win frontier is CLOSED.
+DIRECTIVE for future turns (and self): do NOT re-hunt fr-store commands / probe-elisions / guards / get_mut-first /
+stream side-maps — all verified optimal. The ONLY remaining perf work is the structural borrowed/Arc `RdbValue`
+(multi-day, reserved worktree, all-or-nothing — isolated pieces sub-gate), which is a MODE CHANGE from one-turn
+drive-bys, not a lever pickable "this turn". No further one-turn clean wins exist in the validatable surface.
+[[project_fr_store_driveby_saturated_getmut_first]]
