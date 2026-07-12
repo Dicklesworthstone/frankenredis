@@ -15563,7 +15563,7 @@ impl Store {
                         let mut raw_add = 0u64;
                         for v in values {
                             raw_add += v.len() as u64;
-                            l.push_front(v.clone());
+                            l.push_front_borrowed(v);
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
@@ -15619,7 +15619,7 @@ impl Store {
                         let mut raw_add = 0u64;
                         for v in values {
                             raw_add += v.len() as u64;
-                            l.push_back(v.clone());
+                            l.push_back_borrowed(v);
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
