@@ -13565,7 +13565,7 @@ impl Store {
         delta: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.hincrby_impl::<true>(key, field, delta, now_ms)
+        self.hincrby_impl::<true, true>(key, field, delta, now_ms)
     }
 
     /// Bench/test-only reference: the pre-`get_mut`-first HINCRBY (`ensure_entry` +
@@ -13579,10 +13579,23 @@ impl Store {
         delta: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.hincrby_impl::<false>(key, field, delta, now_ms)
+        self.hincrby_impl::<false, true>(key, field, delta, now_ms)
     }
 
-    fn hincrby_impl<const GETMUT_FIRST: bool>(
+    /// Bench-only baseline: HINCRBY with the O(n) re-scanning encoding refresh (`INCR=false`)
+    /// instead of the O(1) incremental one. Byte-identical result; isolates the per-HINCRBY rescan.
+    #[doc(hidden)]
+    pub fn hincrby_rescan(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta: i64,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        self.hincrby_impl::<true, false>(key, field, delta, now_ms)
+    }
+
+    fn hincrby_impl<const GETMUT_FIRST: bool, const INCR: bool>(
         &mut self,
         key: &[u8],
         field: &[u8],
@@ -13611,6 +13624,9 @@ impl Store {
                 return (Err(StoreError::WrongType), false);
             };
             let mut touched = false;
+            // (cc_fr) Length of the just-inserted value; drives the O(1) incremental encoding
+            // refresh. Set only on the insert arm below (untouched paths never refresh).
+            let mut new_value_len = 0usize;
             let current_res = match m.get(field) {
                 Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger),
                 None => Ok(0),
@@ -13622,7 +13638,9 @@ impl Store {
                         // (cc_fr) Format via fr's canonical integer_decimal_bytes (write_u64_digits
                         // LUT into a stack buffer) not i64::to_string, which routes through the
                         // fmt::Formatter machinery. Byte-identical decimal bytes.
-                        m.insert_borrowed(field, integer_decimal_bytes(next));
+                        let v = integer_decimal_bytes(next);
+                        new_value_len = v.len();
+                        m.insert_borrowed(field, v);
                         touched = true;
                         Ok(next)
                     }
@@ -13633,9 +13651,16 @@ impl Store {
             let is_empty = m.is_empty();
             if touched {
                 entry.touch_write(now_ms, lfu_tracking_enabled);
-                // (frankenredis-yp503) Crossing the entries count via
-                // hincrby on a new field can promote to hashtable.
-                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                // (frankenredis-yp503) Crossing the entries count via hincrby on a new field can
+                // promote to hashtable. (cc_fr) O(1) incremental: only the entry count and the
+                // just-inserted field/value can promote a listpack hash — no O(n) rescan.
+                Self::refresh_hash_encoding_after_insert::<INCR>(
+                    entry,
+                    field.len(),
+                    new_value_len,
+                    max_entries,
+                    max_value,
+                );
             }
             (res, is_empty)
         };
@@ -43896,6 +43921,68 @@ mod tests {
         let mut store = Store::new();
         assert_eq!(store.hincrby(b"h", b"n", 5, 0).unwrap(), 5);
         assert_eq!(store.hincrby(b"h", b"n", -3, 0).unwrap(), 2);
+    }
+
+    #[test]
+    fn hincrby_incremental_refresh_matches_rescan() {
+        // Gate HINCRBY's O(1) incremental post-insert encoding refresh (INCR=true) against the O(n)
+        // `refresh_hash_encoding_flag` re-scan (INCR=false). Result + digest bookkeeping + OBJECT
+        // ENCODING must be byte-identical across every promotion trigger reachable by HINCRBY: no
+        // promotion (existing counter), count-driven (>512 fields), new-field-oversized (>64B field
+        // name), and a hash already promoted to hashtable then incremented.
+        type Hincr = fn(&mut Store, &[u8], &[u8], i64, u64) -> Result<i64, StoreError>;
+        let big_field = vec![b'k'; 80]; // > hash_max_listpack_value (64)
+        let build = |h: Hincr, case: &str| -> (Result<i64, StoreError>, Store) {
+            let mut s = Store::new();
+            let r = match case {
+                "new_key" => h(&mut s, b"h", b"f", 1, 2),
+                "existing_counter" => {
+                    for i in 0..64u32 {
+                        s.hset_borrowed(b"h", format!("c{i:03}").as_bytes(), b"0".to_vec(), 1)
+                            .unwrap();
+                    }
+                    h(&mut s, b"h", b"c010", 7, 2)
+                }
+                "count_promote" => {
+                    for i in 0..512u32 {
+                        s.hset_borrowed(b"h", format!("c{i:04}").as_bytes(), b"0".to_vec(), 1)
+                            .unwrap();
+                    }
+                    // 513th distinct field crosses hash-max-listpack-entries (512).
+                    h(&mut s, b"h", b"cnew", 1, 2)
+                }
+                "field_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"0".to_vec(), 1).unwrap();
+                    h(&mut s, b"h", &big_field, 1, 2)
+                }
+                "already_promoted" => {
+                    // A >64B VALUE forces hashtable encoding; then a numeric HINCRBY stays hashtable.
+                    s.hset_borrowed(b"h", b"big", vec![b'x'; 80], 1).unwrap();
+                    h(&mut s, b"h", b"cnt", 1, 2)
+                }
+                _ => unreachable!(),
+            };
+            (r, s)
+        };
+        for case in [
+            "new_key",
+            "existing_counter",
+            "count_promote",
+            "field_promote",
+            "already_promoted",
+        ] {
+            let (ra, mut a) = build(Store::hincrby, case);
+            let (rb, mut b) = build(Store::hincrby_rescan, case);
+            assert_eq!(ra, rb, "result @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
+            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
+            assert_eq!(
+                a.object_encoding(b"h", 3),
+                b.object_encoding(b"h", 3),
+                "encoding @ {case}"
+            );
+        }
     }
 
     #[test]

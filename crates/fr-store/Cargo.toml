@@ -177,6 +177,11 @@ harness = false
 name = "hset_encoding_refresh"
 harness = false
 
+# (cc_fr) Same A/B for HINCRBY: O(1) incremental refresh vs the O(n) rescan on a counter-map hash.
+[[bench]]
+name = "hincrby_encoding_refresh"
+harness = false
+
 # (6lgnu validation) Quantify the lazy rank-treap's per-ZADD maintenance tax: identical N-member
 # builds with the treap cold (never queried) vs warm (queried once, maintained on every later ZADD).
 [[bench]]
