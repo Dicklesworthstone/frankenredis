@@ -24089,7 +24089,7 @@ impl Store {
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
-        let existing_ttl = self.expiry_ms(dest);
+        let existing_ttl = if self.expires_count != 0 { self.expiry_ms(dest) } else { None };
         if let Some(entry) = self.entries.get(dest) {
             let Some(data) = entry.value.string_bytes() else {
                 return Err(StoreError::WrongType);
@@ -26528,7 +26528,11 @@ impl Store {
         } else {
             0
         };
-        let source_expiry = self.expiry_ms(source);
+        let source_expiry = if self.expires_count != 0 {
+            self.expiry_ms(source)
+        } else {
+            None
+        };
         let Some(source_entry) = self.entries.get_mut(source) else {
             return Ok(false);
         };
@@ -26570,7 +26574,11 @@ impl Store {
         } else {
             0
         };
-        let source_expiry = self.expiry_ms(source);
+        let source_expiry = if self.expires_count != 0 {
+            self.expiry_ms(source)
+        } else {
+            None
+        };
 
         let entry = match self.entries.get_mut(source) {
             Some(source_entry) => {
