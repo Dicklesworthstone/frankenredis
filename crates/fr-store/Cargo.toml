@@ -176,3 +176,9 @@ harness = false
 [[bench]]
 name = "zadd_treap_tax"
 harness = false
+
+# (6lgnu validation) NET structural A/B: span-augmented skiplist (order+rank in one) vs BTreeMap
+# (order only) insert of identical members. skiplist/btree < treap-tax ⇒ 6lgnu net-wins the write side.
+[[bench]]
+name = "skiplist_vs_btreemap"
+harness = false
