@@ -16993,3 +16993,20 @@ bumps_lfu (incl. both LFU-freq) green. Same sub-gate probe primitive (no fresh b
 first vein: EVERY single-item write (zadd_plain bulk, hset_borrowed, zincrby, hincrby, hincrbyfloat, hsetnx) now
 resolves the entry in one probe on the common path, matching what the bulk commands (sadd/lpush) always did.
 Rollback: hsetnx/hincrbyfloat_text -> ::<false>.
+
+### 2026-07-12 NEGATIVE (get_mut-first vein 100% COMPLETE + mutate-existing commands verified optimal — one-turn frontier exhausted)
+After completing the get_mut-first vein for ALL single-item writes (zadd_plain/hset_borrowed/zincrby/hincrby/
+hincrbyfloat/hsetnx, `8263aa3a4`), swept the remaining `with_mutated_entry` callers for a missed 2-probe pattern.
+Result: the mutate-EXISTING commands (SETRANGE, SETBIT, HDEL, APPEND) are ALREADY optimal on the non-LFU common
+path — a SINGLE `with_mutated_entry` `get_mut` (the LFU `should_bump = lfu && contains_key` probe is short-
+circuited when LFU is off). The LFU path's second probe CANNOT be fused: the frequency-bump rand must be drawn
+from presence BEFORE the `get_mut`, because drawing `next_rand()` (needs `&mut self`) while holding the entry
+`&mut` borrow conflicts — the SAME structural 2-probe LFU wall as the LFU reads [[project_p16_pipeline_parity...]]
+(RNG-order + borrow). Not fuseable; and LFU-on is a secondary path regardless. The `with_mutated_entry(key,|_|{})`
+empty-closure callers (EXPIRE-family) mutate nothing (existence-check + digest side-effect) — not a get-or-create.
+NET: the probe-elision / get_mut-first / no-TTL-guard veins are 100% EXHAUSTED across fr-store; fr-protocol
+(in+out) + fr-persist codec + fr-simd kernels saturated; fr-server/fr-command not rch-validatable. The ONLY
+remaining real lever is the structural borrowed/Arc `RdbValue` — MULTI-DAY, all-or-nothing (isolated pieces
+measure sub-gate; needs the fr-store consumer to stop copying too), a dedicated effort in a RESERVED worktree, NOT
+a one-turn drive-by. There are no further one-turn clean perf wins in the validatable surface.
+[[project_fr_store_driveby_saturated_getmut_first]]
