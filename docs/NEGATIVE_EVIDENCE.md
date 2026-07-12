@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (presize vein clean candidates mined) — remaining Vec::new()-grows are upper-bound or delicate; SPOP-count O(count)-lookup lever SURFACED
+
+After the `decode_value_spans` presize win (below), swept ~15 more `Vec::new()`/`Vec::default()`-then
+-push sites for the "pre-size from a known count" pattern. None is a clean drive-by:
+- `decode_string_ranges_if_all_strings` is TEST-ONLY (no production caller); other listpack `Vec::new()`
+  are in tests. RDB collection decodes + `keys.iter().map(..).collect()` already pre-size (ExactSize).
+- The stream decode's `entries: Vec<StreamEntry>` count isn't known until AFTER the listpack nodes
+  (the length field trails them); stream paths are also peer-active.
+- **Upper-bound, not exact** → over-alloc / overflow risk, NOT clean: ZINTER/ZDIFF (`result ≤ first.len()`
+  — reserving a large first with a small intersection wastes), SPOP-count (`≤ count`), LPOS COUNT
+  (`count` can be `usize::MAX` for "all" → `with_capacity` would OOM). Skipped.
+
+SURFACED (real lever, deferred as delicate): **`Store::spop_count` calls `self.spop(key)` in a loop =
+O(count) keyspace `get_mut` lookups** where redis does ONE (the i229a fuse-per-op-lookup vein; the win
+scales with `count`, e.g. bulk random sampling). Blocked from a clean drive-by by (a) the borrow
+checker — `spop` must `self.next_rand()` (needs `&mut self`) BEFORE `get_mut` (`&mut self.entries`), so
+the lookup can't be hoisted while calling the RNG per pop; a fix must PRECOMPUTE the rand sequence,
+then hold the entry and pop; and (b) a byte-exactness TRAP — `spop` draws `next_rand()` **twice** per
+pop under LFU (rand_val + lfu_rand, the latter only while the key still exists) and **once more**
+(rand_val, wasted) on the final break iteration when `count > set_len`; the fused version must
+reproduce that exact RNG-draw count or the Store RNG state (observable by later SRANDMEMBER/SPOP)
+diverges. Medium refactor, needs an RNG-state-after-SPOP differential gate — not a small increment.
+
 ## 2026-07-12: SHIPPED — decode_value_spans (RESTORE hot path) pre-sizes its spans Vec; 1.03–1.68x, byte-identical
 
 AMENDS the "no clean drive-by remains" note below: I'd been grepping for `vec![0; N]` memsets and
