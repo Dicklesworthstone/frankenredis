@@ -17675,18 +17675,24 @@ impl Store {
         // is newly added (setTypeAdd returned 1). The runtime excludes SMOVE
         // from its generic keyspace path so these are the only events. These
         // calls are no-ops when keyspace notifications are disabled.
+        // (cc_fr) `src_logical` BORROWS `source` (a `&[u8]` param, not `self`) — the `.to_vec()`
+        // here was a redundant heap alloc for notifies that no-op when keyspace events are off
+        // (the default), and even when on `notify_keyspace_event` takes `&[u8]`. Upstream passes
+        // the key without copying. Byte-identical; strictly fewer allocs (can't regress). The
+        // `internal_entries_remove(source)` below only shared-borrows `source`, so the borrow
+        // stays live across it (both borrow the param, not `self`).
         let (src_db, src_logical) = match decode_db_key(source) {
-            Some((db, lk)) => (db, lk.to_vec()),
-            None => (0, source.to_vec()),
+            Some((db, lk)) => (db, lk),
+            None => (0, source),
         };
-        self.notify_keyspace_event(NOTIFY_SET, "srem", &src_logical, src_db);
+        self.notify_keyspace_event(NOTIFY_SET, "srem", src_logical, src_db);
 
         // Clean up empty source
         if source_empty {
             self.internal_entries_remove(source);
             self.stream_groups.remove(source);
             self.stream_last_ids.remove(source);
-            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &src_logical, src_db);
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", src_logical, src_db);
         }
         // Add to destination — "sadd" fires only on a genuinely new member.
         // (frankenredis-smovefast) sadd is generic over AsRef<[u8]> and copies the member
@@ -17696,11 +17702,12 @@ impl Store {
         // member; byte-identical, and it halves the member-byte copying on large members.
         let added = self.sadd(destination, &[member], now_ms)?;
         if added > 0 {
+            // (cc_fr) `dst_logical` borrows `destination` (param); same redundant-`to_vec` elision.
             let (dst_db, dst_logical) = match decode_db_key(destination) {
-                Some((db, lk)) => (db, lk.to_vec()),
-                None => (0, destination.to_vec()),
+                Some((db, lk)) => (db, lk),
+                None => (0, destination),
             };
-            self.notify_keyspace_event(NOTIFY_SET, "sadd", &dst_logical, dst_db);
+            self.notify_keyspace_event(NOTIFY_SET, "sadd", dst_logical, dst_db);
         }
         Ok(true)
     }
