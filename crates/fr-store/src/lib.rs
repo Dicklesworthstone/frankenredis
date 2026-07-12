@@ -24489,6 +24489,13 @@ impl Store {
     /// expired-fields counter — a new incarnation of the same key
     /// name starts counting from zero (br-frankenredis-25re).
     pub fn hash_field_ttl_clear_for_key(&mut self, key: &[u8]) {
+        // (cc_fr) Fast exit when NO hash anywhere carries a per-field TTL — mirrors the
+        // hdel-fieldttl-guard on drop_expired_hash_fields. The range below allocates `key.to_vec()`
+        // and walks the BTreeMap on EVERY key removal (DEL/GETDEL/LPOP-empty/expiry/...) for nothing;
+        // an O(1) is_empty skips the alloc + probe. Byte-exact: an empty map has no field TTLs to clear.
+        if self.hash_field_expires.is_empty() {
+            return;
+        }
         // BTreeMap range over (key, _) prefix to enumerate + retain.
         let victims: Vec<(Vec<u8>, Vec<u8>)> = self
             .hash_field_expires
