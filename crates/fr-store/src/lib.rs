@@ -19182,12 +19182,15 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
 
-        let key_existed = self.entries.contains_key(key);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        // `key_existed` only affects behavior under XX (early-return) or LFU (rand + bump); for the
+        // common ZADD (no XX, no LFU — the default) it is unused, so skip the extra `contains_key`
+        // probe entirely (`&&` short-circuits). Byte-identical.
+        let key_existed = (opts.xx || lfu_tracking_enabled) && self.entries.contains_key(key);
         if opts.xx && !key_existed {
             return Ok(None);
         }
 
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && key_existed {

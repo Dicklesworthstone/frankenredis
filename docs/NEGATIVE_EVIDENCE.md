@@ -4,6 +4,25 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — ZADD skips a wasted contains_key on the common (no-XX/no-LFU) path; byte-identical
+
+ZADD computed `let key_existed = self.entries.contains_key(key)` UNCONDITIONALLY, but `key_existed`
+only affects behavior under XX (the early `if opts.xx && !key_existed` return) or LFU (the rand draw +
+`bump_lfu_freq`) — for the common ZADD (no XX, and LFU off by default) it is unused. ONE LEVER:
+`let key_existed = (opts.xx || lfu_tracking_enabled) && self.entries.contains_key(key);` — the `&&`
+short-circuits, so the extra keyspace probe is skipped entirely on the hot default path. ZADD then
+resolves the key exactly once (`internal_entry`, get-or-create). Byte-identical (`key_existed` holds
+the same value at every use — all four uses are XX/LFU-gated).
+
+BYTE-IDENTICAL: all 12 fr-store `zadd` tests pass (incl. the XX/GT/LT/NX flag matrices + metamorphic).
+
+MEASURED: the eliminated work is one foldhash keyspace probe — the SAME `entries` hasher/probe
+measured in `benches/bitfield_resolve_lookup.rs` (a foldhash get on a 1k–100k map, ~1.75x on the
+isolated 2-vs-1-probe pair, order ~15 ns). Same honest scope as the BITFIELD elision: E2E ZADD is a
+smaller Pareto-safe fraction (the skiplist/listpack insert + RESP reply dominate), but ZADD is a very
+hot write, so the wasted probe is worth removing (never slower). No new bench (identical eliminated
+work). Extends the "elide a redundant keyspace probe" micro-vein (BITFIELD below) to ZADD.
+
 ## 2026-07-12: SHIPPED — BITFIELD "resolve once" elides a redundant keyspace lookup (get+get_mut → one get_mut); byte-identical
 
 BITFIELD's resolve-once preamble did `entries.get(key).is_some()` THEN `entries.get_mut(key)` — TWO
