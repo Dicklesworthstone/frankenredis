@@ -16916,3 +16916,26 @@ byte-identical + Pareto-safe + on the highest-frequency inbound primitive (every
 Shipped on byte-identity + Pareto-safety, not a clean end-to-end gate (DEL/hset-class). Rollback: parse_i64_strict
 -> ::<false> + inline. FRONTIER: fr-protocol inbound parse now saturated too; fr-server/fr-command not rch-
 validatable (no linked binary); structural RdbValue remains the only big lever. [[project_fr_store_driveby_saturated_getmut_first]]
+
+### 2026-07-12 NEGATIVE (validatable frontier saturated across all crates — structural RdbValue is the only real lever)
+After the parse_i64 fast path (2038e6337), swept the LAST unexamined validatable surface — fr-protocol OUTBOUND
+encode + fr-simd kernels — and confirmed saturation. fr-protocol encode: `encode_bulk_string_slice` /
+`encode_aggregate_header` / `encode_map_header` all do an EXACT `out.reserve(1+decimal_usize_len(n)+2+n+2)` then a
+single-pass write with itoa `push_usize` + `decimal_usize_len` (ilog10, benched+tested) — no redundant reserve, no
+double-pass. The only residual (`out.extend_from_slice(b"$")` 1-byte -> `out.push`) is compiler-lowered to the same
+store and ~0.05% of a bulk-string encode (the data `extend_from_slice(bytes)` dominates) — NOT honestly a perf
+lever, not built. fr-simd: every kernel (popcount/first_mismatch/common_prefix/bitand|or|xor|not/max/crc64) is
+AVX2 + a scalar tail; the tails are BYTE-loops but BITOP/bitmap ops are MEMORY-bound (read 2, write 1), where SWAR
+does not win [[compute_vs_memory_bound_swar_targets]] — so the byte tail is already optimal.
+
+FULL cross-crate status (this session, 17 lands `acf4b60cb..2038e6337`): fr-store hot-command probe/guard frontier
+CLOSED; fr-protocol inbound-parse + outbound-encode SATURATED; fr-persist codec re-swept SATURATED
+[[project_persist_decode_frontier]]; fr-simd AVX2+scalar kernels optimal; fr-server/fr-command NOT rch-validatable
+(no linked binary, no redis-benchmark on host) [[project_fr_store_driveby_saturated_getmut_first]]. The ONE
+remaining REAL lever is the structural borrowed/Arc `RdbValue` (hold input slices instead of per-element owned Vecs
+across RDB/RESTORE decode) — but it is ALL-OR-NOTHING multi-day: its isolated pieces MEASURE sub-gate (SET/HASH_
+LISTPACK intermediate-Vec elision 1.04-1.08x, reverted; the end-to-end win needs the fr-store CONSUMER to also stop
+copying, else mimalloc serves the per-element allocs [[mimalloc defeats buffer reuse levers]]). NEXT PRODUCTIVE
+STEP is therefore NOT another one-turn drive-by (the sub-gate margins are exhausted) but a dedicated multi-turn
+RdbValue effort in a RESERVED worktree [[project_shared_tree_wip_hazard_2026_07_11]] — or the deferred medium
+get_mut-first refactors (zincrby/hincrby) if single-command sub-gate lands are still wanted.
