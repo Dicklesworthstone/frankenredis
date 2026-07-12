@@ -16959,3 +16959,23 @@ probe is bitfield_resolve_lookup's 1.75x-isolated lookup). Shipped on byte-ident
 class), not a fresh end-to-end gate. This COMPLETES the single-item-write get_mut-first vein for direct-mutation
 commands (zadd_plain bulk + hset_borrowed + zincrby); only hincrby-family remains (delicate with_mutated_entry
 incremental-digest create-case — left deferred). Rollback: zincrby_with_options -> ::<false> + drop ref/impl/helper.
+
+### 2026-07-12 SHIPPED (HINCRBY get_mut-first via with_mutated_or_created_entry — resolves the deferred "delicate" lever)
+The last get_mut-first target, previously deferred as delicate (with_mutated_entry incremental-digest create-case).
+RESOLVED: added `with_mutated_or_created_entry` — get-or-create + mutate in ONE keyspace probe on the common
+(already-stale-digest) path, fusing `ensure_entry` (contains_key) + `with_mutated_entry` (get_mut) that HINCRBY did
+as two probes. Byte-identical: the STALE path (digest almost always stale after any write) does `get_mut`-first
+(create on miss via the same internal_entries_insert) + bump_digest_mutations, exactly as with_mutated_entry's stale
+arm; the RARE non-stale path reproduces ensure_entry's insert + with_mutated_entry's incremental before/after
+entry-digest — and for a NEW key the pre-mutation `old_hash` is the just-inserted EMPTY entry's digest, EXACTLY what
+insert-empty-then-mutate produced (verified: key insertion does NOT mark the digest stale, so the current flow's
+empty-entry old_hash is the behavior to match, not a bug). Non-LFU HINCRBY: 2 probes -> 1 (common path). Rewired via
+const-generic `hincrby_impl<const GETMUT_FIRST>` + `#[doc(hidden)] hincrby_ensure_entry_ref`; the increment closure
+(should_bump_lfu captured = ORIGINAL presence, so a new key never bumps) is shared by both resolution paths.
+BYTE-IDENTICAL: `hincrby_getmut_first_matches_ensure_entry_ref` gates get_mut-first vs ensure_entry over
+new/existing/WRONGTYPE/non-integer-field/overflow x BOTH digest states (stale AND fresh-via-state_digest — the fresh
+cases exercise the delicate incremental-digest create-case), asserting result + DEBUG DIGEST + dirty +
+digest_mutations + digest_stale; + 6 hincr + 5 digest + 73 bumps_lfu (incl. hincrby LFU-freq) + 6 hash_field green.
+No fresh bench: same get_mut-first probe-elision primitive (hset 1.03-1.18x SUB-GATE; gated bitfield_resolve_lookup
+1.75x). COMPLETES the single-item-write get_mut-first vein. FOLLOW-UP (quick, same helper): hincrbyfloat + hsetnx
+also do ensure_entry + with_mutated_entry -> can now use with_mutated_or_created_entry. Rollback: hincrby -> ::<false>.

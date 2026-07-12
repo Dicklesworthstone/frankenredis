@@ -10944,6 +10944,52 @@ impl Store {
         Some(result)
     }
 
+    /// Get-or-create + mutate in ONE keyspace probe on the common (already-stale-digest) path.
+    /// Fuses [`Self::ensure_entry`] (get-or-create) with [`Self::with_mutated_entry`]: callers that
+    /// did `ensure_entry(...); with_mutated_entry(...)` paid a `contains_key` THEN a `get_mut`; this
+    /// takes a single `get_mut`-first (creating via the same `internal_entries_insert` on a miss).
+    /// Byte-identical to that pair: the stale path skips digest hashing exactly as
+    /// `with_mutated_entry` does (just `bump_digest_mutations`); the rare non-stale path reproduces
+    /// `ensure_entry`'s insert + `with_mutated_entry`'s incremental before/after entry-digest — for
+    /// a NEW key the pre-mutation `old_hash` is the just-inserted EMPTY entry's digest, exactly as
+    /// insert-empty-then-mutate produced. Always creates, so returns `R` (never `None`).
+    fn with_mutated_or_created_entry<R>(
+        &mut self,
+        key: &[u8],
+        default_value: impl FnOnce() -> Value,
+        now_ms: u64,
+        mutate: impl FnOnce(&mut Entry) -> R,
+    ) -> R {
+        if self.digest_stale {
+            if let Some(entry) = self.entries.get_mut(key) {
+                let result = mutate(entry);
+                self.bump_digest_mutations();
+                return result;
+            }
+            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+            let entry = self
+                .entries
+                .get_mut(key)
+                .expect("entry must exist after internal insertion");
+            let result = mutate(entry);
+            self.bump_digest_mutations();
+            return result;
+        }
+        if !self.entries.contains_key(key) {
+            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+        }
+        let old_hash = self.current_entry_digest(key).expect("entry ensured above");
+        let result = {
+            let entry = self
+                .entries
+                .get_mut(key)
+                .expect("entry hash captured above");
+            mutate(entry)
+        };
+        self.refresh_entry_digest(key, old_hash);
+        result
+    }
+
     fn state_digest_full_scan(&self) -> u64 {
         self.entries.iter().fold(0_u64, |digest, (key, entry)| {
             digest ^ Self::entry_state_digest(key, entry, self.expiry_ms(key))
@@ -13310,6 +13356,30 @@ impl Store {
         delta: i64,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.hincrby_impl::<true>(key, field, delta, now_ms)
+    }
+
+    /// Bench/test-only reference: the pre-`get_mut`-first HINCRBY (`ensure_entry` +
+    /// `with_mutated_entry` = contains_key + get_mut). Byte-identical to [`Self::hincrby`]; exists
+    /// only for the differential gate `hincrby_getmut_first_matches_ensure_entry_ref`.
+    #[doc(hidden)]
+    pub fn hincrby_ensure_entry_ref(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta: i64,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        self.hincrby_impl::<false>(key, field, delta, now_ms)
+    }
+
+    fn hincrby_impl<const GETMUT_FIRST: bool>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta: i64,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -13320,61 +13390,62 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        // (perf) On the LFU path `should_bump_lfu` already resolved presence (only `next_rand`
-        // ran since), so reuse it: create only when absent, skipping `ensure_entry`'s redundant
-        // `contains_key`. Off-LFU keeps `ensure_entry` (its `&&` short-circuited the probe).
-        if lfu_tracking_enabled {
-            if !should_bump_lfu {
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(Box::default()), now_ms),
-                );
-            }
-        } else {
-            self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
-        }
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let (res, is_empty) = self
-            .with_mutated_entry(key, |entry| {
-                if should_bump_lfu {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        // The increment core; `should_bump_lfu` (captured) reflects ORIGINAL presence, so a NEW key
+        // (should_bump false) never bumps — identical whether the entry was found or just created.
+        let apply = |entry: &mut Entry| -> (Result<i64, StoreError>, bool) {
+            if should_bump_lfu {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            let Value::Hash(m) = &mut entry.value else {
+                return (Err(StoreError::WrongType), false);
+            };
+            let mut touched = false;
+            let current_res = match m.get(field) {
+                Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger),
+                None => Ok(0),
+            };
+            let res = match current_res {
+                Ok(current) => match current.checked_add(delta) {
+                    Some(next) => {
+                        // (frankenredis-hincrfast) Borrowed-field upsert (see hsetfast).
+                        m.insert_borrowed(field, next.to_string().into_bytes());
+                        touched = true;
+                        Ok(next)
+                    }
+                    None => Err(StoreError::IntegerOverflow),
+                },
+                Err(e) => Err(e),
+            };
+            let is_empty = m.is_empty();
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                // (frankenredis-yp503) Crossing the entries count via
+                // hincrby on a new field can promote to hashtable.
+                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+            }
+            (res, is_empty)
+        };
+        let (res, is_empty) = if GETMUT_FIRST {
+            // (perf) Fuse ensure-exists + mutate into one `get_mut`-first probe on the common
+            // stale-digest path (saves the `ensure_entry` contains_key). Byte-identical.
+            self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
+        } else {
+            // Reference: pre-`get_mut`-first ensure_entry + with_mutated_entry (two probes).
+            if lfu_tracking_enabled {
+                if !should_bump_lfu {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::Hash(Box::default()), now_ms),
+                    );
                 }
-                let Value::Hash(m) = &mut entry.value else {
-                    return (Err(StoreError::WrongType), false);
-                };
-                let mut touched = false;
-                let current_res = match m.get(field) {
-                    Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger),
-                    None => Ok(0),
-                };
-                let res = match current_res {
-                    Ok(current) => match current.checked_add(delta) {
-                        Some(next) => {
-                            // (frankenredis-hincrfast) Borrowed-field upsert: HINCRBY on an
-                            // existing counter field is the steady state, and insert_borrowed
-                            // overwrites the value slot in place without allocating an owned
-                            // field key (nor extracting the old value) — byte-identical to
-                            // insert(field.to_vec(), ..). Mirrors redis hashTypeSet (keeps the
-                            // field sds). Same promotion condition as insert. See hsetfast.
-                            m.insert_borrowed(field, next.to_string().into_bytes());
-                            touched = true;
-                            Ok(next)
-                        }
-                        None => Err(StoreError::IntegerOverflow),
-                    },
-                    Err(e) => Err(e),
-                };
-                let is_empty = m.is_empty();
-                if touched {
-                    entry.touch_write(now_ms, lfu_tracking_enabled);
-                    // (frankenredis-yp503) Crossing the entries count via
-                    // hincrby on a new field can promote to hashtable.
-                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
-                }
-                (res, is_empty)
-            })
-            .expect("hash entry was ensured");
+            } else {
+                self.ensure_entry(key, || Value::Hash(Box::default()), now_ms);
+            }
+            self.with_mutated_entry(key, apply)
+                .expect("hash entry was ensured")
+        };
         if res.is_ok() {
             self.dirty = self.dirty.saturating_add(1);
         }
@@ -13383,7 +13454,6 @@ impl Store {
         }
         res
     }
-
     pub fn hsetnx(
         &mut self,
         key: &[u8],
@@ -43283,6 +43353,64 @@ mod tests {
             other => return Err(format!("HMGET should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn hincrby_getmut_first_matches_ensure_entry_ref() {
+        // Gate get_mut-first (`with_mutated_or_created_entry`) vs the `ensure_entry` +
+        // `with_mutated_entry` reference. CRUCIAL: exercise BOTH the stale-digest path (get_mut-first
+        // fuses the probe) AND the fresh-digest incremental path (the create-case `old_hash` = empty
+        // entry's digest must match insert-then-mutate) via `fresh` = reset digest with state_digest.
+        type Hincr = fn(&mut Store, &[u8], &[u8], i64, u64) -> Result<i64, StoreError>;
+        let build = |h: Hincr, case: &str, fresh: bool| -> (Result<i64, StoreError>, Store) {
+            let mut s = Store::new();
+            s.set(b"other".to_vec(), b"v".to_vec(), None, 1); // non-trivial full-scan digest
+            match case {
+                "new_key" => {}
+                "existing_counter" => {
+                    h(&mut s, b"h", b"f", 5, 1).unwrap();
+                }
+                "wrongtype" => {
+                    s.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                "non_integer_field" => {
+                    s.hset_borrowed(b"h", b"f", b"abc".to_vec(), 1).unwrap();
+                }
+                "overflow" => {
+                    s.hset_borrowed(b"h", b"f", i64::MAX.to_string().into_bytes(), 1).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if fresh {
+                let _ = s.state_digest(); // reset digest_stale = false → exercise the incremental path
+            }
+            let r = h(&mut s, b"h", b"f", 3, 2);
+            (r, s)
+        };
+        for case in [
+            "new_key",
+            "existing_counter",
+            "wrongtype",
+            "non_integer_field",
+            "overflow",
+        ] {
+            for fresh in [false, true] {
+                let (ra, mut a) = build(Store::hincrby, case, fresh);
+                let (rb, mut b) = build(Store::hincrby_ensure_entry_ref, case, fresh);
+                assert_eq!(ra, rb, "result @ {case} fresh={fresh}");
+                assert_eq!(a.dirty, b.dirty, "dirty @ {case} fresh={fresh}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations @ {case} fresh={fresh}"
+                );
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale @ {case} fresh={fresh}");
+                assert_eq!(
+                    a.state_digest(),
+                    b.state_digest(),
+                    "state_digest @ {case} fresh={fresh}"
+                );
+            }
+        }
     }
 
     #[test]
