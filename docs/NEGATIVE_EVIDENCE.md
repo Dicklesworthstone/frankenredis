@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (small-clean drive-by frontier exhausted) — even the HOTTEST Vec-build is already presized; next lever is medium/structural
+
+Closed the last open presize question — the HOTTEST result `Vec`: `parse_command_args_borrowed_into`
+(the borrowed command-parse path, run on every command) ALREADY presizes from the multibulk count
+(`args.reserve(count.min(1024))`, capped so a huge `*N` can't OOM) AND reuses the buffer via
+`args.clear()`. So there is no hot-path presize win left. fr-protocol is otherwise optimal/frozen
+(fpconv Grisu dtoa, 2-digit-LUT itoa, stack-buffer double framing).
+
+The small-clean drive-by frontier (presize / memset-elision / AVX2 byte-streaming) is now exhausted
+across the accessible crates after 10 shipped wins this session. The remaining levers are NOT small
+increments:
+- **SPOP-count lookup fusion** (O(count) `get_mut` → O(1)+precompute): real but delicate — even the
+  no-LFU fast path must replay the exact `next_rand()` draw count (incl. the wasted draw on
+  `count > set_len`) AND either match `mark_digest_stale_fields`'s per-pop `digest_mutations`
+  increments (the loop calls it once per non-emptying pop) or prove that count is unobservable; needs
+  a full-store-state (result + dirty + digest + RNG) differential test vs N `spop()` calls, plus a
+  Store-level A/B bench. A dedicated turn, not a drive-by. (LFU is off by default, so the loop's
+  double `contains_key`+`get_mut` only bites under LFU config.)
+- Multi-day structural: borrowed/Arc `RdbValue` (kills per-element owned Vec in decode_rdb), b1o02
+  hash-listpack repr, ChunkedList — all need coordination + a reserved worktree.
+
+No code shipped this turn.
+
 ## 2026-07-12: NEGATIVE (presize vein fully characterized + mined) — presize wins ONLY when per-element work ≈ a pointer-move
 
 Swept the sibling result-`Vec` builders after the LPOP/RPOP presize win (below). The reusable RULE that
