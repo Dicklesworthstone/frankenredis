@@ -11,3 +11,7 @@ proptest.workspace = true
 [[bench]]
 name = "decimal_len_ilog10"
 harness = false
+
+[[bench]]
+name = "parse_i64_fastpath"
+harness = false

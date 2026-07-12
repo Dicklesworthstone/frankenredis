@@ -16897,3 +16897,22 @@ get_mut-first via zadd_plain), and hincrby adds the `with_mutated_entry` increme
 WIP → modified-since-read), raising the risk of a large multi-hunk refactor. NET: fr-store clean-drive-by frontier
 is SATURATED; the next REAL levers are structural (borrowed/Arc RdbValue, b1o02 hash-listpack RESTORE) — multi-day,
 reserved worktree, NOT a shared-tree drive-by. [[project_fr_store_driveby_saturated_getmut_first]]
+
+### 2026-07-12 SHIPPED (parse_i64_strict <=19-digit fast path — hottest inbound RESP primitive, Pareto-safe)
+Switched crates (fr-store frontier saturated). Re-verified fr-protocol inbound parse (read_line, borrowed command
+parser parse_command_args_borrowed_into_inner, parse_bulk_slice — all already tight: borrowed args, presized,
+no copies) and found ONE provable micro-opt: `parse_i64_strict` (parses every `$N` bulk length + `*N` multibulk
+count + `:N` RESP integer — the hottest inbound primitive) ran per-digit u64-overflow guards (`v > u64::MAX/10`,
+`v > u64::MAX - digit`) on EVERY input, but a value with <=19 decimal digits can NEVER overflow u64 (max 19-digit
+~1e19 < u64::MAX ~1.84e19). Split the accumulation loop: <=19 digits take an unchecked loop, only a 20-digit
+positive input keeps the guards. Gated on `p < slen` so a SINGLE-digit length (the hot `$3`/`*3` header) skips the
+branch entirely and is byte-for-byte the pre-change path — strictly Pareto-safe (faster only where 2+ digits,
+never slower). BYTE-IDENTICAL: `parse_i64_strict_fast_path_matches_guarded_ref` fuzzes new vs a guarded reference
+EXHAUSTIVELY over {digits,sign,non-digit}^(0..=5) + all 18-20-digit / i64-MIN/MAX / u64-MAX(+1) boundary strings;
++ 91 fr-protocol lib tests green. const-generic `parse_i64_strict_impl<const FAST>` + `bench_parse_i64_strict`
+hook. A/B (benches/parse_i64_fastpath.rs, realistic short-length corpus): **1.047x directional, INSIDE null
+p5..p95 (cv 7.6%) = SUB-GATE** — the eliminated guards are branch-predicted, so a single-primitive micro-opt; but
+byte-identical + Pareto-safe + on the highest-frequency inbound primitive (every RESP element of every command).
+Shipped on byte-identity + Pareto-safety, not a clean end-to-end gate (DEL/hset-class). Rollback: parse_i64_strict
+-> ::<false> + inline. FRONTIER: fr-protocol inbound parse now saturated too; fr-server/fr-command not rch-
+validatable (no linked binary); structural RdbValue remains the only big lever. [[project_fr_store_driveby_saturated_getmut_first]]

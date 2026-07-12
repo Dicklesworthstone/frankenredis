@@ -1772,6 +1772,18 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
+    parse_i64_strict_impl::<true>(input)
+}
+
+/// Bench hook: `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks
+/// on every input) for the same-binary A/B `benches/parse_i64_fastpath.rs`. Byte-identical to
+/// `parse_i64_strict` (`FAST = true`); not on any production path.
+#[doc(hidden)]
+pub fn bench_parse_i64_strict<const FAST: bool>(input: &[u8]) -> Result<i64, RespParseError> {
+    parse_i64_strict_impl::<FAST>(input)
+}
+
+fn parse_i64_strict_impl<const FAST: bool>(input: &[u8]) -> Result<i64, RespParseError> {
     let slen = input.len();
     if slen == 0 || slen > 20 {
         return Err(RespParseError::InvalidInteger);
@@ -1792,21 +1804,45 @@ fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
     if input[p] >= b'1' && input[p] <= b'9' {
         let mut v: u64 = (input[p] - b'0') as u64;
         p += 1;
-        while p < slen {
-            let b = input[p];
-            if b.is_ascii_digit() {
-                if v > (u64::MAX / 10) {
-                    return Err(RespParseError::InvalidInteger);
+        // (perf) A value with <= 19 decimal digits can never overflow u64 (max 19-digit
+        // ~1e19 < u64::MAX ~1.84e19), so the per-digit overflow guards below are dead code on
+        // that path — the common bulk-length / multibulk-count case. Take an unchecked
+        // accumulation loop then; only a 20-digit input (positive only — a negative caps at 19
+        // digits since `slen > 20` was already rejected) keeps the guarded loop. Byte-identical:
+        // the parsed `v` is the same (no overflow was possible) and the final i64-range check
+        // below is unchanged, so every result and error matches the guarded path.
+        // Gated on `p < slen` so a SINGLE-digit length (the hot `$3` / `*3` header) skips the
+        // digit-count computation + branch entirely and stays byte-for-byte the pre-change path
+        // (its loop ran zero times anyway) — Pareto-safe, faster only where there are 2+ digits.
+        if p < slen {
+            let digit_count = slen - usize::from(negative);
+            if FAST && digit_count <= 19 {
+                while p < slen {
+                    let b = input[p];
+                    if !b.is_ascii_digit() {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                    v = v * 10 + (b - b'0') as u64;
+                    p += 1;
                 }
-                v *= 10;
-                let digit = (b - b'0') as u64;
-                if v > (u64::MAX - digit) {
-                    return Err(RespParseError::InvalidInteger);
-                }
-                v += digit;
-                p += 1;
             } else {
-                return Err(RespParseError::InvalidInteger);
+                while p < slen {
+                    let b = input[p];
+                    if b.is_ascii_digit() {
+                        if v > (u64::MAX / 10) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v *= 10;
+                        let digit = (b - b'0') as u64;
+                        if v > (u64::MAX - digit) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v += digit;
+                        p += 1;
+                    } else {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                }
             }
         }
 
@@ -2033,6 +2069,103 @@ mod tests {
     };
 
     // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original
+    #[test]
+    fn parse_i64_strict_fast_path_matches_guarded_ref() {
+        // Reference: the pre-fast-path parser that runs the per-digit u64-overflow guards on EVERY
+        // input. Production `parse_i64_strict`'s <=19-digit fast path skips only guards that were
+        // provably dead, so it must return the byte-identical `Result` for every input.
+        fn ref_guarded(input: &[u8]) -> Result<i64, RespParseError> {
+            let slen = input.len();
+            if slen == 0 || slen > 20 {
+                return Err(RespParseError::InvalidInteger);
+            }
+            if slen == 1 && input[0] == b'0' {
+                return Ok(0);
+            }
+            let mut p = 0;
+            let negative = input[0] == b'-';
+            if negative {
+                p += 1;
+                if p == slen {
+                    return Err(RespParseError::InvalidInteger);
+                }
+            }
+            if input[p] >= b'1' && input[p] <= b'9' {
+                let mut v: u64 = (input[p] - b'0') as u64;
+                p += 1;
+                while p < slen {
+                    let b = input[p];
+                    if b.is_ascii_digit() {
+                        if v > (u64::MAX / 10) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v *= 10;
+                        let digit = (b - b'0') as u64;
+                        if v > (u64::MAX - digit) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v += digit;
+                        p += 1;
+                    } else {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                }
+                if negative {
+                    let limit = (i64::MIN as u64).wrapping_neg();
+                    if v > limit {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                    return Ok(v.wrapping_neg() as i64);
+                }
+                if v > i64::MAX as u64 {
+                    return Err(RespParseError::InvalidInteger);
+                }
+                return Ok(v as i64);
+            }
+            Err(RespParseError::InvalidInteger)
+        }
+
+        // Exhaustive over {digits, sign, non-digit} up to length 5 (leading zeros, signs, junk).
+        let alphabet = [b'0', b'1', b'2', b'9', b'-', b'x'];
+        for len in 0..=5usize {
+            for mut idx in 0..6usize.pow(len as u32) {
+                let mut buf = Vec::with_capacity(len);
+                for _ in 0..len {
+                    buf.push(alphabet[idx % 6]);
+                    idx /= 6;
+                }
+                assert_eq!(
+                    super::parse_i64_strict(&buf),
+                    ref_guarded(&buf),
+                    "input={:?}",
+                    String::from_utf8_lossy(&buf)
+                );
+            }
+        }
+        // 18-20-digit + i64/u64-boundary strings (the fast/slow-path seam and overflow edges).
+        let boundaries: &[&[u8]] = &[
+            b"9223372036854775807",
+            b"9223372036854775808",
+            b"-9223372036854775808",
+            b"-9223372036854775809",
+            b"18446744073709551615",
+            b"18446744073709551616",
+            b"99999999999999999999",
+            b"9999999999999999999",
+            b"1000000000000000000",
+            b"-1000000000000000000",
+            b"12345678901234567890",
+        ];
+        for b in boundaries {
+            assert_eq!(
+                super::parse_i64_strict(b),
+                ref_guarded(b),
+                "boundary={:?}",
+                String::from_utf8_lossy(b)
+            );
+        }
+    }
+
     // div-by-10 reference for every input that crosses a digit boundary, plus extremes.
     #[test]
     fn decimal_len_matches_div_loop_reference() {
