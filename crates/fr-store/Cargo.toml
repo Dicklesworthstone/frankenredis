@@ -170,3 +170,9 @@ harness = false
 [[bench]]
 name = "hset_getmut_first"
 harness = false
+
+# (6lgnu validation) Quantify the lazy rank-treap's per-ZADD maintenance tax: identical N-member
+# builds with the treap cold (never queried) vs warm (queried once, maintained on every later ZADD).
+[[bench]]
+name = "zadd_treap_tax"
+harness = false
