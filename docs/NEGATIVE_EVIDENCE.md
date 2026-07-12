@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: NEGATIVE (vein complete) — byte-streaming AVX2 routing EXHAUSTED for clean drive-bys; remaining pieces are complex/low-value or peer-contended
+
+After five clean byte-streaming AVX2 wins this session (LZF match-tail `common_prefix`, BITOP
+AND/OR/XOR accumulate, BITOP NOT, HLL dense-merge max, 2-operand BITOP collect), a negative-ledger
+-first sweep this turn found NO further clean drive-by in that vein. Every fr_simd primitive is now
+wired to its caller (popcount→BITCOUNT, first_mismatch→BITPOS, common_prefix→LZF, bit{and,or,xor,not}
++max_bytes→BITOP/HLL, crc64→DUMP), and the byte-streaming loops that remain are already optimal or
+unsuited:
+
+- **HLL `hll_estimate` histogram** — already the 4-bank dependency-breaking scalar tally (−53.5%);
+  an AVX2 histogram needs AVX512 conflict-detection (`vpconflictd`), unavailable here. Not a lever.
+- **HLL 6-bit dense unpack (`hll_decode_dense_registers`)** — the one remaining byte-level HLL compute
+  piece. It IS SIMD-able (base64-style 3→4 shuffle+multiply), but (a) it feeds PFMERGE/PFCOUNT which
+  already run **3.4–3.6x faster than redis 7.2.4** (ledger below), so the marginal value is low, and
+  (b) the shuffle-mask/multiply-constant codec is high-risk to land byte-exact in one increment.
+  Deferred as a scoped future lever, not a drive-by.
+- **memchr-style single-byte `position()` scans** (double/float parse markers `e`/`.`/`p`, first
+  non-zero digit, hash-tag `{`/`}`) — all on SHORT buffers (number strings, keys < 32 B), below the
+  AVX2 crossover; scalar is optimal.
+- **Move/clone/borrow already done**: RENAME moves the entry (O(1) relink, no clone), GETRANGE has
+  `getrange_with` (borrowed bulk reply, no malloc+memcpy), list/keyspace scans are element-level
+  `memcmp` (LLVM-optimal), reply-borrow + RDB owned-move families complete.
+
+CONCLUSION: the clean solo per-crate frontier for THIS session's productive vein is drained. The next
+real levers are the peer-contended dispatch preclassifier (many ready P3 byte-prefix-packet beads in
+fr-server/main.rs — STAND DOWN, peer-hot) or multi-day structural work (b1o02 hash-listpack repr,
+borrowed/Arc RdbValue, ChunkedList). No code shipped this turn; recorded to save the next turn from
+re-treading these.
+
 ## 2026-07-12: SHIPPED — 2-operand BITOP build wired to one-pass AVX2 collect; 1.22–1.96x L1/L2, byte-identical
 
 The last BITOP AVX2 piece. `Store::bitop`'s 2-operand fast path (the common shape) built the
