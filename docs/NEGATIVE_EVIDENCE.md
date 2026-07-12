@@ -16792,3 +16792,29 @@ Same vein + honest scope as the HSET (345cf4897) / HINCRBY (86205d20f) LFU-probe
 isolated one-lookup delta (bitfield_resolve_lookup primitive). Completes the reuse-presence family across the hot
 listpack/skiplist write commands (HSET x2, HINCRBY/HINCRBYFLOAT/HSETNX, ZADD-INCR). Rollback: restore the plain
 `internal_entry` call.
+
+### 2026-07-12 NEGATIVE (drive-by frontier saturated) + SURFACED: single-item-write get_mut-first common-path vein
+After 11 byte-identical lands this session (no-TTL guard/fusion read family, keys_in_db 2.6-2.8x, exists_no_stat
+2->1, reuse-presence across all single-field hash/zset writes), a fresh sweep found NO clean small drive-by left
+in fr-store hot commands. Confirmed already-optimal THIS turn: GETRANGE (fused lookup_live_for_read_mut, slices
+then clones only the range), notify_keyspace_event (O(1) early-exit on flags==0, byte-concat channels), DBSIZE
+(O(1) db_key_counts), HGETALL/SMEMBERS/HVALS/HKEYS (ExactSize .map().collect() auto-presizes, single pass),
+INCR/INCRBYFLOAT (CrimsonHawk single-lookup), SADD (get_mut-first + insert_borrowed + intset batch-merge),
+LRANGE (chunk-seek iter_from + borrow-scan twin), zadd_plain bulk (CrimsonHawk get_mut-first, one probe).
+
+SURFACED (the next bounded lever, NOT a drive-by): the SINGLE-item write commands still resolve the entry via
+`internal_entry` (contains_key + get_mut = 2 probes) on their COMMON path, where the BULK commands
+(zadd_plain_owned / sadd / lpush) already use `get_mut`-FIRST (`if let Some(entry)=get_mut {..} else {insert}` =
+ONE probe for the existing case, edition-2024 if-let temporary scoping releasing the borrow in the else arm).
+Candidates: hset_borrowed (single-field HSET — the HOTTEST, real common-path EV), hincrby/hincrbyfloat/hsetnx
+(via with_mutated_entry), zincrby_with_options (ZINCRBY/ZADD-INCR — secondary vs plain ZADD). BLOCKERS making it
+medium/dedicated not drive-by: (1) the entry-USE block (field insert / score compare / counters / touch_write /
+encoding-flag refresh / digest / WATCH-safe modification_count deferral) must be INLINED into both if-let arms
+(can't `let entry = <get_mut-first expr>` — that's the NLL borrow-return limit, same wall as internal_entry
+itself), so the ~30-40 line use-block is duplicated or factored into a `&mut Entry` helper; (2) the LFU path is
+NOT helped — its rand is drawn from presence BEFORE the entry access (RNG order), so it still needs a presence
+contains_key; only the NON-LFU (common) path collapses to one probe; (3) needs an RNG-state + counters + digest
+differential gate (the SPOP method, 27c7a3c09) since WATCH/modification_count/is_new bookkeeping is subtle.
+METHOD: one command per dedicated turn, non-LFU get_mut-first arm + inlined use + differential test; start with
+hset_borrowed (highest EV). Structural big levers unchanged: borrowed/Arc RdbValue + b1o02 hash-listpack RESTORE
+(multi-day, reserved worktree) [[project_persist_decode_frontier]] [[project_b1o02_hash_listpack_ceiling]].
