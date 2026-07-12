@@ -10546,7 +10546,8 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
-        let moved_expiry = self.expiry_ms(key);
+        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
+        let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
@@ -10592,7 +10593,8 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
-        let moved_expiry = self.expiry_ms(key);
+        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
+        let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
