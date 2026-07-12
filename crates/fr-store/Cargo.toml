@@ -152,3 +152,9 @@ harness = false
 [[bench]]
 name = "bitfield_resolve_lookup"
 harness = false
+
+# (keys-notl-guard) Same-binary A/B for keys_in_db's no-TTL guard: unguarded double key-vector
+# build + reap loop vs skipping the first build + reap when expires_count == 0.
+[[bench]]
+name = "keys_notl_guard"
+harness = false

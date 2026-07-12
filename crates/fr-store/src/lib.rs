@@ -10504,12 +10504,29 @@ impl Store {
 
     #[must_use]
     pub fn keys_in_db(&mut self, db: usize, now_ms: u64) -> Vec<Vec<u8>> {
-        let physical_keys = self.ordered_physical_keys_in_db(db);
+        self.keys_in_db_impl::<true>(db, now_ms)
+    }
 
-        for key in &physical_keys {
-            self.drop_if_expired(key, now_ms);
+    /// Bench-only reference: `keys_in_db` that runs the reap pass UNGUARDED (the pre-guard
+    /// behavior) so the same-binary A/B can isolate the no-TTL fast path. Byte-identical to
+    /// [`Self::keys_in_db`]; not on any production path.
+    #[doc(hidden)]
+    pub fn keys_in_db_unguarded_ref(&mut self, db: usize, now_ms: u64) -> Vec<Vec<u8>> {
+        self.keys_in_db_impl::<false>(db, now_ms)
+    }
+
+    fn keys_in_db_impl<const GUARD: bool>(&mut self, db: usize, now_ms: u64) -> Vec<Vec<u8>> {
+        // (perf) The first key-vector build + per-key reap loop only does anything when a key
+        // can actually expire. With no TTL-bearing key in the store (`expires_count == 0`)
+        // nothing evicts, so the post-reap rebuild below is byte-identical to that first pass —
+        // skip the whole thing (an O(N) `Vec<Vec<u8>>` build + N discarded `contains_key`).
+        // `GUARD == false` is the pre-guard bench baseline.
+        if !GUARD || self.expires_count != 0 {
+            let physical_keys = self.ordered_physical_keys_in_db(db);
+            for key in &physical_keys {
+                self.drop_if_expired(key, now_ms);
+            }
         }
-
         self.ordered_physical_keys_in_db(db)
             .into_iter()
             .map(|key| {
@@ -10547,8 +10564,13 @@ impl Store {
                 .map(|k| k.to_vec())
                 .collect()
         };
-        for key in &candidates {
-            self.drop_if_expired(key, now_ms);
+        // (perf) The reap loop is dead when nothing can expire (`expires_count == 0`): each
+        // `drop_if_expired` degrades to a discarded `contains_key`, O(candidates) waste on a
+        // no-TTL DB. Skip it (byte-identical — no eviction with no TTL). Same CrimsonHawk guard.
+        if self.expires_count != 0 {
+            for key in &candidates {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         // (cc_fr) Classify the glob ONCE, not per candidate. `pg.matches` is byte-identical
         // to `glob_match(pattern, key)`; hot when `lit` is empty (a non-prefix pattern globs
@@ -10671,8 +10693,13 @@ impl Store {
             }
         };
 
-        for key in &candidates {
-            self.drop_if_expired(key, now_ms);
+        // (perf) Skip the reap loop when nothing can expire (`expires_count == 0`) — each
+        // `drop_if_expired` is a discarded `contains_key`, O(candidates) waste on a no-TTL DB.
+        // Byte-identical (no eviction with no TTL). Same CrimsonHawk guard as keys_matching.
+        if self.expires_count != 0 {
+            for key in &candidates {
+                self.drop_if_expired(key, now_ms);
+            }
         }
 
         // (cc_fr) Classify the glob ONCE for the range-pruned candidates (byte-identical

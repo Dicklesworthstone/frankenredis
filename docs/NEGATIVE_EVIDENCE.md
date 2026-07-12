@@ -16693,3 +16693,19 @@ primitive (2 keyspace probes collapsing to 1) is the exact case already gated at
 bitfield_resolve_lookup, and this is non-destructive so there is no measurement caveat. Byte-identical: 29 `move`
 + 6 `copy` + 8 `rename` + 3 `exists` fr-store lib tests green (the move/copy tests assert exact source/dest
 presence through this helper). Rollback: restore the explicit `contains_key` after the drop.
+
+### 2026-07-12 SHIPPED (KEYS/SCAN keyspace-scan skip their reap pass on the no-TTL fast path — 2.6-2.8x keys_in_db)
+The keyspace-scan helpers ran an unguarded per-key `drop_if_expired` reap loop over EVERY candidate. `keys_in_db`
+(behind full-DB KEYS/SWAPDB enumeration) was the worst: it built the physical-key `Vec<Vec<u8>>`, reaped every
+key, then built the vector AGAIN for the result — TWO O(N) key-vector builds + N `contains_key` probes. With no
+TTL-bearing key (`expires_count == 0`) nothing evicts, so the first build + reap loop are entirely dead (the
+post-reap rebuild is identical) — guard the whole first pass. `keys_matching` (KEYS pattern) and
+`keys_matching_in_db` (SCAN keyspace) get the same reap-loop guard (candidates still needed for the glob, so only
+the loop is skipped). Byte-identical (no eviction possible with no TTL); 53 `keys` + 42 `scan` fr-store lib tests
+green. Same-binary A/B (const-generic GUARD, non-destructive so the store is built ONCE and probed repeatedly — a
+CLEAN measurement unlike the destructive DEL A/B): keys_in_db **2.73x / 2.76x / 2.57x** at n256/n2000/n10000,
+candidate median far outside the orig-vs-orig null p5..p95 band — a decisive WIN (guarded does 1 vector build; the
+pre-guard did ~2 builds + the reap loop ≈ 2.7x the work). This is the first CLEANLY-GATED entry in the no-TTL
+guard family beyond CrimsonHawk's read fast-paths: it wins because it elides a whole O(N) allocation pass, not one
+lookup. keys_matching/keys_matching_in_db skip only the loop (build+glob dominate) so their share is smaller,
+shipped on the same byte-identity. Rollback: drop the `keys_in_db` const-generic guard + the two loop guards.
