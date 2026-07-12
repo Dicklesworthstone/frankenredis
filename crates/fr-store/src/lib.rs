@@ -2352,8 +2352,12 @@ impl SortedSet {
     }
 
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
+        self.rank_impl::<true>(member)
+    }
+
+    fn rank_impl<const MEMBER_ONLY: bool>(&mut self, member: &[u8]) -> Option<usize> {
         match &mut self.inner {
-            SortedSetInner::Packed(p) => p.rank(member),
+            SortedSetInner::Packed(p) => p.rank_impl::<MEMBER_ONLY>(member),
             SortedSetInner::Full(f) => f.rank(member),
         }
     }
@@ -19005,12 +19009,37 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
+        self.zrank_impl::<true>(key, member, now_ms)
+    }
+
+    /// Exact pre-change packed-ZSET rank scan retained for same-binary benchmark proof.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    pub fn bench_zrank_decode_scores_reference(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<usize>, StoreError> {
+        self.zrank_impl::<false>(key, member, now_ms)
+    }
+
+    fn zrank_impl<const MEMBER_ONLY: bool>(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<usize>, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let rank = zs.rank(member);
+                        let rank = if MEMBER_ONLY {
+                            zs.rank(member)
+                        } else {
+                            zs.rank_impl::<false>(member)
+                        };
                         entry.touch(now_ms);
                         Ok(rank)
                     }
@@ -19037,7 +19066,11 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let rank = zs.rank(member);
+                        let rank = if MEMBER_ONLY {
+                            zs.rank(member)
+                        } else {
+                            zs.rank_impl::<false>(member)
+                        };
                         entry.touch(now_ms);
                         Ok(rank)
                     }

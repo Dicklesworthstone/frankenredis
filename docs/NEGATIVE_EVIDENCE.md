@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — plain packed ZRANK/ZREVRANK skips unused score decodes; 1.0711x fewer instructions, byte-identical
+
+The negative ledger and current profile frontier ruled out the already-saturated small lookup/
+presize candidates, but the just-landed member-only `PackedZSet::locate` scan exposed one exact
+sibling: plain `PackedZSet::rank` still called `record_at` for every record and discarded the decoded
+`f64` score. ONE LEVER: production rank now parses only `[member-length][member]`, compares the
+member, and advances arithmetically over the fixed eight score bytes. The const-generic false arm
+retains the exact old `record_at` loop in the same binary. `rank_with_score` is deliberately
+unchanged; packed ZREVRANK benefits because it derives reverse rank from this same plain-rank scan.
+
+BYTE-IDENTICAL: the packed-ZSET unit and property tests compare candidate rank directly against the
+score-decoding reference for every present member and a missing member. The bench correctness gate
+repeats all 120 present ranks plus the full-scan miss on two identical listpack-encoded stores and
+asserts identical DUMP bytes. Focused `fr-store` remote test passed.
+
+MEASURED (remote-only, one-binary `packed_zset_locate`, 24 position-balanced A/A/reference rounds,
+100,000 full 120-record misses per sample): worker `vmi1227854`, binary SHA256
+`b623ce54ef1fc60b0b3a9f0bb6e73697723c3e0f00d385babe80e1e2b7274d5d`; candidate median was
+~676.932M instructions versus ~725.032M reference, or **1.071056x reference/candidate** (**6.63% fewer
+instructions**). The A/A null median was **1.000000474**, p5..p95 **[0.999995512, 1.000003752]**, CV
+**0.000236%**; effect CV **0.000280%**. `perf record` verified the old
+`PackedZSet::rank_impl::<false>` at **30.72% median self-time**, CV **1.9340%** (three trials), so the
+timed workload reached the changed function. Rollback: make `PackedZSet::rank` call
+`rank_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — EXPIRE re-arm records its digest mutation without re-probing the proven-present key; 1.32x, byte-identical
 
 The profiled `store_read` frontier had already identified `expire_existing` / `expireat_existing`

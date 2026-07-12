@@ -4660,11 +4660,32 @@ impl PackedZSet {
     /// 0-based rank of `member` in ascending `(score, member)` order (ZRANK).
     #[must_use]
     pub fn rank(&self, member: &[u8]) -> Option<usize> {
+        self.rank_impl::<true>(member)
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Plain rank only needs the member
+    /// and record index, so production skips the fixed-width score bytes. `MEMBER_ONLY=false`
+    /// retains the exact pre-change scan for the benchmark and differential test.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub(crate) fn rank_impl<const MEMBER_ONLY: bool>(&self, member: &[u8]) -> Option<usize> {
         let mut pos = 0;
         let mut idx = 0;
+        if !MEMBER_ONLY {
+            while pos < self.buf.len() {
+                let (decoded_member, _score, end) = self.record_at(pos);
+                if decoded_member == member {
+                    return Some(idx);
+                }
+                idx += 1;
+                pos = end;
+            }
+            return None;
+        }
         while pos < self.buf.len() {
-            let (m, _s, end) = self.record_at(pos);
-            if m == member {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            let m_end = m_start + mlen;
+            let end = m_end + 8;
+            if self.buf[m_start..m_end] == *member {
                 return Some(idx);
             }
             idx += 1;
@@ -5974,6 +5995,13 @@ mod tests {
         assert_eq!(z.rank(b"b"), Some(0));
         assert_eq!(z.rank(b"c"), Some(2));
         assert_eq!(z.rank(b"zzz"), None);
+        for member in [b"b".as_slice(), b"a", b"c", b"zzz"] {
+            assert_eq!(
+                z.rank(member),
+                z.rank_impl::<false>(member),
+                "member-only rank diverged from score-decoding reference"
+            );
+        }
         assert!(z.remove(b"a"));
         assert!(!z.remove(b"a"));
         assert_eq!(z.len(), 2);
@@ -6028,7 +6056,9 @@ mod tests {
                 // rank == index in the sorted reference
                 for (i, (m, _)) in sorted.iter().enumerate() {
                     prop_assert_eq!(packed.rank(m), Some(i));
+                    prop_assert_eq!(packed.rank(m), packed.rank_impl::<false>(m));
                 }
+                prop_assert_eq!(packed.rank(b"missing"), packed.rank_impl::<false>(b"missing"));
                 // iter_desc == reversed sorted
                 let desc: Vec<(Vec<u8>, f64)> =
                     packed.iter_desc().map(|(m, s)| (m.to_vec(), s)).collect();
