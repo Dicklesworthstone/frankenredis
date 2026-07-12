@@ -13491,7 +13491,10 @@ impl Store {
                 Ok(current) => match current.checked_add(delta) {
                     Some(next) => {
                         // (frankenredis-hincrfast) Borrowed-field upsert (see hsetfast).
-                        m.insert_borrowed(field, next.to_string().into_bytes());
+                        // (cc_fr) Format via fr's canonical integer_decimal_bytes (write_u64_digits
+                        // LUT into a stack buffer) not i64::to_string, which routes through the
+                        // fmt::Formatter machinery. Byte-identical decimal bytes.
+                        m.insert_borrowed(field, integer_decimal_bytes(next));
                         touched = true;
                         Ok(next)
                     }
