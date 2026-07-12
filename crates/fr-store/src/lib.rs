@@ -10980,18 +10980,29 @@ impl Store {
             self.bump_digest_mutations();
             return result;
         }
-        if !self.entries.contains_key(key) {
-            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+        // (perf) Non-stale (fresh-digest) path — fuse to `get_mut`-first + in-place before/after
+        // hashing, mirroring the stale arm above: an existing key is ONE `get_mut`, a new key is
+        // insert + `get_mut` (vs the old contains_key + `current_entry_digest` get + `get_mut` +
+        // `refresh_entry_digest` get = up to 4 lookups). TTL is stored OUTSIDE `Entry`, so one
+        // `expiry_ms` read is valid for both hashes. Byte-identical: same old/new entry-state
+        // digests (new key -> old_hash is the just-inserted EMPTY entry) + same `update_digest_hashes`.
+        let expiry = self.expiry_ms(key);
+        if let Some(entry) = self.entries.get_mut(key) {
+            let old_hash = Self::entry_state_digest(key, entry, expiry);
+            let result = mutate(entry);
+            let new_hash = Self::entry_state_digest(key, entry, expiry);
+            self.update_digest_hashes(Some(old_hash), Some(new_hash));
+            return result;
         }
-        let old_hash = self.current_entry_digest(key).expect("entry ensured above");
-        let result = {
-            let entry = self
-                .entries
-                .get_mut(key)
-                .expect("entry hash captured above");
-            mutate(entry)
-        };
-        self.refresh_entry_digest(key, old_hash);
+        self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+        let entry = self
+            .entries
+            .get_mut(key)
+            .expect("entry must exist after internal insertion");
+        let old_hash = Self::entry_state_digest(key, entry, expiry);
+        let result = mutate(entry);
+        let new_hash = Self::entry_state_digest(key, entry, expiry);
+        self.update_digest_hashes(Some(old_hash), Some(new_hash));
         result
     }
 
@@ -43417,9 +43428,11 @@ mod tests {
         s.set(b"str".to_vec(), b"hello".to_vec(), None, 1);
         let _ = s.state_digest(); // reset to a FRESH digest
         assert!(!s.digest_stale, "fresh after state_digest");
-        // with_mutated_entry commands on the fresh digest -> the fused incremental path:
+        // with_mutated_entry commands (HDEL/APPEND) + a with_mutated_or_created_entry command
+        // (HINCRBY) on the fresh digest -> both fused incremental paths:
         s.hdel(b"h", &[b"g" as &[u8]], 2).unwrap();
         s.append(b"str", b" world", 2).unwrap();
+        s.hincrby(b"h", b"f", 5, 2).unwrap();
         let incremental = s.state_digest(); // fresh -> the incrementally-maintained running_digest
         s.digest_stale = true;
         let full_scan = s.state_digest(); // forced full recompute

@@ -17044,3 +17044,18 @@ non-Pareto tradeoff regressing DEBUG-DIGEST-heavy reads to O(N); this is a pure 
 bench (lookup-elision primitive, gated 1.75x isolated). FOLLOW-UP: with_mutated_or_created_entry (hincrby-family)
 has the same fusable non-stale create-path. LESSON: "rare path" is workload-dependent — a self-fresh-keeping digest
 path is COMMON for pure-mutate workloads. Rollback: restore current_entry_digest + separate get_mut + refresh.
+
+### 2026-07-12 SHIPPED (with_mutated_or_created_entry fresh-digest path fused — completes the digest-path fusion vein)
+Follow-on to `49561bb41`: applied the same fresh-digest lookup-fusion to `with_mutated_or_created_entry` (the
+HINCRBY/HINCRBYFLOAT/HSETNX helper). Its non-stale path did `contains_key` + `current_entry_digest` get + `get_mut`
++ `refresh_entry_digest` get = up to 4 keyspace lookups; now `get_mut`-FIRST (existing key = ONE get_mut, new key =
+insert + get_mut) with in-place before/after `entry_state_digest` hashing, mirroring its stale arm. Same key fact:
+TTL is outside `Entry`, so one `expiry_ms` read serves both hashes; new-key `old_hash` = the just-inserted EMPTY
+entry (byte-identical to insert-empty-then-hash). Byte-identical: the hincrby/hincrbyfloat/hsetnx
+`_getmut_first_matches_ensure_entry_ref` differentials (fused with_mutated_or_created_entry vs ensure_entry + fused
+with_mutated_entry, over BOTH stale + fresh digest states) + the extended
+`with_mutated_entry_fresh_path_maintains_full_scan_digest` (now also routes a HINCRBY so the fused
+running_digest == full scan for THIS helper too) + 6 digest + 3 hsetnx green. Now BOTH incremental-digest helpers
+fuse their fresh path; pure-counter workloads (HINCRBY-heavy, staying fresh) do 1 keyspace probe per op instead of
+4. No fresh bench (same lookup-elision primitive). This COMPLETES the digest-path fusion vein. Rollback: restore
+contains_key + current_entry_digest + get_mut + refresh_entry_digest.
