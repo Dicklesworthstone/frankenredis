@@ -16939,3 +16939,23 @@ copying, else mimalloc serves the per-element allocs [[mimalloc defeats buffer r
 STEP is therefore NOT another one-turn drive-by (the sub-gate margins are exhausted) but a dedicated multi-turn
 RdbValue effort in a RESERVED worktree [[project_shared_tree_wip_hazard_2026_07_11]] — or the deferred medium
 get_mut-first refactors (zincrby/hincrby) if single-command sub-gate lands are still wanted.
+
+### 2026-07-12 SHIPPED (zincrby_with_options non-LFU/non-XX get_mut-first — completes the single-item-write vein)
+Executed the deferred zincrby get_mut-first (0861e7b75 listed it as the remaining single-command lever). ZINCRBY /
+ZADD-INCR's common no-XX/no-LFU path resolved the entry via `internal_entry` (contains_key + get_mut = two probes);
+that path draws no RNG and no LFU bump, so it now uses `get_mut`-FIRST — one probe for the existing zset (the
+leaderboard steady state), a single insert for a new key — mirroring zadd_plain / hset_borrowed. Factored the
+~40-line score-mutation use block (NX/XX/GT/LT gates, INCR add, `-0` zincrnegzero, NaN reject, is_empty/touched,
+touch_write + encoding refresh) into a shared `zincrby_apply_entry(&mut Entry, ...)` so the get_mut-first arms and
+the XX/LFU arm all call it — no duplication; WRONGTYPE returns `(Err, false, false)` so the caller's touched/is_empty
+tail runs its no-ops (byte-identical to the prior in-fn `return Err(WrongType)`). const-generic
+`zincrby_with_options_impl<const GETMUT_FIRST>` + `#[doc(hidden)] zincrby_with_options_internal_entry_ref`.
+BYTE-IDENTICAL: `zincrby_getmut_first_matches_internal_entry_ref` gates get_mut-first vs internal_entry over
+new/INCR/NX-skip/GT-gate/LT-gate/multi-member/WRONGTYPE/NaN-reject sequences (result + DEBUG DIGEST + dirty +
+digest_mutations + digest_stale); the shared apply-core is covered by 8 zadd + 5 zincrby + 73 bumps_lfu (incl.
+zincrby_existing_zset LFU-freq) + 2 zscore lib tests, all green. NO fresh bench: this is the SAME get_mut-first
+probe-elision primitive already characterized (hset 429f17f8c: 1.03-1.18x directional, SUB-GATE; the eliminated
+probe is bitfield_resolve_lookup's 1.75x-isolated lookup). Shipped on byte-identity + the gated primitive (DEL/hset
+class), not a fresh end-to-end gate. This COMPLETES the single-item-write get_mut-first vein for direct-mutation
+commands (zadd_plain bulk + hset_borrowed + zincrby); only hincrby-family remains (delicate with_mutated_entry
+incremental-digest create-case — left deferred). Rollback: zincrby_with_options -> ::<false> + drop ref/impl/helper.

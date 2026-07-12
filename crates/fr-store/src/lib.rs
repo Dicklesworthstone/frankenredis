@@ -19442,16 +19442,99 @@ impl Store {
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
+        self.zincrby_with_options_impl::<true>(key, member, delta, opts, now_ms)
+    }
+
+    /// Bench/test-only reference: the pre-`get_mut`-first `zincrby_with_options`, whose common
+    /// no-XX/no-LFU path resolves the entry via `internal_entry` (contains_key + get_mut = two
+    /// probes). Byte-identical to [`Self::zincrby_with_options`]; exists only for the differential
+    /// gate `zincrby_getmut_first_matches_internal_entry_ref`. Not on any production path.
+    #[doc(hidden)]
+    pub fn zincrby_with_options_internal_entry_ref(
+        &mut self,
+        key: &[u8],
+        member: Vec<u8>,
+        delta: f64,
+        opts: ZaddOptions,
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
+        self.zincrby_with_options_impl::<false>(key, member, delta, opts, now_ms)
+    }
+
+    /// Shared score-mutation core for [`Self::zincrby_with_options`]: applies ZADD-INCR / ZINCRBY
+    /// semantics (NX/XX/GT/LT gates, INCR add, NaN reject) to an ALREADY-resolved entry, returning
+    /// `(result, is_empty, touched)`. Factoring it lets the common no-XX/no-LFU path resolve the
+    /// entry `get_mut`-first (one probe) without duplicating this block. A WRONGTYPE entry returns
+    /// `(Err(WrongType), false, false)` so the caller's `touched`/`is_empty` tail runs its no-ops —
+    /// byte-identical to the prior in-function `return Err(WrongType)`.
+    fn zincrby_apply_entry(
+        entry: &mut Entry,
+        member: Vec<u8>,
+        delta: f64,
+        opts: &ZaddOptions,
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+        zset_max_entries: usize,
+        zset_max_value: usize,
+    ) -> (Result<Option<f64>, StoreError>, bool, bool) {
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return (Err(StoreError::WrongType), false, false);
+        };
+        let old_score = zs.get_score(&member);
+        let res = if (opts.nx && old_score.is_some()) || (opts.xx && old_score.is_none()) {
+            Ok(None)
+        } else {
+            // (frankenredis-zincrnegzero) Upstream zaddGenericCommand in INCR mode sets a NEW
+            // member's score to the increment DIRECTLY (not `0 + incr`), so a `-0` increment
+            // yields a `-0` reply (the STORED score is canonicalized to `+0` by insert_with_limits,
+            // so ZSCORE still returns `0`). `0.0 + delta` is the additive identity for every double
+            // EXCEPT `-0.0` (IEEE gives `0.0 + -0.0 = +0.0`). old+delta for existing members;
+            // delta verbatim for new members.
+            let new_score = match old_score {
+                Some(old) => old + delta,
+                None => delta,
+            };
+            if new_score.is_nan() {
+                Err(StoreError::IncrFloatNaN)
+            } else if let Some(old) = old_score {
+                if (opts.gt && new_score <= old) || (opts.lt && new_score >= old) {
+                    Ok(None)
+                } else {
+                    zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
+                    Ok(Some(new_score))
+                }
+            } else {
+                zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
+                Ok(Some(new_score))
+            }
+        };
+        let is_empty = zs.is_empty();
+        let touched = matches!(&res, Ok(Some(_)));
+        if touched {
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            // (frankenredis-yp503) Crossing the entries count via zincrby on a new member
+            // can promote to skiplist.
+            Self::refresh_zset_encoding_flag_after_insert(entry, zset_max_entries, zset_max_value);
+        }
+        (res, is_empty, touched)
+    }
+
+    fn zincrby_with_options_impl<const GETMUT_FIRST: bool>(
+        &mut self,
+        key: &[u8],
+        member: Vec<u8>,
+        delta: f64,
+        opts: ZaddOptions,
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
-        // Byte-identical (return discarded; no volatile key ⇒ nothing to evict).
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
 
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        // `key_existed` only affects behavior under XX (early-return) or LFU (rand + bump); for the
-        // common ZADD (no XX, no LFU — the default) it is unused, so skip the extra `contains_key`
-        // probe entirely (`&&` short-circuits). Byte-identical.
+        // `key_existed` only affects XX (early-return) + LFU (rand + bump); the common no-XX/no-LFU
+        // ZADD short-circuits the probe (`&&`). Byte-identical.
         let key_existed = (opts.xx || lfu_tracking_enabled) && self.entries.contains_key(key);
         if opts.xx && !key_existed {
             return Ok(None);
@@ -19467,82 +19550,64 @@ impl Store {
 
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        let (res, is_empty, touched) = {
-            // (perf) Under XX or LFU, `key_existed` above already probed presence (only the XX
-            // early-return + `next_rand` ran since — no `entries` mutation), so reuse it: create
-            // only when absent (XX-absent already returned above, so that path is LFU-only),
-            // skipping `internal_entry`'s redundant `contains_key`. The common no-XX/no-LFU ZADD
-            // keeps `internal_entry` (its `&&` short-circuited the probe). Byte-identical.
-            let entry = if opts.xx || lfu_tracking_enabled {
-                if key_existed {
-                    self.entries
-                        .get_mut(key)
-                        .expect("zset entry present at probe is still present")
-                } else {
-                    self.internal_entries_insert(
-                        key.to_vec(),
-                        Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
-                    );
-                    self.entries
-                        .get_mut(key)
-                        .expect("zset entry inserted above must exist")
-                }
+
+        let (res, is_empty, touched) = if opts.xx || lfu_tracking_enabled {
+            // XX/LFU path: reuse `key_existed` for get-or-create (a5e0b0b35), bump, then apply.
+            let entry = if key_existed {
+                self.entries
+                    .get_mut(key)
+                    .expect("zset entry present at probe is still present")
             } else {
-                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms)
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
+                );
+                self.entries
+                    .get_mut(key)
+                    .expect("zset entry inserted above must exist")
             };
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            let Value::SortedSet(zs) = &mut entry.value else {
-                return Err(StoreError::WrongType);
-            };
-
-            let old_score = zs.get_score(&member);
-
-            let res = if (opts.nx && old_score.is_some()) || (opts.xx && old_score.is_none()) {
-                Ok(None)
-            } else {
-                // (frankenredis-zincrnegzero) Upstream zaddGenericCommand in INCR
-                // mode sets a NEW member's score to the increment DIRECTLY (not
-                // `0 + incr`), so a `-0` increment yields a `-0` reply (while the
-                // STORED score is canonicalized to `+0` by insert_with_limits, so
-                // ZSCORE still returns `0`). `0.0 + delta` is the additive
-                // identity for every double EXCEPT `-0.0`, where IEEE gives
-                // `0.0 + (-0.0) = +0.0` — collapsing the sign and diverging from
-                // redis only in that one case. Compute old+delta for existing
-                // members; use delta verbatim for new members.
-                let new_score = match old_score {
-                    Some(old) => old + delta,
-                    None => delta,
-                };
-
-                if new_score.is_nan() {
-                    Err(StoreError::IncrFloatNaN)
-                } else if let Some(old) = old_score {
-                    if (opts.gt && new_score <= old) || (opts.lt && new_score >= old) {
-                        Ok(None)
-                    } else {
-                        zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
-                        Ok(Some(new_score))
-                    }
-                } else {
-                    zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
-                    Ok(Some(new_score))
+            Self::zincrby_apply_entry(
+                entry,
+                member,
+                delta,
+                &opts,
+                now_ms,
+                lfu_tracking_enabled,
+                zset_max_entries,
+                zset_max_value,
+            )
+        } else if GETMUT_FIRST {
+            // (perf) Common no-XX/no-LFU path: get_mut-FIRST — one probe for the existing zset, a
+            // single insert for a new key — instead of `internal_entry`'s contains_key + get_mut.
+            // No RNG / LFU bump here (`key_existed` short-circuited false). Mirrors zadd_plain /
+            // hset_borrowed. `GETMUT_FIRST == false` keeps the old `internal_entry` (the diff ref).
+            match self.entries.get_mut(key) {
+                Some(entry) => Self::zincrby_apply_entry(
+                    entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+                ),
+                None => {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
+                    );
+                    let entry = self
+                        .entries
+                        .get_mut(key)
+                        .expect("zset entry inserted above must exist");
+                    Self::zincrby_apply_entry(
+                        entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+                    )
                 }
-            };
-            let is_empty = zs.is_empty();
-            let touched = matches!(&res, Ok(Some(_)));
-            if touched {
-                entry.touch_write(now_ms, lfu_tracking_enabled);
-                // (frankenredis-yp503) Crossing the entries count via
-                // zincrby on a new member can promote to skiplist.
-                Self::refresh_zset_encoding_flag_after_insert(
-                    entry,
-                    zset_max_entries,
-                    zset_max_value,
-                );
             }
-            (res, is_empty, touched)
+        } else {
+            let entry =
+                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
+            Self::zincrby_apply_entry(
+                entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+            )
         };
 
         if touched {
@@ -51089,6 +51154,87 @@ mod tests {
             store.zrange(b"z", 0, -1, 0).unwrap(),
             vec![b"a".to_vec(), b"d".to_vec()]
         );
+    }
+
+    #[test]
+    fn zincrby_getmut_first_matches_internal_entry_ref() {
+        // Gate the non-LFU/non-XX `get_mut`-first entry resolution against the `internal_entry`
+        // path (the only difference; the shared apply-core is covered by the zincrby/zadd suite).
+        // Full op sequences applied via each variant; compares each result + DEBUG DIGEST + dirty +
+        // digest bookkeeping.
+        type Zincr = fn(
+            &mut Store,
+            &[u8],
+            Vec<u8>,
+            f64,
+            super::ZaddOptions,
+            u64,
+        ) -> Result<Option<f64>, StoreError>;
+        fn opt(nx: bool, gt: bool, lt: bool) -> super::ZaddOptions {
+            super::ZaddOptions { nx, xx: false, gt, lt, ch: false }
+        }
+        let build = |z: Zincr, case: &str| -> (Vec<Result<Option<f64>, StoreError>>, Store) {
+            let mut s = Store::new();
+            let mut rs = Vec::new();
+            match case {
+                "new_then_incr" => {
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 2.5, opt(false, false, false), 1));
+                }
+                "nx_skip_existing" => {
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 2.0, opt(true, false, false), 1));
+                }
+                "gt_gate" => {
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), -1.0, opt(false, true, false), 1));
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 3.0, opt(false, true, false), 1));
+                }
+                "lt_gate" => {
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 1.0, opt(false, false, true), 1));
+                }
+                "multi_member" => {
+                    for (m, d) in [("a", 1.0), ("b", 2.0), ("c", -3.0), ("a", 0.5)] {
+                        rs.push(z(&mut s, b"z", m.as_bytes().to_vec(), d, opt(false, false, false), 1));
+                    }
+                }
+                "wrongtype" => {
+                    s.set(b"z".to_vec(), b"str".to_vec(), None, 1);
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), 1.0, opt(false, false, false), 1));
+                }
+                "nan_reject" => {
+                    rs.push(z(&mut s, b"z", b"m".to_vec(), f64::INFINITY, opt(false, false, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        f64::NEG_INFINITY,
+                        opt(false, false, false),
+                        1,
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            (rs, s)
+        };
+        for case in [
+            "new_then_incr",
+            "nx_skip_existing",
+            "gt_gate",
+            "lt_gate",
+            "multi_member",
+            "wrongtype",
+            "nan_reject",
+        ] {
+            let (ra, mut a) = build(Store::zincrby_with_options, case);
+            let (rb, mut b) = build(Store::zincrby_with_options_internal_entry_ref, case);
+            assert_eq!(ra, rb, "results @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
+            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(a.digest_stale, b.digest_stale, "digest_stale @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
+        }
     }
 
     #[test]
