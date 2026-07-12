@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — BITOP NOT wired to AVX2 fr_simd::bitnot_into; 1.02–2.16x, byte-identical (completes the BITOP AVX2 family)
+
+Follow-on to the BITOP AND/OR/XOR AVX2 wiring earlier today. `Store::bitop`'s NOT path used the
+u64-SWAR `swar_not_into` (`dst[i] = !src[i]`, 8 B/word) — the last bit-family op still off AVX2.
+ONE LEVER: added `fr_simd::bitnot_into` (AVX2 `_mm256_xor_si256(src, 0xFF-lanes)`) and wired the NOT
+path to it; `swar_not_into` stays `#[cfg(test)]` as the differential oracle.
+
+BYTE-IDENTICAL (`dst[i] = !src[i]` = `src[i] ^ 0xFF`, deterministic, min-prefix): new fr-simd test
+`bitnot_matches_scalar_and_naive_all_lengths_alignments_and_unequal` (AVX2 == scalar == naive over
+34x34 alignments x {0,1,15,16,31,32,33,64,100,250} + unequal), and fr-store
+`swar_bitop_matches_scalar_and_reports_ab_ratio` — the u64-SWAR oracle (whose `swar()` handles NOT)
+cross-checks the AVX2 bitop byte-for-byte — both green.
+
+MEASURED (same-binary null-gated A/B `benches/bitnot_swar_vs_avx2.rs`, u64-SWAR replica vs AVX2,
+`avx2_detected=true`, byte-identity asserted): **8 KiB 2.163x, 64 KiB 1.620x, 512 KiB 1.191x, 4 MiB
+1.018x** — WIN at every size (all above null p95). NOT wins MORE than AND/OR/XOR and even clears at
+RAM because it is a 2-stream (read src / write dst) kernel vs AND/OR/XOR's 3 streams, so it is more
+compute-bound and less bandwidth-limited. BITOP AVX2 coverage is now complete (AND/OR/XOR/NOT); the
+2-operand AND/OR/XOR fast path keeps its one-pass `zip().map().collect()` (unchanged).
+
 ## 2026-07-12: SHIPPED — BITOP multi-operand accumulate wired to AVX2 fr_simd kernels; 1.13–1.67x cache-resident, byte-identical
 
 PROFILE-FIRST: `fr_simd::bitand_inplace` carried a doc note that whether its AVX2 arm actually beats

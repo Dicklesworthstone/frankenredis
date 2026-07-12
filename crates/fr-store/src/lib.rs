@@ -23902,7 +23902,9 @@ impl Store {
 
     /// Word-at-a-time bitwise NOT of `src` into `dst` (equal lengths for BITOP
     /// NOT). Byte-identical to a scalar `dst[i] = !src[i]` loop. (frankenredis-0ppgh)
-    #[inline]
+    /// Production BITOP NOT now uses `fr_simd::bitnot_into` (AVX2); this remains the
+    /// `#[cfg(test)]` differential oracle.
+    #[cfg(test)]
     fn swar_not_into(dst: &mut [u8], src: &[u8]) {
         let n = dst.len().min(src.len());
         let (dchunks, drem) = dst[..n].as_chunks_mut::<8>();
@@ -23989,9 +23991,10 @@ impl Store {
                 return Err(StoreError::WrongType);
             }
             let mut result = vec![0u8; max_len];
-            // `result` is `max_len == values[0].len()` zeros; NOT every byte.
+            // `result` is `max_len == values[0].len()` zeros; NOT every byte via the AVX2
+            // kernel (1.1-1.7x on cache-resident bitmaps; byte-identical `dst[i] = !src[i]`).
             if let Some(v) = operand!(keys[0]) {
-                Self::swar_not_into(&mut result, &v);
+                fr_simd::bitnot_into(&mut result, &v);
             }
             result
         } else {

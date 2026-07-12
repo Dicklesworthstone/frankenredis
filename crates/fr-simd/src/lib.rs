@@ -550,6 +550,62 @@ unsafe fn bitxor_inplace_avx2(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+/// `dst[i] = !src[i]` over the overlapping prefix (`min` length). `BITOP NOT`'s kernel.
+/// A read-one-write-one stream (fewer streams than AND/OR/XOR, so more compute-bound), which
+/// only helps AVX2. Dispatches `avx2 → scalar`. Bit-identical to `for i { dst[i] = !src[i] }`.
+#[inline]
+pub fn bitnot_into(dst: &mut [u8], src: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed present.
+            unsafe {
+                bitnot_into_avx2(dst, src);
+            }
+            return;
+        }
+    }
+    bitnot_into_scalar(dst, src);
+}
+
+/// Reference kernel: safe, portable, LLVM-vectorized to SSE2 on x86_64. The A/B baseline.
+#[inline]
+pub fn bitnot_into_scalar(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    for i in 0..n {
+        dst[i] = !src[i];
+    }
+}
+
+/// # Safety
+/// The CPU must support `avx2`. Callers must check `is_x86_feature_detected!("avx2")`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bitnot_into_avx2(dst: &mut [u8], src: &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_set1_epi8, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+    let n = dst.len().min(src.len());
+    let full = n / 32 * 32;
+    // SAFETY: AVX2 guaranteed by the caller. Every load/store spans `[offset, offset+32)` with
+    // `offset + 32 <= full <= n <= {dst,src}.len()`, so all accesses stay inside both slices.
+    unsafe {
+        let ones = _mm256_set1_epi8(-1); // 0xFF lanes; `s ^ 0xFF == !s`
+        let mut offset = 0usize;
+        while offset < full {
+            let s = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset) as *mut __m256i,
+                _mm256_xor_si256(s, ones),
+            );
+            offset += 32;
+        }
+    }
+    for i in full..n {
+        dst[i] = !src[i];
+    }
+}
+
 // ───────────────────────────── CRC-64/Jones (Redis) ─────────────────────────────
 //
 // Redis's DUMP/RESTORE/RDB checksum: CRC-64/Jones, poly 0xAD93D23594C935A9, refin=refout=true,
@@ -1094,5 +1150,33 @@ mod tests {
         bitxor_inplace(&mut d, &[0xffu8; 10]);
         assert_eq!(&d[..10], &[0x55u8; 10]);
         assert_eq!(&d[10..], &orig[10..], "XOR bytes past src.len() untouched");
+    }
+
+    #[test]
+    fn bitnot_matches_scalar_and_naive_all_lengths_alignments_and_unequal() {
+        use super::{bitnot_into, bitnot_into_scalar};
+        let mut sa = vec![0u8; 300];
+        fill(&mut sa, 0x2468_ace0_1357_9bdf);
+        for dstart in 0..34usize {
+            for sstart in 0..34usize {
+                for len in [0usize, 1, 15, 16, 31, 32, 33, 64, 100, 250] {
+                    if dstart + len > sa.len() || sstart + len > sa.len() {
+                        continue;
+                    }
+                    let s = &sa[sstart..sstart + len];
+                    let (mut d1, mut d2) = (vec![0x5au8; len], vec![0x5au8; len]);
+                    let naive: Vec<u8> = s.iter().map(|b| !b).collect();
+                    bitnot_into(&mut d1, s);
+                    bitnot_into_scalar(&mut d2, s);
+                    assert_eq!(d1, d2, "NOT dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(d1, naive, "NOT wrong d={dstart} s={sstart} len={len}");
+                }
+            }
+        }
+        // Unequal lengths: only the min prefix is written.
+        let mut d = vec![0x11u8; 40];
+        bitnot_into(&mut d, &[0xf0u8; 10]);
+        assert_eq!(&d[..10], &[0x0fu8; 10]);
+        assert_eq!(&d[10..], &[0x11u8; 30], "NOT bytes past src.len() untouched");
     }
 }
