@@ -16818,3 +16818,29 @@ differential gate (the SPOP method, 27c7a3c09) since WATCH/modification_count/is
 METHOD: one command per dedicated turn, non-LFU get_mut-first arm + inlined use + differential test; start with
 hset_borrowed (highest EV). Structural big levers unchanged: borrowed/Arc RdbValue + b1o02 hash-listpack RESTORE
 (multi-day, reserved worktree) [[project_persist_decode_frontier]] [[project_b1o02_hash_listpack_ceiling]].
+
+### 2026-07-12 SHIPPED-WITH-CAVEAT (hset_borrowed non-LFU get_mut-first — the surfaced hottest-command lever)
+Executed the lever surfaced in 21f23946e (start hset_borrowed). Single-field HSET's non-LFU common path resolved
+the entry via `internal_entry` (contains_key + get_mut = TWO probes); this path draws NO RNG and does no LFU bump
+(should_bump is false), so it now uses `get_mut`-FIRST — one probe for the existing hash (HSET's steady state), a
+single insert for a new key — matching what the BULK commands (zadd_plain / sadd / lpush) already do. Refactored to
+`hset_borrowed_impl::<const GETMUT_FIRST>`; kept `#[doc(hidden)] hset_borrowed_internal_entry_ref` (the old
+internal_entry path) as the differential reference. The LFU path is unchanged in behavior (its rand is drawn from
+presence BEFORE the entry access = RNG order, so get_mut-first can't apply; kept the reuse-presence fusion). BYTE-
+IDENTICAL, gated by `hset_borrowed_getmut_first_matches_internal_entry_ref` (new key / existing-overwrite /
+existing-new-field / WRONGTYPE non-hash / grow-past-encoding-threshold: asserts identical result + DEBUG DIGEST +
+dirty + digest_mutations + digest_stale, whole op sequence applied via each variant) + 8 hset + 73 bumps_lfu (incl.
+hset_existing_hash LFU-freq, the restructured LFU path) + 5 digest lib tests green. The new-key arm builds the
+entry then internal_entries_insert's it — byte-identical final state to insert-empty-then-mutate (touch/encoding/
+digest only touch the entry, not the map; same internal_entries_insert). MEASUREMENT CAVEAT (the DEL-class, honest):
+same-binary A/B (non-destructive same-field overwrite, LFU off) is directional **1.18x / 1.14x / 1.03x** at
+f1/f8/f64 (bigger for small hashes where the probe is a larger fraction of the op) but INSIDE the noisy null p5..p95
+(cv 8-10%) = SUB-GATE by the strict median-vs-p95 criterion — a single constant-factor probe, NOT the keys_in_db
+O(N)-build multiplicative gate. The change REMOVES a probe so it cannot regress (null med ~1.0, cand always >1.0),
+and the eliminated probe is the bitfield_resolve_lookup primitive (1.75x isolated). Shipped on byte-identity + the
+gated primitive + making single-field HSET's probe count match the already-shipped bulk get_mut-first commands, NOT
+on a clean end-to-end gate. METHOD (banked): the get_mut-first common-path conversion for single-item writes is a
+per-command dedicated turn — inline the use-block into both if-let arms (NLL forbids `let entry=<get_mut-first>`),
+non-LFU only (LFU rand-order forces a presence probe), gated by an internal_entry-ref differential test. NEXT in
+the vein: hincrby-family (via with_mutated_entry), zincrby common path (secondary). Rollback: hset_borrowed ->
+::<false> + drop the ref/impl/test/bench.

@@ -12477,7 +12477,32 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: internal_entry
+        self.hset_borrowed_impl::<true>(key, field, value, now_ms)
+    }
+
+    /// Bench/test-only reference: the pre-`get_mut`-first `hset_borrowed`, whose non-LFU path
+    /// resolves the entry via `internal_entry` (contains_key + get_mut = two probes). Byte-
+    /// identical to [`Self::hset_borrowed`]; exists only for the differential gate
+    /// `hset_borrowed_getmut_first_matches_internal_entry_ref`. Not on any production path.
+    #[doc(hidden)]
+    pub fn hset_borrowed_internal_entry_ref(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hset_borrowed_impl::<false>(key, field, value, now_ms)
+    }
+
+    fn hset_borrowed_impl<const GETMUT_FIRST: bool>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: the entry access
         // below re-probes (get-or-insert), so drop's no-TTL fast-exit contains_key is pure
         // overhead when nothing is volatile. Byte-identical (no volatile key ⇒ none expired).
         // hset_borrowed is LIVE: fr-runtime calls it directly + hset_borrowed_many's LFU loop.
@@ -12485,33 +12510,79 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
-        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        // Under LFU the `should_bump_lfu` probe above already resolved presence
-        // (`should_bump_lfu == contains_key` here, since `lfu` is true), and only
-        // `next_rand` ran since — so reuse it to skip `internal_entry`'s redundant
-        // `contains_key`: one `get_mut` (present) or insert + `get_mut` (absent). No
-        // LFU ⇒ the `&&` short-circuited the probe, so `internal_entry` does its own.
-        let entry = if lfu_tracking_enabled {
-            if should_bump_lfu {
-                self.entries
-                    .get_mut(key)
-                    .expect("hash entry present at LFU probe is still present")
+
+        // (perf) Non-LFU common path — HSET's steady state is a field write to an EXISTING hash,
+        // and this path draws NO RNG and does no LFU bump (`should_bump` would be false). Resolve
+        // the entry in ONE keyspace probe via `get_mut`-FIRST (mirrors zadd_plain/sadd/lpush)
+        // instead of `internal_entry`'s contains_key + get_mut: `get_mut` for the existing key, a
+        // single insert for a new key. The field-write use block is inlined into both arms; the
+        // new-key arm builds the entry then `internal_entries_insert`s it — byte-identical final
+        // `entries` state to insert-empty-then-mutate (same insert, touch, encoding-flag, digest).
+        // `GETMUT_FIRST == false` keeps the old `internal_entry` path (the differential-gate ref).
+        if !lfu_tracking_enabled {
+            let result = if GETMUT_FIRST {
+                match self.entries.get_mut(key) {
+                    Some(entry) => match &mut entry.value {
+                        Value::Hash(m) => {
+                            let is_new = m.insert_borrowed(field, value);
+                            entry.touch_write(now_ms, false);
+                            Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                            Ok(is_new)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    },
+                    None => {
+                        let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
+                        let is_new = match &mut entry.value {
+                            Value::Hash(m) => m.insert_borrowed(field, value),
+                            _ => unreachable!("freshly created Hash value"),
+                        };
+                        entry.touch_write(now_ms, false);
+                        Self::refresh_hash_encoding_flag(&mut entry, max_entries, max_value);
+                        self.internal_entries_insert(key.to_vec(), entry);
+                        Ok(is_new)
+                    }
+                }
             } else {
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(Box::default()), now_ms),
-                );
-                self.entries
-                    .get_mut(key)
-                    .expect("hash entry inserted above must exist")
+                let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+                match &mut entry.value {
+                    Value::Hash(m) => {
+                        let is_new = m.insert_borrowed(field, value);
+                        entry.touch_write(now_ms, false);
+                        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                        Ok(is_new)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            };
+            if result.is_ok() {
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             }
+            self.dirty = self.dirty.saturating_add(1);
+            return result;
+        }
+
+        // LFU path: the frequency-bump rand must be drawn from presence BEFORE the entry access
+        // (RNG order), so `get_mut`-first cannot apply — reuse the presence probe (== `contains_key`
+        // since LFU is on) to still skip `internal_entry`'s redundant re-probe.
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let should_bump_lfu = self.entries.contains_key(key);
+        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
+        let entry = if should_bump_lfu {
+            self.entries
+                .get_mut(key)
+                .expect("hash entry present at LFU probe is still present")
         } else {
-            self.internal_entry(key, || Value::Hash(Box::default()), now_ms)
+            self.internal_entries_insert(
+                key.to_vec(),
+                Entry::new(Value::Hash(Box::default()), now_ms),
+            );
+            self.entries
+                .get_mut(key)
+                .expect("hash entry inserted above must exist")
         };
         if should_bump_lfu {
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -12519,7 +12590,7 @@ impl Store {
         let result = match &mut entry.value {
             Value::Hash(m) => {
                 let is_new = m.insert_borrowed(field, value);
-                entry.touch_write(now_ms, lfu_tracking_enabled);
+                entry.touch_write(now_ms, true);
                 // (frankenredis-yp503) Lock the encoding into hashtable
                 // once the hash crosses either listpack threshold.
                 Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
@@ -45920,6 +45991,57 @@ mod tests {
                     "individual-wins"
                 }
             );
+        }
+    }
+
+    #[test]
+    fn hset_borrowed_getmut_first_matches_internal_entry_ref() {
+        // Gate the non-LFU `get_mut`-first entry resolution against the pre-change `internal_entry`
+        // path (byte-identity across the full op sequence, applied via each variant). Every shape:
+        // new key, existing-hash overwrite, existing-hash new field, existing NON-hash (WRONGTYPE),
+        // and a hash grown past the listpack->hashtable encoding threshold. Compares the exact
+        // result + DEBUG DIGEST (full keyspace state) + dirty + digest bookkeeping.
+        type Hset = fn(&mut Store, &[u8], &[u8], Vec<u8>, u64) -> Result<bool, StoreError>;
+        let build = |hset: Hset, case: &str| -> (Result<bool, StoreError>, Store) {
+            let mut s = Store::new();
+            match case {
+                "new_key" => {}
+                "existing_overwrite" => {
+                    hset(&mut s, b"h", b"f", b"old".to_vec(), 1).unwrap();
+                }
+                "existing_new_field" => {
+                    hset(&mut s, b"h", b"pre", b"pv".to_vec(), 1).unwrap();
+                }
+                "wrongtype" => {
+                    s.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                "grow_many" => {
+                    for i in 0..200u32 {
+                        hset(&mut s, b"h", format!("f{i}").as_bytes(), b"v".to_vec(), 1).unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let r = hset(&mut s, b"h", b"f", b"final".to_vec(), 2);
+            (r, s)
+        };
+        for case in [
+            "new_key",
+            "existing_overwrite",
+            "existing_new_field",
+            "wrongtype",
+            "grow_many",
+        ] {
+            let (ra, mut a) = build(Store::hset_borrowed, case);
+            let (rb, mut b) = build(Store::hset_borrowed_internal_entry_ref, case);
+            assert_eq!(ra, rb, "result mismatch @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations mismatch @ {case}"
+            );
+            assert_eq!(a.digest_stale, b.digest_stale, "digest_stale mismatch @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state_digest mismatch @ {case}");
         }
     }
 

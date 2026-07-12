@@ -158,3 +158,9 @@ harness = false
 [[bench]]
 name = "keys_notl_guard"
 harness = false
+
+# (hset-getmut-first) Same-binary A/B for non-LFU hset_borrowed entry resolution: get_mut-first
+# (one probe, existing hash) vs internal_entry (contains_key + get_mut = two).
+[[bench]]
+name = "hset_getmut_first"
+harness = false
