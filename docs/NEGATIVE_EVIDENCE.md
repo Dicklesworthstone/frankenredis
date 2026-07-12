@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — LPOP/RPOP count result Vec pre-sized (exact count); 2.58x small-count, byte-identical
+
+AMENDS the "upper-bound, not exact" note below: LPOP/RPOP with count LOOKED like an upper-bound
+(`result ≤ count`), but the exact final size is cheaply known — `min(count, l.len())`, and `l.len()`
+is O(1) with the list already in hand inside `Value::List(l)`. `lpop_count`/`rpop_count` already fuse
+the keyspace lookup (one `get_mut`, then `pop_front`/`pop_back` in a loop) but grew the result
+`Vec<Vec<u8>>` from empty. ONE LEVER: `Vec::with_capacity(count.min(l.len()))` — capped at `l.len()`,
+so even a huge `count` (e.g. `LPOP key 1000000` on a small list) never over-allocates.
+
+BYTE-IDENTICAL (capacity never affects content): fr-store `lpop_count_existing_list_bumps_lfu`,
+`lpop_rpop_count_handles_missing_and_empty`, `lpop_rpop_removes_empty_key`, `lpush_rpush_lpop_rpop`,
+and metamorphic `mr_rpush_lpop_fifo` all pass; the A/B bench asserts equal result lengths.
+
+MEASURED (same-binary null-gated A/B `benches/pop_count_result_presize.rs` — pushes non-allocating
+empty `Vec`s to isolate the outer `Vec<Vec<u8>>` realloc growth, since real popped elements are MOVED
+in as pointers): **n8 (the common small LPOP/RPOP count) 2.578x** (above null p95 1.088, cv 4.7%),
+n64 1.087x (just inside), n512/n4096 neutral. Same shape as the `decode_value_spans` presize — the
+`O(log n)` realloc savings dominate at small n (~4 reallocs → 1 alloc) and amortize into O(n)
+push/drop work at large n. Pareto-safe: big win on the common small count, no regression on large.
+
 ## 2026-07-12: NEGATIVE (presize vein clean candidates mined) — remaining Vec::new()-grows are upper-bound or delicate; SPOP-count O(count)-lookup lever SURFACED
 
 After the `decode_value_spans` presize win (below), swept ~15 more `Vec::new()`/`Vec::default()`-then

@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "bitnot_collect_vs_zeroinit"
 harness = false
+
+[[bench]]
+name = "pop_count_result_presize"
+harness = false

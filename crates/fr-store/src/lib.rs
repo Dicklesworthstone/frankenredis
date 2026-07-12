@@ -13988,7 +13988,11 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        let mut result = Vec::new();
+                        // Exactly `min(count, l.len())` elements are popped, and `l.len()` is O(1),
+                        // so pre-size the result in one allocation instead of growing from empty
+                        // (~log2(n) realloc+copies on a large `LPOP key n`). Capped at `l.len()`,
+                        // so a huge `count` never over-allocates. Byte-identical (capacity != content).
+                        let mut result = Vec::with_capacity(count.min(l.len()));
                         for _ in 0..count {
                             match l.pop_front() {
                                 Some(v) => result.push(v),
@@ -14087,7 +14091,11 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        let mut result = Vec::new();
+                        // Exactly `min(count, l.len())` elements are popped, and `l.len()` is O(1),
+                        // so pre-size the result in one allocation instead of growing from empty
+                        // (~log2(n) realloc+copies on a large `RPOP key n`). Capped at `l.len()`,
+                        // so a huge `count` never over-allocates. Byte-identical (capacity != content).
+                        let mut result = Vec::with_capacity(count.min(l.len()));
                         for _ in 0..count {
                             match l.pop_back() {
                                 Some(v) => result.push(v),
