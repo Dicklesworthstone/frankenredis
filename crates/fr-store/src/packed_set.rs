@@ -4103,6 +4103,30 @@ impl ListValue {
         }
     }
 
+    /// (cc_fr) Borrowed siblings of [`Self::push_back`]/[`Self::push_front`]. The Packed repr
+    /// (the common small-list case) copies STRAIGHT from the slice into its packed buffer, so
+    /// LPUSH/RPUSH need not materialize an owned `Vec` per element — the old `push_*(bytes.to_vec())`
+    /// alloc'd a temp Vec that was copied into the buffer then dropped. Only the Deque repr (large
+    /// lists) needs an owned element (uncommon), where this `to_vec()`s exactly as before. Same
+    /// `add_entry_bytes`/`maybe_promote`/repr dispatch ⇒ byte-identical to `push_*(elem.to_vec())`.
+    pub fn push_back_borrowed(&mut self, elem: &[u8]) {
+        self.add_entry_bytes(elem);
+        self.maybe_promote(elem.len());
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.push_back(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(elem.to_vec(), self.fill),
+        }
+    }
+
+    pub fn push_front_borrowed(&mut self, elem: &[u8]) {
+        self.add_entry_bytes(elem);
+        self.maybe_promote(elem.len());
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.push_front(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem.to_vec(), self.fill),
+        }
+    }
+
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
         let removed = match &mut self.repr {
             ListRepr::Packed(p) => p.pop_front(),

@@ -182,3 +182,9 @@ harness = false
 [[bench]]
 name = "skiplist_vs_btreemap"
 harness = false
+
+# (cc_fr) Same-binary A/B for LPUSH on the Packed repr: push_front(bytes.to_vec()) temp-Vec vs
+# push_front_borrowed(bytes) direct copy into the packed buffer. Byte-identical.
+[[bench]]
+name = "lpush_borrow"
+harness = false

@@ -14162,6 +14162,29 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.lpush_impl::<M, true>(key, values, now_ms)
+    }
+
+    /// Bench-only baseline: LPUSH that materializes an owned `Vec` per element (`BORROW = false`)
+    /// via `push_front(bytes.to_vec())` instead of `push_front_borrowed(bytes)`. Byte-identical to
+    /// `lpush`; exists only for the same-binary A/B isolating the per-element to_vec on the Packed
+    /// (small-list) path. Not on any production path.
+    #[doc(hidden)]
+    pub fn lpush_orig<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.lpush_impl::<M, false>(key, values, now_ms)
+    }
+
+    fn lpush_impl<M: AsRef<[u8]>, const BORROW: bool>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
@@ -14187,7 +14210,11 @@ impl Store {
                         for v in values {
                             let bytes = v.as_ref();
                             raw_add += bytes.len() as u64;
-                            l.push_front(bytes.to_vec());
+                            if BORROW {
+                l.push_front_borrowed(bytes);
+            } else {
+                l.push_front(bytes.to_vec());
+            }
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
@@ -14208,7 +14235,11 @@ impl Store {
                 for v in values {
                     let bytes = v.as_ref();
                     raw_add += bytes.len() as u64;
-                    l.push_front(bytes.to_vec());
+                    if BORROW {
+                l.push_front_borrowed(bytes);
+            } else {
+                l.push_front(bytes.to_vec());
+            }
                 }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
@@ -14257,7 +14288,7 @@ impl Store {
                         for v in values {
                             let bytes = v.as_ref();
                             raw_add += bytes.len() as u64;
-                            l.push_back(bytes.to_vec());
+                            l.push_back_borrowed(bytes);
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
@@ -14278,7 +14309,7 @@ impl Store {
                 for v in values {
                     let bytes = v.as_ref();
                     raw_add += bytes.len() as u64;
-                    l.push_back(bytes.to_vec());
+                    l.push_back_borrowed(bytes);
                 }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
