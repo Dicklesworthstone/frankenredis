@@ -8020,8 +8020,14 @@ impl Store {
     /// upstream (e.g. MOVE source/destination), which must not move the keyspace
     /// counters. Unlike [`key_is_present`], this honors expiry.
     pub fn exists_no_stat(&mut self, key: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
-        self.entries.contains_key(key)
+        // `drop_if_expired` already reaps a stale entry AND returns the post-reap presence
+        // (`entries.contains_key` on the no-TTL fast path; `false` after an eviction;
+        // otherwise the pre-reap `exists`, which the non-eviction path leaves unchanged), so
+        // its result IS this function's answer — the trailing `contains_key` was a redundant
+        // second keyspace probe. Return the reap directly. Byte-identical; one fewer foldhash
+        // lookup per call (2 -> 1), amplified per-key in the MSETNX / MOVE / COPY / RENAMENX
+        // existence prechecks that call this in a loop.
+        self.drop_if_expired(key, now_ms)
     }
 
     /// Pure presence check against the keyspace map — no lazy expiry, no

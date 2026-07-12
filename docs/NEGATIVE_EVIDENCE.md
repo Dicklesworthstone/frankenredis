@@ -16678,3 +16678,18 @@ pattern on that basis (NOT on a clean end-to-end gate); the const-generic scaffo
 measuring, matching the inline-guard convention of the other guarded sites. Rollback: drop the `if expires_count
 != 0` wrapper. VEIN: ~44 other unguarded statement-form `drop_if_expired` callers remain, but most are either
 O(n)-dwarfed (set/zset algebra, pfcount) = 0-gain, or full-keyspace scans (KEYS/SCAN helpers) — case-by-case.
+
+### 2026-07-12 SHIPPED (exists_no_stat fuses drop_if_expired + contains_key into one lookup — 2 -> 1)
+`exists_no_stat` (the expiry-aware presence probe behind the MSETNX / MOVE / COPY / RENAMENX existence
+prechecks) did `drop_if_expired(key)` THEN `entries.contains_key(key)` — TWO keyspace lookups. But
+`drop_if_expired` already RETURNS the post-reap presence in every branch: `entries.contains_key(key)` on the
+no-TTL fast path, `false` after it evicts a stale key, and otherwise the pre-reap `exists` (which the
+non-eviction path leaves unchanged). So the trailing `contains_key` was a redundant second probe; return the
+reap directly. Byte-identical in ALL branches (verified by case: no-TTL, evicted, present-not-evicted, and the
+should_evict-but-remove-missed fall-through all give the same bool the second probe would). 2 -> 1 foldhash
+lookups per call, amplified per-key in the MSETNX precheck loop (checks every key) and the MOVE/COPY source+dest
+probes. UNLIKE the DEL guard, this is a PROVABLE full-lookup elision (not a noise-limited guard): the eliminated
+primitive (2 keyspace probes collapsing to 1) is the exact case already gated at 1.75x isolated by
+bitfield_resolve_lookup, and this is non-destructive so there is no measurement caveat. Byte-identical: 29 `move`
++ 6 `copy` + 8 `rename` + 3 `exists` fr-store lib tests green (the move/copy tests assert exact source/dest
+presence through this helper). Rollback: restore the explicit `contains_key` after the drop.
