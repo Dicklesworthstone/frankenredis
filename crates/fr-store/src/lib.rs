@@ -15420,7 +15420,7 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let lp_pre = l.listpack_byte_len();
-                    l.push_front(val.clone());
+                    l.push_front_borrowed(&val);
                     l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
@@ -15432,7 +15432,7 @@ impl Store {
             },
             None => {
                 let mut l = ListValue::default();
-                l.push_front(val.clone());
+                l.push_front_borrowed(&val);
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
                     val.len() as u64,
@@ -15745,9 +15745,9 @@ impl Store {
                     Value::List(l) => {
                         let lp_pre = l.listpack_byte_len();
                         if eq_ascii_ci(whereto, b"LEFT") {
-                            l.push_front(val.clone());
+                            l.push_front_borrowed(&val);
                         } else {
-                            l.push_back(val.clone());
+                            l.push_back_borrowed(&val);
                         }
                         l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
                         Self::mark_digest_stale_fields(
@@ -15762,9 +15762,9 @@ impl Store {
             None => {
                 let mut l = ListValue::default();
                 if eq_ascii_ci(whereto, b"LEFT") {
-                    l.push_front(val.clone());
+                    l.push_front_borrowed(&val);
                 } else {
-                    l.push_back(val.clone());
+                    l.push_back_borrowed(&val);
                 }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
