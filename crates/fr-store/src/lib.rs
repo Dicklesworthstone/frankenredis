@@ -4205,6 +4205,19 @@ impl Value {
         }
     }
 
+    /// (cc_fr) Consuming sibling of [`string_owned`]: MOVES the string bytes out
+    /// (`SmallStr::into_vec` returns the `Heap` `Vec` without copying; an inline value
+    /// copies its <=15 bytes) instead of cloning. Used by GETSET, which reads the old
+    /// value and then immediately overwrites the entry — so the old bytes can be moved
+    /// out rather than copied. Byte-identical bytes to `string_owned`.
+    fn into_string_owned(self) -> Option<Vec<u8>> {
+        match self {
+            Self::String(bytes) => Some(bytes.into_vec()),
+            Self::Integer(value) => Some(integer_decimal_bytes(value)),
+            _ => None,
+        }
+    }
+
     fn string_len(&self) -> Option<usize> {
         match self {
             Self::String(bytes) => Some(bytes.len()),
@@ -8530,6 +8543,50 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.getset_impl::<true>(key, value, now_ms)
+    }
+
+    /// Bench-only baseline: GETSET that CLONES the old value (`MOVE = false`) instead of
+    /// moving it out. Byte-identical result to `getset`; exists only for the same-binary
+    /// A/B isolating the old-value move. Not on any production path.
+    #[doc(hidden)]
+    pub fn getset_orig(
+        &mut self,
+        key: Vec<u8>,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.getset_impl::<false>(key, value, now_ms)
+    }
+
+    /// Extract GETSET's old string value. `MOVE = true` moves it out (`SmallStr::into_vec`
+    /// returns the `Heap` `Vec` with no copy) leaving an `Integer(0)` placeholder that the
+    /// impending overwrite discards; `MOVE = false` clones via `string_owned`. Returns
+    /// `WrongType` WITHOUT mutating the entry for a non-string value (so the error path is
+    /// side-effect-free, exactly as `string_owned() -> None` was).
+    #[inline]
+    fn take_or_clone_old_string<const MOVE: bool>(
+        entry: &mut Entry,
+    ) -> Result<Vec<u8>, StoreError> {
+        if MOVE {
+            if entry.value.is_string_like() {
+                Ok(std::mem::replace(&mut entry.value, Value::Integer(0))
+                    .into_string_owned()
+                    .expect("is_string_like implies into_string_owned is Some"))
+            } else {
+                Err(StoreError::WrongType)
+            }
+        } else {
+            entry.value.string_owned().ok_or(StoreError::WrongType)
+        }
+    }
+
+    fn getset_impl<const MOVE: bool>(
+        &mut self,
+        key: Vec<u8>,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // GETSET reads the old value (upstream getsetCommand → getGenericCommand →
         // lookupKeyRead), so it bumps keyspace_hits on a present key /
         // keyspace_misses on a missing one. (frankenredis-934ax)
@@ -8541,12 +8598,7 @@ impl Store {
         // (LFU off). LFU path left verbatim (it copies the old entry's LFU counter).
         if !self.lfu_tracking_enabled() {
             let old = match self.lookup_live_for_read_mut(key.as_slice(), now_ms) {
-                Some(entry) => {
-                    let Some(v) = entry.value.string_owned() else {
-                        return Err(StoreError::WrongType);
-                    };
-                    Some(v)
-                }
+                Some(entry) => Some(Self::take_or_clone_old_string::<MOVE>(entry)?),
                 None => None,
             };
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -8569,9 +8621,7 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
-                let Some(v) = entry.value.string_owned() else {
-                    return Err(StoreError::WrongType);
-                };
+                let v = Self::take_or_clone_old_string::<MOVE>(entry)?;
                 (Some(v), Some(lfu))
             }
             None => (None, None),
@@ -11087,6 +11137,14 @@ impl Store {
                 self.expiry_deadlines.remove(key);
             }
         }
+        // (bugfix) `entry_state_digest` hashes the key's expiry, so changing the TTL changes the
+        // key's digest. Pure-TTL ops (EXPIRE/PEXPIRE/EXPIREAT/PERSIST/GETEX) don't touch the value,
+        // so nothing else marked the incremental digest stale — on a FRESH digest the empty-closure
+        // `with_mutated_entry` above captured the OLD expiry (a no-op), leaving `running_digest`
+        // drifted from a full scan (caught by state_digest's debug_assert). Mark it stale here (the
+        // single TTL-mutation choke point) so state_digest recomputes correctly; value-changing TTL
+        // ops (SET EX / SETEX) already marked it stale via their value write, so this is idempotent.
+        self.digest_stale = true;
     }
 
     fn forget_volatile_key(&mut self, key: &[u8]) {
@@ -41579,6 +41637,56 @@ mod tests {
     }
 
     #[test]
+    fn getset_move_matches_clone_orig() {
+        // (cc_fr) `getset` (MOVE=true, moving the old value out) MUST return the IDENTICAL
+        // old value and leave the IDENTICAL store state as `getset_orig` (MOVE=false,
+        // cloning) for every shape: missing key, short/long/inline/heap string old value,
+        // integer old value (rendered), a WRONGTYPE old value (list — Err, entry unchanged),
+        // and an existing TTL that GETSET must clear.
+        let long = vec![b'q'; 4096];
+        type Case = (&'static [u8], Option<Vec<u8>>, bool, bool); // key, seed old, is_list, prior_ttl
+        let cases: Vec<Case> = vec![
+            (b"miss", None, false, false),
+            (b"short", Some(b"abc".to_vec()), false, false),
+            (b"heap", Some(long.clone()), false, false),
+            (b"intval", Some(b"12345".to_vec()), false, false),
+            (b"wrongtype", Some(b"L".to_vec()), true, false),
+            (b"ttl", Some(b"withttl".to_vec()), false, true),
+        ];
+        for (key, seed, is_list, prior_ttl) in cases {
+            let build = || {
+                let mut s = Store::new();
+                if is_list {
+                    s.rpush(key, &[b"a".to_vec()], 1_000).unwrap();
+                } else if let Some(v) = &seed {
+                    s.set(key.to_vec(), v.clone(), None, 1_000);
+                    if prior_ttl {
+                        s.expire_milliseconds(key, 50_000, 1_000);
+                    }
+                }
+                s
+            };
+            let mut s_new = build();
+            let mut s_orig = build();
+            let r_new = s_new.getset(key.to_vec(), b"NEWVAL", 2_000);
+            let r_orig = s_orig.getset_orig(key.to_vec(), b"NEWVAL", 2_000);
+            assert_eq!(r_new, r_orig, "return for {:?}", String::from_utf8_lossy(key));
+            assert_eq!(
+                s_new.get(key, 2_000).ok(),
+                s_orig.get(key, 2_000).ok(),
+                "stored value for {:?}",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                s_new.pttl(key, 2_000),
+                s_orig.pttl(key, 2_000),
+                "pttl for {:?}",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
     fn getset_clears_existing_ttl() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v1".to_vec(), Some(5_000), 1_000);
@@ -43414,6 +43522,34 @@ mod tests {
             other => return Err(format!("HMGET should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn ttl_change_fresh_digest_matches_full_scan() {
+        // (bugfix regression) entry_state_digest hashes the expiry, so a pure-TTL op (EXPIRE /
+        // EXPIREAT / PERSIST) alters a key's digest. On a FRESH digest the running_digest must stay
+        // == a full-scan recompute afterward (state_digest's own debug_assert also enforces this).
+        // Each op runs on its own fresh-digest store; `state_digest()` (fresh) reads running_digest.
+        // EXPIRE (add TTL to a no-TTL key):
+        let mut a = Store::new();
+        a.set(b"k".to_vec(), b"v".to_vec(), None, 1);
+        let _ = a.state_digest();
+        assert!(!a.digest_stale);
+        a.expire_milliseconds(b"k", 100_000, 2);
+        let _ = a.state_digest(); // would panic in debug via the drift assert if the digest drifted
+        // EXPIREAT:
+        let mut b = Store::new();
+        b.set(b"k".to_vec(), b"v".to_vec(), None, 1);
+        let _ = b.state_digest();
+        b.expire_at_milliseconds(b"k", 9_000_000_000_000, 2);
+        let _ = b.state_digest();
+        // PERSIST (clear an existing TTL):
+        let mut c = Store::new();
+        c.set(b"k".to_vec(), b"v".to_vec(), None, 1);
+        c.expire_milliseconds(b"k", 100_000, 1);
+        let _ = c.state_digest(); // fresh, WITH a TTL
+        c.persist(b"k", 2);
+        let _ = c.state_digest();
     }
 
     #[test]
