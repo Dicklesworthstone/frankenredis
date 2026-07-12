@@ -32429,16 +32429,22 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
     if payload.len() != HLL_REDIS_DENSE_REGISTER_BYTES {
         return Err(StoreError::InvalidHllValue);
     }
-    let mut registers = vec![0u8; HLL_REGISTERS];
-    let (register_chunks, _) = registers.as_chunks_mut::<4>();
+    // Every one of the 16384 registers is unconditionally assigned below, so the old
+    // `vec![0u8; HLL_REGISTERS]` `alloc_zeroed` memset over 16 KiB was pure waste — and on the
+    // PFMERGE / multi-key PFCOUNT hot path mimalloc recycles the block dirty, so it re-memsets
+    // every call. `with_capacity` + `extend` writes straight into the fresh capacity (one write
+    // pass, no memset). Byte-identical: same `w`, same four 6-bit fields, same order.
     let (payload_chunks, _) = payload.as_chunks::<3>();
-    for (regs, bytes) in register_chunks.iter_mut().zip(payload_chunks.iter()) {
+    let mut registers = Vec::with_capacity(HLL_REGISTERS);
+    registers.extend(payload_chunks.iter().flat_map(|bytes| {
         let w = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
-        regs[0] = (w & 0x3f) as u8;
-        regs[1] = ((w >> 6) & 0x3f) as u8;
-        regs[2] = ((w >> 12) & 0x3f) as u8;
-        regs[3] = ((w >> 18) & 0x3f) as u8;
-    }
+        [
+            (w & 0x3f) as u8,
+            ((w >> 6) & 0x3f) as u8,
+            ((w >> 12) & 0x3f) as u8,
+            ((w >> 18) & 0x3f) as u8,
+        ]
+    }));
     Ok(registers)
 }
 

@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — HLL dense-register decode drops the alloc_zeroed memset; 1.58x, byte-identical
+
+AMENDS the "vein exhausted" note below: while the 6-bit-unpack *compute* is a complex/low-value SIMD
+deferral, the decode's ALLOCATION had a clean, safe win I'd overlooked. `hll_decode_dense_registers`
+did `vec![0u8; 16384]` (`alloc_zeroed` = a 16 KiB memset) and then unconditionally overwrote **every**
+register — so the zero-init was 100% wasted, and mimalloc recycles that 16 KiB block dirty on the
+PFMERGE / multi-key PFCOUNT hot path, re-memsetting it every call. Same class as the BITOP-collect
+uninit win. ONE LEVER: `Vec::with_capacity(16384)` + `extend(payload.as_chunks::<3>().flat_map(|b| [4
+six-bit fields]))` — one write pass into fresh capacity, no memset, no `unsafe`.
+
+BYTE-IDENTICAL (same `w`, same four 6-bit fields, same order; every register unconditionally written):
+the A/B bench asserts `decode_zeroed == decode_uninit` on a realistic dense payload before timing, and
+fr-store `pfmerge_combines_two_hlls` / `pfmerge_uses_dense_encoding_when_any_source_is_dense` + the
+metamorphic `mr_hll_pfmerge_*` gates all pass on the real path.
+
+MEASURED (same-binary null-gated A/B `benches/hll_decode_zeroinit.rs`, fresh alloc+build+drop per iter
+to match the hot-path recycle, byte-identity asserted): **cand/orig 1.583x** (null p5..p95 [0.893,
+1.217], cv 9.2%) — decisively above p95. Eliminating the 16 KiB memset is ~a third of the decode's
+memory traffic. Speeds every dense-HLL read (PFMERGE source decode, multi-key PFCOUNT). No downside.
+
 ## 2026-07-12: NEGATIVE (vein complete) — byte-streaming AVX2 routing EXHAUSTED for clean drive-bys; remaining pieces are complex/low-value or peer-contended
 
 After five clean byte-streaming AVX2 wins this session (LZF match-tail `common_prefix`, BITOP

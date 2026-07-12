@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "bitop_collect_scalar_vs_avx2"
 harness = false
+
+[[bench]]
+name = "hll_decode_zeroinit"
+harness = false
