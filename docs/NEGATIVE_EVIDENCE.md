@@ -16758,3 +16758,20 @@ as the popcount range grows, but always >0 and on the common path. Rollback: res
 `drop_if_expired` guard at each. REUSABLE: a read command that uses `drop_if_expired`'s RETURN for a missing-key
 short-circuit AND has a following `get_mut` whose `None` arm returns the SAME default can guard the reap on
 `expires_count` and fold presence into the lookup (works only when the two defaults match exactly).
+
+### 2026-07-12 SHIPPED (no-stat read family fuses the no-TTL reap into the value lookup — 6 hot reads, 2->1 probe)
+Applied the BITCOUNT/BITPOS rule (b3a4ff215) across the whole no-stat read family: LLEN (`llen_no_stat`), ZCARD
+(`zcard_no_stat`), TYPE (`value_type_no_stat`), BITFIELD-GET (`bitfield_get_no_stat`), LINDEX (`lindex`) and its
+zero-copy `_into` twin (`lindex_with`). Each uses the NO-STAT `drop_if_expired` (they must not bump keyspace stats
+— the command layer's key_type precheck already did) as `if !drop_if_expired(key) { return <default> }` for the
+missing-key short-circuit, then a SEPARATE `get`/`get_mut` for the value whose miss arm returns the SAME default
+(verified per site: `Ok(0)` for LLEN/ZCARD; `get(key)?`->None for TYPE; empty-bytes->`bitfield_read(&[])` for
+BITFIELD-GET; `Ok(None)`/`Ok(f(None))` for LINDEX/LINDEX_WITH). Guard the reap on `expires_count != 0` and let
+the miss arm handle the no-TTL-absent case. Fires on EVERY no-TTL call (common path); 2 keyspace probes -> 1.
+Byte-identical incl. RNG for the two get_mut+LFU sites (LINDEX/_with): an absent key drew no rand before (returned
+pre-rand-block) and still draws none (the `lfu && contains_key` gate is false); the immutable-get sites have no
+RNG. Verified: llen(1) + zcard(2) + lindex(2) + bitfield(7) + value_type(1) + type(32) + expired(14) + object_
+idletime(1) lib tests green (cover present/absent/empty/WRONGTYPE/expired + the LMPOP/ZMPOP callers of the
+_no_stat size probes). Same primitive as bitfield_resolve_lookup (1.75x isolated); no fresh gate. NOTE: SPOP /
+SPOP_COUNT (write, RNG-per-pop) + XINFO / BITFIELD-GET-batch (different single-lookup shape) deliberately excluded
+from the sweep. This EXHAUSTS the drop_if_expired-return-used read family. Rollback: restore each unconditional guard.

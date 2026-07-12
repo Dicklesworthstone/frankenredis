@@ -9181,7 +9181,10 @@ impl Store {
         signed: bool,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
         let bytes = match self.entries.get(key) {
@@ -10032,7 +10035,10 @@ impl Store {
     /// over-counts (it records a hit) while the read-only `peek_value_type`
     /// under-reaps (it never evicts). This is the correct middle ground.
     pub fn value_type_no_stat(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return None;
         }
         let entry = self.entries.get(key)?;
@@ -14347,7 +14353,10 @@ impl Store {
     /// the stat-counting `llen` would over-count. Returns WRONGTYPE for a
     /// non-list key (same as llen), 0 for missing/expired.
     pub fn llen_no_stat(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(0);
         }
         match self.entries.get(key) {
@@ -14508,7 +14517,10 @@ impl Store {
         // record the single keyspace hit/miss via the store.key_type precheck
         // run for the lidxorder WRONGTYPE-before-index-parse precedence, so a
         // counting lookup here double-bumped keyspace_hits for a present list.
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -14556,7 +14568,10 @@ impl Store {
         now_ms: u64,
         f: impl FnOnce(Option<&[u8]>) -> R,
     ) -> Result<R, StoreError> {
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(f(None));
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -18307,7 +18322,10 @@ impl Store {
     /// keys via lookupKeyWrite (no keyspace stats), so the stat-counting `zcard`
     /// would over-count. WRONGTYPE for a non-zset key, 0 for missing/expired.
     pub fn zcard_no_stat(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        if !self.drop_if_expired(key, now_ms) {
+        // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
+        // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
+        // the reap on expires_count; fold presence into the lookup. Byte-identical.
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(0);
         }
         match self.entries.get(key) {
