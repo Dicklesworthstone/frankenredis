@@ -7359,6 +7359,44 @@ impl Store {
         }
     }
 
+    /// Post-variadic-HSET encoding refresh that scales with the command payload, not the hash.
+    ///
+    /// With the sticky hashtable flag unset, every pre-existing field/value fits the listpack
+    /// value limit by invariant. A batch containing only short pairs can therefore promote only
+    /// by crossing the entry-count limit. If an incoming pair is oversized we retain the full
+    /// final-map scan: duplicate fields can overwrite an oversized intermediate value, and the
+    /// reference path derives its flag from that final state. `INCR = false` preserves that exact
+    /// pre-change scan as the same-binary benchmark reference.
+    #[inline]
+    fn refresh_hash_encoding_after_batch<const INCR: bool>(
+        entry: &mut Entry,
+        pairs: &[&[u8]],
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if !INCR {
+            Self::refresh_hash_encoding_flag(entry, max_listpack_entries, max_listpack_value);
+            return;
+        }
+        if entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING) {
+            return;
+        }
+        let Value::Hash(m) = &entry.value else {
+            return;
+        };
+        if m.len() > max_listpack_entries {
+            entry.set_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING, true);
+            return;
+        }
+        let (pair_chunks, _) = pairs.as_chunks::<2>();
+        if pair_chunks
+            .iter()
+            .any(|pair| pair[0].len() > max_listpack_value || pair[1].len() > max_listpack_value)
+        {
+            Self::refresh_hash_encoding_flag(entry, max_listpack_entries, max_listpack_value);
+        }
+    }
+
     /// (frankenredis-yp503) Same one-way promotion for sorted sets.
     fn refresh_zset_encoding_flag(
         entry: &mut Entry,
@@ -12540,11 +12578,31 @@ impl Store {
         pairs: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.hset_borrowed_many_impl::<true>(key, pairs, now_ms)
+    }
+
+    /// Bench-only baseline for variadic HSET/HMSET with the pre-change O(n) encoding re-scan.
+    #[doc(hidden)]
+    pub fn hset_borrowed_many_rescan(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.hset_borrowed_many_impl::<false>(key, pairs, now_ms)
+    }
+
+    fn hset_borrowed_many_impl<const INCR: bool>(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         if pairs.len() < 2 {
             return Ok(0);
         }
         if self.lfu_tracking_enabled() {
-            return self.hset_borrowed_many_lfu_batched(key, pairs, now_ms);
+            return self.hset_borrowed_many_lfu_batched::<INCR>(key, pairs, now_ms);
         }
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (internal_entry below re-probes). Byte-identical; return value unused. See append.
@@ -12563,7 +12621,7 @@ impl Store {
         let added = Self::hset_borrowed_many_apply_map(m, pairs, count);
         entry.touch_lru(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
-        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::refresh_hash_encoding_after_batch::<INCR>(entry, pairs, max_entries, max_value);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
         Ok(added)
@@ -12611,7 +12669,7 @@ impl Store {
         }
     }
 
-    fn hset_borrowed_many_lfu_batched(
+    fn hset_borrowed_many_lfu_batched<const INCR: bool>(
         &mut self,
         key: &[u8],
         pairs: &[&[u8]],
@@ -12672,7 +12730,7 @@ impl Store {
         let added = Self::hset_borrowed_many_apply_map(m, pairs, count);
         entry.touch(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
-        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::refresh_hash_encoding_after_batch::<INCR>(entry, pairs, max_entries, max_value);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
         Ok(added)
@@ -47211,6 +47269,112 @@ mod tests {
                 "digest_mutations mismatch @ {case}"
             );
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest mismatch @ {case}");
+            assert_eq!(
+                a.object_encoding(b"h", 3),
+                b.object_encoding(b"h", 3),
+                "encoding mismatch @ {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn hset_borrowed_many_incremental_refresh_matches_rescan() {
+        // Gate the live variadic HSET/HMSET path's payload-bounded refresh against the old full
+        // hash scan. This covers every promotion trigger, an oversized duplicate whose final
+        // short value requires the reference fallback, an already-promoted hash, and the LFU
+        // branch that replays per-field frequency bumps before applying the same refresh.
+        type HsetMany =
+            fn(&mut Store, &[u8], &[&[u8]], u64) -> Result<usize, StoreError>;
+        let build = |hset: HsetMany, case: &str| -> (Result<usize, StoreError>, Store) {
+            let mut s = Store::new();
+            let big_field = vec![b'f'; 80];
+            let big_value = vec![b'v'; 80];
+            let r = match case {
+                "small_overwrite" => {
+                    for i in 0..64u32 {
+                        s.hset_borrowed(
+                            b"h",
+                            format!("f{i:04}").as_bytes(),
+                            b"old".to_vec(),
+                            1,
+                        )
+                        .unwrap();
+                    }
+                    hset(&mut s, b"h", &[b"f0000", b"new", b"f0001", b"new"], 2)
+                }
+                "count_promote" => {
+                    for i in 0..512u32 {
+                        s.hset_borrowed(
+                            b"h",
+                            format!("f{i:04}").as_bytes(),
+                            b"v".to_vec(),
+                            1,
+                        )
+                        .unwrap();
+                    }
+                    hset(&mut s, b"h", &[b"fnew", b"v"], 2)
+                }
+                "value_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
+                        .unwrap();
+                    hset(&mut s, b"h", &[b"f", big_value.as_slice()], 2)
+                }
+                "field_promote" => {
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
+                        .unwrap();
+                    hset(&mut s, b"h", &[big_field.as_slice(), b"v"], 2)
+                }
+                "oversized_duplicate_final_short" => {
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
+                        .unwrap();
+                    hset(
+                        &mut s,
+                        b"h",
+                        &[b"f", big_value.as_slice(), b"f", b"short"],
+                        2,
+                    )
+                }
+                "already_promoted" => {
+                    s.hset_borrowed(b"h", b"big", big_value, 1).unwrap();
+                    hset(&mut s, b"h", &[b"f", b"v"], 2)
+                }
+                "lfu_small_overwrite" => {
+                    for i in 0..64u32 {
+                        s.hset_borrowed(
+                            b"h",
+                            format!("f{i:04}").as_bytes(),
+                            b"old".to_vec(),
+                            1,
+                        )
+                        .unwrap();
+                    }
+                    s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                    s.lfu_decay_time = 0;
+                    hset(&mut s, b"h", &[b"f0000", b"new", b"f0001", b"new"], 2)
+                }
+                _ => unreachable!(),
+            };
+            (r, s)
+        };
+        for case in [
+            "small_overwrite",
+            "count_promote",
+            "value_promote",
+            "field_promote",
+            "oversized_duplicate_final_short",
+            "already_promoted",
+            "lfu_small_overwrite",
+        ] {
+            let (ra, mut a) = build(Store::hset_borrowed_many, case);
+            let (rb, mut b) = build(Store::hset_borrowed_many_rescan, case);
+            assert_eq!(ra, rb, "result mismatch @ {case}");
+            assert_eq!(a.dirty, b.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations mismatch @ {case}"
+            );
+            assert_eq!(a.rng_seed, b.rng_seed, "RNG mismatch @ {case}");
+            assert_eq!(a.state_digest(), b.state_digest(), "state mismatch @ {case}");
             assert_eq!(
                 a.object_encoding(b"h", 3),
                 b.object_encoding(b"h", 3),

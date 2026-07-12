@@ -177,6 +177,12 @@ harness = false
 name = "hset_encoding_refresh"
 harness = false
 
+# Same-binary A/B for live variadic HSET/HMSET: payload-bounded incremental encoding refresh vs
+# the O(hash width) post-command re-scan.
+[[bench]]
+name = "hset_many_encoding_refresh"
+harness = false
+
 # (cc_fr) Same A/B for HINCRBY: O(1) incremental refresh vs the O(n) rescan on a counter-map hash.
 [[bench]]
 name = "hincrby_encoding_refresh"
