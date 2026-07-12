@@ -12260,7 +12260,23 @@ impl Store {
         let rand_samples: Vec<u64> = (0..bump_count).map(|_| self.next_rand()).collect();
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        // `key_state` above already resolved presence (and the `Some(Err)` non-hash case returned
+        // via the field-by-field fallback). Nothing mutates `entries` between that read and here —
+        // only `next_rand` — so reuse it to skip `internal_entry`'s redundant `contains_key`: go
+        // straight to one `get_mut` (present) or insert + `get_mut` (absent). Byte-identical.
+        let entry = if key_state.is_some() {
+            self.entries
+                .get_mut(key)
+                .expect("hash entry present at read is still present")
+        } else {
+            self.internal_entries_insert(
+                key.to_vec(),
+                Entry::new(Value::Hash(Box::default()), now_ms),
+            );
+            self.entries
+                .get_mut(key)
+                .expect("hash entry inserted above must exist")
+        };
         for rand_sample in rand_samples {
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }

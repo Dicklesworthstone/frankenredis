@@ -16609,3 +16609,20 @@ ISOLATED encode-vs-clone magnitude (99fwc's methodology); because hash/set listp
 structural like lists), the END-TO-END repeat-DUMP-COMMAND benefit is dispatch/IO-bound and MODEST — consistent
 with zset lever6's -6.7..-11.6% measured end-to-end. Shipped as a byte-identical consistency fix, not on the
 headline isolated number. Rollback: drop the two arm flags + the 4 validity/insert fields.
+
+### 2026-07-12 SHIPPED (LFU HSET-many reuses the presence it already read — one fewer keyspace lookup)
+`hset_borrowed_many_lfu_batched` (the HSET/HMSET path taken under an LFU maxmemory-policy) did THREE foldhash
+lookups on the common path: `entries.get(key)` to resolve presence+type for the PRNG `bump_count` and the
+non-hash fallback (line 12287), then `internal_entry` which itself re-probes with `contains_key` + `get_mut`.
+The `get` already told us presence, and nothing mutates `entries` between it and the get-or-create — only
+`next_rand` (RNG, not the map) — so the second `contains_key` is pure redundancy. Reuse `key_state.is_some()`:
+present -> one `get_mut`; absent -> `internal_entries_insert` + `get_mut` (exactly `internal_entry`'s insert
+arm). 3 lookups -> 2 on every LFU HSET-many. Byte-identical, gated by the existing differential test
+`hset_borrowed_many_lfu_batch_matches_field_loop` (asserts result + full store state + per-field PRNG advance
+match the field-by-field loop) + the 7 fr-store `hset*` lib tests, all green. HONEST SCOPE: this is the LFU-ON
+path only (the default no-LFU path at 12223 is already a tight 2-lookup `internal_entry`, and reducing THAT to 1
+is the classic get-or-insert NLL borrow-checker limitation — needs Polonius or an always-allocating `entry()`
+API, so left alone). The eliminated lookup's isolated magnitude is the already-measured `bitfield_resolve_lookup`
+primitive (one foldhash probe removed); end-to-end it is a small fraction, since the map build + field inserts
+dominate HSET-many. Shipped as a clean byte-identical micro-elision, consistent with the ZADD (a5e0b0b35) /
+BITFIELD (7308a28e5) redundant-keyspace-probe vein. Rollback: restore the single `internal_entry` call.
