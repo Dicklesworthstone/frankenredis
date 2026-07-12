@@ -7166,3 +7166,37 @@ fr-persist). Do NOT re-chase the score alloc (done) or the member copy (blocked)
 without that structural change. The same raw-entry core now exists for hash-field /
 set-member decode arms if a future lever needs a borrowed read of those (CrimsonHawk's
 "worth revisiting the hash-field and set-member decode arms the same way").
+
+## 2026-07-11 cc_fr: MEASURED SUB-GATE — set/hash listpack decode intermediate-Vec elision (~1.05x, indistinguishable); reverted to stash
+
+Follow-up to the zsetlpscore KEEP (`24e1b365c`), chasing CrimsonHawk's flagged
+"revisit the hash-field and set-member decode arms the same way." Unlike the zset
+SCORE (decoded-then-DISCARDED → a genuinely wasted alloc), `SET_LISTPACK` and
+`HASH_LISTPACK` KEEP every entry, so the only removable work is the intermediate
+`Vec<ListpackEntry>` (`decode_listpack`) + the second iteration (`into_bytes` / pair
+loop). Implemented `decode_set_listpack_members` / `decode_hash_listpack_pairs` on
+the shared `decode_entry_raw` core (byte-exact; 3 differential tests incl. odd-count
+rejection + encoder-built blobs; clippy `-D warnings` clean; 29 listpack lib tests).
+
+MEASURED (same-binary null-gated A/B, `cargo bench -p fr-persist --bench
+listpack_collection_direct`, median-of-41 position-balanced pairs, `new/orig`):
+
+| workload | new/orig | null p5..p95 | null cv% | verdict |
+|---|---:|---|---:|---|
+| set_128  | 1.068x | [0.873, 1.163] | 12.6 | indistinguishable |
+| set_512  | 1.039x | [0.736, 1.269] | 17.3 | indistinguishable |
+| hash_128 | 1.076x | [0.859, 1.245] | 12.3 | indistinguishable |
+| hash_512 | 1.061x | [0.849, 1.143] |  9.6 | indistinguishable |
+
+All four medians are >1.0 (directionally a small win, never a regression) but sit
+INSIDE their null p5..p95 — the ~5-7% intermediate-`Vec` elision is below the
+noisy-worker floor (null cv 9-17%). This CONFIRMS the zsetlpscore `int_96` guard
+proxy (same mechanism, 1.05-1.06x, borderline) and matches the `setkeepttl 6tx3u`
+precedent (byte-exact ~5% below the noisy-worker gate → revert).
+
+REVERTED to a labeled stash (`git stash`: "cc_fr: set/hash listpack direct-decode
+— MEASURED SUB-GATE ..."). The string byte-copies dominate and are IDENTICAL in
+both arms, so this elision is inherently ~5% and cannot clear a robust gate without
+the multi-session borrowed/Arc `RdbValue` change (which lands in the fr-store
+consumer). DO NOT re-chase the set/hash intermediate-`Vec` elision as a standalone
+perf lever; it only becomes material bundled into the borrowed-`RdbValue` rewrite.
