@@ -251,6 +251,22 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) LPOP count popping ALL of a 120-element PACKED list: the batch `pop_front_n` does one
+    // `buf.drain` instead of 120 per-element shifts (the old `pop_front` loop was O(count*len)).
+    // iter_batched rebuilds the list each iter (untimed setup), so only the LPOP is measured.
+    let lpop_members: Vec<Vec<u8>> = (0..120u32).map(|i| format!("elem:{i:05}").into_bytes()).collect();
+    g.bench_function("lpop_count_all_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.rpush(b"l", &lpop_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.lpop_count(std::hint::black_box(b"l"), 120, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map
