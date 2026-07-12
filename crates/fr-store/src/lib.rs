@@ -26656,9 +26656,13 @@ impl Store {
                 hash = fnv1a_update(hash, v);
             }
             Value::Integer(value) => {
-                let bytes = value.to_string();
+                // (cc_fr) Hash the decimal form from a STACK buffer (integer_decimal_into,
+                // write_u64_digits LUT) — no per-int-key String alloc during a full-scan digest.
+                // Byte-identical decimal bytes ⇒ identical fnv1a digest (same as `to_string`).
+                let mut buf = [0u8; 21];
+                let n = integer_decimal_into(&mut buf, *value);
                 hash = fnv1a_update(hash, b"S");
-                hash = fnv1a_update(hash, bytes.as_bytes());
+                hash = fnv1a_update(hash, &buf[..n]);
             }
             Value::Hash(m) => {
                 hash = fnv1a_update(hash, b"H");
