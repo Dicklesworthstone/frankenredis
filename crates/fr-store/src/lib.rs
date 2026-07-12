@@ -11422,11 +11422,13 @@ impl Store {
         if self.notify_keyspace_events == 0 {
             return;
         }
+        // (cc_fr) borrow the logical key (slice into the `key` param) — no owned copy needed
+        // for a by-ref notify. Byte-identical; strictly fewer allocs. Sibling of the SMOVE fix.
         let (db, logical_key) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk.to_vec()),
-            None => (0, key.to_vec()),
+            Some((db, lk)) => (db, lk),
+            None => (0, key),
         };
-        self.notify_keyspace_event(NOTIFY_EXPIRED, "hexpired", &logical_key, db);
+        self.notify_keyspace_event(NOTIFY_EXPIRED, "hexpired", logical_key, db);
     }
 
     /// Drop every expired per-field TTL entry on `key` from the hash and
@@ -15487,10 +15489,10 @@ impl Store {
         };
         if noop_ltrim_on_list {
             let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk.to_vec()),
-                None => (0, key.to_vec()),
+                Some((db, lk)) => (db, lk),
+                None => (0, key),
             };
-            self.notify_keyspace_event(NOTIFY_LIST, "ltrim", &logical_key, db);
+            self.notify_keyspace_event(NOTIFY_LIST, "ltrim", logical_key, db);
         }
         result
     }
@@ -24314,10 +24316,10 @@ impl Store {
         ) && self.notify_keyspace_events != 0
         {
             let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk.to_vec()),
-                None => (0, key.to_vec()),
+                Some((db, lk)) => (db, lk),
+                None => (0, key),
             };
-            self.notify_keyspace_event(NOTIFY_HASH, event, &logical_key, db);
+            self.notify_keyspace_event(NOTIFY_HASH, event, logical_key, db);
         }
         outcome
     }
@@ -24409,10 +24411,10 @@ impl Store {
         if matches!(outcome, HashFieldPersistResult::Persisted) && self.notify_keyspace_events != 0
         {
             let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk.to_vec()),
-                None => (0, key.to_vec()),
+                Some((db, lk)) => (db, lk),
+                None => (0, key),
             };
-            self.notify_keyspace_event(NOTIFY_HASH, "hpersist", &logical_key, db);
+            self.notify_keyspace_event(NOTIFY_HASH, "hpersist", logical_key, db);
         }
         outcome
     }
