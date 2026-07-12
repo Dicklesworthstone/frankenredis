@@ -146,3 +146,9 @@ harness = false
 [[bench]]
 name = "spop_count_fusion"
 harness = false
+
+# (bitfield-resolve) Isolated A/B for the eliminated keyspace lookup in BITFIELD's resolve preamble:
+# get().is_some()+get_mut() (2 foldhash lookups) vs get_mut() (1).
+[[bench]]
+name = "bitfield_resolve_lookup"
+harness = false

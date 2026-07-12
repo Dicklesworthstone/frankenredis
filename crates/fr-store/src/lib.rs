@@ -9512,23 +9512,28 @@ impl Store {
         let has_write = ops.iter().any(BitfieldOp::is_write);
         let had_expiry = self.key_has_expiry(key);
 
-        // Resolve the key ONCE. WrongType (present non-string) is rejected before any op, matching
-        // the per-op path where the first store op's materialize_string does the same.
-        let present = self.entries.get(key).is_some();
+        // Resolve the key ONCE — a single `get_mut` (the old `get(..).is_some()` + `get_mut(..)`
+        // did two keyspace lookups; `present` was used nowhere else). WrongType (present non-string)
+        // is rejected before any op, matching the per-op path where the first store op's
+        // materialize_string does the same.
         let mut created_empty = false;
-        if present {
-            let Some(entry) = self.entries.get_mut(key) else { unreachable!() };
-            if entry.value.materialize_string().is_none() {
-                return Err(StoreError::WrongType);
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if entry.value.materialize_string().is_none() {
+                    return Err(StoreError::WrongType);
+                }
             }
-        } else if has_write {
-            // Absent + at least one write: upstream creates the key. Materialize it empty now (RAW,
-            // like the new-key branches); the first write's bookkeeping is gated to the new-key
-            // contract via `created_empty`+`first_write` below.
-            let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
-            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            self.internal_entries_insert(key.to_vec(), entry);
-            created_empty = true;
+            None => {
+                if has_write {
+                    // Absent + at least one write: upstream creates the key. Materialize it empty now
+                    // (RAW, like the new-key branches); the first write's bookkeeping is gated to the
+                    // new-key contract via `created_empty`+`first_write` below.
+                    let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    self.internal_entries_insert(key.to_vec(), entry);
+                    created_empty = true;
+                }
+            }
         }
 
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);

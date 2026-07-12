@@ -4,6 +4,23 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — BITFIELD "resolve once" elides a redundant keyspace lookup (get+get_mut → one get_mut); byte-identical
+
+BITFIELD's resolve-once preamble did `entries.get(key).is_some()` THEN `entries.get_mut(key)` — TWO
+foldhash lookups — and the `present` bool was used nowhere else (only `created_empty` is). ONE LEVER:
+a single `match self.entries.get_mut(key)` (Some → the WRONGTYPE/materialize check; None → the
+create-empty-on-write branch). No RNG/LFU here, so it is a straight structural lookup-elision.
+
+BYTE-IDENTICAL: all 8 fr-store `bitfield` tests pass (`created_empty`, the WRONGTYPE gate, and the
+absent-plus-write create are all preserved).
+
+MEASURED (isolated same-binary A/B `benches/bitfield_resolve_lookup.rs`, foldhash map = the store's
+`entries` hasher, cv ~14%): eliminating 1 of the 2 resolve lookups is **1.750x @1k keys / 1.774x @100k**
+on the resolve-lookup pair. HONEST SCOPE: that ratio is the ISOLATED resolve lookups; the E2E BITFIELD
+win is a much smaller fraction (the field gather/scatter ops + RESP reply dominate) — this is a
+Pareto-safe simplification (one fewer keyspace probe per BITFIELD, never slower), not a headline E2E
+speedup. (Complements the i229a op-lookup fusion, which had already collapsed the PER-OP lookups.)
+
 ## 2026-07-12: SHIPPED — SPOP-count fuses the keyspace lookup (O(count) get_mut → 1); 1.34–1.44x pop-all, byte-identical
 
 The previously-deferred lever, landed with a differential test as the gate. `spop_count` did `count`×
