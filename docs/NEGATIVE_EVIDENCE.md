@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — BITOP multi-operand accumulate wired to AVX2 fr_simd kernels; 1.13–1.67x cache-resident, byte-identical
+
+PROFILE-FIRST: `fr_simd::bitand_inplace` carried a doc note that whether its AVX2 arm actually beats
+the LLVM-SSE2 scalar loop for the streaming (bandwidth-prone) BITOP kernel was "a measurement, not an
+assumption — see the A/B before trusting a speedup," and the `bitand.rs` bench existed but was never
+recorded. Ran it (worker vmi1149989, `avx2_detected=true`): AVX2 beats SSE2-scalar **1.668x @8 KiB
+(L1), 1.269x @64 KiB (L2), 1.127x @512 KiB (L3)**, bandwidth-neutral (~1.14x, inside null) at 4 MiB.
+So the always-AVX2 dispatch is correct (the "gate/drop AVX2 as cache-bound" hypothesis is REFUTED).
+
+That surfaced the real lever: `Store::bitop`'s multi-operand (0/1/3+) accumulate folded operands with
+a **u64-SWAR** `swar_zip_inplace` (8 B/word) — it never used the AVX2 kernel, and OR/XOR had no AVX2
+kernel at all. ONE LEVER: added `fr_simd::bitor_inplace` / `bitxor_inplace` (mirrors of
+`bitand_inplace`, `_mm256_{or,xor}_si256`) and wired the AND/OR/XOR accumulate to
+`fr_simd::bit{and,or,xor}_inplace`. `swar_zip_inplace` stays `#[cfg(test)]` as the independent
+differential oracle.
+
+BYTE-IDENTICAL: bitwise ops are deterministic; the kernels touch only the `min(dst,src)` prefix, same
+as the SWAR fold (the AND implicit-0 tail-fill is preserved). Gated by (a) new fr-simd unit test
+`bitor_bitxor_match_scalar_and_naive_all_lengths_alignments_and_unequal` (AVX2 == scalar == naive over
+34x34 alignments x {0,1,15,16,31,32,33,64,100,250} lengths + unequal), (b) fr-store `swar_bitop_matches
+_scalar_and_reports_ab_ratio` — the u64-SWAR oracle now cross-checks the AVX2 bitop byte-for-byte —
+plus the metamorphic `mr_bitop_*` gates, all green.
+
+MEASURED (same-binary null-gated A/B `benches/bitop_swar_vs_avx2.rs`, u64-SWAR replica vs AVX2,
+`avx2_detected=true`, byte-identity asserted): **8 KiB 1.674x, 64 KiB 1.305x, 512 KiB 1.129x** (all
+above null p95, cv 3–7%), 4 MiB 1.106x indistinguishable (bandwidth-bound). OR/XOR share the identical
+streaming kernel shape (only the 1-cycle lane intrinsic differs), so the AND ratio transfers.
+
+HONEST SCOPE: the win is on the multi-operand (3+-key) BITOP accumulate over cache-resident bitmaps
+(≤ L3). The common 2-operand BITOP keeps its existing one-pass `zip().map().collect()` (unchanged —
+converting it to copy+AVX2 would add a pass). At RAM-resident sizes the op is bandwidth-bound (neutral).
+Byte-identical, no downside.
+
 ## 2026-07-12: NEGATIVE (sub-gate, reverted) — zset-listpack score ENCODE per-entry render Vec hoist
 
 NEGATIVE-LEDGER-FIRST: `encode_zset_score_listpack_entry` (fr-persist) allocates a fresh

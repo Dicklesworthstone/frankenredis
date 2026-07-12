@@ -24,3 +24,7 @@ harness = false
 [[bench]]
 name = "crc64"
 harness = false
+
+[[bench]]
+name = "bitop_swar_vs_avx2"
+harness = false

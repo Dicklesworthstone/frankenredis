@@ -23877,6 +23877,10 @@ impl Store {
     /// view never changes which source byte maps to which destination byte.
     /// (frankenredis-0ppgh)
     #[inline]
+    // The production BITOP accumulate now uses the AVX2 `fr_simd::bit{and,or,xor}_inplace`
+    // kernels; this u64-SWAR fold remains as the independent differential oracle in the
+    // bitop tests (test `swar()` cross-checks the real path byte-for-byte).
+    #[cfg(test)]
     fn swar_zip_inplace(
         dst: &mut [u8],
         src: &[u8],
@@ -24038,16 +24042,19 @@ impl Store {
                     let val = operand!(key).unwrap_or(std::borrow::Cow::Borrowed(&[]));
                     let val = val.as_ref();
                     if is_and {
-                        Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
+                        // AVX2 (fr_simd) beats the u64 SWAR fold on cache-resident bitmaps
+                        // (measured 1.2-1.67x, benches/bitand.rs). Byte-identical: `dst[i] &= src[i]`
+                        // over the min prefix, same as the old swar_zip_inplace.
+                        fr_simd::bitand_inplace(&mut result, val);
                         // Bytes beyond a shorter operand are AND-ed with implicit 0.
                         if val.len() < result.len() {
                             result[val.len()..].fill(0);
                         }
                     } else if is_or {
                         // OR/XOR with implicit-0 tail leave `result` unchanged there.
-                        Self::swar_zip_inplace(&mut result, val, |a, b| a | b, |a, b| a | b);
+                        fr_simd::bitor_inplace(&mut result, val);
                     } else if is_xor {
-                        Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
+                        fr_simd::bitxor_inplace(&mut result, val);
                     }
                 }
                 result

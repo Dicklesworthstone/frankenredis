@@ -441,6 +441,115 @@ unsafe fn bitand_inplace_avx2(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+/// In-place `dst[i] |= src[i]` over the overlapping prefix (`min` length). `BITOP OR`'s
+/// accumulate kernel. Same streaming read-read-write shape as [`bitand_inplace`]; the AVX2
+/// A/B that settled AND applies verbatim (only the 1-cycle lane op differs). Dispatches
+/// `avx2 → scalar`. Bit-identical to `for i { dst[i] |= src[i] }`.
+#[inline]
+pub fn bitor_inplace(dst: &mut [u8], src: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed present.
+            unsafe {
+                bitor_inplace_avx2(dst, src);
+            }
+            return;
+        }
+    }
+    bitor_inplace_scalar(dst, src);
+}
+
+/// Reference kernel: safe, portable, LLVM-vectorized to SSE2 on x86_64. The A/B baseline.
+#[inline]
+pub fn bitor_inplace_scalar(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    for i in 0..n {
+        dst[i] |= src[i];
+    }
+}
+
+/// # Safety
+/// The CPU must support `avx2`. Callers must check `is_x86_feature_detected!("avx2")`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bitor_inplace_avx2(dst: &mut [u8], src: &[u8]) {
+    use std::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_or_si256, _mm256_storeu_si256};
+    let n = dst.len().min(src.len());
+    let full = n / 32 * 32;
+    // SAFETY: AVX2 guaranteed by the caller. Every load/store spans `[offset, offset+32)` with
+    // `offset + 32 <= full <= n <= {dst,src}.len()`, so all accesses stay inside both slices.
+    unsafe {
+        let mut offset = 0usize;
+        while offset < full {
+            let a = _mm256_loadu_si256(dst.as_ptr().add(offset) as *const __m256i);
+            let b = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset) as *mut __m256i,
+                _mm256_or_si256(a, b),
+            );
+            offset += 32;
+        }
+    }
+    for i in full..n {
+        dst[i] |= src[i];
+    }
+}
+
+/// In-place `dst[i] ^= src[i]` over the overlapping prefix (`min` length). `BITOP XOR`'s
+/// accumulate kernel. Same shape/dispatch as [`bitand_inplace`]. Bit-identical to
+/// `for i { dst[i] ^= src[i] }`.
+#[inline]
+pub fn bitxor_inplace(dst: &mut [u8], src: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed present.
+            unsafe {
+                bitxor_inplace_avx2(dst, src);
+            }
+            return;
+        }
+    }
+    bitxor_inplace_scalar(dst, src);
+}
+
+/// Reference kernel: safe, portable, LLVM-vectorized to SSE2 on x86_64. The A/B baseline.
+#[inline]
+pub fn bitxor_inplace_scalar(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    for i in 0..n {
+        dst[i] ^= src[i];
+    }
+}
+
+/// # Safety
+/// The CPU must support `avx2`. Callers must check `is_x86_feature_detected!("avx2")`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bitxor_inplace_avx2(dst: &mut [u8], src: &[u8]) {
+    use std::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_storeu_si256, _mm256_xor_si256};
+    let n = dst.len().min(src.len());
+    let full = n / 32 * 32;
+    // SAFETY: AVX2 guaranteed by the caller. Every load/store spans `[offset, offset+32)` with
+    // `offset + 32 <= full <= n <= {dst,src}.len()`, so all accesses stay inside both slices.
+    unsafe {
+        let mut offset = 0usize;
+        while offset < full {
+            let a = _mm256_loadu_si256(dst.as_ptr().add(offset) as *const __m256i);
+            let b = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset) as *mut __m256i,
+                _mm256_xor_si256(a, b),
+            );
+            offset += 32;
+        }
+    }
+    for i in full..n {
+        dst[i] ^= src[i];
+    }
+}
+
 // ───────────────────────────── CRC-64/Jones (Redis) ─────────────────────────────
 //
 // Redis's DUMP/RESTORE/RDB checksum: CRC-64/Jones, poly 0xAD93D23594C935A9, refin=refout=true,
@@ -940,5 +1049,50 @@ mod tests {
         bitand_inplace(&mut d, &[0x0fu8; 10]);
         assert_eq!(&d[..10], &[0x0fu8; 10]);
         assert_eq!(&d[10..], &orig[10..], "bytes past src.len() untouched");
+    }
+
+    #[test]
+    fn bitor_bitxor_match_scalar_and_naive_all_lengths_alignments_and_unequal() {
+        use super::{bitor_inplace, bitor_inplace_scalar, bitxor_inplace, bitxor_inplace_scalar};
+        let mut da = vec![0u8; 300];
+        let mut sa = vec![0u8; 300];
+        fill(&mut da, 0x0f0f_1234_5678_9abc);
+        fill(&mut sa, 0xf0f0_fedc_ba98_7654);
+        for dstart in 0..34usize {
+            for sstart in 0..34usize {
+                for len in [0usize, 1, 15, 16, 31, 32, 33, 64, 100, 250] {
+                    if dstart + len > da.len() || sstart + len > sa.len() {
+                        continue;
+                    }
+                    let base = da[dstart..dstart + len].to_vec();
+                    let s = &sa[sstart..sstart + len];
+                    // OR: dispatch == scalar == independent naive.
+                    let (mut o1, mut o2) = (base.clone(), base.clone());
+                    let onaive: Vec<u8> = base.iter().zip(s).map(|(a, b)| a | b).collect();
+                    bitor_inplace(&mut o1, s);
+                    bitor_inplace_scalar(&mut o2, s);
+                    assert_eq!(o1, o2, "OR dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(o1, onaive, "OR wrong d={dstart} s={sstart} len={len}");
+                    // XOR: dispatch == scalar == independent naive.
+                    let (mut x1, mut x2) = (base.clone(), base.clone());
+                    let xnaive: Vec<u8> = base.iter().zip(s).map(|(a, b)| a ^ b).collect();
+                    bitxor_inplace(&mut x1, s);
+                    bitxor_inplace_scalar(&mut x2, s);
+                    assert_eq!(x1, x2, "XOR dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(x1, xnaive, "XOR wrong d={dstart} s={sstart} len={len}");
+                }
+            }
+        }
+        // Unequal lengths: only the min prefix is touched.
+        let mut d = vec![0xaau8; 40];
+        let orig = d.clone();
+        bitor_inplace(&mut d, &[0x55u8; 10]);
+        assert_eq!(&d[..10], &[0xffu8; 10]);
+        assert_eq!(&d[10..], &orig[10..], "OR bytes past src.len() untouched");
+        let mut d = vec![0xaau8; 40];
+        let orig = d.clone();
+        bitxor_inplace(&mut d, &[0xffu8; 10]);
+        assert_eq!(&d[..10], &[0x55u8; 10]);
+        assert_eq!(&d[10..], &orig[10..], "XOR bytes past src.len() untouched");
     }
 }
