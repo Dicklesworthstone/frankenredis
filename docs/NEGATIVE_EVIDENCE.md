@@ -17873,3 +17873,25 @@ running_digest == full scan for THIS helper too) + 6 digest + 3 hsetnx green. No
 fuse their fresh path; pure-counter workloads (HINCRBY-heavy, staying fresh) do 1 keyspace probe per op instead of
 4. No fresh bench (same lookup-elision primitive). This COMPLETES the digest-path fusion vein. Rollback: restore
 contains_key + current_entry_digest + get_mut + refresh_entry_digest.
+
+### 2026-07-13 SHIPPED (DEL/UNLINK per-key `last_del_removed` clone gated on keyspace notifications — frankenredis-3iqm5)
+Pivot off the exhausted foldhash / classify-dispatch / parse-fusion veins into the store-WRITE-notify family
+([[store_write_notify_vein]]: guard per-write work on the condition that makes it needed). `Store::del` pushed
+`key.clone()` into `last_del_removed` for EVERY removed key, but that buffer is consumed ONLY inside the runtime's
+`notify_keyspace_events != 0` block (fr-runtime lib.rs:33287): the two borrowed-fast-path callers
+(execute_plain_del_borrowed / _unlink_borrowed) drain-and-discard it, AOF/replica propagation replays the verbatim
+argv, and lazy-expiry uses a SEPARATE buffer (take_lazy_expired_propagation). With keyspace notifications disabled —
+the DEFAULT — every clone was a per-key heap allocation dropped untouched. Guarded the push on a
+`record_removed = self.notify_keyspace_events != 0` flag captured once before the loop (the SAME flag the consumer
+gates on, so an empty buffer and a populated-then-dropped one are indistinguishable to every observer → byte-
+identical). Lands squarely on the HOTTEST DEL path: the borrowed fast path is taken ONLY when notify==0, so it now
+does zero per-key clones. Gated: `del_records_removed_keys_only_when_notifications_enabled` (same reply/count/entries
+with notify off vs on; buffer empty off, exact removed keys on) + isolated same-binary `perf stat instructions:u`
+A/B `benches/del_notify_record.rs` (candidate=gated skip vs reference=unconditional clone, notify off): reference/
+candidate = **7.408x** fewer instructions, null_median 1.0000000 (cv 0.00003%), 24 rounds. NOTE: isolated A/B
+overstates end-to-end — the eliminated clone is a fraction of del()'s full per-key work (drop_if_expired +
+internal_entries_remove bookkeeping + stream guards); the real gain is that fraction on the default config. This is
+an alloc-ELISION (not buffer-reuse), so [[mimalloc_defeats_buffer_reuse_levers]] does NOT apply — the allocation is
+removed entirely, not recycled. Untouched: the MOVE/COPY `last_del_removed` push (single-key, its own path) + the
+notify-ON behavior (still clones). Rollback: drop the `record_removed` flag, restore the unconditional
+`self.last_del_removed.push(key.clone())`.

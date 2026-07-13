@@ -275,6 +275,13 @@ harness = false
 name = "del_stream_cleanup"
 harness = false
 
+# A/B for DEL's per-key last_del_removed clone: skip push(key.clone()) when keyspace notifications
+# are disabled (the default) vs the prior unconditional push. Byte-identical; isolates the wasted
+# per-key heap allocation dropped untouched by the notify-gated consumer.
+[[bench]]
+name = "del_notify_record"
+harness = false
+
 # A/B for RENAME's eight stream side-map removes: gate on a single has_stream_metadata flag when
 # both keys are stream-free vs the prior unconditional eight. Byte-identical.
 [[bench]]

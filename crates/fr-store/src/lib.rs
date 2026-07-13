@@ -8079,6 +8079,16 @@ impl Store {
     pub fn del(&mut self, keys: &[Vec<u8>], now_ms: u64) -> u64 {
         let mut removed = 0_u64;
         self.last_del_removed.clear();
+        // (perf) `last_del_removed` records the keys DEL/UNLINK actually removed so the command
+        // layer can fire a per-removal "del"/"unlink" keyspace event. That buffer is consumed ONLY
+        // inside the runtime's `notify_keyspace_events != 0` block: the two borrowed-fast-path
+        // callers drain-and-discard it, AOF/replica propagation replays the verbatim argv, and
+        // lazy-expiry propagation uses a separate buffer. With keyspace notifications disabled — the
+        // default — every `push(key.clone())` is a wasted per-key heap allocation whose result is
+        // dropped untouched. Skip the clone when no notification could fire. Byte-identical: the
+        // consumer is gated on the SAME flag, so an empty buffer and a populated-then-dropped one
+        // are indistinguishable to every observer.
+        let record_removed = self.notify_keyspace_events != 0;
         for key in keys {
             // (perf) DEL's per-key work is purely keyspace lookups. When no key in the DB
             // carries a TTL (`expires_count == 0`), `drop_if_expired` degrades to a discarded
@@ -8109,8 +8119,11 @@ impl Store {
                 // Record the key actually removed so the command layer fires a
                 // "del"/"unlink" keyspace event ONLY for real removals — upstream
                 // delGenericCommand notifies per successful dbDelete, never for
-                // a missing (or already-removed duplicate) key argument.
-                self.last_del_removed.push(key.clone());
+                // a missing (or already-removed duplicate) key argument. Only when a
+                // notification could actually fire (see `record_removed` above).
+                if record_removed {
+                    self.last_del_removed.push(key.clone());
+                }
                 removed = removed.saturating_add(1);
             }
         }
@@ -8143,6 +8156,34 @@ impl Store {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
         }
+    }
+
+    /// Bench hook for `benches/del_notify_record.rs`: isolates DEL's per-key
+    /// `last_del_removed.push(key.clone())`. `GATE = true` is production (skip the clone when
+    /// keyspace notifications are disabled — the default); `GATE = false` is the prior
+    /// unconditional push. On a default store (`notify_keyspace_events == 0`) the gated arm
+    /// allocates nothing while the reference clones each key — isolating the wasted heap
+    /// allocation whose result is dropped untouched by the notify-gated consumer. Not on a
+    /// production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_del_notify_record<const GATE: bool>(&mut self, key: &[u8]) {
+        if GATE {
+            if self.notify_keyspace_events != 0 {
+                self.last_del_removed.push(key.to_vec());
+            }
+        } else {
+            self.last_del_removed.push(key.to_vec());
+        }
+    }
+
+    /// Bench helper: drain the buffer the reference arm accumulates so a long bench loop stays
+    /// memory-bounded (mirrors `del()`'s per-call `last_del_removed.clear()`). Same cost in both
+    /// arms (the gated arm clears an already-empty buffer), so it stays out of the timed delta.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_clear_last_del_removed(&mut self) {
+        self.last_del_removed.clear();
     }
 
     /// Bench hook for `benches/rename_stream_relink.rs`: isolates RENAME's eight stream side-map
@@ -35840,6 +35881,40 @@ mod tests {
             store.expiretime_value(b"k", 6_001),
             ExpireTimeValue::KeyMissing
         );
+    }
+
+    #[test]
+    fn del_records_removed_keys_only_when_notifications_enabled() {
+        // The `record_removed` gate must be byte-identical to always-recording for every
+        // observer: the DEL reply (removed count) and post-state are unchanged, and the
+        // `last_del_removed` buffer — consumed ONLY under `notify_keyspace_events != 0` — is
+        // populated exactly when a notification could fire and empty otherwise.
+        let seed = |store: &mut Store| {
+            store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
+            store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+            store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
+        };
+        let del_keys = [b"a".to_vec(), b"b".to_vec(), b"missing".to_vec()];
+
+        // Notifications OFF (the default): count is correct, buffer stays empty (clone elided).
+        let mut off = Store::new();
+        seed(&mut off);
+        assert_eq!(off.del(&del_keys, 0), 2);
+        assert!(off.exists_no_stat(b"c", 0));
+        assert!(!off.exists_no_stat(b"a", 0));
+        assert!(off.take_last_del_removed().is_empty());
+
+        // Notifications ON: identical count/state, buffer records exactly the removed keys.
+        let mut on = Store::new();
+        on.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        seed(&mut on);
+        assert_eq!(on.del(&del_keys, 0), 2);
+        assert!(on.exists_no_stat(b"c", 0));
+        assert!(!on.exists_no_stat(b"a", 0));
+        assert_eq!(on.take_last_del_removed(), vec![b"a".to_vec(), b"b".to_vec()]);
+
+        // Observable post-state matches between the two configs.
+        assert_eq!(off.entries, on.entries);
     }
 
     #[test]
