@@ -18121,3 +18121,16 @@ fail**. Same primitive as `incr_forget_volatile` (`bench_incr_forget_volatile`):
 instructions (null 1.0000, cv 0.21%). Warmer than the INCR case — DEL is a top command and most keys are no-TTL. This
 + the mark-dirty membership gates make the ENTIRE volatile-set maintenance membership-change-only (add = gated mark,
 remove = gated forget, unchanged = neither). Rollback: restore the unconditional `self.forget_volatile_key(key)`.
+
+### 2026-07-13 SHIPPED (internal_entries_insert_with_expiry forget gated on old_expiry — the INSERT-path no-op, hottest sibling — frankenredis-f801t)
+The insert/overwrite counterpart, and the HOTTEST of the forget-no-op sites. `internal_entries_insert_with_expiry`'s
+no-new-TTL branch (`else if !new_has_expiry`) called `forget_volatile_key(&key)` — but a NEW key or a no-TTL overwrite
+of a no-TTL key (`old_expiry.is_none()`) was never in `volatile_keys`, so it is a guaranteed no-op. This fires on
+EVERY new-key SET (the top benchmark write: set_plain_owned/borrowed route a new key here via
+`internal_entries_insert` with `new_expiry=None`). Gated the branch on `&& old_expiry.is_some()` — only a key that
+PREVIOUSLY carried a TTL (volatile -> not, membership change) needs forgetting. `old_expiry` was already in scope (it
+computes `is_ttl_rearm`). Byte-identical (same invariant as a7b284bf2/sszgp; forget of an absent key is a no-op).
+Does NOT touch the mark_dirty branch, so the incr==whole-entry equivalence + the forget branch is unexercised by that
+differential test. Full suite **800 pass, 0 fail**. Same primitive as `incr_forget_volatile`: re-run = **25.26x**
+fewer instructions (null 1.0000). The forget-no-op elision is now complete across BOTH the insert (f801t) and remove
+(sszgp) key-lifecycle choke points + INCR (a7b284bf2). Rollback: restore `else if !new_has_expiry`.

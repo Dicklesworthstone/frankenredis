@@ -11807,7 +11807,14 @@ impl Store {
         // incr==whole-entry-replacement equivalence still holds.
         if new_has_expiry && !is_ttl_rearm {
             self.mark_volatile_keys_dirty();
-        } else if !new_has_expiry {
+        } else if !new_has_expiry && old_expiry.is_some() {
+            // (frankenredis-f801t) A no-TTL insert/overwrite only needs to FORGET the key from the
+            // volatile set when it PREVIOUSLY carried a TTL (membership change: volatile -> not).
+            // A NEW key or a no-TTL overwrite of a no-TTL key (`old_expiry.is_none()`) was never in
+            // `volatile_keys` (⊆ expiry_deadlines.keys() when clean; forget early-returns when
+            // dirty), so `forget_volatile_key` is a guaranteed no-op — a wasted BTreeSet remove-miss
+            // on EVERY new-key SET (the top benchmark write, routed here via internal_entries_insert
+            // with new_expiry=None). Gate on `old_expiry.is_some()`. Byte-identical.
             self.forget_volatile_key(&key);
         }
         self.invalidate_write_side_caches(&key);
