@@ -2357,6 +2357,28 @@ impl SortedSet {
         }
     }
 
+    /// (cc_fr) `(start_rank, count)` of a ZREMRANGEBYSCORE run on a PACKED zset, computed in ONE
+    /// pass over the ordered records — no member materialization. Records are (score, member)-
+    /// ordered, so members below `min` occupy ranks `[0, start)` and the in-range members occupy
+    /// `[start, start+count)`; `remove_rank_range` drains that span. `None` for Full (keeps the
+    /// `score_bound_range` collect path). Equivalent to `score_bound_range(min,max).len()` for the
+    /// count and `rank(first_in_range)` for the start, but without the run Vec or the rank re-scan.
+    fn packed_score_range_span(&self, min: ScoreBound, max: ScoreBound) -> Option<(usize, usize)> {
+        let SortedSetInner::Packed(p) = &self.inner else {
+            return None;
+        };
+        let mut start = 0usize;
+        let mut count = 0usize;
+        for (_, score) in p.iter() {
+            if !min.check_min(score) {
+                start += 1;
+            } else if max.check_max(score) {
+                count += 1;
+            }
+        }
+        Some((start, count))
+    }
+
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
         self.rank_impl::<true>(member)
     }
@@ -21326,16 +21348,29 @@ impl Store {
                     // no rank-tree build). (cc_fr) Packed also drains now (contiguous_run_start
                     // -> rank -> drain_rank_range); only the Full rank-tree keeps per-member.
                     // Byte-identical: same members removed, same residual.
-                    let run = zs.score_bound_range(min, max, false);
-                    let removed_count = run.len();
-                    if let Some(start) = run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
+                    // (cc_fr) Packed: compute the (start,count) rank span in ONE pass and drain it
+                    // (packed_score_range_span -> remove_rank_range) instead of materializing the
+                    // full `run` Vec (score_bound_range) + a separate rank re-scan — the SCORE
+                    // follow-up to d96c0a456's packed drain. Full keeps the score_bound_range path.
+                    // Byte-identical: same start rank + count, same drained members.
+                    let removed_count = if let Some((start, count)) =
+                        zs.packed_score_range_span(min, max)
                     {
-                        zs.remove_rank_range(start, removed_count);
+                        zs.remove_rank_range(start, count)
                     } else {
-                        for (m, _) in &run {
-                            zs.remove(m);
+                        let run = zs.score_bound_range(min, max, false);
+                        let removed_count = run.len();
+                        if let Some(start) =
+                            run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
+                        {
+                            zs.remove_rank_range(start, removed_count);
+                        } else {
+                            for (m, _) in &run {
+                                zs.remove(m);
+                            }
                         }
-                    }
+                        removed_count
+                    };
                     let is_empty = zs.is_empty();
                     if removed_count > 0 {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
