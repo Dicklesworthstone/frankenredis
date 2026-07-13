@@ -360,6 +360,30 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) XTRIM MINID (951,0) on a 1000-entry stream (removes ids 1..950 = 950, keeping the
+    // newest 50, a bulk trim): the rebuild path reconstructs from the 50 survivors in one pass
+    // instead of 950x the O(node) `remove` — the MINID mirror of xtrim_maxlen_950_of_1000.
+    g.bench_function("xtrim_minid_950_of_1000", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                for i in 1..=1000u64 {
+                    s.xadd(b"xm", (i, 0), &xtrim_fields, 1_000).unwrap();
+                }
+                s
+            },
+            |mut s| {
+                std::hint::black_box(s.xtrim_minid(
+                    std::hint::black_box(b"xm"),
+                    std::hint::black_box((951, 0)),
+                    None,
+                    2_000,
+                ))
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map

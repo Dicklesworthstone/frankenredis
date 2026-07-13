@@ -22431,17 +22431,33 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
-                    let mut remove_ids: Vec<StreamId> = entries
+                    let mut removed = entries
                         .keys()
                         .copied()
                         .take_while(|id| *id < min_id)
-                        .collect();
+                        .count();
                     if let Some(cap) = limit {
-                        remove_ids.truncate(cap);
+                        removed = removed.min(cap);
                     }
-                    let removed = remove_ids.len();
-                    for id in &remove_ids {
-                        entries.remove(*id);
+                    // (cc_fr) Bulk trim (removing >= half): rebuild from the surviving newest entries
+                    // in one pass instead of `removed`x O(node) `remove` — see xtrim (MAXLEN,
+                    // b6afa3ad7). Byte-identical redis-visible state (entries/order + live-entry-based
+                    // MEMORY USAGE + digest). Small trims keep the targeted remove loop.
+                    if removed.saturating_mul(2) >= entries.len() {
+                        let survivors: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = entries
+                            .iter()
+                            .skip(removed)
+                            .map(|(id, fields)| (*id, fields.to_pairs()))
+                            .collect();
+                        **entries = StreamEntries::from_sorted_entries(
+                            survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
+                        );
+                    } else {
+                        let remove_ids: Vec<StreamId> =
+                            entries.keys().copied().take(removed).collect();
+                        for id in &remove_ids {
+                            entries.remove(*id);
+                        }
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
@@ -53189,6 +53205,64 @@ mod tests {
                 "memory @ max_len={max_len}"
             );
             assert_eq!(a.state_digest(), b.state_digest(), "digest @ max_len={max_len}");
+        }
+    }
+
+    #[test]
+    fn xtrim_minid_bulk_rebuild_matches_direct_build_cc() {
+        // (cc_fr) XTRIM MINID's bulk rebuild path (removing >= half the entries with id < min_id)
+        // must leave a stream byte-identical to one built from ONLY the survivors (id >= min_id):
+        // same XLEN, XRANGE, MEMORY USAGE, state_digest. Covers rebuild + retained loop paths,
+        // with and without a LIMIT cap.
+        const N: u64 = 300;
+        let fields = |i: u64| vec![(b"f".to_vec(), format!("v{i}").into_bytes())];
+        for &min in &[1u64, 10, 100, 150, 200, 300, 301] {
+            for &cap in &[None, Some(50usize), Some(1000usize)] {
+                let mut a = Store::new();
+                for i in 1..=N {
+                    a.xadd(b"st", (i, 0), &fields(i), 1).unwrap();
+                }
+                a.xtrim_minid(b"st", (min, 0), cap, 2).unwrap();
+
+                // Survivors: ids < min are removed, capped at `cap` (removes the lowest `cap`).
+                let want_removed = (min.saturating_sub(1)).min(N) as usize;
+                let removed = cap.map_or(want_removed, |c| want_removed.min(c));
+                let tag = format!("min={min} cap={cap:?}");
+
+                if removed >= N as usize {
+                    // Remove-all: redis leaves an EMPTY but EXISTING stream (key persists) —
+                    // a survivor-built reference can't express that (an absent key differs in
+                    // MEMORY USAGE/digest), so assert the invariant on `a` directly. The rebuild
+                    // replaces ONLY the packed entries via `from_sorted_entries`; the key, last_id,
+                    // and entries_added live outside StreamEntries and are untouched.
+                    assert!(a.value_type(b"st", 3).is_some(), "key kept @ {tag}");
+                    assert_eq!(a.xlen(b"st", 3).unwrap(), 0, "empty @ {tag}");
+                    assert!(
+                        a.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3)
+                            .unwrap()
+                            .is_empty(),
+                        "xrange empty @ {tag}"
+                    );
+                    continue;
+                }
+
+                let mut b = Store::new();
+                for i in (removed as u64 + 1)..=N {
+                    b.xadd(b"st", (i, 0), &fields(i), 1).unwrap();
+                }
+                assert_eq!(a.xlen(b"st", 3).unwrap(), b.xlen(b"st", 3).unwrap(), "xlen @ {tag}");
+                assert_eq!(
+                    a.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
+                    b.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
+                    "xrange @ {tag}"
+                );
+                assert_eq!(
+                    a.memory_usage_for_key(b"st", 3),
+                    b.memory_usage_for_key(b"st", 3),
+                    "memory @ {tag}"
+                );
+                assert_eq!(a.state_digest(), b.state_digest(), "digest @ {tag}");
+            }
         }
     }
 
