@@ -17999,3 +17999,22 @@ comprehensively saturated — recording so the next agent skips the re-sweep:
   (exactly the field-level trap the MOVE regression `91df4019c` taught). Left as a documented candidate.
 NEXT MUST pivot OUT of the fr-store command hot path: fr-simd compute-bound, structural (b1o02 RESTORE-build,
 multi-day), or a less-trodden command family (set-algebra / random-sampling / GEO).
+
+### 2026-07-13 NEGATIVE (narrowing sweep — fr-simd + random-sampling + list/set reads all saturated too)
+Continued the pivot hunt from f64baaab8; ruled out two of the three suggested targets:
+- **fr-simd compute-bound: SATURATED.** Every exported kernel is ALREADY wired into its hot path — BITCOUNT/BITPOS
+  use `popcount_bytes` + `first_mismatch_byte` (fr-store 10128/10222), PFMERGE-HLL uses `max_bytes_inplace` (33581),
+  fr-persist listpack prefix uses `common_prefix_len` (with a measured-2x local inline + SIMD fallback), CRC64 fold-by-4
+  shipped. No scalar hot loop left that a kernel could take. (Byte-tail work is memory-bound — [[compute_vs_memory_bound_swar_targets]].)
+- **Random-sampling: ALGORITHM-PINNED, un-optimizable.** `srandmember_count` (+ hrandfield/zrandmember/spop count
+  twins) already avoids O(n) materialization (rejection-sample small distinct / partial Fisher-Yates / O(count) get_index
+  clones) AND has borrow-scan twins. The one wart (Fisher-Yates `(0..len).collect()` O(len) alloc for `n>=1024 && n<len/2`)
+  can't be swapped for rejection sampling without changing the `next_rand()` draw sequence, which the borrow-scan twin is
+  pinned to match byte-for-byte. Niche (count>=1024) anyway.
+- **List/set reads: COLLAPSED.** `lrange` (chunk-level `iter_from` seek + borrow-scan twin), `bitfield_get` (single-lookup
+  + `bitfield_get_batch` resolve-once), `count_expiring_keys` == a field read. Nothing left.
+CONCLUSION: the one-turn drive-by perf frontier is EXHAUSTED across fr-store commands + fr-simd. The ONLY remaining
+levers are (a) STRUCTURAL/multi-day (b1o02 hash-listpack RESTORE-build [[project_b1o02_hash_listpack_ceiling]], borrowed/
+Arc RdbValue [[project_persist_decode_frontier]]) or (b) the DEDICATED-turn INCR `mark_volatile_keys_dirty` elision
+(needs test-intent review + rate-limiter rebuild-frequency profiling — do NOT drive-by). Future turns should pick one of
+these deliberately rather than re-sweep the hot path.
