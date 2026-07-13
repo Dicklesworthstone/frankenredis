@@ -7200,3 +7200,41 @@ both arms, so this elision is inherently ~5% and cannot clear a robust gate with
 the multi-session borrowed/Arc `RdbValue` change (which lands in the fr-store
 consumer). DO NOT re-chase the set/hash intermediate-`Vec` elision as a standalone
 perf lever; it only becomes material bundled into the borrowed-`RdbValue` rewrite.
+
+## 2026-07-13 SilverBirch: TRIAGE CLOSEOUT — clean one-turn lever frontier re-confirmed exhausted across all accessible lanes; last repo double-alloc antipattern tidied (Pareto, cold)
+
+Negative-ledger-first survey with fr-store `src/lib.rs` LOCKED (active peer, chaak/md7ti
+committer; reservation → 16:18). Walked every accessible crate looking for a clean,
+benchable, prod-hot single-turn lever. Findings (all re-verified THIS turn, not prose):
+
+- **fr-protocol reply/parse: CLOSED, freshly bench-covered TODAY.** 9 dedicated fast-path
+  benches created 2026-07-13 02:00–04:20 (encode_array_reply / encode_bulk_string /
+  encode_integer / parse_bulk_slice / parse_frame_len_line / parse_i64 /
+  parse_multibulk_count / push_len_header / decimal_len_ilog10). The "3-digit RESP" vein is
+  now end-to-end benched. DON'T re-open fr-protocol encode/parse.
+- **fr-persist: mined out (re-verified 2 candidate spots).** (a) i64→bytes render already the
+  shipped itoa2 path (`write_u64_digits` scratch), NOT `to_string`. (b) `AofRecord::from_resp_frame`
+  (BORROWED) has **NO production callers** — prod AOF decode uses `from_resp_frame_owned`
+  (`decode_aof_stream_with_offsets`:737, `classify_aof_replay_tail_repair`:777), which is
+  fully move-optimal (BulkString moved, SimpleString/Integer `into_bytes`). The AOF replay
+  loop's per-record work is the minimal 1-copy (parser copies bulk once, then MOVE into argv).
+- **Repo now clean of the `to_string().as_bytes().to_vec()` double-alloc antipattern.** It had
+  exactly ONE occurrence: the borrowed `from_resp_frame` Integer arm (lib.rs:611, String alloc +
+  byte-copy = 2 allocs vs the owned twin's 1). Tidied → `n.to_string().into_bytes()`. Byte-exact
+  (proptest `aof_record_from_resp_frame_owned_matches_borrowed` + 4 aof_record tests green via
+  rch remote). **Pareto-safe by construction (strictly ≤ allocs, byte-identical) but COLD** — the
+  fn is test/bench-only in prod, so this is a consistency/tidy, NOT a gated perf win; recorded for
+  honesty, not claimed as a lever.
+- **fr-simd: peer's active lane** (HLL max/merge/decode kernels worked 2026-07-12; OrangePike
+  declared it) — stayed out. fr-store `src/lib.rs` LOCKED; `packed_set.rs`/`keyspace_dict.rs`
+  free but inspected clean (PackedStrSet already has dup-scan-free `append` bulk path;
+  `spop_count_fusion` bench already exists → that lever explored).
+
+**CONCLUSION (dated snapshot):** the drive-by / single-turn clean-lever frontier is exhausted;
+the memory's "hot-path drive-by EXHAUSTED" holds. Remaining real levers are ALL structural /
+multi-day and blocked for a one-turn drive-by: (1) borrowed/Arc `RdbValue` (kills per-element
+owned Vec in RDB decode, 2.5x decode>encode gap, fr-store consumer); (2) large-value ≥4MB SET
+zero-fill memset (sole residual vs-redis LOSS ~0.79x, blocked on `read_buf`/unsafe under
+`#![forbid(unsafe_code)]` + fr-server owned + unbenchable server-level); (3) `Store::spop_count`
+O(count)→1 lookup fusion (RNG-replay-trap, fr-store lib.rs, LOCKED). Next agent: don't re-walk
+fr-protocol/fr-persist micro-paths — go structural or wait for the lib.rs lock to free.

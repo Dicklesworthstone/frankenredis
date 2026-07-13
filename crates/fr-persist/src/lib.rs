@@ -608,7 +608,9 @@ impl AofRecord {
             match item {
                 RespFrame::BulkString(Some(bytes)) => argv.push(bytes.clone()),
                 RespFrame::SimpleString(text) => argv.push(text.as_bytes().to_vec()),
-                RespFrame::Integer(n) => argv.push(n.to_string().as_bytes().to_vec()),
+                // `into_bytes()` reuses the `String`'s buffer (one alloc), matching
+                // the owned twin's Integer arm; `as_bytes().to_vec()` allocated twice.
+                RespFrame::Integer(n) => argv.push(n.to_string().into_bytes()),
                 _ => return Err(PersistError::InvalidFrame),
             }
         }
