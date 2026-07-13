@@ -1772,8 +1772,8 @@ fn parse_resp3_map(
     depth: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (line, mut cursor) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let (len, mut cursor) =
+        parse_frame_len_line::<true>(input, start, RespParseError::InvalidMultibulkLength)?;
     if len == -1 {
         return Ok((RespFrame::Array(None), cursor));
     }
@@ -1872,14 +1872,70 @@ fn parse_resp3_blob_error(
     Ok((RespFrame::Error(text), end))
 }
 
+/// Parse a RESP frame count/length line `<digits>\r\n` at `start` for the owned-frame parsers
+/// (`parse_bulk`, `parse_array` — the `parse_frame` path used on the fr-runtime / fr-command /
+/// fr-server connection reads), returning `(len, cursor)` where `cursor` is just past the CRLF and
+/// `len` is the raw i64 (caller handles `-1`/negative). `FAST == true` (production) fuses the common
+/// `<nonzero-digit><digits...>\r\n` POSITIVE case into one scan+accumulate; leading `0`, negatives,
+/// non-digit, >18 digits, and any malformed/incomplete CRLF FALL THROUGH to the exact prior
+/// `read_line` + `parse_i64_strict` path (read_line errors propagate RAW, as these parsers do; a
+/// parse failure maps to `parse_err`). Byte-identical for the full `(len, cursor)` incl. negative
+/// len, every error, and Incomplete. `FAST == false` forces the slow path for the same-binary A/B
+/// in `benches/parse_frame_len_line_fastpath.rs`.
+#[inline]
+fn parse_frame_len_line<const FAST: bool>(
+    input: &[u8],
+    start: usize,
+    parse_err: RespParseError,
+) -> Result<(i64, usize), RespParseError> {
+    if FAST
+        && let Some(&first) = input.get(start)
+        && first.is_ascii_digit()
+        && first != b'0'
+    {
+        let mut val = (first - b'0') as u64;
+        let mut i = start + 1;
+        let digit_limit = start + 18;
+        loop {
+            match input.get(i) {
+                Some(&b) if b.is_ascii_digit() => {
+                    if i >= digit_limit {
+                        break;
+                    }
+                    val = val * 10 + u64::from(b - b'0');
+                    i += 1;
+                }
+                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
+                    return Ok((val as i64, i + 2));
+                }
+                _ => break,
+            }
+        }
+    }
+    let (line, cursor) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| parse_err)?;
+    Ok((len, cursor))
+}
+
+/// Bench hook for the same-binary A/B in `benches/parse_frame_len_line_fastpath.rs`.
+/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_frame_len_line<const FAST: bool>(
+    input: &[u8],
+    start: usize,
+) -> Result<(i64, usize), RespParseError> {
+    parse_frame_len_line::<FAST>(input, start, RespParseError::InvalidBulkLength)
+}
+
 fn parse_bulk(
     input: &[u8],
     start: usize,
     config: &ParserConfig,
     validate_terminator: bool,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (line, consumed) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    let (len, consumed) =
+        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
     if len == -1 {
         return Ok((RespFrame::BulkString(None), consumed));
     }
@@ -2016,8 +2072,8 @@ fn parse_array(
     depth: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (line, mut cursor) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let (len, mut cursor) =
+        parse_frame_len_line::<true>(input, start, RespParseError::InvalidMultibulkLength)?;
     if len == -1 {
         return Ok((RespFrame::Array(None), cursor));
     }
@@ -2390,12 +2446,58 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_parse_multibulk_count,
-        bench_push_len_header, decimal_u64_len, decimal_usize_len, encode_aggregate_header,
-        encode_bulk_string_slice, encode_map_header, encode_redis_double, format_redis_double,
-        parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
-        parse_frame, parse_frame_with_config, push_i64, push_redis_double_ascii, push_usize,
+        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_parse_frame_len_line,
+        bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
+        encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
+        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
+        parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64,
+        push_redis_double_ascii, push_usize,
     };
+
+    // The fused owned-frame count/length line fast path (parse_bulk / parse_array / parse_resp3_map)
+    // must be byte-identical to the prior read_line + parse_i64_strict two-pass path for the full
+    // result — every `len` (incl. negative), error, and Incomplete — across hand-picked edge cases
+    // plus an exhaustive enumeration over {digits, sign, CR, LF, junk} up to length 5.
+    #[test]
+    fn parse_frame_len_line_fast_matches_slow() {
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"3\r\n".to_vec(),
+            b"0\r\n".to_vec(),
+            b"1\r\n".to_vec(),
+            b"128\r\n".to_vec(),
+            b"1000000\r\n".to_vec(),
+            b"-1\r\n".to_vec(),
+            b"-2\r\n".to_vec(),
+            b"\r\n".to_vec(),
+            b"-\r\n".to_vec(),
+            b"+3\r\n".to_vec(),
+            b" 3\r\n".to_vec(),
+            b"03\r\n".to_vec(),
+            b"3x\r\n".to_vec(),
+            b"3\rX\r\n".to_vec(),
+            b"3".to_vec(),
+            b"3\r".to_vec(),
+            b"".to_vec(),
+            b"1234567890123456789\r\n".to_vec(),
+            b"99999999999999999999\r\n".to_vec(),
+        ];
+        let alphabet = *b"0123\r\n-";
+        for len in 0..=5usize {
+            for mut idx in 0..7usize.pow(len as u32) {
+                let mut buf = Vec::with_capacity(len);
+                for _ in 0..len {
+                    buf.push(alphabet[idx % 7]);
+                    idx /= 7;
+                }
+                cases.push(buf);
+            }
+        }
+        for buf in &cases {
+            let fast = bench_parse_frame_len_line::<true>(buf, 0);
+            let slow = bench_parse_frame_len_line::<false>(buf, 0);
+            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
+        }
+    }
 
     // The fused single-pass multibulk-count fast path must be byte-identical to the prior
     // read_line + parse_i64_strict two-pass path for the full result — every `len` (incl. negative),

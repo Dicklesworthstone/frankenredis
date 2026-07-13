@@ -54,3 +54,9 @@ harness = false
 [[bench]]
 name = "parse_multibulk_count_fastpath"
 harness = false
+
+# Same-binary A/B for the owned-frame count/length line parse (parse_bulk / parse_array /
+# parse_resp3_map on the connection-read frame path): fused single-pass vs read_line + parse_i64.
+[[bench]]
+name = "parse_frame_len_line_fastpath"
+harness = false

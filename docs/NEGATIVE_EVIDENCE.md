@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — fused owned-frame count/length line parse; 1.3856x fewer instructions, bit-identical (frankenredis-i47l7)
+
+NEGATIVE-LEDGER-FIRST: extends the inbound-parser fusion (fr5ri, cxq6j) from the borrowed command
+path to the OWNED-FRAME parser family — `parse_bulk` / `parse_array` / `parse_resp3_map`, i.e. the
+`parse_frame_with_config` path used on the fr-runtime / fr-command / fr-server connection reads
+(replies, sub buffers, inline/fallback), NOT just tests. All three parsed their `<digits>\r\n`
+count/length line via the two-pass `read_line` (scan for CRLF) + `parse_i64_strict` (re-scan the
+digits). A shared `parse_frame_len_line::<FAST>` — RAW `read_line` propagation (as these parsers
+use, unlike the command path's `TooBig*Count` mapping) with a parameterized parse-error — now fuses
+the common positive-count case into one scan+accumulate. Leading `0`, negatives, non-digit, >18
+digits, and malformed/incomplete CRLF FALL THROUGH to the exact prior path. Like fr5ri/cxq6j this
+REMOVES work, so it is not loop-context-sensitive.
+
+BIT-IDENTICAL: `parse_frame_len_line::<true>` == `::<false>` for the FULL `(len, cursor)` — incl.
+NEGATIVE len, every error, and Incomplete — across a hand-picked edge set and an exhaustive
+enumeration over {digits, sign, CR, LF, junk} up to length 5 (in-crate
+`parse_frame_len_line_fast_matches_slow` + the bench correctness gate). fr-protocol lib 96/96,
+golden 41/41, fuzz + oracle green.
+
+MEASURED (`benches/parse_frame_len_line_fastpath.rs`, release-perf, 24 position-balanced
+A/A/reference rounds, 48M realistic frame count/length parses per arm, host `thinkstation1`, binary
+SHA256 `eced38922a4af6c26078668fb771d74cbad543f33f9b63f66d1d55973f9916a0`): candidate ~3.003301B vs
+reference ~4.161301B = **1.385576x fewer instructions (27.83%)**. Null median 0.999999964, p5..p95
+[0.999999660,1.000000173], null CV 0.000016%; effect CV 0.000013%. Reference frame
+`bench_parse_frame_len_line::<false>` self-time ~9.3–14.2%. Rollback: make the three call sites use
+`parse_frame_len_line::<false>`.
+
 ## 2026-07-13: SHIPPED — fused inbound multibulk-count parse into one pass; 1.3856x fewer instructions, bit-identical (frankenredis-cxq6j)
 
 NEGATIVE-LEDGER-FIRST: sibling of the per-argument bulk-length fusion (fr5ri, d2bd6ab72). The
