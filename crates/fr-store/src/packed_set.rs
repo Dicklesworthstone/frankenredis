@@ -4767,6 +4767,33 @@ impl PackedZSet {
         }
     }
 
+    /// (cc_fr) Remove the `count` members at ascending ranks `[s_idx, s_idx+count)` in ONE drain,
+    /// returning the number removed. The zset is stored in `(score, member)` rank order, so a rank
+    /// range is a CONTIGUOUS byte span — this is O(len) (scan to the span, one shift) vs count× the
+    /// O(len) `remove(member)` the generic path does (O(count·len)). No member decode/alloc (only the
+    /// count is needed by ZREMRANGEBY{RANK,SCORE,LEX}). Byte-identical residual to count `remove`s of
+    /// the same ascending slice.
+    pub fn drain_rank_range(&mut self, s_idx: usize, count: usize) -> usize {
+        if s_idx >= self.len || count == 0 {
+            return 0;
+        }
+        let remove = count.min(self.len - s_idx);
+        // Record layout (see record_at): varint(mlen) + member + 8-byte score.
+        let mut pos = 0;
+        for _ in 0..s_idx {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let start_off = pos;
+        for _ in 0..remove {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        self.buf.drain(start_off..pos);
+        self.len -= remove;
+        remove
+    }
+
     /// 0-based rank of `member` in ascending `(score, member)` order (ZRANK).
     #[must_use]
     pub fn rank(&self, member: &[u8]) -> Option<usize> {

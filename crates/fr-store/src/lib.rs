@@ -2326,11 +2326,21 @@ impl SortedSet {
     /// remove (Tree removal is O(count log n), Packed is bounded) — behaviour-identical
     /// to the old ZREMRANGEBYRANK path, so those encodings are unchanged.
     fn remove_rank_range(&mut self, s_idx: usize, count: usize) -> usize {
-        if let SortedSetInner::Full(f) = &mut self.inner
-            && f.ordered_is_compact()
-        {
-            return f.remove_rank_range_compact(s_idx, count);
+        match &mut self.inner {
+            // (CrimsonHawk) Compact(Vec): drain the ordered slice in one shift.
+            SortedSetInner::Full(f) if f.ordered_is_compact() => {
+                return f.remove_rank_range_compact(s_idx, count);
+            }
+            // (cc_fr) Packed(listpack): a rank range is a contiguous byte span, so drain it in one
+            // shift instead of count× O(len) `remove(member)` (the generic path below was O(count·len)
+            // on a packed zset — and it collected the members only to discard them, needing just the
+            // count). Byte-identical residual + count.
+            SortedSetInner::Packed(p) => {
+                return p.drain_rank_range(s_idx, count);
+            }
+            _ => {}
         }
+        // Full non-compact (rank-tree indexed): collect the ascending slice, remove each.
         let to_remove: Vec<Vec<u8>> = self
             .index_slice_asc_adaptive(s_idx, count)
             .into_iter()
@@ -38291,6 +38301,46 @@ mod tests {
             full + probe,
             (full + probe) / full
         );
+    }
+
+    #[test]
+    fn zremrangebyrank_batch_matches_zrange_reference_cc() {
+        // (cc_fr) ZREMRANGEBYRANK removes exactly the rank window [start, stop]; via the packed
+        // `drain_rank_range` (one shift) it MUST leave the same residual as removing ZRANGE(start,
+        // stop) — ZRANGE (unchanged) is the reference. Covers packed (<=128) and Full (>128) zsets
+        // and every start/stop sign combo incl. empty-range no-ops.
+        let ranges: &[(i64, i64)] = &[
+            (0, 0),
+            (1, 3),
+            (0, -1),
+            (-2, -1),
+            (2, 1),
+            (5, 3),
+            (-100, 100),
+            (0, -100),
+            (10, 10),
+            (-3, -1),
+            (3, 500),
+            (-500, -1),
+        ];
+        for &total in &[0usize, 1, 5, 64, 200] {
+            for &(start, stop) in ranges {
+                let members: Vec<(f64, Vec<u8>)> =
+                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let mut store = Store::new();
+                if total > 0 {
+                    store.zadd(b"z", &members, 0).unwrap();
+                }
+                let before = store.zrange(b"z", 0, -1, 1).unwrap();
+                let removed_range = store.zrange(b"z", start, stop, 1).unwrap();
+                store.zremrangebyrank(b"z", start, stop, 1).unwrap();
+                let after = store.zrange(b"z", 0, -1, 1).unwrap();
+                let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
+                let expected: Vec<Vec<u8>> =
+                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                assert_eq!(after, expected, "total={total} start={start} stop={stop}");
+            }
+        }
     }
 
     // (CrimsonHawk) ZREMRANGEBYRANK/BYSCORE/BYLEX bare-drop guard: byte-identical removal

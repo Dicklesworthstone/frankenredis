@@ -296,6 +296,23 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) ZREMRANGEBYRANK removing the middle rank window [30, 90] (61 members) of a 120-member
+    // PACKED zset: the batch drains the contiguous byte span in one shift instead of collecting the
+    // 61 members + 61x the O(len) `remove(member)` (the old O(count*len) packed path).
+    let zrem_members: Vec<(f64, Vec<u8>)> =
+        (0..120u32).map(|i| (f64::from(i), format!("m{i:05}").into_bytes())).collect();
+    g.bench_function("zremrangebyrank_middle_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.zadd(b"z", &zrem_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.zremrangebyrank(std::hint::black_box(b"z"), 30, 90, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map
