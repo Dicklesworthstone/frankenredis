@@ -7330,3 +7330,25 @@ win's REUSABLE rule: grep `HashSet::`/`HashMap::…with_capacity(`/`::new(` (def
 used in per-command loops → swap to `foldhash::quality::RandomState`. Remaining default-SipHash sets
 audited: `subscribed_channels/patterns` (pubsub, membership — small), ACL `allowed/denied_*`
 (config-cold), `members_at_indices` `needed`/`by_idx` (Packed-only ≤128, minor) — none clean levers.
+
+## 2026-07-13 SilverBirch: CLEANUP (sweep completion) — `members_at_indices` drops its two SipHash structures (sort-merge, byte-identical); Packed-only path, not a headline
+
+Closes the SipHash-trap sweep. `SortedSet::members_at_indices` (the non-rank-tree fallback for
+ZRANDMEMBER index resolution) built a default-`RandomState` (SipHash) `HashSet<usize>` (`needed`,
+a `contains` probe per iterated member) **and** a SipHash `HashMap<usize,_>` (`by_idx`) to place a
+handful of ranks. Replaced with the eviction technique: sort the UNIQUE requested ranks, merge-walk
+the ascending iter once (integer compare per member, no hash), resolve each `indices` entry by
+`binary_search`. Removes 2 allocations + all hashing; also breaks immediately on an EMPTY pick list
+(the old code walked the full iter). BYTE-IDENTICAL, proven by `members_at_indices_isomorphic_and_
+faster_zrnd1` (4000 fuzz iters over random n=1..200, arbitrary/repeat/out-of-range picks, BOTH the
+cold Full-without-rank-tree fallback AND the warm rank-tree path, edge cases, golden FNV fingerprint)
++ the two `zrandmember_count_*_borrow_scan_matches_clone` tests — all green via rch.
+
+NOT separately benched as a headline: in PRODUCTION this fallback is reached only for **Packed**
+zsets (≤128 members — `random_members_at_indices`/borrow-scan route Full→`dict.get_index` O(1), never
+here), so the per-call SipHash removed is small next to the ≤128 `iter_asc` listpack decode that
+dominates. Shipped as a **Pareto-safe work-removal cleanup** completing the sweep (the SipHash→no-hash
+mechanism is the same one already benched at 1.6-2.1x isolated in the RANDMEMBER dedup win 337f2a0be),
+not a gate-clearing number. **SipHash-trap vein now CLOSED in fr-store:** 2 headline wins (eviction
+7.5-9.9x cfd9a8eff, RANDMEMBER dedup 1.6-2.1x 337f2a0be) + this cleanup; all remaining default-SipHash
+sets are cold (pubsub/ACL/OBJECT-ENCODING) or the intentional A/B `_orig_bench` arm.

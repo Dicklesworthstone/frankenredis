@@ -1707,19 +1707,39 @@ impl SortedSet {
                 })
                 .collect();
         }
-        let needed: HashSet<usize> = indices.iter().copied().collect();
-        let mut by_idx: HashMap<usize, (Vec<u8>, f64)> = HashMap::with_capacity(needed.len());
+        // (SilverBirch) Resolve the requested ranks WITHOUT hashing. The prior code
+        // built a SipHash `HashSet<usize>` (a `contains` probe for EVERY iterated
+        // member) plus a SipHash `HashMap<usize,_>` — two default-`RandomState`
+        // (SipHash) structures to place a handful of ranks. Instead: sort the UNIQUE
+        // requested ranks, merge-walk the ascending iter ONCE collecting the (member,
+        // score) at each (an integer compare per member, no hash), then resolve every
+        // `indices` entry (request order, dups preserved) by `binary_search`. Same
+        // eliminated-work shape as the eviction / RANDMEMBER SipHash-trap wins.
+        // Byte-identical output: same members at the same ranks in the same order;
+        // an out-of-range rank stays unmatched (iter never reaches it) and is skipped.
+        let mut wanted: Vec<usize> = indices.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        // `collected[k]` holds the pair for `wanted[k]` (sorted), `None` if out of range.
+        let mut collected: Vec<Option<(Vec<u8>, f64)>> = vec![None; wanted.len()];
+        let mut wi = 0usize;
         for (i, (m, s)) in self.iter_asc().enumerate() {
-            if needed.contains(&i) {
-                by_idx.insert(i, (m.to_vec(), s));
-                if by_idx.len() == needed.len() {
-                    break;
-                }
+            if wi >= wanted.len() {
+                break;
+            }
+            if wanted[wi] == i {
+                collected[wi] = Some((m.to_vec(), s));
+                wi += 1;
             }
         }
         indices
             .iter()
-            .filter_map(|idx| by_idx.get(idx).cloned())
+            .filter_map(|idx| {
+                wanted
+                    .binary_search(idx)
+                    .ok()
+                    .and_then(|k| collected[k].clone())
+            })
             .collect()
     }
 
