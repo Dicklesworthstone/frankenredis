@@ -267,6 +267,20 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) RPOP count popping ALL of a 120-element PACKED list: the batch `pop_back_n` scans+
+    // truncates ONCE instead of 120 `pop_back`s that each re-scan from the front (O(count*len)).
+    g.bench_function("rpop_count_all_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.rpush(b"l", &lpop_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.rpop_count(std::hint::black_box(b"l"), 120, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map

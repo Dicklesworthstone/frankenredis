@@ -2907,6 +2907,35 @@ impl PackedList {
         out
     }
 
+    /// (cc_fr) Batch RPOP-count: pop the last `count.min(len)` elements in POP ORDER (last element
+    /// first, matching `pop_back` repeated). Scans ONCE to the split point, collects the tail, and
+    /// `truncate`s — O(len). `pop_back` × count is O(count·len) because each `pop_back` re-scans from
+    /// the front via `bounds(len-1)` (no backlen). Byte-identical values + residual to `count`
+    /// `pop_back`s.
+    pub fn drain_back_n(&mut self, count: usize) -> Vec<Vec<u8>> {
+        let n = count.min(self.len);
+        let keep = self.len - n;
+        // Scan to the start of element `keep` (the first element to remove).
+        let mut pos = 0;
+        for _ in 0..keep {
+            let (elen, e_start) = read_varint(&self.buf, pos);
+            pos = e_start + elen;
+        }
+        let truncate_at = pos;
+        // Collect the removed tail front-to-back, then reverse for pop_back order.
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (elen, e_start) = read_varint(&self.buf, pos);
+            let e_end = e_start + elen;
+            out.push(self.buf[e_start..e_end].to_vec());
+            pos = e_end;
+        }
+        self.buf.truncate(truncate_at);
+        self.len -= n;
+        out.reverse();
+        out
+    }
+
     #[must_use]
     pub fn get(&self, idx: usize) -> Option<&[u8]> {
         let (_rs, es, ee) = self.bounds(idx)?;
@@ -4203,6 +4232,35 @@ impl ListValue {
                 unreachable!("repr checked to be Packed")
             };
             p.drain_front_n(n)
+        };
+        for r in &out {
+            self.on_remove_one(r);
+        }
+        out
+    }
+
+    /// (cc_fr) Batch [`Self::pop_back`] of up to `count` elements (RPOP count), returned in pop
+    /// order (last element first). On the Packed repr this is ONE `drain_back_n` (scan + truncate)
+    /// instead of `count` `pop_back`s that each re-scan from the front (`bounds(len-1)`), i.e.
+    /// O(count·len). The Deque repr, already O(1)/element, keeps the exact per-`pop_back` sequence.
+    /// Byte-identical observable state to calling `pop_back` `count` times (see `pop_front_n`).
+    pub fn pop_back_n(&mut self, count: usize) -> Vec<Vec<u8>> {
+        let n = count.min(self.len());
+        if matches!(self.repr, ListRepr::Deque(_)) {
+            let mut out = Vec::with_capacity(n);
+            for _ in 0..n {
+                match self.pop_back() {
+                    Some(v) => out.push(v),
+                    None => break,
+                }
+            }
+            return out;
+        }
+        let out = {
+            let ListRepr::Packed(p) = &mut self.repr else {
+                unreachable!("repr checked to be Packed")
+            };
+            p.drain_back_n(n)
         };
         for r in &out {
             self.on_remove_one(r);
@@ -6422,6 +6480,54 @@ mod tests {
                 }
             }
             let got = a.pop_front_n(popn);
+            assert_eq!(got, want, "returned @ total={total} popn={popn}");
+            assert_eq!(a.len(), b.len(), "len @ total={total} popn={popn}");
+            assert_eq!(
+                a.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                b.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                "residual @ total={total} popn={popn}"
+            );
+            assert_eq!(
+                a.listpack_byte_len(),
+                b.listpack_byte_len(),
+                "lp_bytes @ total={total} popn={popn}"
+            );
+        }
+    }
+
+    #[test]
+    fn pop_back_n_matches_pop_back_loop_cc() {
+        // (cc_fr) ListValue::pop_back_n(count) MUST be byte-identical (returned values in pop order
+        // = LAST element first, residual, len, lp_bytes) to calling pop_back() count times — across
+        // Packed (O(len) scan+truncate) and Deque (per-pop loop), count < / == / > len incl. empty.
+        for &(total, popn) in &[
+            (0usize, 3usize),
+            (1, 1),
+            (5, 3),
+            (10, 10),
+            (10, 25),
+            (128, 64),
+            (128, 128),
+            (200, 50),
+            (200, 200),
+        ] {
+            let build = || {
+                let mut l = ListValue::default();
+                for i in 0..total {
+                    l.push_back(format!("elem:{i:05}").into_bytes());
+                }
+                l
+            };
+            let mut a = build();
+            let mut b = build();
+            let mut want = Vec::new();
+            for _ in 0..popn {
+                match b.pop_back() {
+                    Some(v) => want.push(v),
+                    None => break,
+                }
+            }
+            let got = a.pop_back_n(popn);
             assert_eq!(got, want, "returned @ total={total} popn={popn}");
             assert_eq!(a.len(), b.len(), "len @ total={total} popn={popn}");
             assert_eq!(

@@ -14929,17 +14929,12 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        // Exactly `min(count, l.len())` elements are popped, and `l.len()` is O(1),
-                        // so pre-size the result in one allocation instead of growing from empty
-                        // (~log2(n) realloc+copies on a large `RPOP key n`). Capped at `l.len()`,
-                        // so a huge `count` never over-allocates. Byte-identical (capacity != content).
-                        let mut result = Vec::with_capacity(count.min(l.len()));
-                        for _ in 0..count {
-                            match l.pop_back() {
-                                Some(v) => result.push(v),
-                                None => break,
-                            }
-                        }
+                        // (cc_fr) Batch pop of `min(count, l.len())` from the back, in pop order
+                        // (last first). On a packed list this is ONE scan + truncate instead of
+                        // `count` `pop_back`s that each re-scan from the front (`bounds(len-1)`) —
+                        // the old loop was O(count·len). Byte-identical result + state to the loop
+                        // (pre-sized inside pop_back_n). The Deque repr keeps its O(1)/element loop.
+                        let result = l.pop_back_n(count);
                         if !result.is_empty() {
                             self.dirty = self.dirty.saturating_add(result.len() as u64);
                         }
