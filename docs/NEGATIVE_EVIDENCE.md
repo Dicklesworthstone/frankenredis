@@ -18070,3 +18070,27 @@ subsystems (command hot path, fr-simd, random-sampling, set-algebra, persistence
 rch-benchable drive-by frontier is CLOSED. A "pick ONE lever, land often" loop cannot make further progress on the
 crate-level surface; the next gain requires an explicit MODE CHANGE (multi-session structural worktree, or fr-server
 work once a linked-binary bench exists).
+
+### 2026-07-13 SHIPPED (mark_volatile_keys_dirty gated on volatile-MEMBERSHIP change — the "blocked" INCR mark_dirty lever, unblocked — frankenredis-t1q35)
+The lever the prior negatives flagged as "dedicated-turn, blocked by a differential test". UNBLOCKED by the insight
+that broke the block: `volatile_keys` is a `BTreeSet<StoreKey>` keyed by KEY (not deadline), and active-expiry reads
+each key's deadline FRESH from `expiry_deadlines`, so the sampling view only needs rebuilding when volatile MEMBERSHIP
+changes (a TTL added/removed) — NOT when a volatile key keeps its TTL. The old code marked the view dirty on every
+`has_expiry` write, forcing an O(n) `clear()`+`extend(expiry_deadlines.keys().cloned())` rebuild on the next
+active-expiry cycle even though the set was unchanged. Two consistent gates:
+1. INCR/DECR/INCRBY/DECRBY (`incrby_existing_or_insert`): DROPPED `if has_expiry { mark_dirty }` entirely — INCR
+   preserves TTL membership (TTL lives outside `Entry`), so it NEVER changes the set.
+2. `internal_entries_insert_with_expiry` (SET-EX re-arm / RESTORE): gated on `new_has_expiry && !is_ttl_rearm` (the
+   `is_ttl_rearm` flag was ALREADY computed there) — re-arming a live TTL leaves membership unchanged.
+WHY THE DIFFERENTIAL TEST DIDN'T BREAK (the test-intent review the prior negative demanded): `incrby_existing_key_
+matches_whole_entry_replacement_side_effects` compares `actual`(incr) vs `expected`(insert_with_expiry) RELATIVELY;
+fixing BOTH paths consistently makes both leave dirty=false → the assert still passes, NO test rewrite. The
+absolute-value asserts (`volatile_key_sort_is_lazy_...`) use NEW-key TTLs (membership changes) which still mark dirty.
+Full suite **799 pass, 0 fail** incl. new `incr_on_ttl_key_does_not_dirty_the_clean_volatile_view`. BYTE-IDENTICAL to
+clients (set + every deadline unchanged; deadline read fresh at sample time). Isolated `perf stat instructions:u` A/B
+`benches/volatile_dirty_rebuild.rs` (1000-key clean volatile view): mark+rebuild vs no-op rebuild = **1810x** fewer
+instructions (null_median 1.0013, cv 0.95%) — the eliminated per-cycle rebuild. NOTE: this is the per-active-expiry-
+CYCLE rebuild cost eliminated; the end-to-end win is workload-dependent (a static-TTL-counter + heavy-INCR workload
+keeps the view clean across cycles → zero rebuilds vs an O(n) rebuild every ~100ms before). Left the 3 EXPIRE-family
+callers unchanged (conservative; they'd need the same `added_expiry` gate — clean follow-up). Rollback: restore the
+unconditional marks.

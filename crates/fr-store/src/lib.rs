@@ -8276,6 +8276,22 @@ impl Store {
         self.rebuild_volatile_keys_if_dirty();
     }
 
+    /// Bench hook for `benches/volatile_dirty_rebuild.rs`: isolates the O(n) volatile-view rebuild
+    /// that a TTL-preserving write (INCR-on-TTL / SET-EX re-arm) used to force per active-expiry
+    /// cycle. `MARK = true` is the OLD behavior (the write dirtied the clean view, so the cycle
+    /// rebuilds it — clear + extend O(n) with a key clone each); `MARK = false` is production (the
+    /// write left the clean view untouched, so the cycle's rebuild is an O(1) not-dirty no-op). On a
+    /// store with N clean volatile keys, this measures the eliminated rebuild. Not on a production
+    /// path (the production gate is in `incrby_existing_or_insert` / `internal_entries_insert_with_expiry`).
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_volatile_dirty_rebuild<const MARK: bool>(&mut self) {
+        if MARK {
+            self.mark_volatile_keys_dirty();
+        }
+        self.rebuild_volatile_keys_if_dirty();
+    }
+
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -8375,22 +8391,21 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
 
-        let has_existing_expiry = deadline.is_some();
-        let (next, has_expiry) = match self.entries.get_mut(key) {
+        let next = match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
                     let next = parse_i64(v)?
                         .checked_add(delta)
                         .ok_or(StoreError::IntegerOverflow)?;
                     entry.replace_with_integer_write(next, now_ms);
-                    (next, has_existing_expiry)
+                    next
                 }
                 Value::Integer(value) => {
                     let next = value
                         .checked_add(delta)
                         .ok_or(StoreError::IntegerOverflow)?;
                     entry.replace_with_integer_write(next, now_ms);
-                    (next, has_existing_expiry)
+                    next
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -8407,19 +8422,19 @@ impl Store {
             }
         };
 
-        // (frankenredis-incrforget) The old `else` branch called `forget_volatile_key(key)` on the
-        // no-TTL path, but that is a PROVABLE no-op: a key with no deadline is absent from
-        // `expiry_deadlines`, and `volatile_keys ⊆ expiry_deadlines.keys()` whenever it is clean
-        // (its only inserts come from `rebuild_volatile_keys_if_dirty`'s
-        // `extend(expiry_deadlines.keys())`), so `volatile_keys.remove(key)` finds nothing; when
-        // dirty, `forget_volatile_key` early-returns. INCR/DECR/INCRBY/DECRBY preserve TTL
-        // membership (the TTL lives outside `Entry`, untouched by the value write), so a no-TTL key
-        // stays no-TTL. Drop the dead call — byte-identical (neither `volatile_keys` nor its dirty
-        // flag changes), eliding a BTreeSet remove-miss (O(log n) when the set is clean & non-empty,
-        // e.g. a hot counter alongside TTL'd keys) on every no-TTL counter write.
-        if has_expiry {
-            self.mark_volatile_keys_dirty();
-        }
+        // (frankenredis-incrmarkdirty) INCR/DECR/INCRBY/DECRBY PRESERVE TTL membership: the TTL
+        // lives outside `Entry` (in `expiry_deadlines`), untouched by the value write, so a key's
+        // presence in the volatile set never changes across an incr. The volatile sampling set is a
+        // `BTreeSet<StoreKey>` keyed by KEY (not deadline) and active-expiry reads each key's
+        // deadline FRESH from `expiry_deadlines`, so it only needs rebuilding when volatile
+        // MEMBERSHIP changes (a TTL added or removed) — not when a volatile key keeps its TTL.
+        // The old `if has_expiry { mark_volatile_keys_dirty() }` fired on every incr of a TTL'd key,
+        // forcing an O(n) rebuild of the whole volatile view on the next active-expiry cycle even
+        // though the set was unchanged (a hot cost for INCR-on-TTL rate-limiter counters). The
+        // no-TTL branch was already elided (its `forget_volatile_key` was a proven no-op). Drop the
+        // whole block — byte-identical to clients (membership + every key's deadline unchanged; the
+        // deadline is read fresh at sample time). Mirrors `internal_entries_insert_with_expiry`'s
+        // `!is_ttl_rearm` gate, so the incr==whole-entry-replacement equivalence still holds.
         self.invalidate_write_side_caches(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
@@ -11763,9 +11778,18 @@ impl Store {
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
         // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
-        if new_has_expiry {
+        // (frankenredis-incrmarkdirty) Only mark the volatile view dirty when the key's MEMBERSHIP
+        // in the volatile set actually changes. `new_has_expiry && !is_ttl_rearm` ⟺ a TTL is set on
+        // a key that did NOT already carry one (is_ttl_rearm == new+old+!new_key), i.e. the key
+        // NEWLY enters the volatile set — the only case the `BTreeSet<StoreKey>` sampling view needs
+        // rebuilding. RE-ARMING an existing TTL (SET ... EX on a live-TTL key) leaves the volatile
+        // membership unchanged (the deadline is updated in place and read fresh at sample time), so
+        // the old unconditional mark forced a wasted O(n) rebuild. Byte-identical to clients (set +
+        // per-key deadlines unchanged); keeps INCR's now-elided mark consistent so the
+        // incr==whole-entry-replacement equivalence still holds.
+        if new_has_expiry && !is_ttl_rearm {
             self.mark_volatile_keys_dirty();
-        } else {
+        } else if !new_has_expiry {
             self.forget_volatile_key(&key);
         }
         self.invalidate_write_side_caches(&key);
@@ -35842,6 +35866,33 @@ mod tests {
         assert!(!store.volatile_keys.contains(b"c".as_slice()));
         assert!(store.expiry_ms(b"t").is_some());
         assert!(store.expiry_ms(b"c").is_none());
+    }
+
+    #[test]
+    fn incr_on_ttl_key_does_not_dirty_the_clean_volatile_view() {
+        // INCR preserves TTL membership, so it must NOT re-dirty a clean volatile sampling view —
+        // the key stays in the set and its deadline is read fresh at expiry-sample time. Rebuilding
+        // the whole O(n) view on every INCR-of-a-TTL'd-counter was the eliminated waste.
+        let mut store = Store::new();
+        store.set(b"c".to_vec(), b"0".to_vec(), Some(100_000), 0);
+        assert!(store.volatile_keys_dirty); // a NEW TTL key dirties the view (membership change)
+        store.rebuild_volatile_keys_if_dirty();
+        assert!(!store.volatile_keys_dirty);
+        assert!(store.volatile_keys.contains(b"c".as_slice()));
+
+        for expected in 1..=5 {
+            assert_eq!(store.incr(b"c", 0).expect("incr"), expected);
+        }
+        // Membership + clean flag untouched; TTL preserved; value correct.
+        assert!(!store.volatile_keys_dirty);
+        assert!(store.volatile_keys.contains(b"c".as_slice()));
+        assert!(store.expiry_ms(b"c").is_some());
+        assert_eq!(store.get(b"c", 0).unwrap(), Some(b"5".to_vec()));
+
+        // Active expiry still reaps the key once its deadline is due (the deadline is read fresh,
+        // and the lazy rebuild fires only then).
+        let _ = store.run_active_expire_cycle(100_001, None, 10);
+        assert!(!store.exists_no_stat(b"c", 100_002));
     }
 
     #[test]
