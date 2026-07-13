@@ -3292,68 +3292,72 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         7 => {
-            if eq_ascii_command(cmd, b"PEXPIRE") {
-                Some(CommandId::Pexpire)
-            } else if eq_ascii_command(cmd, b"PERSIST") {
-                Some(CommandId::Persist)
-            } else if eq_ascii_command(cmd, b"FLUSHDB") {
-                Some(CommandId::Flushdb)
-            } else if eq_ascii_command(cmd, b"HGETALL") {
-                Some(CommandId::Hgetall)
-            } else if eq_ascii_command(cmd, b"HEXISTS") {
-                Some(CommandId::Hexists)
-            } else if eq_ascii_command(cmd, b"HINCRBY") {
-                Some(CommandId::Hincrby)
-            } else if eq_ascii_command(cmd, b"HSTRLEN") {
-                Some(CommandId::Hstrlen)
-            } else if eq_ascii_command(cmd, b"ZINCRBY") {
-                Some(CommandId::Zincrby)
-            } else if eq_ascii_command(cmd, b"ZPOPMIN") {
-                Some(CommandId::Zpopmin)
-            } else if eq_ascii_command(cmd, b"ZPOPMAX") {
-                Some(CommandId::Zpopmax)
-            } else if eq_ascii_command(cmd, b"LINSERT") {
-                Some(CommandId::Linsert)
-            } else if eq_ascii_command(cmd, b"PFCOUNT") {
-                Some(CommandId::Pfcount)
-            } else if eq_ascii_command(cmd, b"PFMERGE") {
-                Some(CommandId::Pfmerge)
-            } else if eq_ascii_command(cmd, b"ZMSCORE") {
-                Some(CommandId::Zmscore)
-            } else if eq_ascii_command(cmd, b"COMMAND") {
-                Some(CommandId::Command)
-            } else if eq_ascii_command(cmd, b"RESTORE") {
-                Some(CommandId::Restore)
-            } else if eq_ascii_command(cmd, b"GEODIST") {
-                Some(CommandId::Geodist)
-            } else if eq_ascii_command(cmd, b"GEOHASH") {
-                Some(CommandId::Geohash)
-            } else if eq_ascii_command(cmd, b"SLOWLOG") {
-                Some(CommandId::Slowlog)
-            } else if eq_ascii_command(cmd, b"EVALSHA") {
-                Some(CommandId::Evalsha)
-            } else if eq_ascii_command(cmd, b"EVAL_RO") {
-                Some(CommandId::EvalRo)
-            } else if eq_ascii_command(cmd, b"LATENCY") {
-                Some(CommandId::Latency)
-            } else if eq_ascii_command(cmd, b"PUBLISH") {
-                Some(CommandId::Publish)
-            } else if eq_ascii_command(cmd, b"WAITAOF") {
-                Some(CommandId::Waitaof)
-            } else if eq_ascii_command(cmd, b"CLUSTER") {
-                Some(CommandId::Cluster)
-            } else if eq_ascii_command(cmd, b"SLAVEOF") {
-                Some(CommandId::Replicaof)
-            } else if eq_ascii_command(cmd, b"SORT_RO") {
-                Some(CommandId::SortRo)
-            } else if eq_ascii_command(cmd, b"MONITOR") {
-                Some(CommandId::Monitor)
-            } else if eq_ascii_command(cmd, b"MIGRATE") {
-                Some(CommandId::Migrate)
-            } else if eq_ascii_command(cmd, b"PFDEBUG") {
-                Some(CommandId::Pfdebug)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference). Underscore
+            // names (EVAL_RO/SORT_RO) pack fine (`_` is not a letter, so no case-fold).
+            const PK_PEXPIRE: u64 = pack_cmd_u64(b"PEXPIRE");
+            const PK_PERSIST: u64 = pack_cmd_u64(b"PERSIST");
+            const PK_FLUSHDB: u64 = pack_cmd_u64(b"FLUSHDB");
+            const PK_HGETALL: u64 = pack_cmd_u64(b"HGETALL");
+            const PK_HEXISTS: u64 = pack_cmd_u64(b"HEXISTS");
+            const PK_HINCRBY: u64 = pack_cmd_u64(b"HINCRBY");
+            const PK_HSTRLEN: u64 = pack_cmd_u64(b"HSTRLEN");
+            const PK_ZINCRBY: u64 = pack_cmd_u64(b"ZINCRBY");
+            const PK_ZPOPMIN: u64 = pack_cmd_u64(b"ZPOPMIN");
+            const PK_ZPOPMAX: u64 = pack_cmd_u64(b"ZPOPMAX");
+            const PK_LINSERT: u64 = pack_cmd_u64(b"LINSERT");
+            const PK_PFCOUNT: u64 = pack_cmd_u64(b"PFCOUNT");
+            const PK_PFMERGE: u64 = pack_cmd_u64(b"PFMERGE");
+            const PK_ZMSCORE: u64 = pack_cmd_u64(b"ZMSCORE");
+            const PK_COMMAND: u64 = pack_cmd_u64(b"COMMAND");
+            const PK_RESTORE: u64 = pack_cmd_u64(b"RESTORE");
+            const PK_GEODIST: u64 = pack_cmd_u64(b"GEODIST");
+            const PK_GEOHASH: u64 = pack_cmd_u64(b"GEOHASH");
+            const PK_SLOWLOG: u64 = pack_cmd_u64(b"SLOWLOG");
+            const PK_EVALSHA: u64 = pack_cmd_u64(b"EVALSHA");
+            const PK_EVAL_RO: u64 = pack_cmd_u64(b"EVAL_RO");
+            const PK_LATENCY: u64 = pack_cmd_u64(b"LATENCY");
+            const PK_PUBLISH: u64 = pack_cmd_u64(b"PUBLISH");
+            const PK_WAITAOF: u64 = pack_cmd_u64(b"WAITAOF");
+            const PK_CLUSTER: u64 = pack_cmd_u64(b"CLUSTER");
+            const PK_SLAVEOF: u64 = pack_cmd_u64(b"SLAVEOF");
+            const PK_SORT_RO: u64 = pack_cmd_u64(b"SORT_RO");
+            const PK_MONITOR: u64 = pack_cmd_u64(b"MONITOR");
+            const PK_MIGRATE: u64 = pack_cmd_u64(b"MIGRATE");
+            const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
+            match pack_cmd_u64(cmd) {
+                PK_PEXPIRE => Some(CommandId::Pexpire),
+                PK_PERSIST => Some(CommandId::Persist),
+                PK_FLUSHDB => Some(CommandId::Flushdb),
+                PK_HGETALL => Some(CommandId::Hgetall),
+                PK_HEXISTS => Some(CommandId::Hexists),
+                PK_HINCRBY => Some(CommandId::Hincrby),
+                PK_HSTRLEN => Some(CommandId::Hstrlen),
+                PK_ZINCRBY => Some(CommandId::Zincrby),
+                PK_ZPOPMIN => Some(CommandId::Zpopmin),
+                PK_ZPOPMAX => Some(CommandId::Zpopmax),
+                PK_LINSERT => Some(CommandId::Linsert),
+                PK_PFCOUNT => Some(CommandId::Pfcount),
+                PK_PFMERGE => Some(CommandId::Pfmerge),
+                PK_ZMSCORE => Some(CommandId::Zmscore),
+                PK_COMMAND => Some(CommandId::Command),
+                PK_RESTORE => Some(CommandId::Restore),
+                PK_GEODIST => Some(CommandId::Geodist),
+                PK_GEOHASH => Some(CommandId::Geohash),
+                PK_SLOWLOG => Some(CommandId::Slowlog),
+                PK_EVALSHA => Some(CommandId::Evalsha),
+                PK_EVAL_RO => Some(CommandId::EvalRo),
+                PK_LATENCY => Some(CommandId::Latency),
+                PK_PUBLISH => Some(CommandId::Publish),
+                PK_WAITAOF => Some(CommandId::Waitaof),
+                PK_CLUSTER => Some(CommandId::Cluster),
+                PK_SLAVEOF => Some(CommandId::Replicaof),
+                PK_SORT_RO => Some(CommandId::SortRo),
+                PK_MONITOR => Some(CommandId::Monitor),
+                PK_MIGRATE => Some(CommandId::Migrate),
+                PK_PFDEBUG => Some(CommandId::Pfdebug),
+                _ => None,
             }
         }
         8 => {
@@ -4158,6 +4162,145 @@ pub fn bench_classify5_match(cmd: &[u8]) -> u32 {
         PK_DEBUG => 32,
         PK_FCALL => 33,
         PK_PSYNC => 34,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify7_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"PEXPIRE") {
+        1
+    } else if eq_ascii_command(cmd, b"PERSIST") {
+        2
+    } else if eq_ascii_command(cmd, b"FLUSHDB") {
+        3
+    } else if eq_ascii_command(cmd, b"HGETALL") {
+        4
+    } else if eq_ascii_command(cmd, b"HEXISTS") {
+        5
+    } else if eq_ascii_command(cmd, b"HINCRBY") {
+        6
+    } else if eq_ascii_command(cmd, b"HSTRLEN") {
+        7
+    } else if eq_ascii_command(cmd, b"ZINCRBY") {
+        8
+    } else if eq_ascii_command(cmd, b"ZPOPMIN") {
+        9
+    } else if eq_ascii_command(cmd, b"ZPOPMAX") {
+        10
+    } else if eq_ascii_command(cmd, b"LINSERT") {
+        11
+    } else if eq_ascii_command(cmd, b"PFCOUNT") {
+        12
+    } else if eq_ascii_command(cmd, b"PFMERGE") {
+        13
+    } else if eq_ascii_command(cmd, b"ZMSCORE") {
+        14
+    } else if eq_ascii_command(cmd, b"COMMAND") {
+        15
+    } else if eq_ascii_command(cmd, b"RESTORE") {
+        16
+    } else if eq_ascii_command(cmd, b"GEODIST") {
+        17
+    } else if eq_ascii_command(cmd, b"GEOHASH") {
+        18
+    } else if eq_ascii_command(cmd, b"SLOWLOG") {
+        19
+    } else if eq_ascii_command(cmd, b"EVALSHA") {
+        20
+    } else if eq_ascii_command(cmd, b"EVAL_RO") {
+        21
+    } else if eq_ascii_command(cmd, b"LATENCY") {
+        22
+    } else if eq_ascii_command(cmd, b"PUBLISH") {
+        23
+    } else if eq_ascii_command(cmd, b"WAITAOF") {
+        24
+    } else if eq_ascii_command(cmd, b"CLUSTER") {
+        25
+    } else if eq_ascii_command(cmd, b"SLAVEOF") {
+        26
+    } else if eq_ascii_command(cmd, b"SORT_RO") {
+        27
+    } else if eq_ascii_command(cmd, b"MONITOR") {
+        28
+    } else if eq_ascii_command(cmd, b"MIGRATE") {
+        29
+    } else if eq_ascii_command(cmd, b"PFDEBUG") {
+        30
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify7_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 7 {
+        return 0;
+    }
+    const PK_PEXPIRE: u64 = pack_cmd_u64(b"PEXPIRE");
+    const PK_PERSIST: u64 = pack_cmd_u64(b"PERSIST");
+    const PK_FLUSHDB: u64 = pack_cmd_u64(b"FLUSHDB");
+    const PK_HGETALL: u64 = pack_cmd_u64(b"HGETALL");
+    const PK_HEXISTS: u64 = pack_cmd_u64(b"HEXISTS");
+    const PK_HINCRBY: u64 = pack_cmd_u64(b"HINCRBY");
+    const PK_HSTRLEN: u64 = pack_cmd_u64(b"HSTRLEN");
+    const PK_ZINCRBY: u64 = pack_cmd_u64(b"ZINCRBY");
+    const PK_ZPOPMIN: u64 = pack_cmd_u64(b"ZPOPMIN");
+    const PK_ZPOPMAX: u64 = pack_cmd_u64(b"ZPOPMAX");
+    const PK_LINSERT: u64 = pack_cmd_u64(b"LINSERT");
+    const PK_PFCOUNT: u64 = pack_cmd_u64(b"PFCOUNT");
+    const PK_PFMERGE: u64 = pack_cmd_u64(b"PFMERGE");
+    const PK_ZMSCORE: u64 = pack_cmd_u64(b"ZMSCORE");
+    const PK_COMMAND: u64 = pack_cmd_u64(b"COMMAND");
+    const PK_RESTORE: u64 = pack_cmd_u64(b"RESTORE");
+    const PK_GEODIST: u64 = pack_cmd_u64(b"GEODIST");
+    const PK_GEOHASH: u64 = pack_cmd_u64(b"GEOHASH");
+    const PK_SLOWLOG: u64 = pack_cmd_u64(b"SLOWLOG");
+    const PK_EVALSHA: u64 = pack_cmd_u64(b"EVALSHA");
+    const PK_EVAL_RO: u64 = pack_cmd_u64(b"EVAL_RO");
+    const PK_LATENCY: u64 = pack_cmd_u64(b"LATENCY");
+    const PK_PUBLISH: u64 = pack_cmd_u64(b"PUBLISH");
+    const PK_WAITAOF: u64 = pack_cmd_u64(b"WAITAOF");
+    const PK_CLUSTER: u64 = pack_cmd_u64(b"CLUSTER");
+    const PK_SLAVEOF: u64 = pack_cmd_u64(b"SLAVEOF");
+    const PK_SORT_RO: u64 = pack_cmd_u64(b"SORT_RO");
+    const PK_MONITOR: u64 = pack_cmd_u64(b"MONITOR");
+    const PK_MIGRATE: u64 = pack_cmd_u64(b"MIGRATE");
+    const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
+    match pack_cmd_u64(cmd) {
+        PK_PEXPIRE => 1,
+        PK_PERSIST => 2,
+        PK_FLUSHDB => 3,
+        PK_HGETALL => 4,
+        PK_HEXISTS => 5,
+        PK_HINCRBY => 6,
+        PK_HSTRLEN => 7,
+        PK_ZINCRBY => 8,
+        PK_ZPOPMIN => 9,
+        PK_ZPOPMAX => 10,
+        PK_LINSERT => 11,
+        PK_PFCOUNT => 12,
+        PK_PFMERGE => 13,
+        PK_ZMSCORE => 14,
+        PK_COMMAND => 15,
+        PK_RESTORE => 16,
+        PK_GEODIST => 17,
+        PK_GEOHASH => 18,
+        PK_SLOWLOG => 19,
+        PK_EVALSHA => 20,
+        PK_EVAL_RO => 21,
+        PK_LATENCY => 22,
+        PK_PUBLISH => 23,
+        PK_WAITAOF => 24,
+        PK_CLUSTER => 25,
+        PK_SLAVEOF => 26,
+        PK_SORT_RO => 27,
+        PK_MONITOR => 28,
+        PK_MIGRATE => 29,
+        PK_PFDEBUG => 30,
         _ => 0,
     }
 }

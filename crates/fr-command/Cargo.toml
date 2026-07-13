@@ -57,3 +57,8 @@ harness = false
 [[bench]]
 name = "classify5_dispatch"
 harness = false
+
+# A/B for the 7-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
+[[bench]]
+name = "classify7_dispatch"
+harness = false

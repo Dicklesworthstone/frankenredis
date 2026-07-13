@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-7 bucket); 1.1339x fewer instructions, byte-identical (frankenredis-nfcy1)
+
+NEGATIVE-LEDGER-FIRST: fourth bucket in the `classify_command` match-dispatch vein (after len-6, -4,
+-5). The 7-byte bucket — 30 commands including PEXPIRE / PERSIST / HGETALL / HEXISTS / HINCRBY /
+ZINCRBY / ZPOPMIN / ZPOPMAX / ZMSCORE / COMMAND / PUBLISH plus the underscore names EVAL_RO / SORT_RO
+— became compute-`pack_cmd_u64(cmd)`-once + `match` on const-packed u64 (jump table). `pack_cmd_u64`
+handles `_` correctly (not a letter → no case-fold). CAUGHT-AND-FIXED: a first pass extracted names
+with `[A-Z0-9]+` and DROPPED the two underscore commands — the `classify_command_matches_linear_reference`
+test immediately failed (SORT_RO/EVAL_RO dispatch broke), proving the safety net works; re-extracted
+with `[A-Z0-9_]+`.
+
+BYTE-IDENTICAL: `classify_command_matches_linear_reference` passes over EVERY known command;
+`bench_classify7_match` == `bench_classify7_linear` over all 30 names + misses; full fr-command lib
+suite 1172/1172, 0 failed (incl. `sort_ro_returns_sorted_list`).
+
+MEASURED (`crates/fr-command/benches/classify7_dispatch.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`9f4088ab954d206d45307cb0a361147d8afe4d2b74664ce38a5589641785261a`): candidate vs reference =
+**1.133854x fewer instructions (11.81%)**. Null median 0.999999986, null CV 0.000020%; effect CV
+0.000012%. Reference frame `fr_command::bench_classify7_linear` self-time ~83–84%. Rollback: restore
+the len==7 `if eq_ascii_command` chain. Remaining: len-8 (20 cmds ≤8B). len-9/10 exceed 8 bytes so
+`pack_cmd_u64` can't pack them — leave linear.
+
 ## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-5 bucket); 1.1364x fewer instructions, byte-identical (frankenredis-s5otn)
 
 NEGATIVE-LEDGER-FIRST: third bucket in the `classify_command` match-dispatch vein (after len-6
