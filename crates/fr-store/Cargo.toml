@@ -281,6 +281,12 @@ harness = false
 name = "sadd_encoding_refresh"
 harness = false
 
+# A/B for TOUCH's non-LFU per-key lookup: one lookup_live_for_read_mut vs the prior
+# record_keyspace_lookup + separate get_mut (2 probes). Byte-identical; isolates the 2nd probe.
+[[bench]]
+name = "touch_lookup_collapse"
+harness = false
+
 # A/B for INCR's no-TTL branch: the dropped forget_volatile_key(key) no-op vs calling it, on a clean
 # non-empty volatile_keys with a no-TTL key. Byte-identical; isolates the BTreeSet remove-miss O(log n).
 [[bench]]

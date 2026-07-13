@@ -18171,3 +18171,17 @@ instructions (null 1.0000002, cv 0.0002%). SCOPE: bounded to the listpack phase 
 converts to hashtable then the flag-check early-returns O(1)) — a real per-add win during set growth and for stable
 small string sets, not the multi-million-member benchmark. Completes the encoding-refresh-incremental family (hash/
 zset/list/set all O(1)). Rollback: restore `Self::refresh_set_encoding_flags(...)` at the SADD existing-set path.
+
+### 2026-07-13 SHIPPED (TOUCH non-LFU single-lookup collapse — the last multi-key command missing it — frankenredis-chaak)
+The "get-ttl-lru-single-lookup" collapse (GET/MGET/HGET/EXISTS/STRLEN/... fuse `record_keyspace_lookup`'s
+drop_if_expired presence-probe with the value `get_mut` into ONE `lookup_live_for_read_mut`) had NOT reached the
+multi-key `touch` command: its non-LFU loop did `record_keyspace_lookup(key)` (probe 1) + `entries.get_mut(key)`
+(probe 2) PER KEY — 2N keyspace lookups for an N-key TOUCH. Split the loop like GET/MGET: non-LFU fast path uses
+`lookup_live_for_read_mut` (1 probe/key) + the same `entry.touch(now_ms)` (LRU) + count; the LFU path stays verbatim
+(the per-key rand draw + freq bump need the separate `get_mut` — the structural LFU wall). Byte-identical: same key
+lazy-expiry, same keyspace hit/miss bump, same touch, same hit count — validated by the existing
+`touch_and_sort_update_lru_and_keyspace_stats` (asserts count=1 + hits=1 + misses=1 + last_access over a present+
+absent key mix) + full suite **801 pass, 0 fail**. Isolated instructions:u A/B `benches/touch_lookup_collapse.rs`
+(16-key TOUCH of present no-TTL keys): reference(2 probes) / candidate(1 probe) = **1.451x** fewer instructions
+(null 1.0000000, cv 0.3%) — this measures the FULL per-key loop, so 1.45x is the real end-to-end TOUCH win, not just
+the isolated probe. Rollback: restore the single unconditional `record_keyspace_lookup + get_mut` loop.

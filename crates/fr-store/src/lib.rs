@@ -8362,6 +8362,36 @@ impl Store {
         }
     }
 
+    /// Bench hook for `benches/touch_lookup_collapse.rs`: isolates TOUCH's non-LFU per-key lookup.
+    /// `COLLAPSE = true` is production (ONE `lookup_live_for_read_mut` per key); `COLLAPSE = false`
+    /// is the prior two-probe form (`record_keyspace_lookup` drop_if_expired + a separate `get_mut`).
+    /// On present no-TTL keys both touch + count identically — byte-identical; only the eliminated
+    /// second keyspace lookup differs. Not on a production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_touch_lookup<const COLLAPSE: bool>(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
+        let mut count = 0_i64;
+        if COLLAPSE {
+            for &key in keys {
+                if let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) {
+                    entry.touch(now_ms);
+                    count += 1;
+                }
+            }
+        } else {
+            for &key in keys {
+                if !self.record_keyspace_lookup(key, now_ms) {
+                    continue;
+                }
+                if let Some(entry) = self.entries.get_mut(key) {
+                    entry.touch(now_ms);
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -27184,22 +27214,31 @@ impl Store {
     /// TOUCH: returns count of keys that exist and updates last access time.
     pub fn touch(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
         let mut count = 0i64;
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        // (frankenredis-chaak) Non-LFU fast path (the default LRU config): fuse
+        // `record_keyspace_lookup`'s drop_if_expired presence-probe with the value `get_mut` into
+        // ONE keyspace lookup via `lookup_live_for_read_mut`, mirroring GET/MGET/EXISTS — 1 probe
+        // per key instead of 2. Byte-identical: same key lazy-expiry, same keyspace hit/miss bump,
+        // same `entry.touch` (LRU), same hit count. On the LFU path the per-key rand draw + freq
+        // bump still need the separate `get_mut` (rand borrows `&mut self`, tangling the entry
+        // borrow — the structural LFU wall), so it stays verbatim.
+        if !self.lfu_tracking_enabled() {
+            for &key in keys {
+                if let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) {
+                    entry.touch(now_ms);
+                    count += 1;
+                }
+            }
+            return count;
+        }
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         for &key in keys {
             if !self.record_keyspace_lookup(key, now_ms) {
                 continue;
             }
-            let rand_sample = if lfu_tracking_enabled {
-                self.next_rand()
-            } else {
-                0
-            };
+            let rand_sample = self.next_rand();
             if let Some(entry) = self.entries.get_mut(key) {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 entry.touch(now_ms);
                 count += 1;
             }
