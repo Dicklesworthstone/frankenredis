@@ -7624,3 +7624,20 @@ srandmember sub-gate.** LESSON: for hash-family LFU reads, gate a fast path on
 `hash_field_expires.is_empty()` to skip the field-TTL reap, THEN the field-split collapse applies —
 same trick unblocks HMGET/HSTRLEN/HEXISTS if their LFU paths still have the wall (check). Truly
 remaining diluted: GETRANGE (substring clone), bitcount/bitpos (O(n) SIMD popcount).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU HLEN 3 probes → 1 (is_empty fast path + field split) — **2.20–2.35x**
+
+HLEN is the exact `hget_with` shape (non-LFU fast path + a `drop_expired_hash_fields` no-op on empty
+map + 3-probe LFU path) but returns just `m.len()` — no field lookup, no clone → LLEN-tier, higher
+than HGET's 1.8x. Added the `hash_field_expires.is_empty()`-gated LFU fast path: skip the reap, fold
+record+get_mut, drop contains_key, field-split rand → 1 probe; per-field-TTL fallback preserved (and
+its bump/rand stay `lfu_tracking_enabled`-guarded for the LFU-off+field-TTL case). Null-gated A/B
+(`benches/hlen_lfu_collapse.rs`, allkeys-lfu, 50k 2-field hashes, median-of-61): n32 **2.346x**, n256
+**2.196x** (tight null cv 10-12%) — WIN. Byte/RNG-identical: new `hlen_lfu_collapsed_matches_
+threeprobe` + `hlen_existing_hash_bumps_lfu_frequency` + `hexists_and_hlen`, green via rch. Clippy-
+clean. **Probe-fold scoreboard (14 wins): GETBIT 2.4-2.6x ≈ HLEN 2.2-2.35x ≈ STRLEN 2.2-2.4x ≈ ZCARD
+2.05-2.33x ≈ LLEN 2.2-2.3x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x ≈ HGET 1.7-1.8x ≈ SCARD 1.6-1.85x ≈
+EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x; srandmember sub-gate.** Hash-family
+`is_empty()` trick confirmed on HGET+HLEN. Remaining same-shape hash reads: HSTRLEN, HEXISTS (both
+length/bool, ~2.2x expected). HMGET already collapsed (per-field within one lookup). Then only the
+GETRANGE/bitcount/bitpos diluted tail. 14 commands folded; the LFU keyspace-read wall is nearly gone.

@@ -413,3 +413,10 @@ harness = false
 [[bench]]
 name = "hget_lfu_collapse"
 harness = false
+
+# A/B for LFU HLEN probe collapse: no-field-TTL fast path skips the reap + folds record+get_mut +
+# drops contains_key via rng_seed field-split (1 probe) vs the prior 3-probe form; HLEN returns only
+# a length so probes dominate. Byte/RNG-identical.
+[[bench]]
+name = "hlen_lfu_collapse"
+harness = false
