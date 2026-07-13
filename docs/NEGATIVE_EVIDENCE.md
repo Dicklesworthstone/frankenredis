@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — fused inbound bulk-length parse into one pass; 1.4696x fewer instructions, bit-identical (frankenredis-fr5ri)
+
+NEGATIVE-LEDGER-FIRST: the reply-encode/itoa vein was saturated, so I pivoted to the INBOUND hot
+path — `parse_bulk_slice`, run for EVERY command argument. It did two passes over the length header:
+`read_line` (scan for CRLF) then `parse_i64_strict` (re-scan the same digits). Production now
+fast-paths the overwhelmingly common `<nonzero-digit><digits...>\r\n` header by scanning the digits,
+accumulating the length, AND locating the CRLF in a SINGLE pass. Every deviation — leading `0`,
+`-1`/negative, non-digit, >18 digits, or a malformed/incomplete CRLF — FALLS THROUGH to the exact
+prior `read_line` + `parse_i64_strict` slow path, so every reply, error, and Incomplete boundary is
+byte-identical. Unlike the header-fusion caveat below, this REMOVES work (one scan vs two scans + a
+call) rather than trading extends, so it is not loop-context-sensitive.
+
+BIT-IDENTICAL: `parse_bulk_slice_impl::<true>` (production) == `::<false>` (exact prior path) for the
+FULL result — Ok slice + consumed, every error variant, and Incomplete — across a hand-picked edge
+set (leading zero, `+3`, ` 3`, `1a`, `3\rX`, `3`, `3\r`, `3\r\n`, 19/20-digit) and an exhaustive
+enumeration over {digits, sign, CR, LF, junk} up to length 5 (in-crate
+`parse_bulk_slice_fast_matches_slow` + the bench correctness gate). fr-protocol lib 94/94, golden
+41/41, fuzz + oracle green.
+
+MEASURED (`benches/parse_bulk_slice_fastpath.rs`, release-perf, 24 position-balanced A/A/reference
+rounds, 48M realistic command-argument header parses per arm, host `thinkstation1`, binary SHA256
+`2e86dbc2a1742c908d0febc5533d1c790049bf4a9599d676ff06a20dc228881f`): candidate ~3.705301B vs
+reference ~5.445301B = **1.469598x fewer instructions (31.95%)**. Null median 0.999999978, p5..p95
+[0.999999698,1.000000298], null CV 0.000020%; effect CV 0.000019%. Reference frame
+`bench_parse_bulk_slice::<false>` self-time ~14.4–15.8%. Reference arm
+`parse_bulk_slice_impl::<false>`. Rollback: make `parse_bulk_slice` call
+`parse_bulk_slice_impl::<false>`.
+
 ## 2026-07-13: REJECTED (SUB-GATE) — direct-write `write_i64_to_slice` (no tmp+copy) is only +0.51%, below the 1% keep gate
 
 NEGATIVE-LEDGER-FIRST: `write_i64_to_slice` (the "digits into a caller slice" helper behind the

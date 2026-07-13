@@ -1862,6 +1862,63 @@ fn parse_bulk_slice<'a>(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
+    parse_bulk_slice_impl::<true>(input, start, config)
+}
+
+/// `FAST == true` (production) fuses the header scan for the overwhelmingly common
+/// `<nonzero-digit><digits...>\r\n` bulk length — every command argument — into a SINGLE pass that
+/// accumulates the length AND locates the CRLF, instead of `read_line` (which scans for CRLF) then
+/// `parse_i64_strict` (which re-scans the same digits). Any deviation (leading `0`, `-1`/negative,
+/// non-digit, >18 digits, or a malformed/incomplete CRLF) FALLS THROUGH to the exact prior slow
+/// path, so every reply, error, and Incomplete boundary is byte-identical. `FAST == false` forces
+/// that slow path verbatim for the same-binary A/B in `benches/parse_bulk_slice_fastpath.rs`.
+#[inline]
+fn parse_bulk_slice_impl<'a, const FAST: bool>(
+    input: &'a [u8],
+    start: usize,
+    config: &ParserConfig,
+) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
+    if FAST
+        && let Some(&first) = input.get(start)
+        && first.is_ascii_digit()
+        && first != b'0'
+    {
+        let mut val = (first - b'0') as u64;
+        let mut i = start + 1;
+        // 18 digits keeps `val` far inside u64 and below any realistic proto-max-bulk-len; a
+        // longer (or overflowing) length is rare and falls back for exact handling.
+        let digit_limit = start + 18;
+        loop {
+            match input.get(i) {
+                Some(&b) if b.is_ascii_digit() => {
+                    if i >= digit_limit {
+                        break; // too many digits — fall back
+                    }
+                    val = val * 10 + u64::from(b - b'0');
+                    i += 1;
+                }
+                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
+                    let consumed = i + 2;
+                    let data_len = val as usize;
+                    if data_len > config.max_bulk_len {
+                        return Err(RespParseError::BulkLengthTooLarge);
+                    }
+                    let end = consumed
+                        .checked_add(data_len)
+                        .and_then(|idx| idx.checked_add(2))
+                        .ok_or(RespParseError::Incomplete)?;
+                    if input.len() < end {
+                        return Err(RespParseError::Incomplete);
+                    }
+                    // Command path: do NOT validate the trailing 2 bytes. (frankenredis-v4cl4)
+                    return Ok((Some(&input[consumed..consumed + data_len]), end));
+                }
+                _ => break, // non-digit / lone '\r' / incomplete CRLF — fall back
+            }
+        }
+    }
+
+    // Slow path — also the fast path's fallback; exact prior behavior.
     let (line, consumed) = read_line(input, start)
         .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
@@ -1885,6 +1942,18 @@ fn parse_bulk_slice<'a>(
     // Command path: do NOT validate the trailing 2 bytes (see `parse_bulk`) —
     // upstream advances past them unconditionally. (frankenredis-v4cl4)
     Ok((Some(&input[consumed..consumed + data_len]), end))
+}
+
+/// Bench hook for the same-binary A/B in `benches/parse_bulk_slice_fastpath.rs`.
+/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_bulk_slice<'a, const FAST: bool>(
+    input: &'a [u8],
+    start: usize,
+    config: &ParserConfig,
+) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
+    parse_bulk_slice_impl::<FAST>(input, start, config)
 }
 
 fn parse_array(
@@ -2267,12 +2336,62 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_integer, bench_push_len_header, decimal_u64_len,
-        decimal_usize_len, encode_aggregate_header, encode_bulk_string_slice, encode_map_header,
-        encode_redis_double, format_redis_double, parse_command_args_borrowed_into,
-        parse_command_frame, parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
-        push_i64, push_redis_double_ascii, push_usize,
+        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_push_len_header,
+        decimal_u64_len, decimal_usize_len, encode_aggregate_header, encode_bulk_string_slice,
+        encode_map_header, encode_redis_double, format_redis_double,
+        parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
+        parse_frame, parse_frame_with_config, push_i64, push_redis_double_ascii, push_usize,
     };
+
+    // The fused single-pass bulk-length fast path must be byte-identical to the prior
+    // read_line + parse_i64_strict two-pass path for the full result — including every error and
+    // Incomplete boundary — across hand-picked edge cases and a small exhaustive enumeration over
+    // {digits, sign, CR, LF, junk} at multiple lengths.
+    #[test]
+    fn parse_bulk_slice_fast_matches_slow() {
+        let config = ParserConfig::default();
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"3\r\nfoo\r\n".to_vec(),
+            b"0\r\n\r\n".to_vec(),
+            b"5\r\nhello\r\n".to_vec(),
+            b"11\r\nhelloworldx\r\n".to_vec(),
+            b"128\r\n".to_vec(),
+            b"-1\r\n".to_vec(),
+            b"-2\r\n".to_vec(),
+            b"\r\n".to_vec(),
+            b"-\r\n".to_vec(),
+            b"+3\r\n".to_vec(),
+            b" 3\r\n".to_vec(),
+            b"07\r\n........\r\n".to_vec(),
+            b"007\r\n".to_vec(),
+            b"1a\r\n".to_vec(),
+            b"3\rX\r\n".to_vec(),
+            b"3".to_vec(),
+            b"3\r".to_vec(),
+            b"3\r\n".to_vec(),
+            b"3\r\nfo".to_vec(),
+            b"123".to_vec(),
+            b"".to_vec(),
+            b"1234567890123456789\r\n".to_vec(),
+            b"99999999999999999999\r\n".to_vec(),
+        ];
+        let alphabet = *b"0123\r\n-";
+        for len in 0..=5usize {
+            for mut idx in 0..7usize.pow(len as u32) {
+                let mut buf = Vec::with_capacity(len);
+                for _ in 0..len {
+                    buf.push(alphabet[idx % 7]);
+                    idx /= 7;
+                }
+                cases.push(buf);
+            }
+        }
+        for buf in &cases {
+            let fast = bench_parse_bulk_slice::<true>(buf, 0, &config);
+            let slow = bench_parse_bulk_slice::<false>(buf, 0, &config);
+            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
+        }
+    }
 
     // The fused single-buffer length header (`<prefix><n>\r\n` in one extend_from_slice) must be
     // byte-identical to the prior `extend(prefix) + push_usize + extend("\r\n")` shape across every

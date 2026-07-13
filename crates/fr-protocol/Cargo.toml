@@ -42,3 +42,9 @@ harness = false
 [[bench]]
 name = "encode_bulk_string_fastpath"
 harness = false
+
+# Same-binary A/B for the inbound per-argument bulk-length parse (every command argument): fused
+# single-pass scan+accumulate vs the prior read_line + parse_i64_strict two-pass.
+[[bench]]
+name = "parse_bulk_slice_fastpath"
+harness = false
