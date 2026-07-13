@@ -1772,23 +1772,24 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<true, true>(input)
+    parse_i64_strict_impl::<true, true, true>(input)
 }
 
 /// Bench hook for the same-binary A/B in `benches/parse_i64_fastpath.rs`.
 ///
 /// `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks on every
-/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs. Neither
-/// reference configuration is on a production path.
+/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs, while
+/// `TWO_DIGIT = false` retains the exact parser that production used before the fixed-width
+/// positive two-digit shortcut. No reference configuration is on a production path.
 #[doc(hidden)]
 #[inline(never)]
-pub fn bench_parse_i64_strict<const FAST: bool, const ONE_DIGIT: bool>(
+pub fn bench_parse_i64_strict<const FAST: bool, const ONE_DIGIT: bool, const TWO_DIGIT: bool>(
     input: &[u8],
 ) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<FAST, ONE_DIGIT>(input)
+    parse_i64_strict_impl::<FAST, ONE_DIGIT, TWO_DIGIT>(input)
 }
 
-fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool>(
+fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool, const TWO_DIGIT: bool>(
     input: &[u8],
 ) -> Result<i64, RespParseError> {
     let slen = input.len();
@@ -1808,6 +1809,17 @@ fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool>(
         } else {
             Err(RespParseError::InvalidInteger)
         };
+    }
+    // Bulk lengths and array counts commonly sit in 10..=99. Once the two bytes are known ASCII
+    // digits with a nonzero tens place, their value is fixed and cannot reach any sign or range
+    // edge. Return it before the general sign/accumulator/final-bounds path. Invalid, leading-zero,
+    // and signed two-byte inputs deliberately fall through to the literal prior parser below.
+    if TWO_DIGIT && slen == 2 {
+        let tens = input[0].wrapping_sub(b'0');
+        let ones = input[1].wrapping_sub(b'0');
+        if (1..=9).contains(&tens) && ones <= 9 {
+            return Ok(i64::from(tens * 10 + ones));
+        }
     }
     if slen == 1 && input[0] == b'0' {
         return Ok(0);
@@ -2153,9 +2165,22 @@ mod tests {
             let input = [byte];
             assert_eq!(
                 super::parse_i64_strict(&input),
-                super::parse_i64_strict_impl::<true, false>(&input),
+                super::parse_i64_strict_impl::<true, false, false>(&input),
                 "one-byte input={byte:#04x}"
             );
+        }
+
+        // The new positive two-digit return must match the exact immediately-prior parser for all
+        // 65,536 possible byte pairs, including signs, leading zeros, punctuation, and high bytes.
+        for first in 0_u8..=u8::MAX {
+            for second in 0_u8..=u8::MAX {
+                let input = [first, second];
+                assert_eq!(
+                    super::parse_i64_strict(&input),
+                    super::parse_i64_strict_impl::<true, true, false>(&input),
+                    "two-byte input=[{first:#04x}, {second:#04x}]"
+                );
+            }
         }
 
         // Exhaustive over {digits, sign, non-digit} up to length 5 (leading zeros, signs, junk).

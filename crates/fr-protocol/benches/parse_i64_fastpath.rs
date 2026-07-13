@@ -1,7 +1,7 @@
-//! Profile-verified same-binary proof for the one-digit `parse_i64_strict` fast path.
+//! Profile-verified same-binary proof for the two-digit `parse_i64_strict` fast path.
 //!
-//! Candidate returns `0..=9` directly after the already-present length check. Reference retains
-//! the exact prior path, including the old zero special case and general sign/range machinery.
+//! Candidate returns positive `10..=99` directly after fixed-width digit validation. Reference
+//! retains the exact current production path, including sign, accumulation, and range machinery.
 
 use std::{
     env,
@@ -42,13 +42,14 @@ impl Arm {
 }
 
 const CORPUS: [&[u8]; 16] = [
-    b"1", b"2", b"3", b"4", b"5", b"6", b"8", b"3", b"3", b"3", b"2", b"4", b"5", b"1", b"7", b"9",
+    b"10", b"12", b"16", b"24", b"32", b"48", b"64", b"16", b"24", b"32", b"12", b"48", b"64",
+    b"10", b"80", b"99",
 ];
 
 fn parse(input: &[u8], arm: Arm) -> Result<i64, fr_protocol::RespParseError> {
     match arm {
-        Arm::Candidate => bench_parse_i64_strict::<true, true>(input),
-        Arm::Reference => bench_parse_i64_strict::<true, false>(input),
+        Arm::Candidate => bench_parse_i64_strict::<true, true, true>(input),
+        Arm::Reference => bench_parse_i64_strict::<true, true, false>(input),
     }
 }
 
@@ -119,7 +120,7 @@ fn profile_trial(executable: &Path, trial: usize) -> Result<f64, String> {
         .map_err(|error| format!("invalid system time: {error}"))?
         .as_nanos();
     let data = env::temp_dir().join(format!(
-        "fr_parse_i64_one_digit_{}_{}_{}.data",
+        "fr_parse_i64_two_digit_{}_{}_{}.data",
         process::id(),
         trial,
         stamp
@@ -253,24 +254,27 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 }
 
 fn correctness_gate() {
-    for byte in 0_u8..=u8::MAX {
-        let input = [byte];
-        assert_eq!(
-            parse(&input, Arm::Candidate),
-            parse(&input, Arm::Reference),
-            "one-byte input differs: {byte:#04x}"
-        );
+    for first in 0_u8..=u8::MAX {
+        for second in 0_u8..=u8::MAX {
+            let input = [first, second];
+            assert_eq!(
+                parse(&input, Arm::Candidate),
+                parse(&input, Arm::Reference),
+                "two-byte input differs: [{first:#04x}, {second:#04x}]"
+            );
+        }
     }
     for input in [
-        b"10".as_slice(),
+        b"1".as_slice(),
         b"-1",
+        b"100",
         b"9223372036854775807",
         b"9223372036854775808",
         b"18446744073709551616",
     ] {
         assert_eq!(parse(input, Arm::Candidate), parse(input, Arm::Reference));
     }
-    println!("CORRECTNESS_GATE all_one_byte_plus_boundaries=bit_identical");
+    println!("CORRECTNESS_GATE all_two_byte_plus_boundaries=bit_identical");
 }
 
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {
