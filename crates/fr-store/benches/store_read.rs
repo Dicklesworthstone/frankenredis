@@ -342,6 +342,24 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) XTRIM MAXLEN 50 on a 1000-entry stream (removes 950, a bulk trim): the rebuild path
+    // reconstructs from the 50 survivors in one pass instead of 950x the O(node) `remove` (each
+    // BTree-locates the id + shifts a chunk's Vec). Untimed setup rebuilds the stream each iter.
+    let xtrim_fields: Vec<(Vec<u8>, Vec<u8>)> = vec![(b"f".to_vec(), b"v".to_vec())];
+    g.bench_function("xtrim_maxlen_950_of_1000", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                for i in 1..=1000u64 {
+                    s.xadd(b"xs", (i, 0), &xtrim_fields, 1_000).unwrap();
+                }
+                s
+            },
+            |mut s| std::hint::black_box(s.xtrim(std::hint::black_box(b"xs"), 50, None, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map

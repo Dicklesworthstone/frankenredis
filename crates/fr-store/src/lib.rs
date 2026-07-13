@@ -22368,10 +22368,27 @@ impl Store {
                     if let Some(cap) = limit {
                         to_remove = to_remove.min(cap);
                     }
-                    let remove_ids: Vec<StreamId> =
-                        entries.keys().copied().take(to_remove).collect();
-                    for id in &remove_ids {
-                        entries.remove(*id);
+                    // (cc_fr) Bulk trim (removing >= half): rebuild from the surviving newest entries
+                    // in ONE pass instead of `to_remove`x O(node) `remove` (each shifts a chunk's Vec
+                    // + BTree-locates the id) — O(to_remove*chunk) on a large stream. `from_sorted_
+                    // entries` rebuilds all internal accounting fresh; redis-visible state is
+                    // byte-identical: same entries/order, and MEMORY USAGE + digest are computed from
+                    // LIVE entries (not the raw dead-carrying arena). Small trims keep the targeted loop.
+                    if to_remove.saturating_mul(2) >= entries.len() {
+                        let survivors: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = entries
+                            .iter()
+                            .skip(to_remove)
+                            .map(|(id, fields)| (*id, fields.to_pairs()))
+                            .collect();
+                        **entries = StreamEntries::from_sorted_entries(
+                            survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
+                        );
+                    } else {
+                        let remove_ids: Vec<StreamId> =
+                            entries.keys().copied().take(to_remove).collect();
+                        for id in &remove_ids {
+                            entries.remove(*id);
+                        }
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
@@ -53133,6 +53150,46 @@ mod tests {
 
         store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
         assert_eq!(store.xdel(b"str", &[(1, 0)], 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn xtrim_maxlen_bulk_rebuild_matches_direct_build_cc() {
+        // (cc_fr) XTRIM MAXLEN's bulk rebuild path (to_remove >= len/2) must leave a stream
+        // byte-identical to one built from ONLY the surviving newest entries — same XLEN, XRANGE,
+        // MEMORY USAGE, and state_digest (all computed from live entries, not the dead-carrying
+        // arena). Covers the rebuild path (small max_len) and the retained targeted-loop path.
+        const N: u64 = 300;
+        let fields = |i: u64| vec![(b"f".to_vec(), format!("v{i}").into_bytes())];
+        for &max_len in &[1usize, 10, 100, 150, 200, 299, 300, 400] {
+            let mut a = Store::new();
+            for i in 1..=N {
+                a.xadd(b"st", (i, 0), &fields(i), 1).unwrap();
+            }
+            a.xtrim(b"st", max_len, None, 2).unwrap();
+
+            let keep = (max_len as u64).min(N);
+            let mut b = Store::new();
+            for i in (N - keep + 1)..=N {
+                b.xadd(b"st", (i, 0), &fields(i), 1).unwrap();
+            }
+
+            assert_eq!(
+                a.xlen(b"st", 3).unwrap(),
+                b.xlen(b"st", 3).unwrap(),
+                "xlen @ max_len={max_len}"
+            );
+            assert_eq!(
+                a.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
+                b.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
+                "xrange @ max_len={max_len}"
+            );
+            assert_eq!(
+                a.memory_usage_for_key(b"st", 3),
+                b.memory_usage_for_key(b"st", 3),
+                "memory @ max_len={max_len}"
+            );
+            assert_eq!(a.state_digest(), b.state_digest(), "digest @ max_len={max_len}");
+        }
     }
 
     #[test]
