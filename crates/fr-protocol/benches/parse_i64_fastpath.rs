@@ -1,7 +1,8 @@
-//! Profile-verified same-binary proof for the two-digit `parse_i64_strict` fast path.
+//! Profile-verified same-binary proof for the three-digit `parse_i64_strict` fast path.
 //!
-//! Candidate returns positive `10..=99` directly after fixed-width digit validation. Reference
-//! retains the exact current production path, including sign, accumulation, and range machinery.
+//! Candidate returns positive `100..=999` directly after fixed-width digit validation. Reference
+//! retains the exact current production path (two-digit shortcut still on), including sign,
+//! accumulation, and range machinery for three-digit inputs.
 
 use std::{
     env,
@@ -42,14 +43,14 @@ impl Arm {
 }
 
 const CORPUS: [&[u8]; 16] = [
-    b"10", b"12", b"16", b"24", b"32", b"48", b"64", b"16", b"24", b"32", b"12", b"48", b"64",
-    b"10", b"80", b"99",
+    b"100", b"128", b"160", b"200", b"256", b"333", b"400", b"512", b"640", b"768", b"800", b"900",
+    b"999", b"120", b"250", b"512",
 ];
 
 fn parse(input: &[u8], arm: Arm) -> Result<i64, fr_protocol::RespParseError> {
     match arm {
-        Arm::Candidate => bench_parse_i64_strict::<true, true, true>(input),
-        Arm::Reference => bench_parse_i64_strict::<true, true, false>(input),
+        Arm::Candidate => bench_parse_i64_strict::<true, true, true, true>(input),
+        Arm::Reference => bench_parse_i64_strict::<true, true, true, false>(input),
     }
 }
 
@@ -256,25 +257,30 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 fn correctness_gate() {
     for first in 0_u8..=u8::MAX {
         for second in 0_u8..=u8::MAX {
-            let input = [first, second];
-            assert_eq!(
-                parse(&input, Arm::Candidate),
-                parse(&input, Arm::Reference),
-                "two-byte input differs: [{first:#04x}, {second:#04x}]"
-            );
+            for third in 0_u8..=u8::MAX {
+                let input = [first, second, third];
+                assert_eq!(
+                    parse(&input, Arm::Candidate),
+                    parse(&input, Arm::Reference),
+                    "three-byte input differs: [{first:#04x}, {second:#04x}, {third:#04x}]"
+                );
+            }
         }
     }
     for input in [
         b"1".as_slice(),
         b"-1",
-        b"100",
+        b"99",
+        b"-99",
+        b"1000",
+        b"-100",
         b"9223372036854775807",
         b"9223372036854775808",
         b"18446744073709551616",
     ] {
         assert_eq!(parse(input, Arm::Candidate), parse(input, Arm::Reference));
     }
-    println!("CORRECTNESS_GATE all_two_byte_plus_boundaries=bit_identical");
+    println!("CORRECTNESS_GATE all_three_byte_plus_boundaries=bit_identical");
 }
 
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {

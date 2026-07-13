@@ -1772,24 +1772,36 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<true, true, true>(input)
+    parse_i64_strict_impl::<true, true, true, true>(input)
 }
 
 /// Bench hook for the same-binary A/B in `benches/parse_i64_fastpath.rs`.
 ///
 /// `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks on every
-/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs, while
+/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs,
 /// `TWO_DIGIT = false` retains the exact parser that production used before the fixed-width
-/// positive two-digit shortcut. No reference configuration is on a production path.
+/// positive two-digit shortcut, and `THREE_DIGIT = false` retains the parser that production used
+/// before the fixed-width positive three-digit shortcut. No reference configuration is on a
+/// production path.
 #[doc(hidden)]
 #[inline(never)]
-pub fn bench_parse_i64_strict<const FAST: bool, const ONE_DIGIT: bool, const TWO_DIGIT: bool>(
+pub fn bench_parse_i64_strict<
+    const FAST: bool,
+    const ONE_DIGIT: bool,
+    const TWO_DIGIT: bool,
+    const THREE_DIGIT: bool,
+>(
     input: &[u8],
 ) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<FAST, ONE_DIGIT, TWO_DIGIT>(input)
+    parse_i64_strict_impl::<FAST, ONE_DIGIT, TWO_DIGIT, THREE_DIGIT>(input)
 }
 
-fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool, const TWO_DIGIT: bool>(
+fn parse_i64_strict_impl<
+    const FAST: bool,
+    const ONE_DIGIT: bool,
+    const TWO_DIGIT: bool,
+    const THREE_DIGIT: bool,
+>(
     input: &[u8],
 ) -> Result<i64, RespParseError> {
     let slen = input.len();
@@ -1819,6 +1831,19 @@ fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool, const TWO_DIGI
         let ones = input[1].wrapping_sub(b'0');
         if (1..=9).contains(&tens) && ones <= 9 {
             return Ok(i64::from(tens * 10 + ones));
+        }
+    }
+    // Medium bulk lengths (`$100`..`$999`) — values a few hundred bytes long — are the common
+    // three-digit RESP header. Three ASCII digits with a nonzero hundreds place have a fixed value
+    // (max 999) that cannot reach any sign or i64 range edge, so return it before the general
+    // sign/accumulator/final-bounds path. Leading-zero, signed, and invalid three-byte inputs
+    // deliberately fall through to the literal prior parser below.
+    if THREE_DIGIT && slen == 3 {
+        let hundreds = input[0].wrapping_sub(b'0');
+        let tens = input[1].wrapping_sub(b'0');
+        let ones = input[2].wrapping_sub(b'0');
+        if (1..=9).contains(&hundreds) && tens <= 9 && ones <= 9 {
+            return Ok(i64::from(hundreds) * 100 + i64::from(tens) * 10 + i64::from(ones));
         }
     }
     if slen == 1 && input[0] == b'0' {
@@ -2165,21 +2190,37 @@ mod tests {
             let input = [byte];
             assert_eq!(
                 super::parse_i64_strict(&input),
-                super::parse_i64_strict_impl::<true, false, false>(&input),
+                super::parse_i64_strict_impl::<true, false, false, false>(&input),
                 "one-byte input={byte:#04x}"
             );
         }
 
-        // The new positive two-digit return must match the exact immediately-prior parser for all
+        // The positive two-digit return must match the exact immediately-prior parser for all
         // 65,536 possible byte pairs, including signs, leading zeros, punctuation, and high bytes.
         for first in 0_u8..=u8::MAX {
             for second in 0_u8..=u8::MAX {
                 let input = [first, second];
                 assert_eq!(
                     super::parse_i64_strict(&input),
-                    super::parse_i64_strict_impl::<true, true, false>(&input),
+                    super::parse_i64_strict_impl::<true, true, false, false>(&input),
                     "two-byte input=[{first:#04x}, {second:#04x}]"
                 );
+            }
+        }
+
+        // The new positive three-digit return must match the exact immediately-prior parser (with
+        // the two-digit shortcut still on) for all 16,777,216 possible byte triples, including
+        // signs, leading zeros, punctuation, and high bytes.
+        for first in 0_u8..=u8::MAX {
+            for second in 0_u8..=u8::MAX {
+                for third in 0_u8..=u8::MAX {
+                    let input = [first, second, third];
+                    assert_eq!(
+                        super::parse_i64_strict(&input),
+                        super::parse_i64_strict_impl::<true, true, true, false>(&input),
+                        "three-byte input=[{first:#04x}, {second:#04x}, {third:#04x}]"
+                    );
+                }
             }
         }
 
