@@ -17926,3 +17926,17 @@ SAME flag `del` uses. Restores the equivalence in BOTH notify states (off → bo
 elides the clone on the common no-notify path (MOVE never even consumes `last_del_removed` — the runtime takes it
 only for DEL/UNLINK — so this is byte-identical in production regardless). Gated by the now-green full suite (797
 pass). Rollback: restore the unconditional `self.last_del_removed.push(source.to_vec())`.
+
+### 2026-07-13 SHIPPED (RPOPLPUSH/LMOVE/SMOVE empty-source stream side-map removes routed through the guarded helper — frankenredis-53w9n)
+Three "clean up empty source" paths — `rpoplpush` + `lmove` (source is a `Value::List`, guarded above) and `smove`
+(source is a Set) — did `internal_entries_remove(source)` then TWO UNCONDITIONAL `stream_groups.remove(source)` +
+`stream_last_ids.remove(source)`. The emptied source is provably NEVER a stream (list/set), so both removes are
+unconditional no-ops. Routed all three through the is_empty-guarded `drop_stream_side_metadata(source)` helper (the
+same one DEL/EXPIRE/RENAME use) — on a no-stream DB (the common case) each remove becomes an O(1) is_empty check
+instead of a foldhash+probe. Byte-identical: empty-map remove is a no-op; a non-stream key is absent from both maps
+regardless. Same 2-remove primitive `del_stream_cleanup` isolates (`bench_del_stream_cleanup<GUARD>`): fresh re-run
+this turn = **6.32x** fewer instructions (guarded vs unconditional pair, stream-free store; null_median 1.0000001,
+cv 0.00002%, 24 rounds — under concurrent host CPU contention, vs 19.48x on the quieter shipped-DEL run; both large).
+Validated by the full fr-store suite (797 pass, 0 fail — covers the rpoplpush/lmove/smove empty-source cleanup paths).
+Fires on any list-move/smove that empties its source. Remaining sibling: eviction ~12022 (cold, memory-pressure only).
+Rollback: restore the two unconditional `stream_groups`/`stream_last_ids` removes at each site.

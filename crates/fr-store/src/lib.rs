@@ -15988,8 +15988,11 @@ impl Store {
             && l.is_empty()
         {
             self.internal_entries_remove(source);
-            self.stream_groups.remove(source);
-            self.stream_last_ids.remove(source);
+            // (frankenredis-53w9n) The emptied `source` is a List (guarded above), never a stream,
+            // so these two side-map removes are unconditional no-ops. Route through the is_empty-
+            // guarded `drop_stream_side_metadata` to skip the two wasted foldhash+probes on a
+            // no-stream DB (the common case). Byte-identical (empty-map remove is a no-op).
+            self.drop_stream_side_metadata(source);
         }
 
         // Push to destination
@@ -16308,8 +16311,11 @@ impl Store {
             && l.is_empty()
         {
             self.internal_entries_remove(source);
-            self.stream_groups.remove(source);
-            self.stream_last_ids.remove(source);
+            // (frankenredis-53w9n) The emptied `source` is a List (guarded above), never a stream,
+            // so these two side-map removes are unconditional no-ops. Route through the is_empty-
+            // guarded `drop_stream_side_metadata` to skip the two wasted foldhash+probes on a
+            // no-stream DB (the common case). Byte-identical (empty-map remove is a no-op).
+            self.drop_stream_side_metadata(source);
         }
         // Push to destination.
         let dest_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(destination) {
@@ -18306,8 +18312,11 @@ impl Store {
         // Clean up empty source
         if source_empty {
             self.internal_entries_remove(source);
-            self.stream_groups.remove(source);
-            self.stream_last_ids.remove(source);
+            // (frankenredis-53w9n) The emptied `source` is a Set, never a stream, so these two
+            // side-map removes are unconditional no-ops. Route through the is_empty-guarded
+            // `drop_stream_side_metadata` to skip the two wasted foldhash+probes on a no-stream DB.
+            // Byte-identical (empty-map remove is a no-op).
+            self.drop_stream_side_metadata(source);
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", src_logical, src_db);
         }
         // Add to destination — "sadd" fires only on a genuinely new member.
