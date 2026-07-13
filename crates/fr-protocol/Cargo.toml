@@ -28,3 +28,10 @@ harness = false
 [[bench]]
 name = "push_len_header_fastpath"
 harness = false
+
+# Same-binary A/B for the fused length headers on a realistic array-of-bulk-strings reply
+# (LRANGE/MGET/SMEMBERS shape) WITH bodies present — measures the owned-arm fusion where real
+# bodies dilute the per-header saving.
+[[bench]]
+name = "encode_array_reply_fastpath"
+harness = false

@@ -4,6 +4,81 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: REJECTED/REVERTED — propagating the fused length header to the OWNED RespFrame encode arms regresses array replies ~1.15%
+
+NEGATIVE-LEDGER-FIRST: after fusing the length header on the borrow-encode helpers (bab278487,
+below), the obvious next step was to apply `push_len_header::<true>` to the owned
+`RespFrame::encode_into` / `encode_into_resp3` arms (Array/Map/Set/Push/Attribute/BulkString/
+Verbatim). It is byte-identical (golden 41/41, fr-protocol lib 93/93), but MEASURED SLOWER on the
+realistic reply shape it targets. A same-binary A/B on an array-of-bulk-strings reply WITH bodies
+(`benches/encode_array_reply_fastpath.rs`: `*count\r\n` + count×`$len\r\n<body>\r\n`, short
+elements, LRANGE/MGET/SMEMBERS shape), release-perf, 24 rounds, host `thinkstation1`, binary SHA256
+`8f9f9db0e5092dc4b89ef4d4d63f710aefae8f532833f091bd6df6a5a8335cc1`: candidate ~4.768801B vs
+reference ~4.714801B = **0.988676x reference/candidate — the fused arm spends ~1.15% MORE
+instructions**. Null median 1.000000036, p5..p95 [0.999999865,1.000000141], null CV 0.000011%;
+effect CV 0.000010%. Reference frame `bench_encode_array_reply::<false>` self-time ~56.5–59.5%.
+
+ROOT CAUSE + METHODOLOGY CAVEAT: `push_len_header` is `#[inline]`, so in the reply loop it inlines,
+and its single `extend_from_slice(&buf[pos..24])` is a RUNTIME-length memcpy (plus a 24-byte stack
+buffer zero-init per element). The three-call reference (`extend(&[prefix])` + `push_usize` +
+`extend(b"\r\n")`) lowers to a couple of CONST-size copies the compiler places inline, which win
+when bodies are already present and the header build is inlined into the loop. The prior
+headers-ONLY, `#[inline(never)]` A/Bs (integer reply, length-header primitive) measured the fused
+helper at a function boundary and so OVERSTATE the benefit for inlined production call sites where a
+body memcpy already dominates. Kept `benches/encode_array_reply_fastpath.rs` +
+`bench_encode_array_reply` as the reproducible artifact; reverted the owned-arm edits — production
+stays on `push_usize`. Follow-up: re-measure bab278487's borrow helpers in a with-bodies, inlined
+context before trusting their headers-only number.
+
+## 2026-07-13: SHIPPED — fused RESP length-header primitive on the borrow-encode reply path; 1.1498x fewer header instructions, bit-identical (frankenredis-gg6yy, bab278487)
+
+NEGATIVE-LEDGER-FIRST: no row measured collapsing the `<prefix><n>\r\n` header (bulk `$`, aggregate
+`*`/`~`, map `%`) into one write. `push_len_header` builds the header right-aligned in one stack
+buffer (digits ONCE via `DIGIT_PAIRS`, terminator pre-placed, prefix left) + a SINGLE
+`extend_from_slice`, replacing `extend(prefix)`+`push_usize`+`extend("\r\n")`. Applied to the
+borrow-encode helpers `encode_bulk_string_slice`/`encode_aggregate_header`/`encode_map_header`
+(GET/MGET/HGETALL/LRANGE/SMEMBERS/ZRANGE). BIT-IDENTICAL across all RESP prefixes × [0,300000] +
+u32/u64 boundaries (in-crate `fused_len_header_matches_three_call_and_helpers` + bench gate);
+fr-protocol lib 93/93, golden 41/41, fuzz+oracle green. MEASURED (`benches/push_len_header_fastpath.rs`,
+release-perf, 24 rounds, 48M headers/arm, host `thinkstation1`, SHA256
+`e261649d6873b2b02b5211fcb3ed6223e99bab3b31e235e2c9f8660179486e07`): candidate ~4.386303B vs
+reference ~5.043303B = **1.149784x fewer instructions (13.03%)**, null median 0.999999969.
+CAVEAT: this is a headers-only `#[inline(never)]` A/B; see the 2026-07-13 owned-arm REVERTED entry
+above — with bodies present and inlined, the fused header did not win. Reference arm
+`bench_push_len_header::<false>`. Rollback: restore the three-call shape in the three helpers.
+
+## 2026-07-13: SHIPPED — fused RESP integer reply into one buffer + single extend; 1.1565x fewer instructions, bit-identical (frankenredis-y1v9d, ae5e6f156)
+
+NEGATIVE-LEDGER-FIRST: the `RespFrame::Integer` arm built `:<n>\r\n` with three `extend_from_slice`
+calls. Production now builds the whole frame right-aligned in one stack buffer (digits ONCE via
+`DIGIT_PAIRS`, `\r\n` pre-placed, `:`/`-` left) + a SINGLE `extend_from_slice`; universal
+counter/length reply (INCR/LLEN/SCARD/EXISTS/DEL...), RESP3 scalars delegate here. A naive first
+attempt via `write_i64_to_slice` REGRESSED ~16.8% (double-copies the digits: build in tmp → copy
+into frame buf → extend); the single-pass build fixed it — unlike the bulk header, the integer
+reply removes TWO const-size extends (`:` and `\r\n`) and keeps one variable digit copy, so it wins
+even inlined. BIT-IDENTICAL over [-200000,200000] + i64/i32 boundaries (in-crate
+`fused_integer_reply_matches_three_extend_and_frame` + bench gate); fr-protocol lib 92/92.
+MEASURED (`benches/encode_integer_fastpath.rs`, release-perf, 24 rounds, 48M encodes/arm, host
+`thinkstation1`, SHA256 `a5bf32c9bf2977eab4d833b6db028ab7153d4129ca54609126a6ac048382010d`):
+candidate ~4.101300B vs reference ~4.743301B = **1.156536x fewer instructions (13.54%)**, null
+median 0.999999972. Reference arm `bench_encode_integer::<false>`. Rollback: `Self::Integer(n)` →
+the three-extend path.
+
+## 2026-07-13: SHIPPED — three-digit RESP integer fast path in parse_i64_strict; 1.4484x fewer instructions, bit-identical (frankenredis-0gqqd, 7368f60ad)
+
+NEGATIVE-LEDGER-FIRST: continues the one-digit (tl5hj) / two-digit (t4ywq) fixed-width ladder in
+the RESP bulk/multibulk length parser. Production recognizes positive ASCII `100..=999` (the common
+`$100`..`$999` medium bulk-length header) and returns its fixed value directly, before the general
+sign/accumulator/range path. Signed, leading-zero, and invalid three-byte inputs fall through to
+the literal prior parser. BIT-IDENTICAL over all 16,777,216 three-byte inputs (in-crate exhaustive
+test + bench correctness gate) plus i64/u64 boundary strings. MEASURED
+(`benches/parse_i64_fastpath.rs`, release-perf, 24 rounds, 48M parses/arm, host `thinkstation1`,
+SHA256 `47f18270f2f8fd20f14a08382febf6757ea771f6f4f1e5b96352340c5142601d`): candidate ~2.676301B vs
+reference ~3.876301B = **1.448380x fewer instructions (30.96%)**, null median 1.000000012.
+Reference arm `parse_i64_strict_impl::<true,true,true,false>`. (An inbound parser — no
+extend/memcpy, unaffected by the inlined-header caveat above.) Rollback: `parse_i64_strict` →
+`parse_i64_strict_impl::<true,true,true,false>`.
+
 ## 2026-07-13: SHIPPED — replica ACK snapshots retain Vec capacity; 1.0276x fewer full-handler instructions, reply-identical
 
 NEGATIVE-LEDGER-FIRST: the replication WRITE rows reject a risky structured-argv rewrite for a

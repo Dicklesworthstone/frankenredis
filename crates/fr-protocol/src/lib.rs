@@ -175,6 +175,24 @@ pub fn bench_push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n
     push_len_header::<FUSED>(out, prefix, n)
 }
 
+/// Bench hook for `benches/encode_array_reply_fastpath.rs`: encode an array of `count` bulk strings
+/// each holding `body` — the shape a populated `RespFrame::Array(Some(..))` of `BulkString`s emits
+/// (LRANGE / MGET / SMEMBERS / ZRANGE), which is where the owned-arm `push_len_header` fusion lands.
+/// Every RESP header (`*count\r\n` and each `$len\r\n`) goes through `push_len_header`; the bodies
+/// are identical in both arms, so only the header path differs — this measures the fusion's win in
+/// a realistic reply where real bodies dilute it. `FUSED = false` forces the prior three-call header
+/// shape for the same-binary A/B. Not on a production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_array_reply<const FUSED: bool>(count: usize, body: &[u8], out: &mut Vec<u8>) {
+    push_len_header::<FUSED>(out, b'*', count as u64);
+    for _ in 0..count {
+        push_len_header::<FUSED>(out, b'$', body.len() as u64);
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
 /// Encode a bulk-string reply from borrowed bytes.
 ///
 /// This is byte-identical to `RespFrame::BulkString(...).encode_into*` while
