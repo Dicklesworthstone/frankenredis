@@ -46,6 +46,9 @@ use fr_store::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "bench-reference")]
+use std::sync::atomic::AtomicBool;
+
 fn encode_nonnegative_integer_reply(value: u64, out: &mut Vec<u8>) {
     out.push(b':');
     let mut buf = [0_u8; 20];
@@ -56,6 +59,15 @@ fn encode_nonnegative_integer_reply(value: u64, out: &mut Vec<u8>) {
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "bench-reference")]
+static BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+pub fn bench_select_replica_ack_snapshot_owned_reference(enabled: bool) {
+    BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE.store(enabled, Ordering::Relaxed);
+}
+
 const DEFAULT_AUTH_USER: &[u8] = b"default";
 const NOAUTH_ERROR: &str = "NOAUTH Authentication required.";
 const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user is disabled.";
@@ -3723,6 +3735,7 @@ impl ReplicationRuntimeState {
         self.backlog.end_offset = end_offset;
     }
 
+    #[cfg(any(test, feature = "bench-reference"))]
     fn replica_ack_offsets(&self) -> Vec<ReplOffset> {
         self.replicas
             .values()
@@ -3730,6 +3743,7 @@ impl ReplicationRuntimeState {
             .collect()
     }
 
+    #[cfg(any(test, feature = "bench-reference"))]
     fn replica_fsync_offsets(&self) -> Vec<ReplOffset> {
         self.replicas
             .values()
@@ -4528,6 +4542,37 @@ impl ServerState {
     }
 
     fn refresh_replica_ack_snapshots(&mut self) {
+        #[cfg(feature = "bench-reference")]
+        if BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE.load(Ordering::Relaxed) {
+            self.refresh_replica_ack_snapshots_owned_reference();
+            return;
+        }
+        self.refresh_replica_ack_snapshots_reusing_capacity();
+    }
+
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    #[cfg_attr(not(feature = "bench-reference"), inline)]
+    fn refresh_replica_ack_snapshots_reusing_capacity(&mut self) {
+        let (runtime, snapshots) = (
+            &self.replication_runtime_state,
+            &mut self.replication_ack_state,
+        );
+        snapshots.replica_ack_offsets.clear();
+        snapshots
+            .replica_ack_offsets
+            .extend(runtime.replicas.values().map(|replica| replica.ack_offset));
+        snapshots.replica_fsync_offsets.clear();
+        snapshots.replica_fsync_offsets.extend(
+            runtime
+                .replicas
+                .values()
+                .map(|replica| replica.fsync_offset),
+        );
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn refresh_replica_ack_snapshots_owned_reference(&mut self) {
         self.replication_ack_state.replica_ack_offsets =
             self.replication_runtime_state.replica_ack_offsets();
         self.replication_ack_state.replica_fsync_offsets =
@@ -43467,6 +43512,83 @@ mod tests {
             runtime.execute_frame(command(&argv), 0),
             fr_protocol::RespFrame::Error("ERR Unrecognized REPLCONF option: �".to_string()),
         );
+    }
+
+    #[test]
+    fn replica_ack_snapshot_capacity_reuse_matches_owned_reference() {
+        use super::{ReplOffset, ServerState};
+
+        fn seed_replicas(server: &mut ServerState, count: usize) {
+            server.replication_runtime_state.replicas.clear();
+            for index in 0..count {
+                let replica = server
+                    .replication_runtime_state
+                    .ensure_replica(index as u64);
+                replica.ack_offset = ReplOffset((index as u64).wrapping_mul(17).wrapping_add(3));
+                replica.fsync_offset = ReplOffset((index as u64).wrapping_mul(29).wrapping_add(5));
+            }
+        }
+
+        let mut server = ServerState::default();
+        for count in [0, 1, 8, 64] {
+            seed_replicas(&mut server, count);
+            server.replication_ack_state.replica_ack_offsets = vec![ReplOffset(u64::MAX); 5];
+            server.replication_ack_state.replica_fsync_offsets = vec![ReplOffset(u64::MAX); 7];
+            server.refresh_replica_ack_snapshots_owned_reference();
+            let expected = server.replication_ack_state.clone();
+
+            server.replication_ack_state.replica_ack_offsets = vec![ReplOffset(u64::MAX); 3];
+            server.replication_ack_state.replica_fsync_offsets = vec![ReplOffset(u64::MAX); 4];
+            server.refresh_replica_ack_snapshots_reusing_capacity();
+            assert_eq!(
+                server.replication_ack_state, expected,
+                "replica_count={count}"
+            );
+        }
+
+        seed_replicas(&mut server, 64);
+        server.refresh_replica_ack_snapshots_reusing_capacity();
+        let ack_pointer = server.replication_ack_state.replica_ack_offsets.as_ptr();
+        let fsync_pointer = server.replication_ack_state.replica_fsync_offsets.as_ptr();
+        let ack_capacity = server.replication_ack_state.replica_ack_offsets.capacity();
+        let fsync_capacity = server
+            .replication_ack_state
+            .replica_fsync_offsets
+            .capacity();
+
+        for count in [8, 0, 64] {
+            seed_replicas(&mut server, count);
+            let expected_ack = server.replication_runtime_state.replica_ack_offsets();
+            let expected_fsync = server.replication_runtime_state.replica_fsync_offsets();
+            server.refresh_replica_ack_snapshots_reusing_capacity();
+            assert_eq!(
+                server.replication_ack_state.replica_ack_offsets,
+                expected_ack
+            );
+            assert_eq!(
+                server.replication_ack_state.replica_fsync_offsets,
+                expected_fsync
+            );
+            assert_eq!(
+                server.replication_ack_state.replica_ack_offsets.as_ptr(),
+                ack_pointer
+            );
+            assert_eq!(
+                server.replication_ack_state.replica_fsync_offsets.as_ptr(),
+                fsync_pointer
+            );
+            assert_eq!(
+                server.replication_ack_state.replica_ack_offsets.capacity(),
+                ack_capacity
+            );
+            assert_eq!(
+                server
+                    .replication_ack_state
+                    .replica_fsync_offsets
+                    .capacity(),
+                fsync_capacity
+            );
+        }
     }
 
     // (CrimsonHawk) The SSCAN/HSCAN borrow `_into` extend-past-cursor-0 strict cursor parse accepts

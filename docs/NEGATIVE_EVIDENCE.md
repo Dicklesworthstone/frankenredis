@@ -4,6 +4,44 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — replica ACK snapshots retain Vec capacity; 1.0276x fewer full-handler instructions, reply-identical
+
+NEGATIVE-LEDGER-FIRST: the replication WRITE rows reject a risky structured-argv rewrite for a
+syscall-bound workload, while the existing REPLCONF rows cover correctness and option
+classification; no row measured the two snapshot-vector allocations inside
+`refresh_replica_ack_snapshots`. ONE LEVER: production now clears and extends the two long-lived
+ACK/FACK snapshot vectors instead of replacing each with a freshly collected `Vec`. It deliberately
+retains the prior two `BTreeMap` traversals, value order, and offset selection so this commit measures
+capacity reuse alone. The independently no-inline
+`refresh_replica_ack_snapshots_owned_reference` preserves the literal prior pair of
+collect-and-assign operations in the same binary. Scope is periodic/control-plane ACK traffic, not
+a general request-throughput claim. Resource tradeoff: each snapshot retains its peak allocation,
+about 16 bytes per historical peak replica across the two `ReplOffset` vectors.
+
+REPLY-IDENTICAL: the differential unit compares candidate and exact prior snapshots at 0, 1, 8,
+and 64 replicas, then exercises 64 -> 8 -> 0 -> 64 and verifies both vector pointers and capacities
+remain stable while the offsets remain identical. The full-path benchmark also compares the eight
+replies from replica registration, increasing and decreasing ACKs, combined ACK+FACK, FACK, GETACK,
+WAIT, and WAITAOF before timing. The focused remote differential test passed. A full runtime run
+passed 568 tests with 2 ignored and hit only the unrelated pre-existing
+`acl_log_marks_script_denials_as_lua` failure. Remote workspace check, touched-crate all-targets
+clippy with `-D warnings`, and the complete `fr-conformance` suite passed; workspace-wide clippy
+remained blocked before reaching runtime by the pre-existing `fr-simd/src/lib.rs:795`
+needless-range-loop warning. Rustfmt and diff checks were clean. Ordering is unchanged; floating
+point and randomness are not involved.
+
+MEASURED (remote-only, one-binary `replconf_ack_snapshot`, `release-perf`, 24 position-balanced
+A/A/reference rounds, 200,000 full steady-state master-side REPLCONF ACK executions per arm with
+one registered replica and warmed snapshot capacity): worker `vmi1152480`, binary SHA256
+`a0f579367dfba48849b901f2b410d722632c0963739845a806a7ddcd639791c7`; candidate median was
+1,077,809,263 instructions versus 1,107,609,657 reference, or **1.027649277x
+reference/candidate** (**2.690536% fewer instructions**). The A/A null median was **0.999999824**,
+p5..p95 **[0.999256752, 1.001155637]**, CV **0.059775%**; effect CV **0.063965%**. Four
+`perf record` trials lost zero samples and verified the exact selected helper: candidate self-time
+was **0.94%**, while three exact-old trials had **1.28% median self-time** (self-time CV
+**14.8843%**, samples 1.06%, 1.28%, 1.53%). Rollback: restore the two assignments from
+`replica_ack_offsets()` and `replica_fsync_offsets()` in `refresh_replica_ack_snapshots`.
+
 ## 2026-07-12: SHIPPED — recognized REPLCONF options classify without an owned String; 4.0959x fewer classifier instructions, reply-identical
 
 NEGATIVE-LEDGER-FIRST: the replication WRITE rows reject a risky structured-argv rewrite for a

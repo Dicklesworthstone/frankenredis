@@ -26,3 +26,8 @@ proptest.workspace = true
 name = "replconf_option"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "replconf_ack_snapshot"
+harness = false
+required-features = ["bench-reference"]
