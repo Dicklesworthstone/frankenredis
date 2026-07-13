@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — three more DoS-safe fr-internal Store side-maps → foldhash; script_cache lookups 1.66x fewer instructions, byte-identical (frankenredis-nt3a5)
+
+NEGATIVE-LEDGER-FIRST: follow-up to the stream-maps→foldhash swap (tudak). Three more Store side-maps
+still used the std default hasher (SipHash), all DoS-safe:
+- `script_cache` (SHA1-hex `String` → script body): SHA1 keys are the hash of the client's script and
+  are NOT attacker-collidable (would require breaking SHA1 first), so foldhash adds no collision
+  surface. EVALSHA lookup.
+- `function_libraries` (`String` library-name → library): keys set only by the auth-gated FUNCTION
+  LOAD; bounded. FCALL lookup.
+- `stream_pel_summary_cache` ((stream-key, group) tuple → memoized XPENDING histogram): an
+  fr-internal memoization cache, not a Redis dict; its stream-key half is already foldhash-hashed in
+  the keyspace.
+DELIBERATELY LEFT ON SipHash: the pub/sub subscription sets (`subscribed_channels`/`_patterns`/
+`_shard_channels`) — Redis DoS-hardens pubsub, a different posture I won't unilaterally diverge from.
+
+BYTE-IDENTICAL: a hasher swap can't change map contents or lookup results. Compiles with no signature
+ripple; 54 fr-store script/function/pel unit tests pass, 0 failed.
+
+MEASURED (`crates/fr-store/benches/script_cache_hasher.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`aee96113f0dbe3d494d8bebafd967938bb741757d9958659c40a058547f81555`; `HashMap<String,u64>`
+pre-populated with 16 realistic 40-char SHA1-hex keys, get-heavy): foldhash vs SipHash =
+**1.658809x fewer instructions** (conservative — the bench's per-lookup `from_utf8` dilutes BOTH
+arms; production `script_cache` holds owned `String`s with no such overhead). Null median 1.000000021,
+effect CV 0.185530% (elevated null CV 0.269% = concurrent machine load; effect far above the null
+band). Reference frame `probe_reference_sip` self-time ~38.3%. The stream Vec<u8> case measured 2.36x
+(tudak). Rollback: revert the three field types + constructors to the default hasher.
+
 ## 2026-07-13: SHIPPED — stream side-maps use foldhash instead of std SipHash; 2.36x fewer instructions per lookup, byte-identical (frankenredis-tudak)
 
 NEGATIVE-LEDGER-FIRST: the RENAME profile (ywfk6) revealed the four stream side-maps

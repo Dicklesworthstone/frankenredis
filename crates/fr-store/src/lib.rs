@@ -5794,7 +5794,10 @@ pub struct Store {
     /// change, so repeated XPENDING (dashboard/monitoring polling) is O(1) after
     /// the first call. Invalidation over-clears (safe); a debug_assert in
     /// xpending_summary cross-checks the cache against a fresh scan in test/dev.
-    stream_pel_summary_cache: HashMap<StreamPelSummaryCacheKey, StreamPelSummaryCacheValue>,
+    // (perf) foldhash — fr-internal memoization cache, not a Redis dict; the (stream-key, group)
+    // key's stream-key half is already foldhash-hashed in the keyspace. See stream-maps (tudak).
+    stream_pel_summary_cache:
+        HashMap<StreamPelSummaryCacheKey, StreamPelSummaryCacheValue, foldhash::quality::RandomState>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId, foldhash::quality::RandomState>,
     /// Per-stream cumulative entries-added counter used by XINFO.
@@ -5802,7 +5805,9 @@ pub struct Store {
     /// Highest stream entry ID removed via XDEL/XTRIM for each stream key.
     pub stream_max_deleted_ids: HashMap<Vec<u8>, StreamId, foldhash::quality::RandomState>,
     /// Script cache: SHA1 hex string → script body.
-    script_cache: HashMap<String, Vec<u8>>,
+    // (perf) foldhash — keyed by SHA1 hex (not attacker-collidable without breaking SHA1), so no
+    // DoS surface; speeds up every EVALSHA lookup.
+    script_cache: HashMap<String, Vec<u8>, foldhash::quality::RandomState>,
     /// Pub/Sub: channels this client is subscribed to.
     pub subscribed_channels: HashSet<Vec<u8>>,
     /// Pub/Sub: patterns this client is subscribed to.
@@ -5812,7 +5817,9 @@ pub struct Store {
     /// Pub/Sub: pending messages for delivery.
     pub pubsub_pending: Vec<PubSubMessage>,
     /// Function libraries: library_name → FunctionLibrary.
-    function_libraries: HashMap<String, FunctionLibrary>,
+    // (perf) foldhash — library name keys (set by the auth-gated FUNCTION LOAD; bounded), speeds up
+    // every FCALL lookup.
+    function_libraries: HashMap<String, FunctionLibrary, foldhash::quality::RandomState>,
 
     /// Per-field hash TTLs (Redis 7.4 HEXPIRE family). Keyed on
     /// (hash-key-bytes, field-bytes) → absolute expiry in ms-since-epoch.
@@ -6279,16 +6286,16 @@ impl Default for Store {
             cluster_current_epoch: 0,
             cluster_my_config_epoch: 0,
             stream_groups: HashMap::default(),
-            stream_pel_summary_cache: HashMap::new(),
+            stream_pel_summary_cache: HashMap::default(),
             stream_last_ids: HashMap::default(),
             stream_entries_added: HashMap::default(),
             stream_max_deleted_ids: HashMap::default(),
-            script_cache: HashMap::new(),
+            script_cache: HashMap::default(),
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
             subscribed_shard_channels: HashSet::new(),
             pubsub_pending: Vec::new(),
-            function_libraries: HashMap::new(),
+            function_libraries: HashMap::default(),
             hash_field_expires: BTreeMap::new(),
             hash_field_expired_counts: BTreeMap::new(),
             maxmemory_policy: MaxmemoryPolicy::default(),

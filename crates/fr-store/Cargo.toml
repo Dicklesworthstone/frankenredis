@@ -285,3 +285,8 @@ harness = false
 [[bench]]
 name = "stream_map_hasher"
 harness = false
+
+# A/B for the script_cache hasher: foldhash vs std SipHash over SHA1-hex String keys (EVALSHA).
+[[bench]]
+name = "script_cache_hasher"
+harness = false
