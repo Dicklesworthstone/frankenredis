@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — fused inbound multibulk-count parse into one pass; 1.3856x fewer instructions, bit-identical (frankenredis-cxq6j)
+
+NEGATIVE-LEDGER-FIRST: sibling of the per-argument bulk-length fusion (fr5ri, d2bd6ab72). The
+`*N\r\n` multibulk count in `parse_command_args_borrowed_into_inner` — parsed once per command —
+used the same two-pass `read_line` (scan for CRLF) + `parse_i64_strict` (re-scan digits). A shared
+`parse_multibulk_count::<FAST>` now fuses the common positive-count case into one scan+accumulate.
+Leading `0`, negatives (`*-1`/`*-2` → the null-array no-op), non-digit, >18 digits, and any
+malformed/incomplete CRLF FALL THROUGH to the exact prior two-pass path with the same
+`TooBigMbulkCount` / `InvalidMultibulkLength` mapping. Like fr5ri this REMOVES work, so it is not
+loop-context-sensitive.
+
+BIT-IDENTICAL: `parse_multibulk_count::<true>` == `::<false>` for the FULL result — `(len, cursor)`
+incl. NEGATIVE len, every error, and Incomplete — across a hand-picked edge set (leading zero,
+`+3`, ` 3`, `03`, `3x`, `3\rX`, `3`, `3\r`, 19/20-digit) and an exhaustive enumeration over
+{digits, sign, CR, LF, junk} up to length 5 (in-crate `parse_multibulk_count_fast_matches_slow` +
+the bench correctness gate). fr-protocol lib 95/95, golden 41/41, fuzz + oracle green.
+
+MEASURED (`benches/parse_multibulk_count_fastpath.rs`, release-perf, 24 position-balanced
+A/A/reference rounds, 48M realistic `*N\r\n` count parses per arm, host `thinkstation1`, binary
+SHA256 `d9dfc3f769bb3c606c2a0d193b6d6f663d4647ffb2d0acd5af822cb9a8feb373`): candidate ~3.003301B vs
+reference ~4.161301B = **1.385576x fewer instructions (27.83%)**. Null median 1.000000014, p5..p95
+[0.999999748,1.000000268], null CV 0.000017%; effect CV 0.000015%. Reference frame
+`bench_parse_multibulk_count::<false>` self-time ~10.0–12.0%. Rollback: make the call site use
+`parse_multibulk_count::<false>`.
+
 ## 2026-07-13: SHIPPED — fused inbound bulk-length parse into one pass; 1.4696x fewer instructions, bit-identical (frankenredis-fr5ri)
 
 NEGATIVE-LEDGER-FIRST: the reply-encode/itoa vein was saturated, so I pivoted to the INBOUND hot

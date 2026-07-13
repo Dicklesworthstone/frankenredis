@@ -1536,6 +1536,62 @@ pub fn parse_command_args_borrowed_into<'a>(
     }
 }
 
+/// Parse the RESP multibulk count line `<digits>\r\n` at `start`, returning `(len, cursor)` where
+/// `cursor` is the index just past the CRLF. `FAST == true` (production) fuses the common
+/// `<nonzero-digit><digits...>\r\n` POSITIVE count — scan digits, accumulate the value, AND locate
+/// the CRLF in a SINGLE pass — instead of `read_line` (scan for CRLF) then `parse_i64_strict`
+/// (re-scan the digits). Leading `0`, negatives (`*-1` / `*-2`), non-digit, >18 digits, and any
+/// malformed/incomplete CRLF FALL THROUGH to the exact prior two-pass path — with the same
+/// `TooBigMbulkCount` / `InvalidMultibulkLength` mapping — so every `len` (incl. negative), error,
+/// and Incomplete boundary is byte-identical. `FAST == false` forces that slow path for the
+/// same-binary A/B in `benches/parse_multibulk_count_fastpath.rs`.
+#[inline]
+fn parse_multibulk_count<const FAST: bool>(
+    input: &[u8],
+    start: usize,
+) -> Result<(i64, usize), RespParseError> {
+    if FAST
+        && let Some(&first) = input.get(start)
+        && first.is_ascii_digit()
+        && first != b'0'
+    {
+        let mut val = (first - b'0') as u64;
+        let mut i = start + 1;
+        // 1..=18 nonzero-lead digits are always a positive count that fits i64; longer falls back.
+        let digit_limit = start + 18;
+        loop {
+            match input.get(i) {
+                Some(&b) if b.is_ascii_digit() => {
+                    if i >= digit_limit {
+                        break;
+                    }
+                    val = val * 10 + u64::from(b - b'0');
+                    i += 1;
+                }
+                Some(&b'\r') if input.get(i + 1) == Some(&b'\n') => {
+                    return Ok((val as i64, i + 2));
+                }
+                _ => break,
+            }
+        }
+    }
+    let (line, cursor) =
+        read_line(input, start).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    Ok((len, cursor))
+}
+
+/// Bench hook for the same-binary A/B in `benches/parse_multibulk_count_fastpath.rs`.
+/// `FAST = false` forces the prior `read_line` + `parse_i64_strict` two-pass path. Not production.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_multibulk_count<const FAST: bool>(
+    input: &[u8],
+    start: usize,
+) -> Result<(i64, usize), RespParseError> {
+    parse_multibulk_count::<FAST>(input, start)
+}
+
 fn parse_command_args_borrowed_into_inner<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -1546,9 +1602,7 @@ fn parse_command_args_borrowed_into_inner<'a>(
         Some(&other) => return Err(RespParseError::InvalidPrefix(other)),
         None => return Err(RespParseError::Incomplete),
     }
-    let (line, mut cursor) =
-        read_line(input, 1).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let (len, mut cursor) = parse_multibulk_count::<true>(input, 1)?;
     // (frankenredis-6dpyk) Any multibulk count <= 0 is a no-op upstream — `*-2`
     // must not error. Mirror parse_command_frame: every negative count becomes
     // the null-array no-op; `*0` falls through to the empty-args path.
@@ -2336,12 +2390,59 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_push_len_header,
-        decimal_u64_len, decimal_usize_len, encode_aggregate_header, encode_bulk_string_slice,
-        encode_map_header, encode_redis_double, format_redis_double,
+        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_parse_multibulk_count,
+        bench_push_len_header, decimal_u64_len, decimal_usize_len, encode_aggregate_header,
+        encode_bulk_string_slice, encode_map_header, encode_redis_double, format_redis_double,
         parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
         parse_frame, parse_frame_with_config, push_i64, push_redis_double_ascii, push_usize,
     };
+
+    // The fused single-pass multibulk-count fast path must be byte-identical to the prior
+    // read_line + parse_i64_strict two-pass path for the full result — every `len` (incl. negative),
+    // error, and Incomplete boundary — across hand-picked edge cases plus an exhaustive enumeration
+    // over {digits, sign, CR, LF, junk} up to length 5.
+    #[test]
+    fn parse_multibulk_count_fast_matches_slow() {
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"3\r\n".to_vec(),
+            b"0\r\n".to_vec(),
+            b"1\r\n".to_vec(),
+            b"128\r\n".to_vec(),
+            b"1000000\r\n".to_vec(),
+            b"-1\r\n".to_vec(),
+            b"-2\r\n".to_vec(),
+            b"\r\n".to_vec(),
+            b"-\r\n".to_vec(),
+            b"+3\r\n".to_vec(),
+            b" 3\r\n".to_vec(),
+            b"03\r\n".to_vec(),
+            b"007\r\n".to_vec(),
+            b"3x\r\n".to_vec(),
+            b"3\rX\r\n".to_vec(),
+            b"3".to_vec(),
+            b"3\r".to_vec(),
+            b"123".to_vec(),
+            b"".to_vec(),
+            b"1234567890123456789\r\n".to_vec(),
+            b"99999999999999999999\r\n".to_vec(),
+        ];
+        let alphabet = *b"0123\r\n-";
+        for len in 0..=5usize {
+            for mut idx in 0..7usize.pow(len as u32) {
+                let mut buf = Vec::with_capacity(len);
+                for _ in 0..len {
+                    buf.push(alphabet[idx % 7]);
+                    idx /= 7;
+                }
+                cases.push(buf);
+            }
+        }
+        for buf in &cases {
+            let fast = bench_parse_multibulk_count::<true>(buf, 0);
+            let slow = bench_parse_multibulk_count::<false>(buf, 0);
+            assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
+        }
+    }
 
     // The fused single-pass bulk-length fast path must be byte-identical to the prior
     // read_line + parse_i64_strict two-pass path for the full result — including every error and

@@ -48,3 +48,9 @@ harness = false
 [[bench]]
 name = "parse_bulk_slice_fastpath"
 harness = false
+
+# Same-binary A/B for the inbound multibulk-count parse (once per command): fused single-pass
+# scan+accumulate vs the prior read_line + parse_i64_strict two-pass.
+[[bench]]
+name = "parse_multibulk_count_fastpath"
+harness = false
