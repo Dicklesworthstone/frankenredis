@@ -7549,3 +7549,19 @@ per-call amortizes across N keys.) **Probe-fold scoreboard (9 wins): GETBIT 2.4-
 (O(n) popcount → size-dependent), HGET (4-probe + field-TTL reap + clone). Cleanest ones done; the
 rest are diluted/more-involved. The LFU probe-fold vein (record+get→1, ±drop contains_key, ±field-
 split rand) has now cleared the ubiquitous string/keyspace read commands under allkeys-lfu.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU LLEN 3 probes → 1 (rng_seed field split) — **2.20–2.35x**
+
+The collection-length reads (LLEN/SCARD/ZCARD/HLEN) have the SAME clean 3-probe LFU wall (record +
+contains_key + get_mut) + return only a length (no value read/clone) → STRLEN-tier win. Did LLEN:
+folded record+get_mut inline + dropped contains_key, rand on the `&mut self.rng_seed` field split
+(before the type check → present wrong-type key draws + bumps but no touch, then WRONGTYPE — the
+touch is inside the `Value::List` arm). Null-gated A/B (`benches/llen_lfu_collapse.rs`, allkeys-lfu,
+50k 1-elem-list keyspace, median-of-61): n32 **2.345x**, n256 **2.199x** — WIN. Byte/RNG-identical:
+new `llen_lfu_collapsed_matches_threeprobe` (present-list/absent/wrong-type/expired; asserts result,
+`rng_seed`, hits/misses, OBJECT FREQ) + `llen_existing_list_bumps_lfu_frequency`, green via rch.
+Clippy-clean. **Probe-fold scoreboard (10 wins): GETBIT 2.4-2.6x ≈ STRLEN 2.2-2.4x ≈ LLEN 2.2-2.3x >
+TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x > EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x;
+srandmember sub-gate.** SCARD/ZCARD are the identical 3-probe length-read shape (next up, ~2.2x
+each). HLEN is the same but its LFU path may need field-TTL handling (check). Then the diluted tail
+(GETRANGE-clone, bitcount/bitpos-O(n), HGET-4probe+clone).
