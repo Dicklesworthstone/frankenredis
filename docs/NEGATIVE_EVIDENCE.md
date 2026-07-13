@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — packed ZRANK/ZREVRANK WITHSCORE decodes only the matching score; 1.1070x fewer instructions, byte-identical
+
+NEGATIVE-LEDGER-FIRST: the plain packed-rank keep below explicitly left `rank_with_score` unchanged,
+and no rejection covered its internal scan. That scan still called `record_at` for every record,
+decoding and discarding each nonmatching `f64`, even though WITHSCORE observes only the one score on
+the matching member. ONE LEVER: production `PackedZSet::rank_with_score` now parses each member,
+advances arithmetically over the fixed eight score bytes, and decodes the score only after the member
+matches. `rank_with_score_impl::<false>` retains the exact old `record_at` loop in the same binary.
+Both ZRANK and ZREVRANK WITHSCORE benefit through the shared packed helper.
+
+BYTE-IDENTICAL: the focused packed-ZSET test compares candidate and score-decoding reference for
+first/middle/last/missing members, tied scores, and canonical zero behavior. The property gate also
+compares both arms after every generated insert/update/remove sequence. The benchmark correctness
+gate checks all 120 present members, a miss, and the complete residual packed iteration. Focused
+remote `fr-store` test passed.
+
+MEASURED (remote-only, one-binary `packed_zset_rank_with_score`, 24 position-balanced
+A/A/reference rounds, 100,000 last-record hits per arm): worker `vmi1227854`, binary SHA256
+`534b0aed836ecde426c5fc985f1ebf373b1daa094ac893a6ed5c60835aad367e`; candidate median was
+~667.423M instructions versus ~738.823M reference, or **1.106979x reference/candidate** (**9.66%
+fewer instructions**). The A/A null median was **0.999999939**, p5..p95
+**[0.999999026, 1.000001366]**, CV **0.000083%**; effect CV **0.000061%**. `perf record` verified the
+old `PackedZSet::rank_with_score_impl::<false>` at **27.82% median self-time**, CV **20.4003%**
+(three trials), so the timed workload reached the changed function. Rollback: make
+`PackedZSet::rank_with_score` call `rank_with_score_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — packed ZPOPMAX skips discarded score decodes while locating the tail; 1.4227x fewer instructions, byte-identical
 
 The negative ledger ruled out the earlier ZPOPMAX TTL-guard and full-representation bulk-drain

@@ -4805,15 +4805,42 @@ impl PackedZSet {
     }
 
     /// (CrimsonHawk) Rank + score in one scan for `ZRANK ... WITHSCORE` — the score is
-    /// already decoded per record, so returning it avoids a second `get_score` pass.
+    /// decoded only for the matching record, while returning it still avoids a second
+    /// `get_score` pass.
     #[must_use]
     pub fn rank_with_score(&self, member: &[u8]) -> Option<(usize, f64)> {
+        self.rank_with_score_impl::<true>(member)
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Rank needs only each member until a
+    /// match, so production skips every nonmatching fixed-width score. `MEMBER_ONLY=false` retains
+    /// the exact pre-change `record_at` traversal.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn rank_with_score_impl<const MEMBER_ONLY: bool>(
+        &self,
+        member: &[u8],
+    ) -> Option<(usize, f64)> {
         let mut pos = 0;
         let mut idx = 0;
+        if !MEMBER_ONLY {
+            while pos < self.buf.len() {
+                let (decoded_member, score, end) = self.record_at(pos);
+                if decoded_member == member {
+                    return Some((idx, score));
+                }
+                idx += 1;
+                pos = end;
+            }
+            return None;
+        }
         while pos < self.buf.len() {
-            let (m, s, end) = self.record_at(pos);
-            if m == member {
-                return Some((idx, s));
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            let m_end = m_start + mlen;
+            let end = m_end + 8;
+            if self.buf[m_start..m_end] == *member {
+                let mut score_bytes = [0; 8];
+                score_bytes.copy_from_slice(&self.buf[m_end..end]);
+                return Some((idx, f64::from_le_bytes(score_bytes)));
             }
             idx += 1;
             pos = end;
@@ -6127,6 +6154,11 @@ mod tests {
                 z.rank_impl::<false>(member),
                 "member-only rank diverged from score-decoding reference"
             );
+            assert_eq!(
+                z.rank_with_score(member),
+                z.rank_with_score_impl::<false>(member),
+                "member-only rank-with-score diverged from score-decoding reference"
+            );
         }
         assert!(z.remove(b"a"));
         assert!(!z.remove(b"a"));
@@ -6210,8 +6242,16 @@ mod tests {
                 for (i, (m, _)) in sorted.iter().enumerate() {
                     prop_assert_eq!(packed.rank(m), Some(i));
                     prop_assert_eq!(packed.rank(m), packed.rank_impl::<false>(m));
+                    prop_assert_eq!(
+                        packed.rank_with_score(m),
+                        packed.rank_with_score_impl::<false>(m)
+                    );
                 }
                 prop_assert_eq!(packed.rank(b"missing"), packed.rank_impl::<false>(b"missing"));
+                prop_assert_eq!(
+                    packed.rank_with_score(b"missing"),
+                    packed.rank_with_score_impl::<false>(b"missing")
+                );
                 // iter_desc == reversed sorted
                 let desc: Vec<(Vec<u8>, f64)> =
                     packed.iter_desc().map(|(m, s)| (m.to_vec(), s)).collect();
