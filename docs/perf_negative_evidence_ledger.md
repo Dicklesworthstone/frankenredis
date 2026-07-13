@@ -7762,3 +7762,33 @@ DECISION: **REVERTED** the LSET code (byte-identical + tested, but not a measura
 per commit-or-negative-ledger). VEIN LESSON: prioritize BORROWED-arg writes (fields/members) — they gate
 cleanly. OWNED-value writes (LSET, GETSET, APPEND-grows) dilute the single-probe collapse below the
 wallclock gate; confirm via instructions:u before shipping, or skip.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`48c26f2f2`). LFU SETBIT write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.42x (n32)**
+
+Third member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]),
+chosen per the LSET lesson: BORROWED-arg writes gate cleanly. SETBIT takes `(offset: usize, value:
+bool)` — NO owned value — so the single-bit op keeps the eliminated probe a meaningful fraction
+(LSET's owned `Vec<u8>` diluted it below the gate → reverted). Under allkeys-lfu SETBIT did two
+`entries` probes: a `contains_key` LFU rand-gate + `with_mutated_entry`'s `get_mut`. The collapse
+resolves the entry with a single get_mut-first probe, draws `rand_sample` on the disjoint
+`&mut self.rng_seed` field split, and INLINES `with_mutated_entry`'s exact stale/fresh digest
+bookkeeping (the `&mut Entry` closure cannot reach `self.rng_seed`); the absent-key CREATE branch is
+shared/unchanged. Byte/RNG/digest-identical: the LFU bump is digest-neutral (`entry_state_digest`
+hashes only key+value+expiry), so `old_hash` is the same before/after it; the field-split draw
+advances `rng_seed` exactly as `next_rand`, present-key-gated as before; LFU off both arms do identical
+work. Const-generic `setbit_impl<COLLAPSE>` + `#[doc(hidden)] setbit_lfu_twoprobe_bench` + shared
+`setbit_apply` mutation helper.
+
+A/B (`benches/setbit_lfu_collapse.rs`, allkeys-lfu, 50k bitmaps, SETBIT bit 0 = idempotent /
+non-growing / no per-call alloc, common already-stale-digest path, median-of-61, machine loaded):
+n32 **1.419x** (null med 1.0073, p5..p95 [0.796, **1.223**], cv 13.90%) = clean gate-clear WIN; n256
+**1.219x** (null med 0.9514, p5..p95 [0.530, **1.753**], cv **39.60%**) = directional but NOISE-DROWNED
+(machine load spike, unusable band — the reliable low-cv n32 measurement IS the WIN; n256 discarded,
+NOT counter-evidence; contrast LSET whose BOTH sizes were cleanly indistinguishable at low cv). Gated by
+`setbit_lfu_collapsed_matches_twoprobe` (set / clear / unchanged / grow-past-
+length bit, integer-encoded string, absent-create, wrongtype, expired-create × LFU on&off × stale&fresh
+digest — asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store lib suite correctness pass.
+
+VEIN: HDEL + SETBIT (with_mutated_entry, borrowed-arg) landed; SREM (concurrent, borrowed members) in
+flight; LSET (owned value) reverted sub-gate. Remaining with_mutated_entry write: setrange (borrowed
+&[u8], but heavier memcpy). ~36 sites left; borrowed-arg first.
