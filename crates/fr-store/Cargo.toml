@@ -280,3 +280,8 @@ harness = false
 [[bench]]
 name = "rename_stream_relink"
 harness = false
+
+# A/B for the stream side-map hasher: foldhash vs the prior std SipHash, over stream-key lookups.
+[[bench]]
+name = "stream_map_hasher"
+harness = false

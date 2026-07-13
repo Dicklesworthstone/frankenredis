@@ -5782,7 +5782,10 @@ pub struct Store {
     /// CLUSTER epoch admin paths need both even before a peer registry exists.
     pub cluster_current_epoch: u64,
     pub cluster_my_config_epoch: u64,
-    stream_groups: HashMap<Vec<u8>, StreamGroupState>,
+    // (perf) foldhash, not SipHash: keyed by the stream KEY (already foldhash-hashed in the main
+    // `entries` keyspace + expiry/HLL/DUMP side-maps), so this adds no DoS surface but makes every
+    // XADD/XGROUP/XACK/XREAD + cleanup lookup a fast hash. See RENAME ledger (ywfk6).
+    stream_groups: HashMap<Vec<u8>, StreamGroupState, foldhash::quality::RandomState>,
     /// (frankenredis-b0exs) Memoized XPENDING-summary per-consumer histograms,
     /// keyed by (stream key, group name). Building the histogram is an O(P) scan
     /// of the whole pending-entries-list; redis keeps per-consumer PELs and
@@ -5793,11 +5796,11 @@ pub struct Store {
     /// xpending_summary cross-checks the cache against a fresh scan in test/dev.
     stream_pel_summary_cache: HashMap<StreamPelSummaryCacheKey, StreamPelSummaryCacheValue>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
-    stream_last_ids: HashMap<Vec<u8>, StreamId>,
+    stream_last_ids: HashMap<Vec<u8>, StreamId, foldhash::quality::RandomState>,
     /// Per-stream cumulative entries-added counter used by XINFO.
-    stream_entries_added: HashMap<Vec<u8>, u64>,
+    stream_entries_added: HashMap<Vec<u8>, u64, foldhash::quality::RandomState>,
     /// Highest stream entry ID removed via XDEL/XTRIM for each stream key.
-    pub stream_max_deleted_ids: HashMap<Vec<u8>, StreamId>,
+    pub stream_max_deleted_ids: HashMap<Vec<u8>, StreamId, foldhash::quality::RandomState>,
     /// Script cache: SHA1 hex string → script body.
     script_cache: HashMap<String, Vec<u8>>,
     /// Pub/Sub: channels this client is subscribed to.
@@ -6275,11 +6278,11 @@ impl Default for Store {
             cluster_assigned_slots: BTreeSet::new(),
             cluster_current_epoch: 0,
             cluster_my_config_epoch: 0,
-            stream_groups: HashMap::new(),
+            stream_groups: HashMap::default(),
             stream_pel_summary_cache: HashMap::new(),
-            stream_last_ids: HashMap::new(),
-            stream_entries_added: HashMap::new(),
-            stream_max_deleted_ids: HashMap::new(),
+            stream_last_ids: HashMap::default(),
+            stream_entries_added: HashMap::default(),
+            stream_max_deleted_ids: HashMap::default(),
             script_cache: HashMap::new(),
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),

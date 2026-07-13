@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — stream side-maps use foldhash instead of std SipHash; 2.36x fewer instructions per lookup, byte-identical (frankenredis-tudak)
+
+NEGATIVE-LEDGER-FIRST: the RENAME profile (ywfk6) revealed the four stream side-maps
+(`stream_groups` / `stream_last_ids` / `stream_entries_added` / `stream_max_deleted_ids`) use the
+std default hasher (SipHash) — ~72% of that bench's reference arm was `RandomState::hash_one` +
+`DefaultHasher::write`. They are keyed by the STREAM KEY, yet the main keyspace `entries` map and the
+`expiry_deadlines` / `hll_register_cache` / `dump_payload_cache` side-maps — keyed by the SAME
+user-controlled keys — already use `foldhash::quality::RandomState`. Switched the four stream maps to
+foldhash too (field types + the four `HashMap::new()` → `HashMap::default()` constructors; the RDB
+restore path writes per-item via `.insert()`, so no bulk-assign type change).
+
+DoS-SAFE: those keys are already foldhash-hashed in the main keyspace, so a fast hasher on the stream
+side-maps adds NO collision surface an attacker couldn't already reach. Speeds up every XADD /
+XREAD / XACK / XGROUP / XINFO lookup + the (guarded) cleanups when streams exist.
+
+BYTE-IDENTICAL: a hasher swap can't change map contents or lookup results. 319 fr-store stream/x
+unit tests pass; 794/795 total pass. The lone failure — `zadd_insert_move_matches_clone_and_reports_ab_ratio`,
+a wall-clock timing-ratio test on zset code my change can't touch — is load-flaky: it passes 2/3 in
+isolation and passes on HEAD (three such `*_ab_ratio`/`*_faster_*` tests flaked this session under
+sustained machine load).
+
+MEASURED (`crates/fr-store/benches/stream_map_hasher.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`c557baa72314824f8b98241f29937a89d1322df263b6d82a8c3778e029fec3fb`; a `HashMap<Vec<u8>,u64>`
+pre-populated with 16 realistic stream keys, get-heavy): foldhash vs SipHash lookups =
+**2.363523x fewer instructions**. Null median 0.999999996, effect CV 0.109570% (elevated null CV
+0.185628% reflects concurrent machine load; the effect is far above the null band). Reference frame
+`probe_reference_sip` self-time ~58.9%. Rollback: revert the four field types + constructors to the
+default hasher.
+
 ## 2026-07-13: SHIPPED — RENAME gates its 8 stream side-map removes on a has_stream_metadata flag; isolated relink 58.2x fewer instructions, byte-identical (frankenredis-ywfk6)
 
 NEGATIVE-LEDGER-FIRST: third site in the fr-store empty-sidemap-guard vein (after DEL 5998y and
