@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — empty-guard the stream side-map removes on two more general-write paths; byte-identical (frankenredis-qxjvv)
+
+NEGATIVE-LEDGER-FIRST: follow-up to the DEL guard (5998y). `drop_stream_side_metadata` (30 callers)
+already `is_empty()`-guards the two stream side-map removes, but a survey found two GENERAL-write
+paths still doing them UNCONDITIONALLY (the plain-SET path is fine — guarded on `old_was_stream`):
+- `set_with_abs_expiry` — SET EXAT/PXAT/KEEPTTL overwrite — removed `stream_groups`/`stream_last_ids`
+  for the key unconditionally.
+- the set-algebra STORE empty-destination path (SINTER/SUNION/SDIFFSTORE producing an empty set →
+  delete destination) — same unconditional pair on `destination`.
+Both are exactly `drop_stream_side_metadata`'s body, so both were replaced with a call to that
+already-guarded helper. On a stream-free DB the key is absent from both maps → two wasted
+foldhash+probes skipped per op.
+
+BYTE-IDENTICAL: the helper does the same two removes, `is_empty()`-guarded (an empty-map remove is a
+no-op; a stale entry keeps the map non-empty and is still removed). 341 fr-store set/store/stream/
+expire unit tests pass. (The unrelated `zset_index_slice_treap..._ab_ratio` wall-clock timing test
+flaked under load again — confirmed it passes in isolation.)
+
+MEASURED: identical operation to the DEL cleanup — re-ran `benches/del_stream_cleanup.rs`
+(release-perf, 24 rounds): the guarded pair is **19.480974x fewer instructions** than the
+unconditional pair (2 `is_empty()` checks vs 2 foldhash+probes), null median 1.000000091. End-to-end
+gain ∝ the cleanup's share of each write. Rollback: restore the two inline `remove` calls at both
+sites.
+
 ## 2026-07-13: SHIPPED — DEL skips the stream side-map cleanup on stream-free DBs; isolated cleanup 19.48x fewer instructions, byte-identical (frankenredis-5998y)
 
 NEGATIVE-LEDGER-FIRST + PIVOT (command dispatch + parse-fusion veins closed): `Store::del` called

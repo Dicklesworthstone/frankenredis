@@ -7536,8 +7536,10 @@ impl Store {
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if self.internal_entries_remove(destination).is_some() {
-            self.stream_groups.remove(destination);
-            self.stream_last_ids.remove(destination);
+            // (perf) Use the empty-guarded helper instead of two unconditional removes: on a
+            // stream-free DB the destination is absent from both side-maps, so this skips two
+            // wasted foldhash+probes. Byte-identical (empty-map remove is a no-op). See DEL (5998y).
+            self.drop_stream_side_metadata(destination);
             self.dirty = self.dirty.saturating_add(1);
         }
         count
@@ -7998,8 +8000,10 @@ impl Store {
         } else {
             0
         };
-        self.stream_groups.remove(key.as_slice());
-        self.stream_last_ids.remove(key.as_slice());
+        // (perf) Empty-guarded helper vs two unconditional removes: a SET EXAT/PXAT/KEEPTTL that
+        // overwrites a non-stream key on a stream-free DB skips two wasted foldhash+probes.
+        // Byte-identical (empty-map remove is a no-op). See DEL (5998y).
+        self.drop_stream_side_metadata(key.as_slice());
         let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
