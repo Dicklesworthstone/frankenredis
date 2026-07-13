@@ -334,3 +334,9 @@ harness = false
 [[bench]]
 name = "eviction_count_len"
 harness = false
+
+# A/B for the RANDMEMBER/RANDFIELD COUNT distinct-index dedup: HashSet<usize> default SipHash
+# vs foldhash on the exact `picked` loop. Byte-identical index sequence (dedup by value).
+[[bench]]
+name = "sampling_dedup_foldhash"
+harness = false

@@ -7302,3 +7302,31 @@ sub-gate probe before asking *what it revealed*. (c) This REFUTES my own two ear
 exhausted" entries THIS session — a real 8x sat in the eviction path the whole time. The
 "exhausted" calls were drive-by-only; profiling a colder-looking command family (eviction) still
 had a large structural lever. Don't over-trust "exhausted" for command families nobody bench-swept.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. RANDMEMBER/RANDFIELD/ZRANDMEMBER `COUNT` distinct-index dedup — foldhash not SipHash (isolated dedup **1.6–2.1x**)
+
+Direct application of the eviction "SipHash trap" vein above. The distinct-index rejection-sampling
+loop shared by `srandmember_count` / `hrandfield_count` / `zrandmember` + their borrow-scan twins
+(8 sites: `let mut picked = HashSet::with_capacity(n)`) drew `next_rand() % len` and dedup'd into a
+**std `HashSet<usize>` = default SipHash** — a cryptographic hash per `insert` — until `n` distinct
+indices were chosen. Swapped all 8 to `HashSet::with_capacity_and_hasher(n,
+foldhash::quality::RandomState::default())` (the hasher the `entries` keyspace already uses).
+BYTE/RNG-IDENTICAL: the dedup is BY VALUE, so the hasher changes nothing about which indices are
+drawn or kept — the sampled index sequence, `next_rand()` draw count, and final members are all
+unchanged. Confirmed by the bench's own `dedup_siphash == dedup_foldhash` assert AND 24 rand lib
+tests incl. `srandmember_count_borrow_scan_matches_clone`, `hrandfield_count_{field,pair}_borrow_
+scan_matches_clone`, `zrandmember_count_{withscores,member}_borrow_scan_matches_clone`,
+`srandmember_count_avoids_materializing_whole_set` (all green via rch).
+
+Null-gated same-binary A/B on the ISOLATED dedup loop (`benches/sampling_dedup_foldhash.rs`,
+median-of-61, SplitMix64 stand-in for `next_rand`): n16/len100k **1.69x**, n256/len100k **1.95x**,
+n1000/len100k **2.10x**, n511/len1024 **1.61x**, n500/len2048 **1.76x** — all WIN, candidate median
+outside null p5..p95. **CAVEAT (honest):** this isolates the hasher on the dedup loop; the
+END-TO-END RANDMEMBER/RANDFIELD `COUNT` share is smaller (the command also materializes the sampled
+members via `get_index` + clone), so the whole-command win is a fraction of 1.6-2.1x — largest for
+big-COUNT sampling of small members. Shipped as a Pareto-safe swap (foldhash strictly ≤ SipHash cost
+for `usize`, never regresses), not a whole-command gate-clearing number. Committed with the eviction
+win's REUSABLE rule: grep `HashSet::`/`HashMap::…with_capacity(`/`::new(` (default `RandomState`)
+used in per-command loops → swap to `foldhash::quality::RandomState`. Remaining default-SipHash sets
+audited: `subscribed_channels/patterns` (pubsub, membership — small), ACL `allowed/denied_*`
+(config-cold), `members_at_indices` `needed`/`by_idx` (Packed-only ≤128, minor) — none clean levers.

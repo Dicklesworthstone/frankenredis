@@ -14704,7 +14704,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -14795,7 +14800,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -14894,7 +14904,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -18257,7 +18272,12 @@ impl Store {
             if n < len / 2 && n < 1024 {
                 // Rejection sampling for a small distinct subset.
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -18348,7 +18368,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -21972,7 +21997,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -22057,7 +22087,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
@@ -22151,7 +22186,12 @@ impl Store {
             let n = (count as usize).min(len);
             if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
-                let mut picked = HashSet::with_capacity(n);
+                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
+                // drawn `usize` indices by value (hasher-independent, so the sampled index
+                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
+                // the isolated loop. Same hasher the keyspace `entries` map uses.
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
                 while idxs.len() < n {
                     let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
