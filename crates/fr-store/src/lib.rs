@@ -27145,7 +27145,14 @@ impl Store {
         let Some(entry) = self.internal_entries_remove(source) else {
             return Ok(false);
         };
-        self.last_del_removed.push(source.to_vec());
+        // (frankenredis-3iqm5) `last_del_removed` is consumed ONLY under `notify_keyspace_events
+        // != 0` (see `del`), so the source-key clone is wasted when notifications are off — the
+        // default. Gate it on the SAME flag `del` uses, restoring the move==copy+del equivalence
+        // (`del` also skips its push when notifications are off) and eliding the clone on the
+        // common path. Byte-identical to what copy+del now produces.
+        if self.notify_keyspace_events != 0 {
+            self.last_del_removed.push(source.to_vec());
+        }
         self.internal_entries_insert_with_expiry(
             destination.to_vec(),
             entry.into_duplicate_for_copy(now_ms),

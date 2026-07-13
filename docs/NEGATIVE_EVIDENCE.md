@@ -17913,3 +17913,16 @@ overstates end-to-end — the four probes are a fraction of RENAMENX's full reli
 fraction on no-stream DBs. Remaining unguarded stream-remove siblings (SMOVE empty-source 18253, eviction 12022,
 move_existing_no_stat) are lower-freq follow-ups. Rollback: drop the `has_stream_metadata` flag, restore the four
 unconditional source `remove`s.
+
+### 2026-07-13 FIX+SHIPPED (MOVE's last_del_removed clone notify-gated — restores move==copy+del after 8f60d77b0)
+REGRESSION CAUGHT by the full fr-store suite (`move_heap_string_relink_matches_copy_delete_fallback`, a MOVE
+differential asserting `move_existing_no_stat` == copy+`del` field-for-field): my DEL clone-gate `8f60d77b0` made
+`del` skip its `last_del_removed.push` when notifications are off (default), but `move_existing_no_stat` still pushed
+the source key UNCONDITIONALLY → candidate `[source]` != fallback `[]`. LESSON: run the FULL `cargo test -p fr-store
+--lib` before a commit touching a widely-asserted field like `last_del_removed`, not just the targeted test (8f60d77b0
+shipped with this latent failure because I ran only the DEL test). FIX = the exact sibling the 8f60d77b0 ledger
+flagged as "untouched": gate MOVE's `last_del_removed.push(source.to_vec())` on `notify_keyspace_events != 0`, the
+SAME flag `del` uses. Restores the equivalence in BOTH notify states (off → both empty; on → both `[source]`) and
+elides the clone on the common no-notify path (MOVE never even consumes `last_del_removed` — the runtime takes it
+only for DEL/UNLINK — so this is byte-identical in production regardless). Gated by the now-green full suite (797
+pass). Rollback: restore the unconditional `self.last_del_removed.push(source.to_vec())`.
