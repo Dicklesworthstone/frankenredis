@@ -7820,3 +7820,26 @@ digest — asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store
 VEIN: HDEL + SETBIT (with_mutated_entry, borrowed-arg) landed; SREM (concurrent, borrowed members) in
 flight; LSET (owned value) reverted sub-gate. Remaining with_mutated_entry write: setrange (borrowed
 &[u8], but heavier memcpy). ~36 sites left; borrowed-arg first.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`c506f6066`). LFU SETRANGE write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.34-1.35x**
+
+Fourth member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]),
+borrowed-value write. SETRANGE under allkeys-lfu did two `entries` probes: a `contains_key` LFU
+rand-gate (shared by BOTH the empty-value length path AND the mutating path) + `with_mutated_entry`'s
+`get_mut`. The collapse resolves the entry with a single get_mut-first probe on BOTH paths, drawing
+`rand_sample` on the disjoint `&mut self.rng_seed` field split, and inlines `with_mutated_entry`'s exact
+stale/fresh digest bookkeeping on the mutating path; the absent-key create branch is shared/unchanged.
+Byte/RNG/digest-identical: the LFU bump is digest-neutral, so `old_hash` is the same before/after it;
+the field-split draw advances `rng_seed` exactly as `next_rand`, present-key-gated as before. Borrowed
+value slice (`&[u8]`, NO owned alloc) — a small-range write keeps the probe a meaningful fraction
+(contrast owned-value LSET, sub-gate/reverted). Const-generic `setrange_impl<COLLAPSE>` +
+`setrange_lfu_twoprobe_bench` + shared `setrange_apply`.
+
+A/B (`benches/setrange_lfu_collapse.rs`, allkeys-lfu, 50k 8-byte strings, SETRANGE 1-byte in-bounds
+overwrite = non-growing / borrowed value, common already-stale-digest path, median-of-61):
+n32 **1.351x** (null med 1.0042, p5..p95 [0.824, **1.280**], cv 13.35%); n256 **1.342x** (null med 1.0266, p5..p95 [0.818, **1.193**], cv 11.81%) — BOTH clean gate-clear WINs. Gated by `setrange_lfu_collapsed_matches_twoprobe` (overwrite / extend / gap-fill /
+empty-value / absent-create / wrongtype / expired × LFU on&off × stale&fresh digest — asserts result,
+RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store lib suite correctness pass.
+
+VEIN with_mutated_entry-family: HDEL 1.585x, SETBIT 1.42x, SETRANGE 1.35x (borrowed-arg all gate);
+LSET (owned value) reverted sub-gate; SREM (concurrent, borrowed members). Borrowed-arg rule holds.
