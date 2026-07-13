@@ -427,3 +427,10 @@ harness = false
 [[bench]]
 name = "hstrlen_lfu_collapse"
 harness = false
+
+# A/B for LFU HEXISTS probe collapse: no-field-TTL fast path skips the reap + folds record+get_mut +
+# drops contains_key via rng_seed field-split (1 probe) vs the prior 3-probe form; HEXISTS returns
+# only a bool so probes dominate. Byte/RNG-identical.
+[[bench]]
+name = "hexists_lfu_collapse"
+harness = false
