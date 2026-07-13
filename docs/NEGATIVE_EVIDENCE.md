@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: REJECTED (SUB-GATE) — direct-write `write_i64_to_slice` (no tmp+copy) is only +0.51%, below the 1% keep gate
+
+NEGATIVE-LEDGER-FIRST: `write_i64_to_slice` (the "digits into a caller slice" helper behind the
+double/score reply formatter — ZSCORE / ZRANGE WITHSCORES / GEODIST / ZADD-INCR reply) builds the
+digits in a `[0u8;20]` `tmp` via `write_u64_digits` then `copy_from_slice`s them into `buf` — a
+double touch of the digits + a stack zero-init. Candidate wrote them ONCE, right-aligned, directly
+into `buf` (width = `decimal_u64_len(val)`, two-at-a-time `DIGIT_PAIRS` loop ending at `total`), no
+tmp, no copy. BIT-IDENTICAL over [-300000,300000] + i64/i32 boundaries (in-crate test + bench gate).
+
+MEASURED (`benches/write_i64_to_slice_fastpath.rs`, release-perf, 24 rounds, 48M writes/arm of a
+realistic small-score corpus, host `thinkstation1`, binary SHA256
+`870d7b42421341bd7657bcb3167d39131e2def0912e356b1fd0fc60274058c68`): candidate ~3.531301B vs
+reference ~3.549300B = **1.005097x reference/candidate — only 0.51% fewer instructions**. Null
+median 1.000000055, effect CV 0.000011% (a real, tight, non-noise improvement) — but it FAILS the
+harness keep gate (`effect_median <= 1.01`). WHY SO SMALL: for the dominant small scores (1–4
+digits) the avoided `copy_from_slice` is 1–4 bytes and the compiler already elides most of the
+`tmp` zero-init, while the direct path ADDS a `decimal_u64_len` (ilog10) call — roughly a wash. The
+avoided copy only pays off for many-digit values, which are rarer. REVERTED (production stays on
+tmp+copy); removed the bench/hook/test to keep the tree clean. Don't re-attempt without a
+digit-heavy score workload that clears the 1% gate.
+
 ## 2026-07-13: CONFIRMED — the shipped bab278487 bulk-string header fusion still wins ~12.8% WITH a body present (resolves the "suspect" caveat)
 
 FOLLOW-THROUGH on the 2026-07-13 REVERTED entry, which flagged that bab278487's borrow helpers were
