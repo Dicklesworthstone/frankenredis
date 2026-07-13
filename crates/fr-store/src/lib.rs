@@ -10787,10 +10787,42 @@ impl Store {
                     Value::Stream(_) => ValueType::Stream,
                 });
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return None;
-        }
-        let entry = self.entries.get(key)?;
+        self.value_type_lfu_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU TYPE keyspace-probe collapse. TYPE draws NO RNG and does NOT touch
+    /// access, so `COLLAPSE = true` (shipped) simply folds `record_keyspace_lookup` (drop_if_expired
+    /// probe + hit/miss) + the `get` into ONE probe — the same fold `lookup_live_for_read_mut` does
+    /// (value_type only branches here because that helper asserts non-LFU). No field split is needed
+    /// (no `next_rand`). `false` is the prior two-probe form. Byte-identical: same hit/miss
+    /// accounting, same lazy-expiry, same type. Only reached with LFU tracking on.
+    fn value_type_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<ValueType> {
+        let entry = if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return None;
+            }
+            match self.entries.get(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    entry
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    return None;
+                }
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return None;
+            }
+            self.entries.get(key)?
+        };
         Some(match &entry.value {
             Value::String(_) => ValueType::String,
             Value::Integer(_) => ValueType::String,
@@ -10800,6 +10832,18 @@ impl Store {
             Value::SortedSet(_) => ValueType::ZSet,
             Value::Stream(_) => ValueType::Stream,
         })
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn value_type_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
+        self.value_type_lfu_impl::<true>(key, now_ms)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn value_type_lfu_twoprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
+        self.value_type_lfu_impl::<false>(key, now_ms)
     }
 
     #[must_use]
@@ -46448,6 +46492,34 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn value_type_lfu_collapsed_matches_twoprobe() {
+        // Under allkeys-lfu the collapsed TYPE (one fold `get`, no RNG, no touch) must be
+        // byte-identical to the prior record + get two-probe form across value types, an absent key,
+        // and an expired key: result, keyspace hits/misses, and RNG state (neither draws).
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.rpush(b"list", &[b"a".to_vec()], 1).unwrap();
+            s.hset(b"hash", b"f".to_vec(), b"v".to_vec(), 1).unwrap();
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1);
+            s
+        }
+        let now = 10;
+        for key in [b"str".as_slice(), b"list", b"hash", b"absent", b"ttl"] {
+            let mut a = build();
+            let mut b = build();
+            let ra = a.value_type_lfu_collapsed_bench(key, now);
+            let rb = b.value_type_lfu_twoprobe_bench(key, now);
+            assert_eq!(ra, rb, "type key={key:?}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
+            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
+            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+        }
     }
 
     #[test]

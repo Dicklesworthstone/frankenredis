@@ -7515,3 +7515,20 @@ same-shape: GETRANGE-small / EXISTS / TYPE / HGET (HGET is 4-probe incl a field-
 field value → smaller/more-involved; the string-bit-length trio are the cleanest). The 3-probe
 (redundant-`contains_key`) commands win MORE than 2-probe ones; the win tracks probe-count × (1 −
 other-work-fraction).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU TYPE 2 probes → 1 (plain fold, NO RNG) — **1.83–1.94x**
+
+The cleanest collapse: TYPE (`value_type`) draws NO RNG and does NOT touch access, so its LFU path
+(record_keyspace_lookup + `get`, 2 probes) folds into ONE `get` with no field split, no rand, no
+bump — value_type only branched to the 2-probe form because `lookup_live_for_read_mut` asserts
+non-LFU. Inlined the expiry-peek + `get` + hit/miss accounting (byte-identical to the helper).
+TYPE returns only a type enum discriminant (no value borrow), so its 2→1 is 1.9x — HIGHER than GET's
+2→1 (1.6x, which at least borrows the value). Null-gated A/B (`benches/type_lfu_collapse.rs`,
+allkeys-lfu, 50k keyspace, looped single-TYPEs, median-of-61): n32 **1.938x**, n256 **1.826x** — WIN.
+Byte-identical: new `value_type_lfu_collapsed_matches_twoprobe` (string/list/hash/absent/expired;
+asserts result, `rng_seed` unchanged, hits/misses) + `value_type_returns_string_or_none`, green via
+rch. Clippy-clean. Confirms win ≈ probe-count × (1 − other-work-fraction): TYPE (2 probes, ~0 work) >
+GET (2 probes, value borrow). **Field-split/probe-fold scoreboard (8 wins): GETBIT 2.4-2.6x ≈
+STRLEN 2.2-2.4x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x > spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x;
+srandmember sub-gate.** Remaining tiny-work single-key LFU walls: EXISTS (2-probe, +touch/rand),
+GETRANGE-small (clones substring → diluted), bitcount/bitpos-small (3-probe but O(n) popcount).

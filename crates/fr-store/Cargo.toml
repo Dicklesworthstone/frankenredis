@@ -376,3 +376,9 @@ harness = false
 [[bench]]
 name = "getbit_lfu_collapse"
 harness = false
+
+# A/B for LFU TYPE probe collapse: fold record+get into 1 probe (no RNG, no touch) vs the prior
+# 2-probe form; TYPE returns only a type enum so probes are all its work. Byte-identical.
+[[bench]]
+name = "type_lfu_collapse"
+harness = false
