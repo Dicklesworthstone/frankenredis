@@ -8221,6 +8221,34 @@ impl Store {
         }
     }
 
+    /// Bench hook for `benches/renamenx_stream_relink.rs`: isolates RENAMENX's FOUR source stream
+    /// side-map removes (RENAMENX never overwrites newkey, so unlike RENAME there are no destination
+    /// clears). `GUARD = true` is production (gate the four on one `has_stream_metadata` flag);
+    /// `GUARD = false` is the prior unconditional four. On a stream-free store all four are no-ops
+    /// (the key is absent) — byte-identical; only the wasted foldhash+probes differ. Not on a
+    /// production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_renamenx_stream_relink<const GUARD: bool>(&mut self, key: &[u8]) {
+        if GUARD {
+            let has_stream_metadata = !self.stream_groups.is_empty()
+                || !self.stream_last_ids.is_empty()
+                || !self.stream_entries_added.is_empty()
+                || !self.stream_max_deleted_ids.is_empty();
+            if has_stream_metadata {
+                self.stream_entries_added.remove(key);
+                self.stream_max_deleted_ids.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+            }
+        } else {
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+        }
+    }
+
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -10882,16 +10910,44 @@ impl Store {
         if self.entries.contains_key(newkey) {
             return Ok(false);
         }
-        let moved_entries_added = self.stream_entries_added.remove(key);
-        let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
+        // (frankenredis-3iqm5-sib) RENAMENX relinks the FOUR source stream side-maps key->newkey,
+        // but only a stream key ever populates them. Gate all four source removes on a single
+        // `has_stream_metadata` flag (mirrors RENAME `0c03d7a58`, which this sibling missed) — on a
+        // stream-free store (the common case) each `remove` is a wasted foldhash+probe. Byte-
+        // identical: an empty-map remove is a no-op returning None, so `moved_*` stay None and the
+        // re-insert blocks below are skipped exactly as before. RENAMENX never overwrites `newkey`
+        // (it returned Ok(false) above if newkey existed), so unlike RENAME there are no newkey
+        // clears to gate.
+        let has_stream_metadata = !self.stream_groups.is_empty()
+            || !self.stream_last_ids.is_empty()
+            || !self.stream_entries_added.is_empty()
+            || !self.stream_max_deleted_ids.is_empty();
+        let moved_entries_added = if has_stream_metadata {
+            self.stream_entries_added.remove(key)
+        } else {
+            None
+        };
+        let moved_max_deleted_id = if has_stream_metadata {
+            self.stream_max_deleted_ids.remove(key)
+        } else {
+            None
+        };
         // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
         let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
         entry.refresh_db_add_metadata(now_ms);
-        let moved_groups = self.stream_groups.remove(key);
-        let moved_last_id = self.stream_last_ids.remove(key);
+        let moved_groups = if has_stream_metadata {
+            self.stream_groups.remove(key)
+        } else {
+            None
+        };
+        let moved_last_id = if has_stream_metadata {
+            self.stream_last_ids.remove(key)
+        } else {
+            None
+        };
         self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
@@ -43250,6 +43306,39 @@ mod tests {
         let mut store = Store::new();
         let err = store.renamenx(b"missing", b"new", 0).expect_err("renamenx");
         assert_eq!(err, StoreError::KeyNotFound);
+    }
+
+    #[test]
+    fn renamenx_relinks_all_four_stream_side_maps() {
+        // The has_stream_metadata guard must not break stream relink: a stream RENAMENX'd to an
+        // empty destination must carry ALL four side-maps (entries_added / max_deleted / groups /
+        // last_id) to the new key, and leave none behind on the source. Distinctive values (entries
+        // added != live length) prove the map value moved, not the live-length fallback.
+        let mut store = Store::new();
+        store
+            .xadd(b"src", (1, 0), &[(b"f".to_vec(), b"a".to_vec())], 0)
+            .expect("xadd 1");
+        store
+            .xadd(b"src", (2, 0), &[(b"f".to_vec(), b"b".to_vec())], 0)
+            .expect("xadd 2");
+        store
+            .xgroup_create(b"src", b"g1", (0, 0), false, 0)
+            .expect("xgroup_create");
+        store.restore_stream_entries_added(b"src", 7); // != live length (2)
+        store.restore_stream_max_deleted_id(b"src", (5, 0));
+
+        assert_eq!(store.stream_entries_added(b"src", 99), 7);
+        assert_eq!(store.stream_group_count(b"src"), 1);
+
+        assert!(store.renamenx(b"src", b"dst", 0).expect("renamenx"));
+
+        // Source fully gone; every side-map now keyed under dst.
+        assert!(!store.exists_no_stat(b"src", 0));
+        assert_eq!(store.stream_group_count(b"src"), 0);
+        assert_eq!(store.stream_max_deleted_id(b"src"), None);
+        assert_eq!(store.stream_entries_added(b"dst", 99), 7);
+        assert_eq!(store.stream_max_deleted_id(b"dst"), Some((5, 0)));
+        assert_eq!(store.stream_group_count(b"dst"), 1);
     }
 
     #[test]

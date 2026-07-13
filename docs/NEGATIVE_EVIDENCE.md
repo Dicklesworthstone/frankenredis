@@ -17895,3 +17895,21 @@ an alloc-ELISION (not buffer-reuse), so [[mimalloc_defeats_buffer_reuse_levers]]
 removed entirely, not recycled. Untouched: the MOVE/COPY `last_del_removed` push (single-key, its own path) + the
 notify-ON behavior (still clones). Rollback: drop the `record_removed` flag, restore the unconditional
 `self.last_del_removed.push(key.clone())`.
+
+### 2026-07-13 SHIPPED (RENAMENX's four source stream side-map removes gated on has_stream_metadata — frankenredis-cg8ba)
+The exact sibling the RENAME guard `0c03d7a58` missed. `Store::renamenx` relinks the FOUR source stream side-maps
+(stream_entries_added / stream_max_deleted_ids / stream_groups / stream_last_ids) key->newkey with four
+UNCONDITIONAL `remove`s, but only a stream key ever populates them. Gated all four on one `has_stream_metadata`
+flag (`!is_empty() || ...`), mirroring RENAME verbatim — on a stream-free store (the common case) each remove is a
+wasted foldhash+probe. Byte-identical: an empty-map remove is a no-op returning None, so `moved_*` stay None and the
+re-insert blocks are skipped exactly as before. RENAMENX never overwrites `newkey` (returns Ok(false) earlier if it
+exists), so unlike RENAME there are NO destination clears to gate — four removes, not eight. Gated:
+`renamenx_relinks_all_four_stream_side_maps` (a stream RENAMENX carries entries_added=7 [!= live len 2] / max_deleted
+/ groups / last_id to dst, none left on src — distinctive values prove the map moved, not the live-length fallback)
++ isolated same-binary `perf stat instructions:u` A/B `benches/renamenx_stream_relink.rs`: reference/candidate =
+**9.908x** fewer instructions (null_median 1.0000000, cv 0.00003%, profile self 11.68%, 24 rounds). Same compute-
+bound probe-elision primitive as `rename_stream_relink` (RENAME's 58.2x, scaled to 4 removes). NOTE: isolated A/B
+overstates end-to-end — the four probes are a fraction of RENAMENX's full relink+insert work; real gain is that
+fraction on no-stream DBs. Remaining unguarded stream-remove siblings (SMOVE empty-source 18253, eviction 12022,
+move_existing_no_stat) are lower-freq follow-ups. Rollback: drop the `has_stream_metadata` flag, restore the four
+unconditional source `remove`s.

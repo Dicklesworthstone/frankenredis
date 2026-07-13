@@ -288,6 +288,12 @@ harness = false
 name = "rename_stream_relink"
 harness = false
 
+# A/B for RENAMENX's four SOURCE stream side-map removes: gate on has_stream_metadata vs the prior
+# unconditional four (sibling of rename_stream_relink; RENAMENX never clears the destination).
+[[bench]]
+name = "renamenx_stream_relink"
+harness = false
+
 # A/B for the stream side-map hasher: foldhash vs the prior std SipHash, over stream-key lookups.
 [[bench]]
 name = "stream_map_hasher"
