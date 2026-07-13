@@ -17972,3 +17972,30 @@ it fires only when `volatile_keys` is clean AND non-empty (a hot no-TTL counter 
 PURE no-TTL counter store `volatile_keys` is empty so forget was already ~free (this store_read `incr_no_ttl` bench
 would NOT show it). Isolated 25x overstates end-to-end (forget is a fraction of INCR's ~200-300 instr). Zero downside
 (strictly-less work, byte-identical). Rollback: restore the `else { self.forget_volatile_key(key); }`.
+
+### 2026-07-13 NEGATIVE (fr-store command hot-path saturation sweep — read path CLOSED; INCR mark_dirty BLOCKED)
+After the INCR forget elision I swept the rest of the fr-store command hot path for fresh levers and found it
+comprehensively saturated — recording so the next agent skips the re-sweep:
+- **Hot reads ALL single-lookup-collapsed + have borrowed `_with`/`_into` variants** (verified this turn): `get`/
+  `get_string_bytes`, `mget` (per-key collapse + expires_count hoist), `hget`/`hget_with`, `getrange`/`getrange_with`,
+  `strlen`, `exists`, and the shared `lookup_live_for_read_mut` (expires_count-guarded, single get_mut). `string_len`
+  already counts Integer digits via `i64_text_len` (NO decimal-string alloc). `append` is single-lookup via
+  `with_mutated_entry` with the length cap fused inside. NOTHING left here.
+- **`forget_volatile_key` dead-no-op sub-vein EXHAUSTED**: INCR (a7b284bf2) was the ONLY caller in a provably-no-TTL
+  branch. The other 6 callers (SET-overwrite guarded on `old_expiry.is_some()`, PERSIST, GETEX-persist, internal_
+  entries_remove, internal_entries_insert_with_expiry's no-new-TTL branch) all run where the key HAD/has a TTL, so the
+  remove is meaningful — NOT elidable.
+- **INCR `mark_volatile_keys_dirty` (the has_expiry branch) — REAL win but BLOCKED, do NOT drive-by**: INCR preserves
+  TTL membership (TTL lives outside `Entry`), so marking the volatile sampling view dirty forces an UNNECESSARY
+  O(n_volatile) rebuild on the next active-expiry sample. For INCR-on-TTL rate-limiters (a top-3 Redis pattern, large
+  volatile set) that's a per-sample O(n) rebuild that could be avoided. BUT eliding it flips `volatile_keys_dirty`
+  false-vs-true, and that flag is (a) asserted 7x incl. a DELIBERATE differential equivalence test
+  `incrby_existing_key_matches_whole_entry_replacement_side_effects` (~line 35855) that builds `expected` via
+  `internal_entries_insert_with_expiry` (which marks dirty) and asserts INCR matches it FIELD-FOR-FIELD. The win is
+  CLIENT-unobservable (rebuild reproduces the identical set — membership unchanged), so it's byte-identical to a
+  client but diverges the internal flag the test pins. Shipping needs a DEDICATED turn: review whether the
+  incr==whole-entry-SET equivalence is intentional for that flag, update the test to reflect INCR being *smarter* than
+  a full SET, and profile a real rate-limiter (INCR+TTL, large volatile set) rebuild-frequency win — NOT a quick land
+  (exactly the field-level trap the MOVE regression `91df4019c` taught). Left as a documented candidate.
+NEXT MUST pivot OUT of the fr-store command hot path: fr-simd compute-bound, structural (b1o02 RESTORE-build,
+multi-day), or a less-trodden command family (set-algebra / random-sampling / GEO).
