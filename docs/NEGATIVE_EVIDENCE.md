@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: CONFIRMED — the shipped bab278487 bulk-string header fusion still wins ~12.8% WITH a body present (resolves the "suspect" caveat)
+
+FOLLOW-THROUGH on the 2026-07-13 REVERTED entry, which flagged that bab278487's borrow helpers were
+only measured headers-only (`#[inline(never)]`) and might, like the owned arms, regress once a body
+memcpy is present. Verified directly: `benches/encode_bulk_string_fastpath.rs` +
+`bench_encode_bulk_string<FUSED>` faithfully reproduce `encode_bulk_string_slice`'s `Some` arm (same
+`reserve`, body, terminator) and A/B ONLY the header shape, on a single bulk-string reply
+(GET/HGET) with realistic short bodies (0..64 B). release-perf, 24 rounds, host `thinkstation1`,
+binary SHA256 `07b73c24f7772ae552b87366e205ea7df9d9db6733be77717c6234251ca95278`: candidate
+~4.086306B vs reference ~4.688300B = **1.147322x reference/candidate — the fused header spends
+~12.84% FEWER instructions**, even with the body. Null median 0.999999981, p5..p95
+[0.999999838,1.000000178], null CV 0.000030%; effect CV 0.000031%. Reference frame
+`bench_encode_bulk_string::<false>` self-time ~37–43%. Byte-identical over all body lengths 0..64.
+
+RECONCILED with the owned-arm regression: the win survives for the BORROW helpers because each emits
+ONE header per call (encode_bulk_string_slice is invoked once per element by the command loop, and
+`push_len_header` inlines into a non-loop body). It regresses ONLY in the owned `RespFrame`
+recursion, where `push_len_header` inlines into a TIGHT per-element loop and its runtime-length
+memcpy loses to the reference's const-size copies. So the refined rule is single-header-per-call
+(wins) vs many-headers-in-a-tight-inlined-loop (loses) — NOT simply "inlined vs not". bab278487
+stands; production unchanged. Kept the bench + hook as the reproducible artifact.
+
 ## 2026-07-13: REJECTED/REVERTED — propagating the fused length header to the OWNED RespFrame encode arms regresses array replies ~1.15%
 
 NEGATIVE-LEDGER-FIRST: after fusing the length header on the borrow-encode helpers (bab278487,
@@ -22,13 +44,11 @@ ROOT CAUSE + METHODOLOGY CAVEAT: `push_len_header` is `#[inline]`, so in the rep
 and its single `extend_from_slice(&buf[pos..24])` is a RUNTIME-length memcpy (plus a 24-byte stack
 buffer zero-init per element). The three-call reference (`extend(&[prefix])` + `push_usize` +
 `extend(b"\r\n")`) lowers to a couple of CONST-size copies the compiler places inline, which win
-when bodies are already present and the header build is inlined into the loop. The prior
-headers-ONLY, `#[inline(never)]` A/Bs (integer reply, length-header primitive) measured the fused
-helper at a function boundary and so OVERSTATE the benefit for inlined production call sites where a
-body memcpy already dominates. Kept `benches/encode_array_reply_fastpath.rs` +
-`bench_encode_array_reply` as the reproducible artifact; reverted the owned-arm edits — production
-stays on `push_usize`. Follow-up: re-measure bab278487's borrow helpers in a with-bodies, inlined
-context before trusting their headers-only number.
+when bodies are already present and the header build is inlined into a TIGHT PER-ELEMENT LOOP. The
+distinguishing factor is the loop, not inlining per se: a single header per call still wins even
+inlined with a body (see the CONFIRMED bab278487 bulk-string re-measurement at top). Kept
+`benches/encode_array_reply_fastpath.rs` + `bench_encode_array_reply` as the reproducible artifact;
+reverted the owned-arm edits — production stays on `push_usize`.
 
 ## 2026-07-13: SHIPPED — fused RESP length-header primitive on the borrow-encode reply path; 1.1498x fewer header instructions, bit-identical (frankenredis-gg6yy, bab278487)
 
@@ -43,9 +63,12 @@ fr-protocol lib 93/93, golden 41/41, fuzz+oracle green. MEASURED (`benches/push_
 release-perf, 24 rounds, 48M headers/arm, host `thinkstation1`, SHA256
 `e261649d6873b2b02b5211fcb3ed6223e99bab3b31e235e2c9f8660179486e07`): candidate ~4.386303B vs
 reference ~5.043303B = **1.149784x fewer instructions (13.03%)**, null median 0.999999969.
-CAVEAT: this is a headers-only `#[inline(never)]` A/B; see the 2026-07-13 owned-arm REVERTED entry
-above — with bodies present and inlined, the fused header did not win. Reference arm
-`bench_push_len_header::<false>`. Rollback: restore the three-call shape in the three helpers.
+CAVEAT (RESOLVED): the primitive A/B above is headers-only. The concern that the borrow helpers
+might regress with bodies was checked directly and DISPROVED — see the 2026-07-13 CONFIRMED entry at
+top: an isolated bodies-present A/B of `encode_bulk_string_slice` still wins 1.1473x (12.8%). The
+fusion is safe for the borrow helpers (one header per call); only the owned-arm tight-loop variant
+regressed (REVERTED). Reference arm `bench_push_len_header::<false>`. Rollback: restore the
+three-call shape in the three helpers.
 
 ## 2026-07-13: SHIPPED — fused RESP integer reply into one buffer + single extend; 1.1565x fewer instructions, bit-identical (frankenredis-y1v9d, ae5e6f156)
 

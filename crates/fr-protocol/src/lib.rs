@@ -193,6 +193,28 @@ pub fn bench_encode_array_reply<const FUSED: bool>(count: usize, body: &[u8], ou
     }
 }
 
+/// Bench hook that faithfully reproduces `encode_bulk_string_slice`'s `Some` arm (the shipped
+/// bab278487 change) so it can be A/B'd in isolation. `FUSED = true` is exactly current production
+/// (fused `$<len>\r\n` header via `push_len_header`); `FUSED = false` is the exact pre-bab278487
+/// path (`extend("$")` + `push_usize` + `extend("\r\n")`). Both keep the identical `reserve` and
+/// body/terminator writes, so the A/B isolates the header shape alone — verifying whether the fused
+/// header still wins on a single bulk-string reply (GET/HGET) WITH a body present. Not on a
+/// production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_bulk_string<const FUSED: bool>(bytes: &[u8], out: &mut Vec<u8>) {
+    out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
+    if FUSED {
+        push_len_header::<true>(out, b'$', bytes.len() as u64);
+    } else {
+        out.extend_from_slice(b"$");
+        push_usize(out, bytes.len());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\r\n");
+}
+
 /// Encode a bulk-string reply from borrowed bytes.
 ///
 /// This is byte-identical to `RespFrame::BulkString(...).encode_into*` while

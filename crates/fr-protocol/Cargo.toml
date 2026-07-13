@@ -35,3 +35,10 @@ harness = false
 [[bench]]
 name = "encode_array_reply_fastpath"
 harness = false
+
+# Isolated A/B of the shipped bab278487 encode_bulk_string_slice header fusion vs the pre-change
+# three-call header, on a single bulk-string reply (GET/HGET) WITH a body present — verifies
+# whether the fused header still wins once a body is in the picture.
+[[bench]]
+name = "encode_bulk_string_fastpath"
+harness = false
