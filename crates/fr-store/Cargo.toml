@@ -275,6 +275,12 @@ harness = false
 name = "del_stream_cleanup"
 harness = false
 
+# A/B for INCR's no-TTL branch: the dropped forget_volatile_key(key) no-op vs calling it, on a clean
+# non-empty volatile_keys with a no-TTL key. Byte-identical; isolates the BTreeSet remove-miss O(log n).
+[[bench]]
+name = "incr_forget_volatile"
+harness = false
+
 # A/B for DEL's per-key last_del_removed clone: skip push(key.clone()) when keyspace notifications
 # are disabled (the default) vs the prior unconditional push. Byte-identical; isolates the wasted
 # per-key heap allocation dropped untouched by the notify-gated consumer.

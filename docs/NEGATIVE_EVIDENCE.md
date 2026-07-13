@@ -17954,3 +17954,21 @@ family**: every non-stream-reachable site (DEL, RENAME, RENAMENX, SET-overwrite,
 general-write helper) now guards its stream side-map removes; only genuinely stream-typed paths (XDEL/XTRIM/XADD-
 create) remove unconditionally, which is correct. NEXT lever MUST pivot off this vein entirely. Rollback: restore the
 two unconditional removes.
+
+### 2026-07-13 SHIPPED (INCR-family no-TTL-branch forget_volatile_key elided — provable no-op, frankenredis-tfrbe) — PIVOT off the stream/notify vein
+First lever off the (now-closed) stream/notify guard vein. `incrby_existing_or_insert` (the choke point for
+INCR/DECR/INCRBY/DECRBY) had `if has_expiry { mark_volatile_keys_dirty() } else { forget_volatile_key(key) }`. The
+`else` (no-TTL) branch was a PROVABLE no-op: a key with no deadline is absent from `expiry_deadlines`, and
+`volatile_keys ⊆ expiry_deadlines.keys()` whenever clean (its ONLY inserts are `rebuild_volatile_keys_if_dirty`'s
+`extend(expiry_deadlines.keys())` — verified: the 3 `volatile_keys` mutation sites are that extend + two clears + the
+one remove, NO other insert), so `volatile_keys.remove(no_ttl_key)` finds nothing; when dirty, `forget_volatile_key`
+early-returns. INCR preserves TTL membership (TTL lives outside `Entry`), so a no-TTL key stays no-TTL. Dropped the
+dead call. BYTE-IDENTICAL — neither `volatile_keys` NOR its dirty flag changes (so no differential test on those can
+shift; full suite 798 pass incl. new `incr_no_ttl_leaves_volatile_keys_and_dirty_flag_untouched`). Isolated
+same-binary `perf stat instructions:u` A/B `benches/incr_forget_volatile.rs` (clean 1000-key `volatile_keys`, no-TTL
+counter): candidate (elided) vs reference (calls forget) = **25.26x** fewer instructions (null_median 1.0000, null_cv
+0.23%, effect_cv 7.4% — the eliminated BTreeSet remove-miss O(log n) traversal). NOTE: the win is WORKLOAD-DEPENDENT —
+it fires only when `volatile_keys` is clean AND non-empty (a hot no-TTL counter alongside static TTL'd keys); on a
+PURE no-TTL counter store `volatile_keys` is empty so forget was already ~free (this store_read `incr_no_ttl` bench
+would NOT show it). Isolated 25x overstates end-to-end (forget is a fraction of INCR's ~200-300 instr). Zero downside
+(strictly-less work, byte-identical). Rollback: restore the `else { self.forget_volatile_key(key); }`.

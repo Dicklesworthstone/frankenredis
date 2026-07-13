@@ -8249,6 +8249,33 @@ impl Store {
         }
     }
 
+    /// Bench hook for `benches/incr_forget_volatile.rs`: isolates the INCR-family no-TTL branch's
+    /// former `forget_volatile_key(key)` call. `CALL = false` is production (the dead no-op was
+    /// dropped → does nothing); `CALL = true` is the prior behavior (call it). On a store with a
+    /// clean, non-empty `volatile_keys` and a `key` that has no TTL, the reference pays a BTreeSet
+    /// remove-miss (O(log n)) that finds nothing, while the candidate does zero work — byte-
+    /// identical (`volatile_keys` and its dirty flag are unchanged either way). Not on a production
+    /// path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_incr_forget_volatile<const CALL: bool>(&mut self, key: &[u8]) {
+        if CALL {
+            self.forget_volatile_key(key);
+        }
+    }
+
+    /// Bench setup for `incr_forget_volatile`: give the store `n` TTL-bearing keys and rebuild the
+    /// `volatile_keys` sampling view so it is clean and non-empty (the state in which
+    /// `forget_volatile_key` actually traverses the BTreeSet). Not on a production path.
+    #[doc(hidden)]
+    pub fn bench_setup_clean_volatile_keys(&mut self, n: usize, now_ms: u64) {
+        for i in 0..n {
+            let key = format!("ttlkey:{i:08}").into_bytes();
+            self.set(key, b"v".to_vec(), Some(10_000_000), now_ms);
+        }
+        self.rebuild_volatile_keys_if_dirty();
+    }
+
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -8380,10 +8407,18 @@ impl Store {
             }
         };
 
+        // (frankenredis-incrforget) The old `else` branch called `forget_volatile_key(key)` on the
+        // no-TTL path, but that is a PROVABLE no-op: a key with no deadline is absent from
+        // `expiry_deadlines`, and `volatile_keys ⊆ expiry_deadlines.keys()` whenever it is clean
+        // (its only inserts come from `rebuild_volatile_keys_if_dirty`'s
+        // `extend(expiry_deadlines.keys())`), so `volatile_keys.remove(key)` finds nothing; when
+        // dirty, `forget_volatile_key` early-returns. INCR/DECR/INCRBY/DECRBY preserve TTL
+        // membership (the TTL lives outside `Entry`, untouched by the value write), so a no-TTL key
+        // stays no-TTL. Drop the dead call — byte-identical (neither `volatile_keys` nor its dirty
+        // flag changes), eliding a BTreeSet remove-miss (O(log n) when the set is clean & non-empty,
+        // e.g. a hot counter alongside TTL'd keys) on every no-TTL counter write.
         if has_expiry {
             self.mark_volatile_keys_dirty();
-        } else {
-            self.forget_volatile_key(key);
         }
         self.invalidate_write_side_caches(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -35781,6 +35816,32 @@ mod tests {
         assert_eq!(store.incr(b"n", 0).expect("incr"), 1);
         assert_eq!(store.incr(b"n", 0).expect("incr"), 2);
         assert_eq!(store.get(b"n", 0).unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn incr_no_ttl_leaves_volatile_keys_and_dirty_flag_untouched() {
+        // Locks the invariant behind eliding INCR's no-TTL-branch forget_volatile_key: a no-TTL
+        // counter alongside TTL'd keys must not disturb the clean `volatile_keys` sampling view.
+        let mut store = Store::new();
+        store.set(b"t".to_vec(), b"v".to_vec(), Some(10_000_000), 0); // volatile
+        store.set(b"c".to_vec(), b"0".to_vec(), None, 0); // no-TTL counter
+        store.rebuild_volatile_keys_if_dirty();
+        assert!(!store.volatile_keys_dirty);
+        assert!(store.volatile_keys.contains(b"t".as_slice()));
+        assert!(!store.volatile_keys.contains(b"c".as_slice()));
+
+        for expected in 1..=5 {
+            assert_eq!(store.incr(b"c", 0).expect("incr"), expected);
+        }
+
+        // The counter incremented correctly; the volatile view (content + clean flag) is unchanged,
+        // and the TTL'd key still carries its deadline.
+        assert_eq!(store.get(b"c", 0).unwrap(), Some(b"5".to_vec()));
+        assert!(!store.volatile_keys_dirty);
+        assert!(store.volatile_keys.contains(b"t".as_slice()));
+        assert!(!store.volatile_keys.contains(b"c".as_slice()));
+        assert!(store.expiry_ms(b"t").is_some());
+        assert!(store.expiry_ms(b"c").is_none());
     }
 
     #[test]
