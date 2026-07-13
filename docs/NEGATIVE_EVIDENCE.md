@@ -18134,3 +18134,21 @@ Does NOT touch the mark_dirty branch, so the incr==whole-entry equivalence + the
 differential test. Full suite **800 pass, 0 fail**. Same primitive as `incr_forget_volatile`: re-run = **25.26x**
 fewer instructions (null 1.0000). The forget-no-op elision is now complete across BOTH the insert (f801t) and remove
 (sszgp) key-lifecycle choke points + INCR (a7b284bf2). Rollback: restore `else if !new_has_expiry`.
+
+### 2026-07-13 NEGATIVE (gate-no-op-cleanup pattern fully SWEPT — remaining candidate is marginal)
+After the 4-land volatile membership-change vein, swept the rest of the store for the "gate a per-write cleanup that
+is a no-op in the common case" pattern. All warm sites are already gated:
+- volatile_keys mark/forget — DONE (this vein, 4 lands).
+- stream side-maps (stream_groups/last_ids/entries_added/max_deleted) — DONE (is_empty / has_stream_metadata /
+  old_was_stream guards across DEL/RENAME/RENAMENX/SET-overwrite/SMOVE/eviction/RPOPLPUSH/LMOVE, earlier session).
+- hash_field_expires — HDEL already gates the per-field cleanup on `!is_empty()` (frankenredis, ~13511); HSET doesn't
+  touch it; HEXPIRE/reap paths are gated on the map.
+- key-set caches (ordered_keys / random_key_index / keyspace_generation) — gated on is_new_key (insert) / always on
+  remove (a removal genuinely changes the key set). Correct.
+- write-side caches (mem_estimate / dump_payload / hll_register) — invalidate_write_side_caches is is_empty-guarded
+  (3c0af1aad, 12.95x). LREM already early-stops (frankenredis-387i6). update_expiry_deadline gated on old==new.
+REMAINING candidate (NOT worth it): gate internal_entries_insert_with_expiry's `invalidate_write_side_caches(&key)` on
+`!is_new_key` (a new key is provably absent from all 3 caches — removes clear them). BUT it's MARGINAL on top of the
+existing is_empty guard: common case (empty caches — no DUMP/MEMORY-USAGE/PFADD) it saves only ~3 bool checks
+(unmeasurable, won't gate); the 3-probe win needs the RARE non-empty-cache + new-key combo (a bench would overstate
+by setting that up). Below the gate threshold. The gate-no-op vein is CLOSED. Next lever must be a different pattern.
