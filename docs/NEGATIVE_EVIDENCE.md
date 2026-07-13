@@ -4,6 +4,27 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-8 bucket); 1.0828x fewer instructions, byte-identical (frankenredis-fzabv)
+
+NEGATIVE-LEDGER-FIRST: fifth and final match-eligible bucket in the `classify_command`
+match-dispatch vein (after len-6/4/5/7). The 8-byte bucket — 21 commands including EXPIREAT /
+SMEMBERS / GETRANGE / SETRANGE / BITCOUNT / XPENDING / BITFIELD / FUNCTION plus the underscore name
+FCALL_RO — became compute-`pack_cmd_u64(cmd)`-once + `match` on const-packed u64 (jump table).
+Extracted with the corrected `[A-Z0-9_]+` regex (FCALL_RO included). This COMPLETES every
+≤8-byte bucket (4/5/6/7/8 all match-based); len-3 is tiny (5 cmds, negligible), and len-9+ names
+exceed 8 bytes so `pack_cmd_u64` can't pack them (they stay linear via `eq_ascii_command`'s byte-fold).
+
+BYTE-IDENTICAL: `classify_command_matches_linear_reference` passes over EVERY known command;
+`bench_classify8_match` == `bench_classify8_linear` over all 21 names + misses; full fr-command lib
+suite 1172/1172, 0 failed.
+
+MEASURED (`crates/fr-command/benches/classify8_dispatch.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`2b93519a24f2149254492ce54e393d15375a9acae3c5b199bd87d6007a801532`): candidate vs reference =
+**1.082812x fewer instructions (7.65%)**. Null median 1.000000044, null CV 0.000012%; effect CV
+0.000013%. Reference frame `fr_command::bench_classify8_linear` self-time ~76–88%. Rollback: restore
+the len==8 `if eq_ascii_command` chain. Vein COMPLETE (all match-eligible buckets shipped: len-4/5/6/7/8).
+
 ## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-7 bucket); 1.1339x fewer instructions, byte-identical (frankenredis-nfcy1)
 
 NEGATIVE-LEDGER-FIRST: fourth bucket in the `classify_command` match-dispatch vein (after len-6, -4,

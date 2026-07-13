@@ -3361,50 +3361,53 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         8 => {
-            if eq_ascii_command(cmd, b"EXPIREAT") {
-                Some(CommandId::Expireat)
-            } else if eq_ascii_command(cmd, b"RENAMENX") {
-                Some(CommandId::Renamenx)
-            } else if eq_ascii_command(cmd, b"FLUSHALL") {
-                Some(CommandId::Flushall)
-            } else if eq_ascii_command(cmd, b"SMEMBERS") {
-                Some(CommandId::Smembers)
-            } else if eq_ascii_command(cmd, b"ZREVRANK") {
-                Some(CommandId::Zrevrank)
-            } else if eq_ascii_command(cmd, b"GETRANGE") {
-                Some(CommandId::Getrange)
-            } else if eq_ascii_command(cmd, b"SETRANGE") {
-                Some(CommandId::Setrange)
-            } else if eq_ascii_command(cmd, b"BITCOUNT") {
-                Some(CommandId::Bitcount)
-            } else if eq_ascii_command(cmd, b"XPENDING") {
-                Some(CommandId::Xpending)
-            } else if eq_ascii_command(cmd, b"LASTSAVE") {
-                Some(CommandId::Lastsave)
-            } else if eq_ascii_command(cmd, b"SHUTDOWN") {
-                Some(CommandId::Shutdown)
-            } else if eq_ascii_command(cmd, b"BITFIELD") {
-                Some(CommandId::Bitfield)
-            } else if eq_ascii_command(cmd, b"FUNCTION") {
-                Some(CommandId::Function)
-            } else if eq_ascii_command(cmd, b"SPUBLISH") {
-                Some(CommandId::Spublish)
-            } else if eq_ascii_command(cmd, b"READONLY") {
-                Some(CommandId::Readonly)
-            } else if eq_ascii_command(cmd, b"FCALL_RO") {
-                Some(CommandId::FcallRo)
-            } else if eq_ascii_command(cmd, b"BZPOPMIN") {
-                Some(CommandId::Bzpopmin)
-            } else if eq_ascii_command(cmd, b"BZPOPMAX") {
-                Some(CommandId::Bzpopmax)
-            } else if eq_ascii_command(cmd, b"REPLCONF") {
-                Some(CommandId::Replconf)
-            } else if eq_ascii_command(cmd, b"FAILOVER") {
-                Some(CommandId::Failover)
-            } else if eq_ascii_command(cmd, b"SENTINEL") {
-                Some(CommandId::Sentinel)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_EXPIREAT: u64 = pack_cmd_u64(b"EXPIREAT");
+            const PK_RENAMENX: u64 = pack_cmd_u64(b"RENAMENX");
+            const PK_FLUSHALL: u64 = pack_cmd_u64(b"FLUSHALL");
+            const PK_SMEMBERS: u64 = pack_cmd_u64(b"SMEMBERS");
+            const PK_ZREVRANK: u64 = pack_cmd_u64(b"ZREVRANK");
+            const PK_GETRANGE: u64 = pack_cmd_u64(b"GETRANGE");
+            const PK_SETRANGE: u64 = pack_cmd_u64(b"SETRANGE");
+            const PK_BITCOUNT: u64 = pack_cmd_u64(b"BITCOUNT");
+            const PK_XPENDING: u64 = pack_cmd_u64(b"XPENDING");
+            const PK_LASTSAVE: u64 = pack_cmd_u64(b"LASTSAVE");
+            const PK_SHUTDOWN: u64 = pack_cmd_u64(b"SHUTDOWN");
+            const PK_BITFIELD: u64 = pack_cmd_u64(b"BITFIELD");
+            const PK_FUNCTION: u64 = pack_cmd_u64(b"FUNCTION");
+            const PK_SPUBLISH: u64 = pack_cmd_u64(b"SPUBLISH");
+            const PK_READONLY: u64 = pack_cmd_u64(b"READONLY");
+            const PK_FCALL_RO: u64 = pack_cmd_u64(b"FCALL_RO");
+            const PK_BZPOPMIN: u64 = pack_cmd_u64(b"BZPOPMIN");
+            const PK_BZPOPMAX: u64 = pack_cmd_u64(b"BZPOPMAX");
+            const PK_REPLCONF: u64 = pack_cmd_u64(b"REPLCONF");
+            const PK_FAILOVER: u64 = pack_cmd_u64(b"FAILOVER");
+            const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
+            match pack_cmd_u64(cmd) {
+                PK_EXPIREAT => Some(CommandId::Expireat),
+                PK_RENAMENX => Some(CommandId::Renamenx),
+                PK_FLUSHALL => Some(CommandId::Flushall),
+                PK_SMEMBERS => Some(CommandId::Smembers),
+                PK_ZREVRANK => Some(CommandId::Zrevrank),
+                PK_GETRANGE => Some(CommandId::Getrange),
+                PK_SETRANGE => Some(CommandId::Setrange),
+                PK_BITCOUNT => Some(CommandId::Bitcount),
+                PK_XPENDING => Some(CommandId::Xpending),
+                PK_LASTSAVE => Some(CommandId::Lastsave),
+                PK_SHUTDOWN => Some(CommandId::Shutdown),
+                PK_BITFIELD => Some(CommandId::Bitfield),
+                PK_FUNCTION => Some(CommandId::Function),
+                PK_SPUBLISH => Some(CommandId::Spublish),
+                PK_READONLY => Some(CommandId::Readonly),
+                PK_FCALL_RO => Some(CommandId::FcallRo),
+                PK_BZPOPMIN => Some(CommandId::Bzpopmin),
+                PK_BZPOPMAX => Some(CommandId::Bzpopmax),
+                PK_REPLCONF => Some(CommandId::Replconf),
+                PK_FAILOVER => Some(CommandId::Failover),
+                PK_SENTINEL => Some(CommandId::Sentinel),
+                _ => None,
             }
         }
         9 => {
@@ -4301,6 +4304,109 @@ pub fn bench_classify7_match(cmd: &[u8]) -> u32 {
         PK_MONITOR => 28,
         PK_MIGRATE => 29,
         PK_PFDEBUG => 30,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify8_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"EXPIREAT") {
+        1
+    } else if eq_ascii_command(cmd, b"RENAMENX") {
+        2
+    } else if eq_ascii_command(cmd, b"FLUSHALL") {
+        3
+    } else if eq_ascii_command(cmd, b"SMEMBERS") {
+        4
+    } else if eq_ascii_command(cmd, b"ZREVRANK") {
+        5
+    } else if eq_ascii_command(cmd, b"GETRANGE") {
+        6
+    } else if eq_ascii_command(cmd, b"SETRANGE") {
+        7
+    } else if eq_ascii_command(cmd, b"BITCOUNT") {
+        8
+    } else if eq_ascii_command(cmd, b"XPENDING") {
+        9
+    } else if eq_ascii_command(cmd, b"LASTSAVE") {
+        10
+    } else if eq_ascii_command(cmd, b"SHUTDOWN") {
+        11
+    } else if eq_ascii_command(cmd, b"BITFIELD") {
+        12
+    } else if eq_ascii_command(cmd, b"FUNCTION") {
+        13
+    } else if eq_ascii_command(cmd, b"SPUBLISH") {
+        14
+    } else if eq_ascii_command(cmd, b"READONLY") {
+        15
+    } else if eq_ascii_command(cmd, b"FCALL_RO") {
+        16
+    } else if eq_ascii_command(cmd, b"BZPOPMIN") {
+        17
+    } else if eq_ascii_command(cmd, b"BZPOPMAX") {
+        18
+    } else if eq_ascii_command(cmd, b"REPLCONF") {
+        19
+    } else if eq_ascii_command(cmd, b"FAILOVER") {
+        20
+    } else if eq_ascii_command(cmd, b"SENTINEL") {
+        21
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify8_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 8 {
+        return 0;
+    }
+    const PK_EXPIREAT: u64 = pack_cmd_u64(b"EXPIREAT");
+    const PK_RENAMENX: u64 = pack_cmd_u64(b"RENAMENX");
+    const PK_FLUSHALL: u64 = pack_cmd_u64(b"FLUSHALL");
+    const PK_SMEMBERS: u64 = pack_cmd_u64(b"SMEMBERS");
+    const PK_ZREVRANK: u64 = pack_cmd_u64(b"ZREVRANK");
+    const PK_GETRANGE: u64 = pack_cmd_u64(b"GETRANGE");
+    const PK_SETRANGE: u64 = pack_cmd_u64(b"SETRANGE");
+    const PK_BITCOUNT: u64 = pack_cmd_u64(b"BITCOUNT");
+    const PK_XPENDING: u64 = pack_cmd_u64(b"XPENDING");
+    const PK_LASTSAVE: u64 = pack_cmd_u64(b"LASTSAVE");
+    const PK_SHUTDOWN: u64 = pack_cmd_u64(b"SHUTDOWN");
+    const PK_BITFIELD: u64 = pack_cmd_u64(b"BITFIELD");
+    const PK_FUNCTION: u64 = pack_cmd_u64(b"FUNCTION");
+    const PK_SPUBLISH: u64 = pack_cmd_u64(b"SPUBLISH");
+    const PK_READONLY: u64 = pack_cmd_u64(b"READONLY");
+    const PK_FCALL_RO: u64 = pack_cmd_u64(b"FCALL_RO");
+    const PK_BZPOPMIN: u64 = pack_cmd_u64(b"BZPOPMIN");
+    const PK_BZPOPMAX: u64 = pack_cmd_u64(b"BZPOPMAX");
+    const PK_REPLCONF: u64 = pack_cmd_u64(b"REPLCONF");
+    const PK_FAILOVER: u64 = pack_cmd_u64(b"FAILOVER");
+    const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
+    match pack_cmd_u64(cmd) {
+        PK_EXPIREAT => 1,
+        PK_RENAMENX => 2,
+        PK_FLUSHALL => 3,
+        PK_SMEMBERS => 4,
+        PK_ZREVRANK => 5,
+        PK_GETRANGE => 6,
+        PK_SETRANGE => 7,
+        PK_BITCOUNT => 8,
+        PK_XPENDING => 9,
+        PK_LASTSAVE => 10,
+        PK_SHUTDOWN => 11,
+        PK_BITFIELD => 12,
+        PK_FUNCTION => 13,
+        PK_SPUBLISH => 14,
+        PK_READONLY => 15,
+        PK_FCALL_RO => 16,
+        PK_BZPOPMIN => 17,
+        PK_BZPOPMAX => 18,
+        PK_REPLCONF => 19,
+        PK_FAILOVER => 20,
+        PK_SENTINEL => 21,
         _ => 0,
     }
 }
