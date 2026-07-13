@@ -289,6 +289,70 @@ fn write_i64_to_slice(n: i64, buf: &mut [u8]) -> usize {
     i + digits.len()
 }
 
+/// Frame a RESP integer reply (`:<n>\r\n`) into `out`. `FUSED == true` (production) builds the
+/// `:` prefix, digits, and `\r\n` terminator in one stack buffer and appends them with a SINGLE
+/// `extend_from_slice` — one capacity check + one memcpy — on the universal counter/length reply
+/// path (INCR / LLEN / SCARD / EXISTS / DEL / SADD count / ...), instead of three separate extends
+/// (`:` prefix, `push_i64`'s own extend, `\r\n`). `FUSED == false` retains the exact prior
+/// three-call path for the same-binary A/B in `benches/encode_integer_fastpath.rs`; it is not on a
+/// production path. Byte-identical: `write_i64_to_slice` renders the same digits and leading `-` as
+/// `push_i64`.
+#[inline]
+fn encode_integer_reply<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
+    if FUSED {
+        // Build ":<n>\r\n" right-aligned in one stack buffer and emit it with a SINGLE
+        // extend_from_slice. The digits are written exactly ONCE (two-at-a-time via DIGIT_PAIRS,
+        // same core as write_u64_digits) directly into their final position — no intermediate
+        // digit copy — with the terminator pre-placed to their right and the ':' prefix (and any
+        // '-') filled to their left. ':' + up to 20 signed digits + "\r\n" = 23 bytes; 24 leaves
+        // buf[0] as slack so the worst case (i64::MIN) lands at buf[1..24].
+        let mut buf = [0u8; 24];
+        buf[22] = b'\r';
+        buf[23] = b'\n';
+        let (neg, mut val) = if n < 0 {
+            (true, (n as i128).unsigned_abs() as u64)
+        } else {
+            (false, n as u64)
+        };
+        let mut pos = 22;
+        while val >= 100 {
+            let pair = (val % 100) as usize * 2;
+            val /= 100;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        if val < 10 {
+            pos -= 1;
+            buf[pos] = b'0' + val as u8;
+        } else {
+            let pair = val as usize * 2;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        if neg {
+            pos -= 1;
+            buf[pos] = b'-';
+        }
+        pos -= 1;
+        buf[pos] = b':';
+        out.extend_from_slice(&buf[pos..24]);
+    } else {
+        out.extend_from_slice(b":");
+        push_i64(out, n);
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
+/// Bench hook for the same-binary A/B in `benches/encode_integer_fastpath.rs`. `FUSED = false`
+/// forces the prior three-`extend_from_slice` integer-reply path. Not on a production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_integer<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
+    encode_integer_reply::<FUSED>(n, out)
+}
+
 /// Fast d2string cases that format into a fixed stack `buf` (returning the byte
 /// length): NaN/±inf, signed zero, and any integer-valued double in the i64
 /// fast-range. Byte-identical to the matching arms of [`push_redis_double_ascii`].
@@ -513,11 +577,7 @@ impl RespFrame {
                 push_inline_sanitized(out, s.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }
-            Self::Integer(n) => {
-                out.extend_from_slice(b":");
-                push_i64(out, *n);
-                out.extend_from_slice(b"\r\n");
-            }
+            Self::Integer(n) => encode_integer_reply::<true>(*n, out),
             Self::BulkString(None) => out.extend_from_slice(b"$-1\r\n"),
             Self::BulkString(Some(bytes)) => {
                 out.extend_from_slice(b"$");
@@ -2120,11 +2180,53 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, decimal_u64_len, decimal_usize_len, encode_redis_double,
-        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
-        parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64,
-        push_redis_double_ascii, push_usize,
+        RespParseError, bench_encode_integer, decimal_u64_len, decimal_usize_len,
+        encode_redis_double, format_redis_double, parse_command_args_borrowed_into,
+        parse_command_frame, parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
+        push_i64, push_redis_double_ascii, push_usize,
     };
+
+    // The fused single-buffer integer reply (`:<n>\r\n` in one extend_from_slice) must be
+    // byte-identical to both the prior three-extend path and the canonical RespFrame encoder,
+    // for every boundary plus a dense scan around zero and the ±small ranges that dominate real
+    // counter/length replies.
+    #[test]
+    fn fused_integer_reply_matches_three_extend_and_frame() {
+        let mut sample: Vec<i64> = vec![
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX,
+            i64::MAX - 1,
+            -1000000000000,
+            -999,
+            -100,
+            -99,
+            -10,
+            0,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+        ];
+        for n in -5000_i64..=5000 {
+            sample.push(n);
+        }
+        for &n in &sample {
+            let mut fused = Vec::new();
+            let mut old = Vec::new();
+            let mut frame = Vec::new();
+            bench_encode_integer::<true>(n, &mut fused);
+            bench_encode_integer::<false>(n, &mut old);
+            RespFrame::Integer(n).encode_into(&mut frame);
+            assert_eq!(fused, old, "fused vs three-extend differ for n={n}");
+            assert_eq!(fused, frame, "fused vs frame differ for n={n}");
+            // Sanity: the bytes are exactly `:<decimal>\r\n`.
+            assert_eq!(fused[0], b':');
+            assert_eq!(&fused[fused.len() - 2..], b"\r\n");
+        }
+        // Non-empty destination: the reply appends, never overwrites.
+        let mut buf = b"PRE".to_vec();
+        bench_encode_integer::<true>(42, &mut buf);
+        assert_eq!(buf, b"PRE:42\r\n");
+    }
 
     // (frankenredis-e4fu8) Lock the branchless ilog10 digit-count against the original
     #[test]
