@@ -7565,3 +7565,20 @@ TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x > EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 
 srandmember sub-gate.** SCARD/ZCARD are the identical 3-probe length-read shape (next up, ~2.2x
 each). HLEN is the same but its LFU path may need field-TTL handling (check). Then the diluted tail
 (GETRANGE-clone, bitcount/bitpos-O(n), HGET-4probe+clone).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU SCARD 2 probes → 1 (rng_seed field split) — **1.64–1.85x**
+
+SCARD is 2-probe (record + get_mut, NO `contains_key` gate — unlike LLEN's 3-probe), with the LFU
+bump INSIDE the `Value::Set` arm (a present wrong-type key draws the unconditional rand but does NOT
+bump/touch → WRONGTYPE). Folded record+get_mut inline, rand on the `&mut self.rng_seed` field split
+(drawn before the match, matching the original's unconditional post-record-hit draw). Length-only
+work. Null-gated A/B (`benches/scard_lfu_collapse.rs`, allkeys-lfu, 50k 2-elem-set keyspace,
+median-of-61): n32 **1.852x** (noisy cv 45%), n256 **1.639x** (cv 23%) — WIN. Byte/RNG-identical:
+new `scard_lfu_collapsed_matches_twoprobe` (present-set/absent/wrong-type/expired; asserts result,
+`rng_seed`, hits/misses, OBJECT FREQ) + `scard_bumps_lfu_frequency`, green via rch. Clippy-clean.
+**Probe-fold scoreboard (11 wins): GETBIT 2.4-2.6x ≈ STRLEN 2.2-2.4x ≈ LLEN 2.2-2.3x > TYPE 1.8-1.9x
+≈ TOUCH 1.8-1.9x ≈ SCARD 1.6-1.85x ≈ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x;
+srandmember sub-gate.** ZCARD (19720, 3-probe like LLEN → ~2.2x) is the last clean length-read; then
+diluted tail. NOTE the 2-probe vs 3-probe split: SCARD/GET/EXISTS draw unconditionally after a
+record-hit (2 probes → ~1.6-1.85x); LLEN/STRLEN/GETBIT/ZCARD keep the redundant `contains_key`
+rand-gate (3 probes → ~2.2-2.6x). Both fold to 1; the 3-probe ones win more.

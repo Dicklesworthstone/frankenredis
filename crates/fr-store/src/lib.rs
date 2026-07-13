@@ -17295,31 +17295,75 @@ impl Store {
                 None => Ok(0),
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(0);
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        self.scard_lfu_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU SCARD keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` + the value `get_mut` into ONE probe, drawing `rand_sample` on the
+    /// disjoint `&mut self.rng_seed` field split. SCARD draws unconditionally after a hit (no
+    /// `contains_key` gate) but only USES the draw (bump) in the `Value::Set` arm — a present
+    /// wrong-type key draws but does NOT bump/touch, then WRONGTYPE. `false` is the prior two-probe
+    /// form. SCARD returns only a length (no value read). Byte/RNG-identical. LFU-only.
+    fn scard_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let len = s.len();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(0);
+            }
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    match &entry.value {
+                        Value::Set(s) => {
+                            let len = s.len();
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                            entry.touch(now_ms);
+                            Ok(len)
+                        }
+                        _ => Err(StoreError::WrongType),
                     }
-                    entry.touch(now_ms);
-                    Ok(len)
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(0),
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(0)
+                }
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(0);
+            }
+            let rand_sample = self.next_rand();
+            match self.entries.get_mut(key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        let len = s.len();
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        entry.touch(now_ms);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(0),
+            }
         }
+    }
+
+    #[doc(hidden)]
+    pub fn scard_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        self.scard_lfu_impl::<true>(key, now_ms)
+    }
+
+    #[doc(hidden)]
+    pub fn scard_lfu_twoprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        self.scard_lfu_impl::<false>(key, now_ms)
     }
 
     pub fn sismember(
@@ -46571,6 +46615,36 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn scard_lfu_collapsed_matches_twoprobe() {
+        // Under allkeys-lfu the collapsed SCARD (one get_mut fold + rng_seed field-split draw) must
+        // be byte-identical to the prior record + get_mut two-probe form for a present set, an absent
+        // key, a wrong-type key (draw but no bump/touch, then WRONGTYPE), and an expired key: result,
+        // keyspace hits/misses, RNG state, LFU freq.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.sadd(b"set", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        for key in [b"set".as_slice(), b"absent", b"str", b"ttl"] {
+            let mut a = build();
+            let mut b = build();
+            let ra = a.scard_lfu_collapsed_bench(key, now);
+            let rb = b.scard_lfu_twoprobe_bench(key, now);
+            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
+            assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
+            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
+            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+            assert_eq!(a.object_freq(b"set", now), b.object_freq(b"set", now), "freq key={key:?}");
+        }
     }
 
     #[test]

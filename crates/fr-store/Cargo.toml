@@ -394,3 +394,9 @@ harness = false
 [[bench]]
 name = "llen_lfu_collapse"
 harness = false
+
+# A/B for LFU SCARD probe collapse: fold record+get_mut via rng_seed field-split (1 probe) vs the
+# prior 2-probe form; SCARD returns only a length so probes are all its work. Byte-identical.
+[[bench]]
+name = "scard_lfu_collapse"
+harness = false
