@@ -12,6 +12,9 @@ mod keyspace_dict;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
 pub use packed_set::PackedStreamLogBTreeReference;
+#[cfg(any(test, feature = "bench-reference"))]
+#[doc(hidden)]
+pub use packed_set::PackedZSet as BenchPackedZSet;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
     PackedZSetIter, RestoredListNode, RetainedListpackChunk,

@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — packed ZPOPMAX skips discarded score decodes while locating the tail; 1.4227x fewer instructions, byte-identical
+
+The negative ledger ruled out the earlier ZPOPMAX TTL-guard and full-representation bulk-drain
+families, while the newly landed member-only packed-ZSET scans exposed a distinct sibling in
+`PackedZSet::pop_max`: locating the final listpack record decoded every intervening eight-byte score
+through `record_at`, discarded both returned fields, then decoded the final record again. ONE LEVER:
+production `pop_max` now parses only each member length and advances arithmetically over the member
+plus fixed-width score while locating the tail. The final record is still decoded exactly once for
+the returned `(member, score)`, and `pop_max_impl::<false>` retains the exact old scan as the
+same-binary reference.
+
+BYTE-IDENTICAL: the differential unit test drains 120 mixed-length members with tied and distinct
+scores from candidate and reference packed ZSETs, asserting every popped result, length, and full
+residual iteration after every step through the empty case. The benchmark repeats that complete
+drain as its correctness gate. Focused remote `fr-store` test passed.
+
+MEASURED (remote-only, one-binary `packed_zset_pop_max`, 24 position-balanced A/A/reference rounds,
+5,000 complete 120-record drains per arm): worker `vmi1227854`, binary SHA256
+`237b0341c5f2cc3b09900104da662d316d35c5280d07b2035721a3a0a4923578`; candidate median was
+~1.45792B instructions versus ~2.07321B reference, or **1.422037x reference/candidate** (**29.68%
+fewer instructions**). The A/A null median was **0.999999960**, p5..p95
+**[0.999986778, 1.000007528]**, CV **0.000592%**; effect CV **0.000487%**. `perf record` verified the
+old `PackedZSet::pop_max_impl::<false>` at **57.54% median self-time**, CV **4.2713%** (three trials),
+so the timed workload reached the changed function. Rollback: make `PackedZSet::pop_max` call
+`pop_max_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — plain packed ZRANK/ZREVRANK skips unused score decodes; 1.0711x fewer instructions, byte-identical
 
 The negative ledger and current profile frontier ruled out the already-saturated small lookup/

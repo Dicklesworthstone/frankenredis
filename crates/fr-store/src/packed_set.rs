@@ -4883,16 +4883,32 @@ impl PackedZSet {
 
     /// Remove and return the highest-ranked `(member, score)` (ZPOPMAX).
     pub fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
+        self.pop_max_impl::<true>()
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Finding the final record needs only
+    /// record boundaries; production skips every discarded member/score decode, while
+    /// `MEMBER_ONLY=false` retains the exact pre-change traversal.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn pop_max_impl<const MEMBER_ONLY: bool>(&mut self) -> Option<(Vec<u8>, f64)> {
         if self.buf.is_empty() {
             return None;
         }
         // Walk to the last record's start.
         let mut pos = 0;
         let mut last_start = 0;
-        while pos < self.buf.len() {
-            last_start = pos;
-            let (_m, _s, end) = self.record_at(pos);
-            pos = end;
+        if MEMBER_ONLY {
+            while pos < self.buf.len() {
+                last_start = pos;
+                let (mlen, m_start) = read_varint(&self.buf, pos);
+                pos = m_start + mlen + 8;
+            }
+        } else {
+            while pos < self.buf.len() {
+                last_start = pos;
+                let (_member, _score, end) = self.record_at(pos);
+                pos = end;
+            }
         }
         let (m, score, _end) = self.record_at(last_start);
         let out = (m.to_vec(), score);
@@ -6123,6 +6139,33 @@ mod tests {
             z2.iter().collect::<Vec<_>>(),
             vec![(&b"x"[..], 0.0), (b"y", -0.0)]
         );
+    }
+
+    #[test]
+    fn packed_zset_pop_max_member_only_matches_score_decoding_reference() {
+        let pairs: Vec<(Vec<u8>, f64)> = (0_i32..120)
+            .map(|index| {
+                (
+                    format!("member:{index:04}").into_bytes(),
+                    f64::from((index % 17) - 8) + f64::from(index % 3) * 0.25,
+                )
+            })
+            .collect();
+        let mut candidate = PackedZSet::from_unique_pairs(pairs.clone());
+        let mut reference = PackedZSet::from_unique_pairs(pairs);
+        loop {
+            let candidate_result = candidate.pop_max();
+            let reference_result = reference.pop_max_impl::<false>();
+            assert_eq!(candidate_result, reference_result);
+            assert_eq!(candidate.len(), reference.len());
+            assert_eq!(
+                candidate.iter().collect::<Vec<_>>(),
+                reference.iter().collect::<Vec<_>>()
+            );
+            if candidate_result.is_none() {
+                break;
+            }
+        }
     }
 
     proptest! {

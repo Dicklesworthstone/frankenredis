@@ -75,6 +75,13 @@ name = "packed_zset_locate"
 harness = false
 required-features = ["bench-reference"]
 
+# Same-binary, null-gated instruction benchmark for PackedZSet::pop_max locating the final
+# record without decoding every discarded score.
+[[bench]]
+name = "packed_zset_pop_max"
+harness = false
+required-features = ["bench-reference"]
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]
