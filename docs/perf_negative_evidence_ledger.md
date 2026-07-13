@@ -7763,6 +7763,34 @@ per commit-or-negative-ledger). VEIN LESSON: prioritize BORROWED-arg writes (fie
 cleanly. OWNED-value writes (LSET, GETSET, APPEND-grows) dilute the single-probe collapse below the
 wallclock gate; confirm via instructions:u before shipping, or skip.
 
+## 2026-07-13 SwiftWillow: WIN — KEEP. LFU SREM write-side 2 probes → 1 on borrowed members — **1.379–1.414x at n32**
+
+Followed the LSET negative's routing correction to a borrowed-argument write. Under allkeys-lfu,
+SREM still did a `contains_key` random-sample gate followed by `entries.get_mut`: two foldhash
+keyspace probes before the set-member removal. `srem_impl<COLLAPSE>` now makes production SREM use
+the successful `get_mut` as the presence gate and draws the identical sample through the disjoint
+`rng_seed` field while the entry is held. The retained bench reference executes the exact prior
+two-probe path. This is a direct-`get_mut` command, so unlike HDEL there is no digest-wrapper
+replication; absent/expired keys still draw nothing, and present wrong-type keys still draw and bump
+before returning WRONGTYPE.
+
+One-binary, one-invocation, position-balanced A/B (`benches/srem_lfu_collapse.rs`, `release-perf`,
+allkeys-lfu, 50k one-member sets, production-valid SREM of a missing borrowed member, median-of-61)
+was independently repeated on two fail-closed RCH workers:
+
+- `vmi1149989`: n32 **1.379x**, A/A null median `1.0002`, p5..p95 `[0.790, 1.196]`, cv `13.49%`
+  — WIN. n256 `1.288x`, null `0.9819`, `[0.785, 1.417]`, cv `16.99%` — positive but below gate.
+- `vmi1152480`: n32 **1.414x**, A/A null median `0.9892`, p5..p95 `[0.762, 1.319]`, cv `23.77%`
+  — WIN. n256 `1.309x`, null `1.0408`, `[0.787, 1.517]`, cv `20.65%` — positive but below gate.
+
+The keep claim is deliberately bounded to n32: both workers clear their own n32 null p95, while
+neither n256 observation clears its noisy per-size null spread. `srem_lfu_collapsed_matches_twoprobe`
+proves result, full entry value/access/LFU/modification metadata, RNG state, dirty count, digest
+mutation/staleness state, and final DEBUG DIGEST over missing/present/partial/remove-to-empty,
+absent, wrong-type, and lazy-expired cases with LFU both on and off. The focused parity gate passed
+remotely on `vmi1149989`. This overturns the old structural “rand needs &mut self” wall for SREM and
+confirms the LSET row's borrowed-argument routing lesson; it does not claim an end-to-end socket win.
+
 ## 2026-07-13 SwiftWillow: WIN — LANDED (`48c26f2f2`). LFU SETBIT write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.42x (n32)**
 
 Third member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]),

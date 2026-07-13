@@ -17591,6 +17591,20 @@ impl Store {
     }
 
     pub fn srem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
+        self.srem_impl::<true>(key, members, now_ms)
+    }
+
+    /// A/B toggle for the LFU SREM keyspace-probe collapse. `COLLAPSE = true` (shipped) draws
+    /// the LFU random sample through the disjoint `rng_seed` field after the entry has been found,
+    /// eliminating the separate `contains_key` gate before `get_mut` (two probes to one).
+    /// `false` preserves the prior two-probe path for same-binary measurement. SREM is a direct
+    /// `get_mut` write, so no digest-wrapper bookkeeping needs to move.
+    fn srem_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the get_mut below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -17653,6 +17667,17 @@ impl Store {
             }
             None => Ok(0),
         }
+    }
+
+    /// Prior two-probe SREM retained solely for the same-binary A/B benchmark.
+    #[doc(hidden)]
+    pub fn srem_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.srem_impl::<false>(key, members, now_ms)
     }
 
     pub fn smembers(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -39223,6 +39248,68 @@ mod tests {
             other => return Err(format!("SREM should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn srem_lfu_collapsed_matches_twoprobe() {
+        fn build(lfu: bool) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store
+                .sadd(b"set", &[b"a".to_vec(), b"b".to_vec()], 1)
+                .unwrap();
+            store.sadd(b"single", &[b"a".to_vec()], 1).unwrap();
+            store.set(b"string".to_vec(), b"value".to_vec(), None, 1);
+            store.sadd(b"expired", &[b"a".to_vec()], 1).unwrap();
+            assert!(store.expire_milliseconds(b"expired", 5, 1));
+            store
+        }
+
+        let cases: &[(&[u8], &[&[u8]])] = &[
+            (b"set", &[b"missing"]),
+            (b"set", &[b"a"]),
+            (b"set", &[b"a", b"missing"]),
+            (b"single", &[b"a"]),
+            (b"absent", &[b"a"]),
+            (b"string", &[b"a"]),
+            (b"expired", &[b"a"]),
+        ];
+        let now_ms = 10;
+
+        for lfu in [true, false] {
+            for &(key, members) in cases {
+                let mut collapsed = build(lfu);
+                let mut prior = build(lfu);
+                let collapsed_result = collapsed.srem(key, members, now_ms);
+                let prior_result = prior.srem_lfu_twoprobe_bench(key, members, now_ms);
+                let tag = format!("lfu={lfu} key={key:?} members={members:?}");
+
+                assert_eq!(collapsed_result, prior_result, "result {tag}");
+                assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                assert_eq!(
+                    collapsed.entries.get(key),
+                    prior.entries.get(key),
+                    "entry {tag}"
+                );
+                assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                assert_eq!(
+                    collapsed.digest_mutations, prior.digest_mutations,
+                    "digest_mutations {tag}"
+                );
+                assert_eq!(
+                    collapsed.digest_stale, prior.digest_stale,
+                    "digest_stale {tag}"
+                );
+                assert_eq!(
+                    collapsed.state_digest(),
+                    prior.state_digest(),
+                    "digest {tag}"
+                );
+            }
+        }
     }
 
     #[test]
