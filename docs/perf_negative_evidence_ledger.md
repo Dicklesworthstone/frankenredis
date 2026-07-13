@@ -7659,3 +7659,24 @@ SCARD 1.6-1.85x ≈ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1
 sub-gate.** LAST clean same-shape read: HEXISTS (bool, field lookup → ~1.7-1.9x). Then ONLY the
 diluted tail (GETRANGE substring clone, bitcount/bitpos O(n) SIMD popcount). 15 read commands folded
 across string/keyspace/list/set/zset/hash families — the LFU keyspace-read wall is essentially closed.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU HEXISTS 3 probes → 1 (is_empty fast path + field split) — **1.90–1.96x**
+
+The final clean hash-read sibling. Under allkeys-lfu, HEXISTS did `record_keyspace_lookup` + a
+redundant `contains_key` rand-gate + `get_mut`, while `drop_hash_field_if_expired` was a guaranteed
+no-op when `hash_field_expires.is_empty()` (the common case, no HEXPIRE use). Added that
+`is_empty()`-gated fast path: skip the reap, fold record+get_mut, drop contains_key, and draw the
+same rand sample through the disjoint `rng_seed` field — 3 keyspace probes → 1. The nonempty
+field-TTL fallback remains the exact prior path, including its LFU-off bump/rand guards.
+
+One-binary, one-invocation, position-balanced A/B on remote worker `vmi1293453`
+(`benches/hexists_lfu_collapse.rs`, `release-perf`, allkeys-lfu, 50k single-field hashes,
+median-of-61): n32 **1.962x** vs three-probe (A/A null median `1.0147`, p5..p95
+`[0.924, 1.130]`, cv `6.61%`); n256 **1.895x** (null median `0.9970`, p5..p95
+`[0.852, 1.170]`, cv `20.18%`). Both candidate medians clear their own per-size null spreads.
+Byte/RNG-identical: `hexists_lfu_collapsed_matches_threeprobe` covers present/missing field,
+absent/wrong-type/expired key and asserts reply/error, RNG state, keyspace stats, and OBJECT FREQ;
+`hash_read_family_collapse_and_field_ttl_fallback` preserves the non-LFU field-expiry reap. All five
+focused tests and workspace/all-targets check passed via fail-closed RCH. The clean hash-family LFU
+probe-fold vein is now complete; the remaining string/collection scan tail needs fresh attribution
+before another lever.
