@@ -18037,3 +18037,20 @@ RESERVED worktree + multi-session commitment (40-120x RESTORE-build ceiling, ~2x
 [[project_b1o02_hash_listpack_ceiling]]; (b) borrowed/Arc `RdbValue` [[project_persist_decode_frontier]]; (c) the
 dedicated-turn INCR `mark_volatile_keys_dirty` elision (blocked by a deliberate equivalence test). A "pick ONE lever,
 land often" drive-by will keep returning negatives — the next real gain requires committing to (a).
+
+### 2026-07-13 NEGATIVE (persistence subsystem also saturated — DUMP + RDB-load)
+Extended the sweep beyond the command hot path to the persistence subsystem (the last benchable-at-store-level area):
+also saturated.
+- **DUMP**: listpack DUMP is DIRECT-EMIT for all three collection types (set `encode_set_listpack_dump`, hash
+  `encode_hash_listpack_dump`, zset inline at ~28904 — member bytes by reference, scores stack-rendered via
+  `zset_score_listpack_entry`, no `Vec<Vec<u8>>` clone) AND memoized (`cache_dump_payload` for every small-listpack
+  type, mod_count-keyed). Large hashtable/skiplist encodings left uncached (correct). List direct-emit was A/B'd
+  REJECTED/neutral (g5o8d/k1wcp, [[project_dump_direct_emit_vein]]). Large DUMP is LZF-bound [[project_dump_p128_structural_lzf_neutral]].
+- **RDB-load**: the hash-load gap (qxfmr) is FIXED — `RdbValue::Hash` → `hset_many` (one keyspace lookup, MOVES fields
+  in) → `HashFieldMap::from_unique_pairs` bulk-build (decide Packed-vs-Hash once, reserve exact cap, one pass) after an
+  O(n) uniqueness check (genuinely REQUIRED: the Packed branch `append`s without dedup, and small RDB hashes are all
+  Packed — so the check can't be skipped for the common case). set/zset/list RDB-load move-builds shipped; decode-side
+  itoa2/listpack-move/int-probe all shipped [[project_dump_direct_emit_vein]].
+FULL PICTURE: command hot path, fr-simd, random-sampling, set-algebra, AND persistence are ALL saturated. The ONLY
+remaining perf work is the multi-day structural b1o02 [[project_b1o02_hash_listpack_ceiling]] (or borrowed RdbValue /
+the dedicated INCR mark_dirty). There is no further one-turn drive-by lever anywhere in the benchable surface.
