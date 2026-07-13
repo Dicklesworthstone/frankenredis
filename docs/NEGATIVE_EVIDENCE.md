@@ -17940,3 +17940,17 @@ cv 0.00002%, 24 rounds — under concurrent host CPU contention, vs 19.48x on th
 Validated by the full fr-store suite (797 pass, 0 fail — covers the rpoplpush/lmove/smove empty-source cleanup paths).
 Fires on any list-move/smove that empties its source. Remaining sibling: eviction ~12022 (cold, memory-pressure only).
 Rollback: restore the two unconditional `stream_groups`/`stream_last_ids` removes at each site.
+
+### 2026-07-13 SHIPPED (eviction-path stream side-map removes routed through the guarded helper — frankenredis-bc014, COMPLETES the family)
+The maxmemory eviction loop (`evict_keys_until_under_limit`) did `internal_entries_remove(candidate)` then TWO
+UNCONDITIONAL `stream_groups.remove(candidate)` + `stream_last_ids.remove(candidate)` per evicted key. Only a stream
+key ever populates them, so on a no-stream DB — the common maxmemory-CACHE case — the pair are wasted foldhash+probes
+on EVERY eviction. Routed through `drop_stream_side_metadata(candidate.as_slice())` (is_empty-guarded). Byte-identical
+(empty-map remove is a no-op; a non-stream evicted key is absent from both maps regardless). NOT cold as I'd earlier
+tagged it: under memory pressure a cache evicts per write, so this fires per-eviction — the guard elides the two
+probes on the hot cache-eviction path. Same 2-remove primitive `del_stream_cleanup` isolates (6.32x this turn / 19.48x
+quiet). Validated by the full fr-store suite (797 pass, 0 fail). **This COMPLETES the stream side-map is_empty-guard
+family**: every non-stream-reachable site (DEL, RENAME, RENAMENX, SET-overwrite, RPOPLPUSH/LMOVE/SMOVE, eviction, the
+general-write helper) now guards its stream side-map removes; only genuinely stream-typed paths (XDEL/XTRIM/XADD-
+create) remove unconditionally, which is correct. NEXT lever MUST pivot off this vein entirely. Rollback: restore the
+two unconditional removes.

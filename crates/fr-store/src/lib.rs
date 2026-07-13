@@ -12075,8 +12075,12 @@ impl Store {
                     break;
                 };
                 if let Some(evicted_entry) = self.internal_entries_remove(candidate.as_slice()) {
-                    self.stream_groups.remove(candidate.as_slice());
-                    self.stream_last_ids.remove(candidate.as_slice());
+                    // (frankenredis-53w9n-sib) Only a stream key ever populates these two maps, so
+                    // on a no-stream DB (the common maxmemory-cache case) the pair are wasted
+                    // foldhash+probes per evicted key. Route through the is_empty-guarded helper —
+                    // byte-identical (empty-map remove is a no-op; a non-stream evicted key is
+                    // absent from both maps regardless). Completes the stream side-map guard family.
+                    self.drop_stream_side_metadata(candidate.as_slice());
                     evicted_keys = evicted_keys.saturating_add(1);
                     self.stat_evicted_keys = self.stat_evicted_keys.saturating_add(1);
                     // (CrimsonHawk) Decrement the cached used_memory by exactly
