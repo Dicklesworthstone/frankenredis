@@ -8080,8 +8080,18 @@ impl Store {
                 self.drop_if_expired(key, now_ms);
             }
             if self.internal_entries_remove(key.as_slice()).is_some() {
-                self.stream_groups.remove(key.as_slice());
-                self.stream_last_ids.remove(key.as_slice());
+                // (perf) Only stream keys ever populate `stream_groups` / `stream_last_ids`, so
+                // when both side-maps are empty (a DB with no streams — the common case) the two
+                // `remove` calls are pure wasted foldhash+probes on every deleted key. Guard on
+                // `is_empty()`: an empty-map `remove` is already a no-op, so this is byte-identical
+                // (a stale entry keeps the map non-empty and still gets removed). Mirrors the
+                // empty-sidemap fast-exit guard used elsewhere. O(1) check vs 2 hash+probes/key.
+                if !self.stream_groups.is_empty() {
+                    self.stream_groups.remove(key.as_slice());
+                }
+                if !self.stream_last_ids.is_empty() {
+                    self.stream_last_ids.remove(key.as_slice());
+                }
                 // Record the key actually removed so the command layer fires a
                 // "del"/"unlink" keyspace event ONLY for real removals — upstream
                 // delGenericCommand notifies per successful dbDelete, never for
@@ -8098,6 +8108,27 @@ impl Store {
     #[must_use]
     pub fn take_last_del_removed(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.last_del_removed)
+    }
+
+    /// Bench hook for the same-binary A/B in `benches/del_stream_cleanup.rs`: isolates DEL's
+    /// per-key stream side-map cleanup. `GUARD = true` is production (skip the two `remove` calls
+    /// when both side-maps are empty); `GUARD = false` is the prior unconditional pair of removes.
+    /// A non-stream key is absent from both maps, so both arms are no-ops on a stream-free store —
+    /// byte-identical; only the wasted foldhash+probe differs. Not on a production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_del_stream_cleanup<const GUARD: bool>(&mut self, key: &[u8]) {
+        if GUARD {
+            if !self.stream_groups.is_empty() {
+                self.stream_groups.remove(key);
+            }
+            if !self.stream_last_ids.is_empty() {
+                self.stream_last_ids.remove(key);
+            }
+        } else {
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+        }
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {

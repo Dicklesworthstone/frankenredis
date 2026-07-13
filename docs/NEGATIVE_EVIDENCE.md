@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — DEL skips the stream side-map cleanup on stream-free DBs; isolated cleanup 19.48x fewer instructions, byte-identical (frankenredis-5998y)
+
+NEGATIVE-LEDGER-FIRST + PIVOT (command dispatch + parse-fusion veins closed): `Store::del` called
+`stream_groups.remove(key)` AND `stream_last_ids.remove(key)` for EVERY deleted key. Only stream
+keys ever populate those two side-maps, so on a DB with no streams (both maps empty — the common
+case for cache / non-stream workloads) each is a pure wasted foldhash+probe per deleted key. Guard
+each on `is_empty()`: an empty-map `remove` is already a no-op, so this is BYTE-IDENTICAL (a stale
+entry keeps the map non-empty and is still removed). Mirrors the empty-sidemap fast-exit guard used
+elsewhere; extends the CrimsonHawk no-TTL DEL guard.
+
+BYTE-IDENTICAL: 106 fr-store DEL/stream unit tests pass; the change is provably a no-op on empty
+maps. (Two unrelated wall-clock timing-ratio tests —
+`intersect_sorted_i64_galloping..._faster_galp1`, `zset_index_slice_treap..._ab_ratio` — flaked
+under machine load; verified the galloping one fails on HEAD too with this change stashed, and the
+treap one passes in isolation.)
+
+MEASURED (`crates/fr-store/benches/del_stream_cleanup.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`72b7475eacfba61a652d3c57985146afbd6ff9156c4bfc7ba9c80016f6460e0d`; a stream-free store, 16 absent
+non-stream keys): the ISOLATED per-key cleanup is **19.480975x fewer instructions** (2 `is_empty()`
+checks vs 2 foldhash+probes). Null median 1.000000026, null CV 0.000031%; effect CV 0.000019%.
+Reference frame `bench_del_stream_cleanup::<false>`. This isolates the cleanup only — end-to-end DEL
+gain is proportional to the cleanup's share of per-key work (the two removes are ~one-third of a
+non-stream key's DEL). Rollback: restore the two unconditional `remove` calls in `Store::del`.
+
 ## 2026-07-13: REJECTED (REGRESSION) — classify_command match dispatch on the len-3 bucket regresses ~2.2%; the linear chain is optimal for tiny front-loaded buckets
 
 NEGATIVE-LEDGER-FIRST: the `classify_command` match-on-packed vein shipped every ≥4-command

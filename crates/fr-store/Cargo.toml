@@ -268,3 +268,9 @@ harness = false
 [[bench]]
 name = "lpush_borrow"
 harness = false
+
+# A/B for DEL's per-key stream side-map cleanup: skip the two remove()s when both maps are empty
+# (no-stream DB) vs the prior unconditional pair. Byte-identical; isolates the wasted foldhash+probe.
+[[bench]]
+name = "del_stream_cleanup"
+harness = false
