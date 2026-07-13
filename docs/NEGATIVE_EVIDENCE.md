@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-5 bucket); 1.1364x fewer instructions, byte-identical (frankenredis-s5otn)
+
+NEGATIVE-LEDGER-FIRST: third bucket in the `classify_command` match-dispatch vein (after len-6
+zb2h3 and len-4 u2ngi). The 5-byte bucket — 34 commands including SETNX / HMGET / HMSET / LPUSH /
+RPUSH / SCARD / ZRANK / ZCARD / SETEX / GETEX / LTRIM / HSCAN / SSCAN / ZSCAN / BLPOP / BRPOP — was a
+linear per-candidate `eq_ascii_command` chain (re-packing `cmd` each time). Rewrote it to compute
+`pack_cmd_u64(cmd)` ONCE + `match` on const-packed u64 (compiler jump table / binary search).
+
+BYTE-IDENTICAL: `classify_command_matches_linear_reference` (vs `classify_command_linear`) still
+passes over EVERY known command; `bench_classify5_match` == `bench_classify5_linear` over all 34
+names + misses; full fr-command lib suite 1172/1172, 0 failed.
+
+MEASURED (`crates/fr-command/benches/classify5_dispatch.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`1ae2f61d2119a9a3e806a301a42d8dec443fd00d614abfdb58f3b4fe682d588c`; workload = 16 realistic 5-byte
+names, hits spread + one miss): candidate vs reference = **1.136351x fewer instructions (12.00%)**.
+Null median 1.000000037, p5..p95 [0.999999752,1.000000207], null CV 0.000015%; effect CV 0.000010%.
+Reference frame `fr_command::bench_classify5_linear` self-time ~76–81%. Rollback: restore the len==5
+`if eq_ascii_command` chain. Remaining buckets: 3/7/8.
+
 ## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-4 bucket); 1.0863x fewer instructions, byte-identical (frankenredis-u2ngi)
 
 NEGATIVE-LEDGER-FIRST: second bucket in the `classify_command` match-dispatch vein (after the

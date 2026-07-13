@@ -3109,76 +3109,79 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         5 => {
-            if eq_ascii_command(cmd, b"SETNX") {
-                Some(CommandId::Setnx)
-            } else if eq_ascii_command(cmd, b"HKEYS") {
-                Some(CommandId::Hkeys)
-            } else if eq_ascii_command(cmd, b"HVALS") {
-                Some(CommandId::Hvals)
-            } else if eq_ascii_command(cmd, b"HMGET") {
-                Some(CommandId::Hmget)
-            } else if eq_ascii_command(cmd, b"HMSET") {
-                Some(CommandId::Hmset)
-            } else if eq_ascii_command(cmd, b"LPUSH") {
-                Some(CommandId::Lpush)
-            } else if eq_ascii_command(cmd, b"RPUSH") {
-                Some(CommandId::Rpush)
-            } else if eq_ascii_command(cmd, b"SCARD") {
-                Some(CommandId::Scard)
-            } else if eq_ascii_command(cmd, b"ZRANK") {
-                Some(CommandId::Zrank)
-            } else if eq_ascii_command(cmd, b"ZCARD") {
-                Some(CommandId::Zcard)
-            } else if eq_ascii_command(cmd, b"SETEX") {
-                Some(CommandId::Setex)
-            } else if eq_ascii_command(cmd, b"SDIFF") {
-                Some(CommandId::Sdiff)
-            } else if eq_ascii_command(cmd, b"PFADD") {
-                Some(CommandId::Pfadd)
-            } else if eq_ascii_command(cmd, b"LTRIM") {
-                Some(CommandId::Ltrim)
-            } else if eq_ascii_command(cmd, b"XREAD") {
-                Some(CommandId::Xread)
-            } else if eq_ascii_command(cmd, b"LMPOP") {
-                Some(CommandId::Lmpop)
-            } else if eq_ascii_command(cmd, b"ZMPOP") {
-                Some(CommandId::Zmpop)
-            } else if eq_ascii_command(cmd, b"XINFO") {
-                Some(CommandId::Xinfo)
-            } else if eq_ascii_command(cmd, b"XTRIM") {
-                Some(CommandId::Xtrim)
-            } else if eq_ascii_command(cmd, b"LMOVE") {
-                Some(CommandId::Lmove)
-            } else if eq_ascii_command(cmd, b"SMOVE") {
-                Some(CommandId::Smove)
-            } else if eq_ascii_command(cmd, b"GETEX") {
-                Some(CommandId::Getex)
-            } else if eq_ascii_command(cmd, b"BITOP") {
-                Some(CommandId::Bitop)
-            } else if eq_ascii_command(cmd, b"ZDIFF") {
-                Some(CommandId::Zdiff)
-            } else if eq_ascii_command(cmd, b"HSCAN") {
-                Some(CommandId::Hscan)
-            } else if eq_ascii_command(cmd, b"SSCAN") {
-                Some(CommandId::Sscan)
-            } else if eq_ascii_command(cmd, b"ZSCAN") {
-                Some(CommandId::Zscan)
-            } else if eq_ascii_command(cmd, b"TOUCH") {
-                Some(CommandId::Touch)
-            } else if eq_ascii_command(cmd, b"RESET") {
-                Some(CommandId::Reset)
-            } else if eq_ascii_command(cmd, b"BLPOP") {
-                Some(CommandId::Blpop)
-            } else if eq_ascii_command(cmd, b"BRPOP") {
-                Some(CommandId::Brpop)
-            } else if eq_ascii_command(cmd, b"DEBUG") {
-                Some(CommandId::Debug)
-            } else if eq_ascii_command(cmd, b"FCALL") {
-                Some(CommandId::Fcall)
-            } else if eq_ascii_command(cmd, b"PSYNC") {
-                Some(CommandId::Psync)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_SETNX: u64 = pack_cmd_u64(b"SETNX");
+            const PK_HKEYS: u64 = pack_cmd_u64(b"HKEYS");
+            const PK_HVALS: u64 = pack_cmd_u64(b"HVALS");
+            const PK_HMGET: u64 = pack_cmd_u64(b"HMGET");
+            const PK_HMSET: u64 = pack_cmd_u64(b"HMSET");
+            const PK_LPUSH: u64 = pack_cmd_u64(b"LPUSH");
+            const PK_RPUSH: u64 = pack_cmd_u64(b"RPUSH");
+            const PK_SCARD: u64 = pack_cmd_u64(b"SCARD");
+            const PK_ZRANK: u64 = pack_cmd_u64(b"ZRANK");
+            const PK_ZCARD: u64 = pack_cmd_u64(b"ZCARD");
+            const PK_SETEX: u64 = pack_cmd_u64(b"SETEX");
+            const PK_SDIFF: u64 = pack_cmd_u64(b"SDIFF");
+            const PK_PFADD: u64 = pack_cmd_u64(b"PFADD");
+            const PK_LTRIM: u64 = pack_cmd_u64(b"LTRIM");
+            const PK_XREAD: u64 = pack_cmd_u64(b"XREAD");
+            const PK_LMPOP: u64 = pack_cmd_u64(b"LMPOP");
+            const PK_ZMPOP: u64 = pack_cmd_u64(b"ZMPOP");
+            const PK_XINFO: u64 = pack_cmd_u64(b"XINFO");
+            const PK_XTRIM: u64 = pack_cmd_u64(b"XTRIM");
+            const PK_LMOVE: u64 = pack_cmd_u64(b"LMOVE");
+            const PK_SMOVE: u64 = pack_cmd_u64(b"SMOVE");
+            const PK_GETEX: u64 = pack_cmd_u64(b"GETEX");
+            const PK_BITOP: u64 = pack_cmd_u64(b"BITOP");
+            const PK_ZDIFF: u64 = pack_cmd_u64(b"ZDIFF");
+            const PK_HSCAN: u64 = pack_cmd_u64(b"HSCAN");
+            const PK_SSCAN: u64 = pack_cmd_u64(b"SSCAN");
+            const PK_ZSCAN: u64 = pack_cmd_u64(b"ZSCAN");
+            const PK_TOUCH: u64 = pack_cmd_u64(b"TOUCH");
+            const PK_RESET: u64 = pack_cmd_u64(b"RESET");
+            const PK_BLPOP: u64 = pack_cmd_u64(b"BLPOP");
+            const PK_BRPOP: u64 = pack_cmd_u64(b"BRPOP");
+            const PK_DEBUG: u64 = pack_cmd_u64(b"DEBUG");
+            const PK_FCALL: u64 = pack_cmd_u64(b"FCALL");
+            const PK_PSYNC: u64 = pack_cmd_u64(b"PSYNC");
+            match pack_cmd_u64(cmd) {
+                PK_SETNX => Some(CommandId::Setnx),
+                PK_HKEYS => Some(CommandId::Hkeys),
+                PK_HVALS => Some(CommandId::Hvals),
+                PK_HMGET => Some(CommandId::Hmget),
+                PK_HMSET => Some(CommandId::Hmset),
+                PK_LPUSH => Some(CommandId::Lpush),
+                PK_RPUSH => Some(CommandId::Rpush),
+                PK_SCARD => Some(CommandId::Scard),
+                PK_ZRANK => Some(CommandId::Zrank),
+                PK_ZCARD => Some(CommandId::Zcard),
+                PK_SETEX => Some(CommandId::Setex),
+                PK_SDIFF => Some(CommandId::Sdiff),
+                PK_PFADD => Some(CommandId::Pfadd),
+                PK_LTRIM => Some(CommandId::Ltrim),
+                PK_XREAD => Some(CommandId::Xread),
+                PK_LMPOP => Some(CommandId::Lmpop),
+                PK_ZMPOP => Some(CommandId::Zmpop),
+                PK_XINFO => Some(CommandId::Xinfo),
+                PK_XTRIM => Some(CommandId::Xtrim),
+                PK_LMOVE => Some(CommandId::Lmove),
+                PK_SMOVE => Some(CommandId::Smove),
+                PK_GETEX => Some(CommandId::Getex),
+                PK_BITOP => Some(CommandId::Bitop),
+                PK_ZDIFF => Some(CommandId::Zdiff),
+                PK_HSCAN => Some(CommandId::Hscan),
+                PK_SSCAN => Some(CommandId::Sscan),
+                PK_ZSCAN => Some(CommandId::Zscan),
+                PK_TOUCH => Some(CommandId::Touch),
+                PK_RESET => Some(CommandId::Reset),
+                PK_BLPOP => Some(CommandId::Blpop),
+                PK_BRPOP => Some(CommandId::Brpop),
+                PK_DEBUG => Some(CommandId::Debug),
+                PK_FCALL => Some(CommandId::Fcall),
+                PK_PSYNC => Some(CommandId::Psync),
+                _ => None,
             }
         }
         6 => {
@@ -4000,6 +4003,161 @@ pub fn bench_classify4_match(cmd: &[u8]) -> u32 {
         PK_EVAL => 38,
         PK_ROLE => 39,
         PK_MOVE => 40,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify5_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"SETNX") {
+        1
+    } else if eq_ascii_command(cmd, b"HKEYS") {
+        2
+    } else if eq_ascii_command(cmd, b"HVALS") {
+        3
+    } else if eq_ascii_command(cmd, b"HMGET") {
+        4
+    } else if eq_ascii_command(cmd, b"HMSET") {
+        5
+    } else if eq_ascii_command(cmd, b"LPUSH") {
+        6
+    } else if eq_ascii_command(cmd, b"RPUSH") {
+        7
+    } else if eq_ascii_command(cmd, b"SCARD") {
+        8
+    } else if eq_ascii_command(cmd, b"ZRANK") {
+        9
+    } else if eq_ascii_command(cmd, b"ZCARD") {
+        10
+    } else if eq_ascii_command(cmd, b"SETEX") {
+        11
+    } else if eq_ascii_command(cmd, b"SDIFF") {
+        12
+    } else if eq_ascii_command(cmd, b"PFADD") {
+        13
+    } else if eq_ascii_command(cmd, b"LTRIM") {
+        14
+    } else if eq_ascii_command(cmd, b"XREAD") {
+        15
+    } else if eq_ascii_command(cmd, b"LMPOP") {
+        16
+    } else if eq_ascii_command(cmd, b"ZMPOP") {
+        17
+    } else if eq_ascii_command(cmd, b"XINFO") {
+        18
+    } else if eq_ascii_command(cmd, b"XTRIM") {
+        19
+    } else if eq_ascii_command(cmd, b"LMOVE") {
+        20
+    } else if eq_ascii_command(cmd, b"SMOVE") {
+        21
+    } else if eq_ascii_command(cmd, b"GETEX") {
+        22
+    } else if eq_ascii_command(cmd, b"BITOP") {
+        23
+    } else if eq_ascii_command(cmd, b"ZDIFF") {
+        24
+    } else if eq_ascii_command(cmd, b"HSCAN") {
+        25
+    } else if eq_ascii_command(cmd, b"SSCAN") {
+        26
+    } else if eq_ascii_command(cmd, b"ZSCAN") {
+        27
+    } else if eq_ascii_command(cmd, b"TOUCH") {
+        28
+    } else if eq_ascii_command(cmd, b"RESET") {
+        29
+    } else if eq_ascii_command(cmd, b"BLPOP") {
+        30
+    } else if eq_ascii_command(cmd, b"BRPOP") {
+        31
+    } else if eq_ascii_command(cmd, b"DEBUG") {
+        32
+    } else if eq_ascii_command(cmd, b"FCALL") {
+        33
+    } else if eq_ascii_command(cmd, b"PSYNC") {
+        34
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify5_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 5 {
+        return 0;
+    }
+    const PK_SETNX: u64 = pack_cmd_u64(b"SETNX");
+    const PK_HKEYS: u64 = pack_cmd_u64(b"HKEYS");
+    const PK_HVALS: u64 = pack_cmd_u64(b"HVALS");
+    const PK_HMGET: u64 = pack_cmd_u64(b"HMGET");
+    const PK_HMSET: u64 = pack_cmd_u64(b"HMSET");
+    const PK_LPUSH: u64 = pack_cmd_u64(b"LPUSH");
+    const PK_RPUSH: u64 = pack_cmd_u64(b"RPUSH");
+    const PK_SCARD: u64 = pack_cmd_u64(b"SCARD");
+    const PK_ZRANK: u64 = pack_cmd_u64(b"ZRANK");
+    const PK_ZCARD: u64 = pack_cmd_u64(b"ZCARD");
+    const PK_SETEX: u64 = pack_cmd_u64(b"SETEX");
+    const PK_SDIFF: u64 = pack_cmd_u64(b"SDIFF");
+    const PK_PFADD: u64 = pack_cmd_u64(b"PFADD");
+    const PK_LTRIM: u64 = pack_cmd_u64(b"LTRIM");
+    const PK_XREAD: u64 = pack_cmd_u64(b"XREAD");
+    const PK_LMPOP: u64 = pack_cmd_u64(b"LMPOP");
+    const PK_ZMPOP: u64 = pack_cmd_u64(b"ZMPOP");
+    const PK_XINFO: u64 = pack_cmd_u64(b"XINFO");
+    const PK_XTRIM: u64 = pack_cmd_u64(b"XTRIM");
+    const PK_LMOVE: u64 = pack_cmd_u64(b"LMOVE");
+    const PK_SMOVE: u64 = pack_cmd_u64(b"SMOVE");
+    const PK_GETEX: u64 = pack_cmd_u64(b"GETEX");
+    const PK_BITOP: u64 = pack_cmd_u64(b"BITOP");
+    const PK_ZDIFF: u64 = pack_cmd_u64(b"ZDIFF");
+    const PK_HSCAN: u64 = pack_cmd_u64(b"HSCAN");
+    const PK_SSCAN: u64 = pack_cmd_u64(b"SSCAN");
+    const PK_ZSCAN: u64 = pack_cmd_u64(b"ZSCAN");
+    const PK_TOUCH: u64 = pack_cmd_u64(b"TOUCH");
+    const PK_RESET: u64 = pack_cmd_u64(b"RESET");
+    const PK_BLPOP: u64 = pack_cmd_u64(b"BLPOP");
+    const PK_BRPOP: u64 = pack_cmd_u64(b"BRPOP");
+    const PK_DEBUG: u64 = pack_cmd_u64(b"DEBUG");
+    const PK_FCALL: u64 = pack_cmd_u64(b"FCALL");
+    const PK_PSYNC: u64 = pack_cmd_u64(b"PSYNC");
+    match pack_cmd_u64(cmd) {
+        PK_SETNX => 1,
+        PK_HKEYS => 2,
+        PK_HVALS => 3,
+        PK_HMGET => 4,
+        PK_HMSET => 5,
+        PK_LPUSH => 6,
+        PK_RPUSH => 7,
+        PK_SCARD => 8,
+        PK_ZRANK => 9,
+        PK_ZCARD => 10,
+        PK_SETEX => 11,
+        PK_SDIFF => 12,
+        PK_PFADD => 13,
+        PK_LTRIM => 14,
+        PK_XREAD => 15,
+        PK_LMPOP => 16,
+        PK_ZMPOP => 17,
+        PK_XINFO => 18,
+        PK_XTRIM => 19,
+        PK_LMOVE => 20,
+        PK_SMOVE => 21,
+        PK_GETEX => 22,
+        PK_BITOP => 23,
+        PK_ZDIFF => 24,
+        PK_HSCAN => 25,
+        PK_SSCAN => 26,
+        PK_ZSCAN => 27,
+        PK_TOUCH => 28,
+        PK_RESET => 29,
+        PK_BLPOP => 30,
+        PK_BRPOP => 31,
+        PK_DEBUG => 32,
+        PK_FCALL => 33,
+        PK_PSYNC => 34,
         _ => 0,
     }
 }
