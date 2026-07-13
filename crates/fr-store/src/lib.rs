@@ -9767,7 +9767,60 @@ impl Store {
 
     // ── Bitmap (string extension) operations ─────────────────────
 
+    /// Shared SETBIT in-place mutation on an existing entry: materialize to a raw string, grow to
+    /// cover `byte_idx` if needed, flip the bit, and report `(old_bit, changed)`. Factored out of
+    /// the closure so the LFU keyspace-probe collapse (`setbit_impl::<true>`) and its prior-path
+    /// baseline (`::<false>`) run byte-identical bodies.
+    fn setbit_apply(
+        entry: &mut Entry,
+        byte_idx: usize,
+        bit_idx: usize,
+        value: bool,
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+    ) -> Result<(bool, bool), StoreError> {
+        let Some(v) = entry.value.materialize_string() else {
+            return Err(StoreError::WrongType);
+        };
+        let old_len = v.len();
+        if v.len() <= byte_idx {
+            v.resize(byte_idx + 1, 0);
+        }
+        let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
+        if value {
+            v[byte_idx] |= 1 << bit_idx;
+        } else {
+            v[byte_idx] &= !(1 << bit_idx);
+        }
+        let changed = old_len != v.len() || old_bit != value;
+        entry.touch_write(now_ms, lfu_tracking_enabled);
+        // Upstream bitops.c::setbitCommand calls dbUnshareStringValue which always
+        // converts the value to raw, regardless of length. (br-frankenredis-setbitenc)
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+        Ok((old_bit, changed))
+    }
+
     pub fn setbit(
+        &mut self,
+        key: &[u8],
+        offset: usize,
+        value: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.setbit_impl::<true>(key, offset, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU SETBIT keyspace-probe collapse. `COLLAPSE = true` (shipped) resolves
+    /// the existing entry with a single `get_mut`-first probe and draws `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split — dropping the separate `contains_key` LFU rand-gate (2
+    /// probes → 1 under allkeys-lfu). It inlines `with_mutated_entry`'s exact stale/fresh digest
+    /// bookkeeping (the `&mut Entry` closure cannot reach `self.rng_seed`); the absent-key create
+    /// branch is shared and unchanged. `false` is the prior path (`contains_key` rand-gate +
+    /// `with_mutated_entry`). Byte/RNG/digest-identical: the LFU bump is digest-neutral, so `old_hash`
+    /// is the same before or after it; the field-split draw advances `rng_seed` exactly as
+    /// `next_rand`, present-key-gated as before. Borrowed-arg write (offset+bool, no owned value), so
+    /// the single-bit op keeps the probe a meaningful fraction — unlike owned-value LSET (sub-gate).
+    fn setbit_impl<const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         offset: usize,
@@ -9789,39 +9842,76 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let byte_idx = offset / 8;
+        let bit_idx = 7 - (offset % 8); // MSB-first within each byte
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
         };
-        let byte_idx = offset / 8;
-        let bit_idx = 7 - (offset % 8); // MSB-first within each byte
-        match self.with_mutated_entry(key, |entry| {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-            }
-            let Some(v) = entry.value.materialize_string() else {
-                return Err(StoreError::WrongType);
-            };
-            let old_len = v.len();
-            if v.len() <= byte_idx {
-                v.resize(byte_idx + 1, 0);
-            }
-            let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
-            if value {
-                v[byte_idx] |= 1 << bit_idx;
+
+        let result_opt: Option<Result<(bool, bool), StoreError>> = if COLLAPSE {
+            // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing `rand_sample` on the
+            // disjoint `rng_seed` field split while the entry is held. Inlines the exact
+            // `with_mutated_entry` digest bookkeeping (the LFU bump is digest-neutral, so `old_hash`
+            // is identical taken before or after it).
+            if self.digest_stale {
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::setbit_apply(
+                            entry,
+                            byte_idx,
+                            bit_idx,
+                            value,
+                            now_ms,
+                            lfu_tracking_enabled,
+                        );
+                        self.bump_digest_mutations();
+                        Some(r)
+                    }
+                    None => None,
+                }
             } else {
-                v[byte_idx] &= !(1 << bit_idx);
+                let expiry = self.expiry_ms(key);
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        let old_hash = Self::entry_state_digest(key, entry, expiry);
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::setbit_apply(
+                            entry,
+                            byte_idx,
+                            bit_idx,
+                            value,
+                            now_ms,
+                            lfu_tracking_enabled,
+                        );
+                        let new_hash = Self::entry_state_digest(key, entry, expiry);
+                        self.update_digest_hashes(Some(old_hash), Some(new_hash));
+                        Some(r)
+                    }
+                    None => None,
+                }
             }
-            let changed = old_len != v.len() || old_bit != value;
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            // Upstream bitops.c::setbitCommand calls
-            // dbUnshareStringValue which always converts the
-            // value to raw, regardless of length.
-            // (br-frankenredis-setbitenc)
-            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            Ok((old_bit, changed))
-        }) {
+        } else {
+            // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
+            self.with_mutated_entry(key, |entry| {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                Self::setbit_apply(entry, byte_idx, bit_idx, value, now_ms, lfu_tracking_enabled)
+            })
+        };
+
+        match result_opt {
             Some(result) => {
                 let (old_bit, changed) = result?;
                 if changed {
@@ -9844,6 +9934,19 @@ impl Store {
                 Ok(old_bit)
             }
         }
+    }
+
+    /// Prior-path (two-probe) SETBIT baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// plus `with_mutated_entry`. Not on any production path (`setbit` uses `setbit_impl::<true>`).
+    #[doc(hidden)]
+    pub fn setbit_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        offset: usize,
+        value: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.setbit_impl::<false>(key, offset, value, now_ms)
     }
 
     pub fn getbit(&mut self, key: &[u8], offset: usize, now_ms: u64) -> Result<bool, StoreError> {
@@ -47167,6 +47270,64 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn setbit_lfu_collapsed_matches_twoprobe() {
+        // The get_mut-first LFU SETBIT collapse (one probe + rng_seed field-split draw + inlined
+        // with_mutated_entry digest bookkeeping) must be byte/RNG/digest-identical to the prior
+        // contains_key rand-gate + with_mutated_entry path — across set/clear/unchanged bits,
+        // a grow-past-length bit, an integer-encoded string, absent (create), wrong-type, and
+        // expired (create) keys, under BOTH allkeys-lfu (draw + bump) and a non-LFU policy (no
+        // draw; the inline digest replica must still equal with_mutated_entry), and BOTH stale and
+        // forced-fresh digest state. Asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.setbit(b"bm", 0, true, 1).unwrap();
+            s.setbit(b"bm", 2, true, 1).unwrap();
+            s.set(b"si".to_vec(), b"12345".to_vec(), None, 1); // integer-encoded string
+            s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap(); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, offset, value)
+        let cases: &[(&[u8], usize, bool)] = &[
+            (b"bm", 1, true),    // set an unset bit in-bounds (changed)
+            (b"bm", 0, true),    // set an already-set bit (unchanged)
+            (b"bm", 2, false),   // clear a set bit (changed)
+            (b"bm", 40, true),   // set a bit past the end (grow / resize)
+            (b"si", 1, true),    // setbit on an integer-encoded string (materialize + raw)
+            (b"absent", 5, true), // create new bitmap
+            (b"lst", 0, true),   // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, true),   // expired -> create
+        ];
+        for lfu in [true, false] {
+            for force_fresh in [false, true] {
+                for &(key, offset, value) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    if force_fresh {
+                        let _ = a.state_digest();
+                        let _ = b.state_digest();
+                    }
+                    let ra = a.setbit(key, offset, value, now);
+                    let rb = b.setbit_lfu_twoprobe_bench(key, offset, value, now);
+                    let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} off={offset}");
+                    assert_eq!(ra, rb, "result {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.object_freq(b"bm", now), b.object_freq(b"bm", now), "freq {tag}");
+                    assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
         }
     }
 

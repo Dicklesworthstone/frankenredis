@@ -449,3 +449,12 @@ harness = false
 [[bench]]
 name = "hdel_lfu_collapse"
 harness = false
+
+# A/B for the LFU SETBIT write-side keyspace-probe collapse: get_mut-first + rng_seed field-split
+# draw (1 probe) with inlined with_mutated_entry digest bookkeeping vs the prior contains_key
+# rand-gate + with_mutated_entry (2 probes). Borrowed-arg (offset+bool, no owned value) so the
+# single-bit op keeps the probe a meaningful fraction. Byte/RNG/digest-identical
+# (setbit_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "setbit_lfu_collapse"
+harness = false
