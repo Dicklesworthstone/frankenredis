@@ -313,6 +313,35 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) ZPOPMAX count popping 60 of a 120-member PACKED zset: the batch pop_max_n scans once
+    // to the split + truncates instead of 60x `pop_max` (each an O(len) FRONT scan to the last
+    // record) — the old O(count*len) packed path.
+    g.bench_function("zpopmax_count_60_of_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.zadd(b"z", &zrem_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.zpopmax_count(std::hint::black_box(b"z"), 60, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    // (cc_fr) ZPOPMIN count popping 60 of a 120-member PACKED zset: batch front drain vs 60x the
+    // O(len) `pop_min` front-drain.
+    g.bench_function("zpopmin_count_60_of_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.zadd(b"z", &zrem_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.zpopmin_count(std::hint::black_box(b"z"), 60, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map

@@ -2289,16 +2289,8 @@ impl SortedSet {
     /// identical to `count`× `pop_min()`.
     fn pop_min_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
         match &mut self.inner {
-            SortedSetInner::Packed(p) => {
-                let mut out = Vec::new();
-                for _ in 0..count {
-                    match p.pop_min() {
-                        Some(pair) => out.push(pair),
-                        None => break,
-                    }
-                }
-                out
-            }
+            // (cc_fr) Contiguous front span drained in one shift — was count× O(len) `pop_min`.
+            SortedSetInner::Packed(p) => p.pop_min_n(count),
             SortedSetInner::Full(f) => f.pop_min_n(count),
         }
     }
@@ -2306,16 +2298,8 @@ impl SortedSet {
     /// (CrimsonHawk) Bulk pop of the `count` highest members (descending).
     fn pop_max_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
         match &mut self.inner {
-            SortedSetInner::Packed(p) => {
-                let mut out = Vec::new();
-                for _ in 0..count {
-                    match p.pop_max() {
-                        Some(pair) => out.push(pair),
-                        None => break,
-                    }
-                }
-                out
-            }
+            // (cc_fr) Contiguous tail span; scan-to-split + truncate — was count× O(len) `pop_max`.
+            SortedSetInner::Packed(p) => p.pop_max_n(count),
             SortedSetInner::Full(f) => f.pop_max_n(count),
         }
     }
@@ -45101,6 +45085,58 @@ mod tests {
         assert_eq!(store.object_encoding(b"byscore", 0), Some("skiplist"));
         store.zstore_from_pairs(b"byrank".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
         assert_eq!(store.object_encoding(b"byrank", 0), Some("listpack"));
+    }
+
+    #[test]
+    fn zpop_count_packed_batch_matches_reference_cc() {
+        // (cc_fr) ZPOPMIN/ZPOPMAX count via the packed batch pop_min_n/pop_max_n must return the
+        // `count` lowest/highest (member, score) pairs — min ASCENDING, max DESCENDING (matching
+        // repeated pop_min/pop_max) — and leave the complementary residual. Members m00000.. carry
+        // score = index, so the expected pairs are exact. Packed (<=128) and Full (>128), count
+        // < / == / > len.
+        for &total in &[0usize, 1, 5, 64, 200] {
+            for &popn in &[0usize, 1, 3, total / 2, total, total + 5] {
+                let members: Vec<(f64, Vec<u8>)> =
+                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let k = popn.min(total);
+                // ZPOPMIN: k lowest, ascending.
+                {
+                    let mut store = Store::new();
+                    if total > 0 {
+                        store.zadd(b"z", &members, 0).unwrap();
+                    }
+                    let got = store.zpopmin_count(b"z", popn, 1).unwrap();
+                    let want: Vec<(Vec<u8>, f64)> =
+                        (0..k).map(|i| (format!("m{i:05}").into_bytes(), i as f64)).collect();
+                    assert_eq!(got, want, "zpopmin total={total} popn={popn}");
+                    assert_eq!(
+                        store.zrange(b"z", 0, -1, 1).unwrap().len(),
+                        total - k,
+                        "zpopmin residual total={total} popn={popn}"
+                    );
+                }
+                // ZPOPMAX: k highest, descending.
+                {
+                    let mut store = Store::new();
+                    if total > 0 {
+                        store.zadd(b"z", &members, 0).unwrap();
+                    }
+                    let got = store.zpopmax_count(b"z", popn, 1).unwrap();
+                    let want: Vec<(Vec<u8>, f64)> = (0..k)
+                        .map(|j| {
+                            let i = total - 1 - j;
+                            (format!("m{i:05}").into_bytes(), i as f64)
+                        })
+                        .collect();
+                    assert_eq!(got, want, "zpopmax total={total} popn={popn}");
+                    assert_eq!(
+                        store.zrange(b"z", 0, -1, 1).unwrap().len(),
+                        total - k,
+                        "zpopmax residual total={total} popn={popn}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -4794,6 +4794,50 @@ impl PackedZSet {
         remove
     }
 
+    /// (cc_fr) ZPOPMIN count: remove and return the `count.min(len)` lowest `(member, score)` in
+    /// ascending order (lowest first — matching repeated `pop_min`). The lowest ranks are the front
+    /// records, so this collects them then drains the front span in ONE shift — O(len) vs count× the
+    /// O(len) `pop_min` (each drains the front). Byte-identical to count `pop_min`s.
+    pub fn pop_min_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let n = count.min(self.len);
+        let mut out = Vec::with_capacity(n);
+        let mut pos = 0;
+        for _ in 0..n {
+            let (m, score, end) = self.record_at(pos);
+            out.push((m.to_vec(), score));
+            pos = end;
+        }
+        self.buf.drain(0..pos);
+        self.len -= n;
+        out
+    }
+
+    /// (cc_fr) ZPOPMAX count: remove and return the `count.min(len)` highest `(member, score)` in
+    /// DESCENDING order (highest first — matching repeated `pop_max`). The highest ranks are the tail
+    /// records, so this scans once to the split, collects the tail, `truncate`s, and reverses — O(len)
+    /// vs count× the O(len) `pop_max` (each front-scans to the last record). Byte-identical to count
+    /// `pop_max`s.
+    pub fn pop_max_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let n = count.min(self.len);
+        let keep = self.len - n;
+        let mut pos = 0;
+        for _ in 0..keep {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let start_off = pos;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (m, score, end) = self.record_at(pos);
+            out.push((m.to_vec(), score));
+            pos = end;
+        }
+        self.buf.truncate(start_off);
+        self.len -= n;
+        out.reverse();
+        out
+    }
+
     /// 0-based rank of `member` in ascending `(score, member)` order (ZRANK).
     #[must_use]
     pub fn rank(&self, member: &[u8]) -> Option<usize> {
