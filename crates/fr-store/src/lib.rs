@@ -18053,72 +18053,77 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if self.lfu_tracking_enabled() {
-            return self.spop_count_loop_ref(key, count, now_ms);
-        }
         if count == 0 {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         // `spop` opens with `drop_if_expired`; a missing/expired key early-returns Ok(None) BEFORE
         // it draws rand_val, so the loop makes NO draw for it — and none for the final failed call
         // after the set is drained + the key removed. Hence there is no "wasted" draw to replay.
         if !self.drop_if_expired(key, now_ms) {
             return Ok(Vec::new());
         }
-        let s_len = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => s.len(),
-                _ => {
-                    let _ = self.next_rand(); // drop passed, rand_val drawn, then WRONGTYPE on the type
-                    return Err(StoreError::WrongType);
-                }
-            },
-            None => return Ok(Vec::new()), // defensive: not present after drop_if_expired == true
-        };
-        if s_len == 0 {
-            let _ = self.next_rand(); // defensive present-but-empty set: rand_val, then is_empty → None
-            return Ok(Vec::new());
-        }
-        let pops = count.min(s_len);
-        let mut picks: Vec<u64> = Vec::with_capacity(pops);
-        for _ in 0..pops {
-            picks.push(self.next_rand());
-        }
-        let mut result: Vec<Vec<u8>> = Vec::with_capacity(pops);
+        // (SilverBirch) ONE keyspace probe for the whole pop batch. Previously the non-LFU path did
+        // a `get` for the cardinality + a `get_mut` for the pops (two probes), and the LFU path fell
+        // back to `spop_count_loop_ref` — a full `count`× per-pop `get_mut` loop (O(count) probes).
+        // `spop`'s per-call `next_rand()` draws (`rand_val`, plus `lfu_rand` when LFU tracking is on
+        // and the key is present — true every iteration here) need no `&self.entries`, so they run
+        // on a disjoint `&mut self.rng_seed` field split WHILE the `get_mut` entry is held, exactly
+        // replaying `spop`'s sequence (rand_val, then lfu_rand + bump, BEFORE the type/empty check —
+        // so a present wrong-type/empty key still consumes one draw pair). Byte-identical result,
+        // dirty, digest state, residual set, and RNG state (gated by `spop_count_fused_matches_spop_loop`).
+        let mut result: Vec<Vec<u8>> = Vec::new();
         let mut emptied = false;
-        if let Some(entry) = self.entries.get_mut(key) {
-            for &pick in &picks {
-                let member;
-                let this_emptied;
-                {
-                    let s = match &mut entry.value {
-                        Value::Set(s) => s,
-                        _ => break, // unreachable: type checked above
-                    };
-                    if s.is_empty() {
-                        break; // unreachable: pops <= s_len
+        let mut wrong_type = false;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                for _ in 0..count {
+                    let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
+                    if lfu_tracking_enabled {
+                        let lfu_rand = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand);
                     }
-                    let idx = (pick as usize) % s.len();
-                    member = s.pop_index(idx);
-                    this_emptied = s.is_empty();
-                }
-                if let Some(m) = member {
-                    result.push(m);
-                }
-                // Match `spop`'s per-pop bookkeeping: digest is marked stale for every pop that did
-                // NOT empty the set; `touch_write` runs for every successful pop.
-                if !this_emptied {
-                    Self::mark_digest_stale_fields(
-                        &mut self.digest_stale,
-                        &mut self.digest_mutations,
-                    );
-                }
-                entry.touch_write(now_ms, false);
-                if this_emptied {
-                    emptied = true;
-                    break;
+                    let member;
+                    let this_emptied;
+                    {
+                        let s = match &mut entry.value {
+                            Value::Set(s) => s,
+                            _ => {
+                                wrong_type = true;
+                                break;
+                            }
+                        };
+                        if s.is_empty() {
+                            break; // present-but-empty: `spop` returns None here (draw already made)
+                        }
+                        let idx = (rand_val as usize) % s.len();
+                        member = s.pop_index(idx);
+                        this_emptied = s.is_empty();
+                    }
+                    if let Some(m) = member {
+                        result.push(m);
+                    }
+                    // Match `spop`'s per-pop bookkeeping: digest is marked stale for every pop that
+                    // did NOT empty the set; `touch_write` runs for every successful pop.
+                    if !this_emptied {
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                    }
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                    if this_emptied {
+                        emptied = true;
+                        break;
+                    }
                 }
             }
+            None => return Ok(Vec::new()), // defensive: not present after drop_if_expired == true
+        }
+        if wrong_type {
+            return Err(StoreError::WrongType);
         }
         if emptied {
             self.internal_entries_remove(key);
@@ -46194,33 +46199,46 @@ mod tests {
         // pre-fusion `count`x `spop` loop across EVERY observable: result, residual set, dirty,
         // digest state, and the RNG state (`rng_seed`, a deterministic LCG). LFU is off by default,
         // so `spop_count` takes the fused path while `spop_count_loop_ref` is the reference loop.
-        fn build(n: usize) -> Store {
+        fn build(n: usize, lfu: bool) -> Store {
             let mut s = Store::new();
+            if lfu {
+                // allkeys-lfu ⇒ spop draws lfu_rand + bumps LFU per pop; exercises the fused LFU path
+                // (which previously delegated to spop_count_loop_ref) against the explicit loop.
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            }
             let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
             s.sadd(b"s", &members, 1).unwrap();
             s
         }
-        for n in [1usize, 4, 10, 50] {
-            for &count in &[0usize, 1, n / 2, n.saturating_sub(1), n, n + 3] {
-                let mut a = build(n);
-                let mut b = build(n);
-                let ra = a.spop_count(b"s", count, 2).unwrap();
-                let rb = b.spop_count_loop_ref(b"s", count, 2).unwrap();
-                assert_eq!(ra, rb, "result n={n} count={count}");
-                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed n={n} count={count}");
-                assert_eq!(a.dirty, b.dirty, "dirty n={n} count={count}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest n={n} count={count}");
-                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale n={n} count={count}");
-                let mut ma = a.smembers(b"s", 3).unwrap();
-                ma.sort();
-                let mut mb = b.smembers(b"s", 3).unwrap();
-                mb.sort();
-                assert_eq!(ma, mb, "residual n={n} count={count}");
-                assert_eq!(
-                    a.scard(b"s", 3).unwrap(),
-                    b.scard(b"s", 3).unwrap(),
-                    "scard n={n} count={count}"
-                );
+        for &lfu in &[false, true] {
+            for n in [1usize, 4, 10, 50] {
+                for &count in &[0usize, 1, n / 2, n.saturating_sub(1), n, n + 3] {
+                    let mut a = build(n, lfu);
+                    let mut b = build(n, lfu);
+                    let ra = a.spop_count(b"s", count, 2).unwrap();
+                    let rb = b.spop_count_loop_ref(b"s", count, 2).unwrap();
+                    assert_eq!(ra, rb, "result lfu={lfu} n={n} count={count}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed lfu={lfu} n={n} count={count}");
+                    assert_eq!(a.dirty, b.dirty, "dirty lfu={lfu} n={n} count={count}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest lfu={lfu} n={n} count={count}"
+                    );
+                    assert_eq!(
+                        a.digest_stale, b.digest_stale,
+                        "digest_stale lfu={lfu} n={n} count={count}"
+                    );
+                    let mut ma = a.smembers(b"s", 3).unwrap();
+                    ma.sort();
+                    let mut mb = b.smembers(b"s", 3).unwrap();
+                    mb.sort();
+                    assert_eq!(ma, mb, "residual lfu={lfu} n={n} count={count}");
+                    assert_eq!(
+                        a.scard(b"s", 3).unwrap(),
+                        b.scard(b"s", 3).unwrap(),
+                        "scard lfu={lfu} n={n} count={count}"
+                    );
+                }
             }
         }
         // Missing key: `spop`'s first call draws one rand_val before returning None.

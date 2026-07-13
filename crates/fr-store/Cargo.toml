@@ -340,3 +340,9 @@ harness = false
 [[bench]]
 name = "sampling_dedup_foldhash"
 harness = false
+
+# A/B for LFU spop_count probe collapse: fused one-get_mut drain (rng_seed field split) vs the
+# O(count)-probe spop_count_loop_ref, under allkeys-lfu. Byte/RNG-identical (fused_matches_spop_loop).
+[[bench]]
+name = "spop_count_lfu_collapse"
+harness = false

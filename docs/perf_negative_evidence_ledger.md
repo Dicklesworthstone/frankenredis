@@ -7380,3 +7380,30 @@ code path, can never regress. NOT dressed as a perf headline. **REUSABLE:** the 
 field-split unblocks the same single-lookup collapse for `hrandfield_count`/`zrandmember` (same
 2-probe shape) and, bigger, `Store::spop_count`'s O(count) get_mut loop → 1 (the deferred
 RNG-trap lever) — draw all pops on the field split while holding the set borrow.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU `spop_count` O(count) keyspace probes → 1 (rng_seed field split) — **1.58–1.69x** drain; the deferred RNG-trap lever, now unblocked
+
+Cashed the field-split follow-up flagged above. `spop_count` under an allkeys-lfu / volatile-lfu
+policy delegated to `spop_count_loop_ref` = `count`× `self.spop(key)`, each doing `drop_if_expired`
++ `contains_key` (lfu_rand gate) + `get_mut` PER popped member — O(count) keyspace probes. (The
+non-LFU path was already fused but still did TWO probes: a `get` for the cardinality + a `get_mut`
+for the pops.) Unified both into ONE `get_mut` for the whole batch: `spop`'s per-call `next_rand()`
+draws — `rand_val`, plus `lfu_rand` + the LFU bump when tracking is on (drawn while the key is
+present, i.e. every iteration) — need no `&self.entries`, so they run on a disjoint `&mut
+self.rng_seed` field split WHILE the entry is held, exactly replaying `spop`'s sequence (draw +
+bump BEFORE the type/empty check, so a present wrong-type/empty key still consumes one draw pair).
+The field-split also let the non-LFU path drop its separate cardinality `get` (draws now happen
+in-loop, so `s_len` needn't be known up front) — 2 probes → 1 there too.
+
+Byte/RNG-identical: extended `spop_count_fused_matches_spop_loop` to run BOTH `lfu ∈ {false, true}`
+across n∈{1,4,10,50} × count∈{0,1,n/2,n-1,n,n+3} + missing/count0/wrong-type edge cases, asserting
+result, `rng_seed`, `dirty`, `digest_mutations`, `digest_stale`, residual set, scard — all green via
+rch (`spop_count_loop_ref` kept as the reference). DRAIN A/B (`benches/spop_count_lfu_collapse.rs`,
+allkeys-lfu, 20k-key keyspace + 10k-member target refilled untimed, worker vmi cv 14-25%):
+count10 **1.582x**, count100 **1.685x**, count1000 **1.665x** — all WIN, well outside null p5..p95.
+Flat across count because loop_ref pays ~2 probes PER POP (get_mut + contains_key) regardless of
+count while the fused path pays ~1 per whole call. **REUSABLE:** `Store::lcg_next_seed(&mut u64)` +
+the field-split pattern (draw on `&mut self.rng_seed` while an `entries` entry is held) is the
+general unblock for "must draw RNG per element while holding the value borrow" — the class the
+`persist_decode_frontier`/`afe3a9da2` note called blocked. srandmember 2-probe collapse (31eb56e77)
+was sub-gate at ~1.14x (single-key, probe ~14%); this O(count)→1 multi-pop version clears easily.
