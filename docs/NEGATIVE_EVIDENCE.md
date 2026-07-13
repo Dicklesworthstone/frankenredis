@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — RENAME gates its 8 stream side-map removes on a has_stream_metadata flag; isolated relink 58.2x fewer instructions, byte-identical (frankenredis-ywfk6)
+
+NEGATIVE-LEDGER-FIRST: third site in the fr-store empty-sidemap-guard vein (after DEL 5998y and
+SET-EXAT / set-algebra-store qxjvv). `Store::rename` unconditionally touched all four stream
+side-maps for BOTH keys — 4 source captures (`stream_entries_added`/`stream_max_deleted_ids`/
+`stream_groups`/`stream_last_ids`.remove(key)) + 4 destination clears (…remove(newkey)) = 8 removes.
+Only stream keys populate them, so on a stream-free DB (the common case) all 8 are wasted probes.
+Compute a single `has_stream_metadata` flag (four `is_empty()` checks) ONCE and gate all 8: an
+empty-map remove is a no-op and the captured Options are None either way → byte-identical.
+
+NOTE (uncovered): these stream side-maps use the std default hasher (SipHash), NOT foldhash — the
+profile shows ~72% of the reference arm is `RandomState::hash_one` + `DefaultHasher::write`. So each
+skipped remove avoids a full SipHash of the key; switching these maps to foldhash is a separate
+future lever (may be intentional SipHash for DoS-resistance on user-controlled stream keys).
+
+BYTE-IDENTICAL: 8 fr-store RENAME unit tests pass; provably a no-op on empty maps.
+
+MEASURED (`crates/fr-store/benches/rename_stream_relink.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`5f78a8dd0f44c471efc2a21445ae19ad415a89d3d6a1e3ea05081d160a261330`; stream-free store, 16 absent
+keys): the ISOLATED relink is **58.209515x fewer instructions** (a `has_stream_metadata` bool vs 8
+SipHash+probe removes). Null median 0.999999929, null CV 0.000027%; effect CV 0.000017%. Reference
+frame `bench_rename_stream_relink::<false>` self-time ~1.68% (the relink is a small slice of a full
+RENAME, and the hashing is in callees) — the 58x is the isolated cleanup, end-to-end RENAME gain is
+proportional to its share. Rollback: restore the 8 unconditional removes in `Store::rename`.
+
 ## 2026-07-13: SHIPPED — empty-guard the stream side-map removes on two more general-write paths; byte-identical (frankenredis-qxjvv)
 
 NEGATIVE-LEDGER-FIRST: follow-up to the DEL guard (5998y). `drop_stream_side_metadata` (30 callers)

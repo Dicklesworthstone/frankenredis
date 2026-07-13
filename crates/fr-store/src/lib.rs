@@ -8135,6 +8135,41 @@ impl Store {
         }
     }
 
+    /// Bench hook for `benches/rename_stream_relink.rs`: isolates RENAME's eight stream side-map
+    /// removes (four source captures + four destination clears). `GUARD = true` is production (gate
+    /// them on a single `has_stream_metadata` flag); `GUARD = false` is the prior unconditional
+    /// eight. On a stream-free store both are no-ops (both keys absent) — byte-identical; only the
+    /// wasted foldhash+probes differ. Not on a production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_rename_stream_relink<const GUARD: bool>(&mut self, key: &[u8], newkey: &[u8]) {
+        if GUARD {
+            let has_stream_metadata = !self.stream_groups.is_empty()
+                || !self.stream_last_ids.is_empty()
+                || !self.stream_entries_added.is_empty()
+                || !self.stream_max_deleted_ids.is_empty();
+            if has_stream_metadata {
+                self.stream_entries_added.remove(key);
+                self.stream_max_deleted_ids.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+                self.stream_groups.remove(newkey);
+                self.stream_last_ids.remove(newkey);
+                self.stream_entries_added.remove(newkey);
+                self.stream_max_deleted_ids.remove(newkey);
+            }
+        } else {
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+            self.stream_groups.remove(newkey);
+            self.stream_last_ids.remove(newkey);
+            self.stream_entries_added.remove(newkey);
+            self.stream_max_deleted_ids.remove(newkey);
+        }
+    }
+
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -10722,21 +10757,48 @@ impl Store {
         if key == newkey {
             return Ok(());
         }
-        let moved_entries_added = self.stream_entries_added.remove(key);
-        let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
+        // (perf) A rename touches the four stream side-maps for BOTH keys (capture-from-source +
+        // clear-destination = 8 removes), but only stream keys ever populate them — on a stream-free
+        // DB (the common case) all eight are wasted foldhash+probes. Compute the "any stream metadata
+        // exists anywhere" flag ONCE and gate them: an empty-map remove is a no-op and the captured
+        // Options are None either way, so this is byte-identical. Mirrors the DEL / SET-EXAT guards.
+        let has_stream_metadata = !self.stream_groups.is_empty()
+            || !self.stream_last_ids.is_empty()
+            || !self.stream_entries_added.is_empty()
+            || !self.stream_max_deleted_ids.is_empty();
+        let moved_entries_added = if has_stream_metadata {
+            self.stream_entries_added.remove(key)
+        } else {
+            None
+        };
+        let moved_max_deleted_id = if has_stream_metadata {
+            self.stream_max_deleted_ids.remove(key)
+        } else {
+            None
+        };
         // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
         let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
         entry.refresh_db_add_metadata(now_ms);
-        let moved_groups = self.stream_groups.remove(key);
-        let moved_last_id = self.stream_last_ids.remove(key);
+        let moved_groups = if has_stream_metadata {
+            self.stream_groups.remove(key)
+        } else {
+            None
+        };
+        let moved_last_id = if has_stream_metadata {
+            self.stream_last_ids.remove(key)
+        } else {
+            None
+        };
         self.internal_entries_remove(newkey);
-        self.stream_groups.remove(newkey);
-        self.stream_last_ids.remove(newkey);
-        self.stream_entries_added.remove(newkey);
-        self.stream_max_deleted_ids.remove(newkey);
+        if has_stream_metadata {
+            self.stream_groups.remove(newkey);
+            self.stream_last_ids.remove(newkey);
+            self.stream_entries_added.remove(newkey);
+            self.stream_max_deleted_ids.remove(newkey);
+        }
         self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);

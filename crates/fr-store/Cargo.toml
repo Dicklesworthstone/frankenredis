@@ -274,3 +274,9 @@ harness = false
 [[bench]]
 name = "del_stream_cleanup"
 harness = false
+
+# A/B for RENAME's eight stream side-map removes: gate on a single has_stream_metadata flag when
+# both keys are stream-free vs the prior unconditional eight. Byte-identical.
+[[bench]]
+name = "rename_stream_relink"
+harness = false
