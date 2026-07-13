@@ -7454,3 +7454,27 @@ hits/misses, OBJECT FREQ) + 9 mget lib tests, green via rch. Clippy-clean. Field
 spop_count LFU 1.6-1.7x, TOUCH LFU 1.8-1.9x, MGET LFU 1.5-1.8x, srandmember 2→1 sub-gate. The LFU
 "structural wall" — `record_keyspace_lookup`(+`contains_key`)+`get_mut` per element with a between
 `next_rand()` — is a REPEATING shape; grep other multi-key/count LFU reads (HMGET already collapsed).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU GET 2 probes → 1 (rng_seed field split) — **1.59–1.62x** (the hottest command; REFINES the "single-key is sub-gate" rule)
+
+`get_string_bytes` (GET) has two collapsed non-LFU fast paths already; its LFU slow path did
+`record_keyspace_lookup` (drop_if_expired probe + hit/miss) + `get_mut` — two probes. Folded them
+inline against `self.entries.get_mut(key)` and drew `rand_sample` on the disjoint `&mut
+self.rng_seed` field split while the entry is held (drawn BEFORE the `is_string_like` check, so a
+present wrong-type key still consumes one draw and skips `touch_access` — matching the two-probe
+form). Null-gated A/B (`benches/get_lfu_collapse.rs`, allkeys-lfu, 50k keyspace, small values, looped
+single-GETs over a key spread, median-of-61): n32 **1.622x**, n256 **1.585x** — WIN. Byte/RNG-
+identical: new `get_lfu_collapsed_matches_twoprobe` (present/absent/wrong-type/expired; asserts
+result, `rng_seed`, hits/misses, OBJECT FREQ) + `get_string_bytes_matches_get_stats_and_touch`, green
+via rch. Clippy-clean.
+
+**RULE REFINEMENT (important).** srandmember's single-key 2→1 was SUB-GATE (~1.14x) — I over-
+generalized that to "single-key collapse = sub-gate." WRONG. srandmember was sub-gate because its
+per-op work is DOMINATED by sampling + `get_index`+clone materialisation, which dilutes the probe
+fraction. GET **borrows** its value (Cow, no clone) and does almost nothing but the two probes, so
+its 2→1 is 1.6x. So the real rule: **the field-split clears when the two keyspace probes are a LARGE
+FRACTION of the command** — always true for O(N)/O(count) tiny-per-element loops (spop/TOUCH/MGET),
+AND for single-key commands whose non-probe work is minimal (GET; likely STRLEN, GETBIT, TYPE-like,
+EXISTS). It's sub-gate only when heavy per-op work (clone/sample/scan) dwarfs the probe. Field-split
+scoreboard: spop_count 1.6-1.7x, TOUCH 1.8-1.9x, MGET 1.5-1.8x, **GET 1.6x**, srandmember sub-gate.
+Next candidates (single-key, low non-probe work, LFU 2-probe): STRLEN, GETBIT, GETRANGE(small).

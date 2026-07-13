@@ -358,3 +358,9 @@ harness = false
 [[bench]]
 name = "mget_lfu_collapse"
 harness = false
+
+# A/B for LFU GET probe collapse: fold record+get_mut via rng_seed field-split (1 probe) vs the prior
+# 2-probe form, under allkeys-lfu; GET borrows its value so probes dominate. Byte/RNG-identical.
+[[bench]]
+name = "get_lfu_collapse"
+harness = false
