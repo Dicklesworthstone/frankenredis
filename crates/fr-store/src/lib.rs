@@ -7345,6 +7345,48 @@ impl Store {
         entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
     }
 
+    /// (frankenredis-md7ti) Post-add encoding refresh that scales with the command, not the set —
+    /// the last non-incremental encoding refresh (hash/zset/list already do O(1) after a write).
+    /// `INCR = true` (production) does the O(1) incremental check; `INCR = false` (bench baseline)
+    /// keeps the O(n) `refresh_set_encoding_flags` member-length re-scan.
+    ///
+    /// Fast path applies ONLY to a set ALREADY flagged listpack (and not yet hashtable): by invariant
+    /// every existing member is an integer-or-string of length <= `max_listpack_value` (any oversized
+    /// member would have promoted it to hashtable via a prior refresh, and every set-write path
+    /// refreshes). After adding members, only the entry COUNT and the LONGEST just-added member can
+    /// trip the one-way listpack->hashtable promotion — `added_member_max_len` is the max length over
+    /// the command's members (duplicates already in a listpack set are <= max_value, so they cannot
+    /// raise the max past the limit). Intset / fresh-generic (intset->listpack transition, whose
+    /// former-integer members need a real length re-scan) / already-hashtable sets take the full
+    /// `refresh_set_encoding_flags`. Byte-identical: the promotion decision matches the full scan.
+    #[inline]
+    fn refresh_set_encoding_flags_after_insert<const INCR: bool>(
+        entry: &mut Entry,
+        added_member_max_len: usize,
+        max_intset_entries: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if INCR
+            && entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING)
+            && !entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
+        {
+            if let Value::Set(set) = &entry.value {
+                if set.len() > max_listpack_entries || added_member_max_len > max_listpack_value {
+                    entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+                    entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
+                }
+                return;
+            }
+        }
+        Self::refresh_set_encoding_flags(
+            entry,
+            max_intset_entries,
+            max_listpack_entries,
+            max_listpack_value,
+        );
+    }
+
     /// (frankenredis-yp503) Hash encoding promotion to hashtable is
     /// one-way in vendored. Set the sticky flag whenever the hash
     /// exceeds either listpack threshold (entries or per-key/value).
@@ -8290,6 +8332,34 @@ impl Store {
             self.mark_volatile_keys_dirty();
         }
         self.rebuild_volatile_keys_if_dirty();
+    }
+
+    /// Bench setup for `sadd_encoding_refresh`: build a listpack-encoded string set with `n` short
+    /// members (config raised so it stays listpack). Not on a production path.
+    #[doc(hidden)]
+    pub fn bench_setup_listpack_set(&mut self, key: &[u8], n: usize, now_ms: u64) {
+        self.set_max_listpack_entries = n.saturating_mul(4).max(256);
+        self.set_max_listpack_value = 64;
+        for i in 0..n {
+            let member = format!("member:{i:08}").into_bytes();
+            let _ = self.sadd(key, &[member], now_ms);
+        }
+    }
+
+    /// Bench hook for `benches/sadd_encoding_refresh.rs`: isolates SADD's post-add set-encoding
+    /// refresh. `INCR = true` (production) is the O(1) incremental check; `INCR = false` is the prior
+    /// O(n) `set_fits_listpack` member-length re-scan. On a stable listpack set + a short member
+    /// (`member_len` <= max) neither promotes, so both leave the encoding unchanged — byte-identical;
+    /// only the eliminated O(n) scan differs. Not on a production path.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_set_encoding_refresh<const INCR: bool>(&mut self, key: &[u8], member_len: usize) {
+        let mi = self.set_max_intset_entries;
+        let mle = self.set_max_listpack_entries;
+        let mlv = self.set_max_listpack_value;
+        if let Some(entry) = self.entries.get_mut(key) {
+            Self::refresh_set_encoding_flags_after_insert::<INCR>(entry, member_len, mi, mle, mlv);
+        }
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -16593,8 +16663,17 @@ impl Store {
                                 entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
                                 entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
                             }
-                            Self::refresh_set_encoding_flags(
+                            // (frankenredis-md7ti) O(1) incremental refresh for the hot
+                            // repeated-SADD-to-a-listpack-set path — see the fn doc. On an
+                            // already-listpack set the O(n) member-length re-scan is elided.
+                            let added_member_max_len = members
+                                .iter()
+                                .map(|m| m.as_ref().len())
+                                .max()
+                                .unwrap_or(0);
+                            Self::refresh_set_encoding_flags_after_insert::<true>(
                                 entry,
+                                added_member_max_len,
                                 max_intset_entries,
                                 max_listpack_entries,
                                 max_listpack_value,
@@ -36971,6 +37050,46 @@ mod tests {
             Some("hashtable"),
             "12-byte member with cap=5 must promote listpack→hashtable"
         );
+    }
+
+    #[test]
+    fn refresh_set_encoding_flags_after_insert_matches_full_scan() {
+        // The O(1) incremental set-encoding refresh must produce the IDENTICAL promotion decision as
+        // the O(n) full member-length re-scan, for an add to an already-listpack (generic) set.
+        let (mi, mle, mlv) = (512_usize, 4_usize, 8_usize);
+        // (members present AFTER the add [strings → generic/listpack], length of the just-added one)
+        let cases: &[(&[&[u8]], usize)] = &[
+            (&[b"aa", b"bb", b"cc"], 2),               // all short → stays listpack
+            (&[b"aa", b"bb", b"toolongvalue"], 12),    // new member > max_value → hashtable
+            (&[b"a", b"b", b"c", b"d", b"e"], 1),      // count 5 > max_entries 4 → hashtable
+            (&[b"aa"], 2),                             // single short → listpack
+        ];
+        for &(members, new_len) in cases {
+            let build = || {
+                let mut set = super::SetValue::new();
+                for m in members {
+                    set.insert_borrowed(m, mi);
+                }
+                let mut e = Entry::new(Value::Set(Box::new(set)), 0);
+                // The set was listpack before the add (the invariant the fast path relies on).
+                e.set_flag(super::ENTRY_FORCE_SET_LISTPACK_ENCODING, true);
+                e
+            };
+            let mut inc = build();
+            let mut full = build();
+            Store::refresh_set_encoding_flags_after_insert::<true>(&mut inc, new_len, mi, mle, mlv);
+            Store::refresh_set_encoding_flags_after_insert::<false>(&mut full, new_len, mi, mle, mlv);
+            assert_eq!(
+                inc.has_flag(super::ENTRY_FORCE_SET_HASHTABLE_ENCODING),
+                full.has_flag(super::ENTRY_FORCE_SET_HASHTABLE_ENCODING),
+                "hashtable flag mismatch for {members:?}"
+            );
+            assert_eq!(
+                inc.has_flag(super::ENTRY_FORCE_SET_LISTPACK_ENCODING),
+                full.has_flag(super::ENTRY_FORCE_SET_LISTPACK_ENCODING),
+                "listpack flag mismatch for {members:?}"
+            );
+        }
     }
 
     #[test]

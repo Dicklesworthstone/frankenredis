@@ -275,6 +275,12 @@ harness = false
 name = "del_stream_cleanup"
 harness = false
 
+# A/B for SADD's post-add set-encoding refresh: O(1) incremental (count + new member len) vs the
+# prior O(n) set_fits_listpack member-length re-scan, on a stable listpack set. Byte-identical.
+[[bench]]
+name = "sadd_encoding_refresh"
+harness = false
+
 # A/B for INCR's no-TTL branch: the dropped forget_volatile_key(key) no-op vs calling it, on a clean
 # non-empty volatile_keys with a no-TTL key. Byte-identical; isolates the BTreeSet remove-miss O(log n).
 [[bench]]

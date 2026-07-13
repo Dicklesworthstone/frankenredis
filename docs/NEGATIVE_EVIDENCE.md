@@ -18152,3 +18152,22 @@ REMAINING candidate (NOT worth it): gate internal_entries_insert_with_expiry's `
 existing is_empty guard: common case (empty caches — no DUMP/MEMORY-USAGE/PFADD) it saves only ~3 bool checks
 (unmeasurable, won't gate); the 3-probe win needs the RARE non-empty-cache + new-key combo (a bench would overstate
 by setting that up). Below the gate threshold. The gate-no-op vein is CLOSED. Next lever must be a different pattern.
+
+### 2026-07-13 SHIPPED (O(1) incremental set-encoding refresh for SADD — the last non-incremental refresh — frankenredis-md7ti)
+Pivoted from the gate-no-op vein to the ENCODING-REFRESH-AFTER-WRITE pattern. Hash (refresh_hash_encoding_flag_after_
+insert), zset (refresh_zset_encoding_flag_after_insert), and list (note_command_grow) all do O(1) incremental
+listpack->hashtable promotion checks after a write; SET was the ONLY one still doing the O(n) full re-scan
+(refresh_set_encoding_flags -> set_fits_listpack iterates EVERY member's length) on each add. Added
+`refresh_set_encoding_flags_after_insert<const INCR>` mirroring the hash pattern: on a set ALREADY flagged listpack
+(invariant: every existing member <= max_listpack_value, else it'd be hashtable), only the entry COUNT and the LONGEST
+just-added member (`added_member_max_len` = max over the command's members; duplicates in a listpack set are already
+<= max_value so cannot raise it) can trip the one-way promotion — O(1). Intset (set_fits_intset is O(1) anyway),
+fresh intset->listpack transitions (former-integer members need a real length scan), and already-hashtable sets fall
+back to the full refresh. Byte-identical: gated `refresh_set_encoding_flags_after_insert_matches_full_scan`
+(INCR=true vs INCR=false over stays-listpack / member-too-long / count-exceeds / single-member) + full suite **801
+pass, 0 fail** (incl. the existing r6xt3/7vogx encoding-promotion tests). Isolated instructions:u A/B
+`benches/sadd_encoding_refresh.rs` (128-member listpack set): O(1) incremental vs O(128) scan = **32.71x** fewer
+instructions (null 1.0000002, cv 0.0002%). SCOPE: bounded to the listpack phase (<=128 members; a growing set
+converts to hashtable then the flag-check early-returns O(1)) — a real per-add win during set growth and for stable
+small string sets, not the multi-million-member benchmark. Completes the encoding-refresh-incremental family (hash/
+zset/list/set all O(1)). Rollback: restore `Self::refresh_set_encoding_flags(...)` at the SADD existing-set path.
