@@ -8519,7 +8519,16 @@ impl Store {
             }
             // The key now carries a TTL; defer rebuilding the sorted sampling
             // view until a due expiry consumer needs key-order iteration.
-            self.mark_volatile_keys_dirty();
+            // (frankenredis-t1q35) Only when the key NEWLY enters the volatile set (`added_expiry` ==
+            // old_expiry.is_none()). RE-ARMING an existing TTL (EXPIRE/PEXPIRE/EXPIREAT on a key that
+            // already had one — the rate-limiter reset pattern) leaves volatile MEMBERSHIP unchanged;
+            // the deadline is updated in `expiry_deadlines` and read fresh at sample time, so the
+            // `BTreeSet<StoreKey>` sampling view is still correct. The old unconditional mark forced a
+            // wasted O(n) rebuild on the next active-expiry cycle. Byte-identical to clients (set +
+            // every deadline unchanged). Mirrors the INCR / insert_with_expiry `!is_ttl_rearm` gate.
+            if added_expiry {
+                self.mark_volatile_keys_dirty();
+            }
             self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
@@ -8595,7 +8604,16 @@ impl Store {
             }
             // The key now carries a TTL; defer rebuilding the sorted sampling
             // view until a due expiry consumer needs key-order iteration.
-            self.mark_volatile_keys_dirty();
+            // (frankenredis-t1q35) Only when the key NEWLY enters the volatile set (`added_expiry` ==
+            // old_expiry.is_none()). RE-ARMING an existing TTL (EXPIRE/PEXPIRE/EXPIREAT on a key that
+            // already had one — the rate-limiter reset pattern) leaves volatile MEMBERSHIP unchanged;
+            // the deadline is updated in `expiry_deadlines` and read fresh at sample time, so the
+            // `BTreeSet<StoreKey>` sampling view is still correct. The old unconditional mark forced a
+            // wasted O(n) rebuild on the next active-expiry cycle. Byte-identical to clients (set +
+            // every deadline unchanged). Mirrors the INCR / insert_with_expiry `!is_ttl_rearm` gate.
+            if added_expiry {
+                self.mark_volatile_keys_dirty();
+            }
             self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
@@ -25328,7 +25346,12 @@ impl Store {
                                 self.db_expires_counts[db].saturating_add(1);
                         }
                     }
-                    self.mark_volatile_keys_dirty();
+                    // (frankenredis-t1q35) Mark dirty only when the key NEWLY enters the volatile set;
+                    // GETEX re-arming an existing TTL leaves membership unchanged (deadline read fresh
+                    // at sample time). Byte-identical to clients. Mirrors the EXPIRE-family gate.
+                    if added_expiry {
+                        self.mark_volatile_keys_dirty();
+                    }
                     self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
                     self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
@@ -35893,6 +35916,34 @@ mod tests {
         // and the lazy rebuild fires only then).
         let _ = store.run_active_expire_cycle(100_001, None, 10);
         assert!(!store.exists_no_stat(b"c", 100_002));
+    }
+
+    #[test]
+    fn expire_rearm_does_not_dirty_the_clean_volatile_view() {
+        // EXPIRE re-arming an existing TTL (the rate-limiter reset pattern) leaves volatile
+        // membership unchanged, so it must NOT re-dirty a clean sampling view. Adding a TTL to a
+        // no-TTL key (membership change) still must.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(100_000), 0); // new TTL → dirty
+        store.rebuild_volatile_keys_if_dirty();
+        assert!(!store.volatile_keys_dirty);
+        assert!(store.volatile_keys.contains(b"k".as_slice()));
+
+        // EXPIRE re-arm (relative + absolute): membership unchanged → view stays clean.
+        assert!(store.expire_milliseconds(b"k", 200_000, 0));
+        assert!(!store.volatile_keys_dirty, "EXPIRE re-arm must not dirty the clean view");
+        assert!(store.expire_at_milliseconds(b"k", 300_000, 0));
+        assert!(!store.volatile_keys_dirty, "EXPIREAT re-arm must not dirty the clean view");
+        assert!(store.volatile_keys.contains(b"k".as_slice()));
+        assert!(store.expiry_ms(b"k").is_some());
+
+        // A NEW TTL on a fresh no-TTL key DOES dirty the view (membership change).
+        store.set(b"fresh".to_vec(), b"v".to_vec(), None, 0);
+        assert!(store.expire_milliseconds(b"fresh", 50_000, 0));
+        assert!(
+            store.volatile_keys_dirty,
+            "adding a NEW TTL must dirty the volatile view"
+        );
     }
 
     #[test]

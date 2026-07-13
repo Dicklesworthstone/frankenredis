@@ -18094,3 +18094,17 @@ CYCLE rebuild cost eliminated; the end-to-end win is workload-dependent (a stati
 keeps the view clean across cycles → zero rebuilds vs an O(n) rebuild every ~100ms before). Left the 3 EXPIRE-family
 callers unchanged (conservative; they'd need the same `added_expiry` gate — clean follow-up). Rollback: restore the
 unconditional marks.
+
+### 2026-07-13 SHIPPED (EXPIRE-family mark_dirty gated on added_expiry — the clean follow-up sibling — frankenredis-k7ruo)
+The follow-up the previous entry flagged. The 3 production EXPIRE-family `mark_volatile_keys_dirty` callers —
+`expire_milliseconds_impl` (EXPIRE/PEXPIRE), `expire_at_milliseconds` (EXPIREAT/PEXPIREAT), and `getex` (GETEX EX/PX/
+EXAT/PXAT) — marked the volatile sampling view dirty unconditionally after setting a TTL. Gated each on the
+`added_expiry` flag they ALREADY compute (`= old_expiry.is_none()`): only a key NEWLY entering the volatile set needs
+the O(n) rebuild; RE-ARMING an existing TTL (EXPIRE key N on a live-TTL key — the rate-limiter reset pattern) leaves
+membership unchanged (deadline updated in `expiry_deadlines`, read fresh at sample time). Byte-identical to clients
+(set + every deadline unchanged). Left `expire_milliseconds_orig` (the bench baseline) UNGATED — the differential test
+`expire_milliseconds_streamlined_matches_orig` asserts only return/pttl/expires_count/notifications (NOT the dirty
+flag), so production-gated-vs-orig-ungated stays green. Full suite **800 pass, 0 fail** incl. new
+`expire_rearm_does_not_dirty_the_clean_volatile_view` + the streamlined-matches-orig differential. Same primitive as
+36a8147df; `volatile_dirty_rebuild` A/B re-run this turn = **1797x** (null 1.0015). Completes the mark-dirty-only-on-
+membership-change vein across INCR + all TTL-SET commands. Rollback: restore the unconditional marks at the 3 sites.
