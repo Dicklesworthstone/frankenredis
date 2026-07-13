@@ -4,6 +4,26 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: REJECTED (REGRESSION) — classify_command match dispatch on the len-3 bucket regresses ~2.2%; the linear chain is optimal for tiny front-loaded buckets
+
+NEGATIVE-LEDGER-FIRST: the `classify_command` match-on-packed vein shipped every ≥4-command
+≤8-byte bucket (len-4/5/6/7/8, ~8–12% each). The last candidate was the 3-byte bucket — but it has
+only 5 commands (GET / SET / DEL / TTL / LCS), and the dominant real command GET is FIRST in the
+linear `eq_ascii_command` chain. On a realistic GET-heavy workload the compute-`pack_cmd_u64`-once +
+`match` (jump-table) rewrite is SLOWER: same-binary A/B (`bench_classify3_match` vs
+`bench_classify3_linear`, release-perf, 24 rounds, host `thinkstation1`, binary SHA256
+`aaba022d5e89fe1f6afd56791554380b86b6d5c02c0e1ae27443cbf8d37658ff`; corpus GET×8/SET×4/DEL×2/TTL×1/
+LCS×1 + miss) measured **0.978456x reference/candidate — the match spends ~2.20% MORE
+instructions**. Null median 1.000000009, null CV 0.000029%; effect CV 0.000017%.
+
+ROOT CAUSE: for a tiny bucket whose hottest member is the first linear arm, the linear chain already
+resolves GET in ONE `pack==const` compare — the `match`'s jump-table/const-materialization overhead
+isn't amortized over enough candidates to win. This sets the vein's LOWER BOUND: the match rewrite
+pays off from ~20+ commands per bucket (len-4..8) but LOSES on the 5-command len-3 bucket. REVERTED
+(production len-3 stays the linear chain); byte-identity was still confirmed
+(`classify_command_matches_linear_reference` + fr-command 1172/1172). The classify_command
+match-dispatch vein is now CLOSED: len-4/5/6/7/8 shipped, len-3 rejected, len-9+ un-packable (>8B).
+
 ## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-8 bucket); 1.0828x fewer instructions, byte-identical (frankenredis-fzabv)
 
 NEGATIVE-LEDGER-FIRST: fifth and final match-eligible bucket in the `classify_command`
