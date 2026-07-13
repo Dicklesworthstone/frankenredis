@@ -382,3 +382,9 @@ harness = false
 [[bench]]
 name = "type_lfu_collapse"
 harness = false
+
+# A/B for LFU EXISTS probe collapse: fold record+get_mut via rng_seed field-split (1 probe) vs the
+# prior 2-probe form; EXISTS returns only a bool (any type) so probes are all its work. Byte-identical.
+[[bench]]
+name = "exists_lfu_collapse"
+harness = false

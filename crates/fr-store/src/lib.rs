@@ -8478,29 +8478,60 @@ impl Store {
                 None => false,
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return false;
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        self.exists_lfu_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU EXISTS keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` (drop_if_expired probe + hit/miss) + the `get_mut` into ONE probe,
+    /// drawing `rand_sample` on the disjoint `&mut self.rng_seed` field split while the entry is
+    /// held. EXISTS accepts ANY type (no WRONGTYPE) and returns only a bool, so the two probes are
+    /// all its work. `false` is the prior two-probe form. Byte/RNG-identical: same hit/miss, same
+    /// draw per present key, same `touch_access`. Only reached with LFU tracking on.
+    fn exists_lfu_impl<const COLLAPSE: bool>(&mut self, key: &[u8], now_ms: u64) -> bool {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return false;
+            }
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
+                    true
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    false
+                }
+            }
         } else {
-            0
-        };
-        if let Some(entry) = self.entries.get_mut(key) {
-            entry.touch_access(
-                now_ms,
-                lfu_tracking_enabled,
-                lfu_decay,
-                lfu_log_factor,
-                rand_sample,
-            );
-            true
-        } else {
-            false
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return false;
+            }
+            let rand_sample = self.next_rand();
+            if let Some(entry) = self.entries.get_mut(key) {
+                entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
+                true
+            } else {
+                false
+            }
         }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn exists_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.exists_lfu_impl::<true>(key, now_ms)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn exists_lfu_twoprobe_bench(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.exists_lfu_impl::<false>(key, now_ms)
     }
 
     pub fn exists_no_touch(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -46492,6 +46523,34 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn exists_lfu_collapsed_matches_twoprobe() {
+        // Under allkeys-lfu the collapsed EXISTS (one get_mut fold + rng_seed field-split draw) must
+        // be byte-identical to the prior record + get_mut two-probe form for present keys (any type),
+        // an absent key, and an expired key: result, keyspace hits/misses, RNG state, LFU freq.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.rpush(b"list", &[b"a".to_vec()], 1).unwrap();
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1);
+            s
+        }
+        let now = 10;
+        for key in [b"str".as_slice(), b"list", b"absent", b"ttl"] {
+            let mut a = build();
+            let mut b = build();
+            let ra = a.exists_lfu_collapsed_bench(key, now);
+            let rb = b.exists_lfu_twoprobe_bench(key, now);
+            assert_eq!(ra, rb, "result key={key:?}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
+            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
+            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+            assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq key={key:?}");
+        }
     }
 
     #[test]

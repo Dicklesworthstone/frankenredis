@@ -7532,3 +7532,20 @@ GET (2 probes, value borrow). **Field-split/probe-fold scoreboard (8 wins): GETB
 STRLEN 2.2-2.4x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x > spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x;
 srandmember sub-gate.** Remaining tiny-work single-key LFU walls: EXISTS (2-probe, +touch/rand),
 GETRANGE-small (clones substring → diluted), bitcount/bitpos-small (3-probe but O(n) popcount).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU EXISTS 2 probes → 1 (rng_seed field split) — **1.65x**
+
+`exists` LFU path did `record_keyspace_lookup` + `get_mut` (2 probes) + `touch_access`; EXISTS
+accepts ANY type (no WRONGTYPE) and returns only a bool, so the probes are all its work — the
+simplest field-split case yet. Folded record+get_mut inline, rand on the `&mut self.rng_seed` field
+split. Null-gated A/B (`benches/exists_lfu_collapse.rs`, allkeys-lfu, 50k keyspace, looped single-
+EXISTS, median-of-61, noisy cv 28-33%): n32 **1.649x**, n256 **1.652x** — WIN. Byte/RNG-identical:
+new `exists_lfu_collapsed_matches_twoprobe` (present-any-type/absent/expired; asserts result,
+`rng_seed`, hits/misses, OBJECT FREQ) + `exists_no_touch_updates_stats_without_lru`, green via rch.
+Clippy-clean. (Store `exists` is single-key; the multi-key EXISTS command loops it, so this 1.65x
+per-call amortizes across N keys.) **Probe-fold scoreboard (9 wins): GETBIT 2.4-2.6x ≈ STRLEN
+2.2-2.4x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x > EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET
+1.5-1.8x; srandmember sub-gate.** Remaining: GETRANGE-small (clones → diluted), bitcount/bitpos-small
+(O(n) popcount → size-dependent), HGET (4-probe + field-TTL reap + clone). Cleanest ones done; the
+rest are diluted/more-involved. The LFU probe-fold vein (record+get→1, ±drop contains_key, ±field-
+split rand) has now cleared the ubiquitous string/keyspace read commands under allkeys-lfu.
