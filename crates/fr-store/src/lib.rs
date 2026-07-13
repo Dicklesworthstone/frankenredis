@@ -13841,13 +13841,60 @@ impl Store {
                 None => Ok(f(None)),
             };
         }
+        self.hget_with_lfu_impl::<true, R>(key, field, now_ms, f)
+    }
+
+    /// A/B toggle for the LFU HGET keyspace-probe collapse (the borrowing `hget_with` — the runtime's
+    /// zero-copy `_into` hot path). `COLLAPSE = true` (shipped) adds a fast path for the COMMON case
+    /// `hash_field_expires.is_empty()` (HEXPIRE unused): `drop_hash_field_if_expired` is then a
+    /// guaranteed no-op, so it is skipped and `record_keyspace_lookup` + `get_mut` fold into ONE
+    /// probe (dropping the redundant `contains_key` rand-gate too — 3 probes → 1), with `rand_sample`
+    /// drawn on the disjoint `&mut self.rng_seed` field split. When per-field TTLs exist (rare) it
+    /// falls back to the exact prior path (reaps the field first). `false` is always the prior path.
+    /// hget_with BORROWS the value (no clone), so the probes are its dominant cost. Byte/RNG-
+    /// identical (bump + touch happen before the type check in both, matching WRONGTYPE handling).
+    /// LFU-only.
+    fn hget_with_lfu_impl<const COLLAPSE: bool, R>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE && self.hash_field_expires.is_empty() {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(f(None));
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(f(m.get(field))),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(f(None))
+                }
+            };
+        }
+        // Fallback (field-TTLs present, OR the `false` bench arm): the exact prior path. This is
+        // ALSO reached with LFU OFF (non-empty field-TTL + non-LFU misses the fast path above), so
+        // the LFU bump + rand draw stay guarded on `lfu_tracking_enabled` — byte-identical to the
+        // original.
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(f(None));
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -13866,6 +13913,28 @@ impl Store {
             }
             None => Ok(f(None)),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn hget_with_lfu_collapsed_bench<R>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        self.hget_with_lfu_impl::<true, R>(key, field, now_ms, f)
+    }
+
+    #[doc(hidden)]
+    pub fn hget_with_lfu_threeprobe_bench<R>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        self.hget_with_lfu_impl::<false, R>(key, field, now_ms, f)
     }
 
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
@@ -46663,6 +46732,44 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn hget_with_lfu_collapsed_matches_threeprobe() {
+        // Under allkeys-lfu with NO per-field TTLs (the fast path), the collapsed hget_with (one
+        // get_mut fold + rng_seed field-split draw, drop_hash_field_if_expired skipped) must be
+        // byte-identical to the prior record + drop + contains_key + get_mut path for a present
+        // field, a missing field, an absent key, a wrong-type key (draw + bump + touch then
+        // WRONGTYPE), and an expired key: result, keyspace hits/misses, RNG state, LFU freq.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.hset(b"hash", b"f".to_vec(), b"val".to_vec(), 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let probes: &[(&[u8], &[u8])] = &[
+            (b"hash", b"f"),
+            (b"hash", b"missing"),
+            (b"absent", b"f"),
+            (b"str", b"f"),
+            (b"ttl", b"f"),
+        ];
+        for &(key, field) in probes {
+            let mut a = build();
+            let mut b = build();
+            let ra = a.hget_with_lfu_collapsed_bench(key, field, now, |o| o.map(<[u8]>::to_vec));
+            let rb = b.hget_with_lfu_threeprobe_bench(key, field, now, |o| o.map(<[u8]>::to_vec));
+            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?} field={field:?}");
+            assert_eq!(ra.ok().flatten(), rb.ok().flatten(), "value key={key:?} field={field:?}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?} field={field:?}");
+            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
+            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+            assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq");
+        }
     }
 
     #[test]

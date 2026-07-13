@@ -7601,3 +7601,26 @@ spop). Remaining are the DILUTED tail only: GETRANGE (clones a substring), bitco
 popcount, SIMD-fast → probe fraction small except tiny bitmaps), HGET (4-probe: + drop_hash_field_
 if_expired + clones the field value). Next agent: the high-ROI LFU probe-fold vein is essentially
 mined; the tail wins are marginal/size-dependent — profile before investing.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU HGET (borrowing `hget_with`) 3 probes → 1 — **1.71–1.82x** (overturns the "HGET diluted" note)
+
+The prior turn's ledger called HGET diluted/involved. PARTLY WRONG: the CLONING `hget` is diluted,
+but the runtime's actual hot path is the BORROWING `hget_with` (zero-copy `_into`, encodes straight
+to the write buffer — no clone). Its LFU path was 3-probe (record + contains_key + get_mut) plus a
+`drop_hash_field_if_expired` that is a GUARANTEED NO-OP when `hash_field_expires.is_empty()` (HEXPIRE
+unused — the common case). Added an LFU fast path for that case: skip the reap, fold record+get_mut,
+drop contains_key, field-split the rand → ONE probe. When per-field TTLs exist (rare) it falls back
+to the exact prior path (which is ALSO reached with LFU-off + field-TTLs, so its bump/rand stay
+`lfu_tracking_enabled`-guarded — a bug I caught and fixed before it shipped). Null-gated A/B
+(`benches/hget_lfu_collapse.rs`, allkeys-lfu, 50k single-field hashes, looped single-HGETs, median-
+of-61): n32 **1.824x**, n256 **1.706x** (cv 10-16%) — WIN. Slightly under the pure length-reads
+(2.2-2.6x) because the hash field lookup `m.get(field)` + the `is_empty()` gate add a little work.
+Byte/RNG-identical: new `hget_with_lfu_collapsed_matches_threeprobe` (present/missing-field/absent/
+wrong-type/expired) + `hget_single_lookup_collapse_and_field_ttl_fallback` (the field-TTL path is
+unchanged) + 4 hget tests, green via rch. Clippy-clean. **Probe-fold scoreboard (13 wins): GETBIT
+2.4-2.6x ≈ STRLEN 2.2-2.4x ≈ ZCARD 2.05-2.33x ≈ LLEN 2.2-2.3x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x ≈
+HGET 1.7-1.8x ≈ SCARD 1.6-1.85x ≈ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x;
+srandmember sub-gate.** LESSON: for hash-family LFU reads, gate a fast path on
+`hash_field_expires.is_empty()` to skip the field-TTL reap, THEN the field-split collapse applies —
+same trick unblocks HMGET/HSTRLEN/HEXISTS if their LFU paths still have the wall (check). Truly
+remaining diluted: GETRANGE (substring clone), bitcount/bitpos (O(n) SIMD popcount).
