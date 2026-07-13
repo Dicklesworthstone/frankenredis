@@ -89,6 +89,13 @@ name = "packed_zset_rank_with_score"
 harness = false
 required-features = ["bench-reference"]
 
+# Same-binary, null-gated instruction benchmark for ending a packed score-range scan once its
+# sorted iterator passes the inclusive upper bound.
+[[bench]]
+name = "packed_zset_score_range"
+harness = false
+required-features = ["bench-reference"]
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]

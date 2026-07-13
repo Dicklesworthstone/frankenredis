@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — packed score-range scans stop after the inclusive upper bound; 6.5283x fewer instructions, byte-identical
+
+NEGATIVE-LEDGER-FIRST: prior GEO evidence rejected reply encoding and dispatch variants, while the
+packed `for_each_in_score_range` iterator itself was neither optimized nor rejected. Packed ZSET
+records are already sorted by canonical `(score, member)`, but every narrow GEO cell range decoded
+the entire tail after passing `hi`. ONE LEVER: production now breaks on the first canonical score
+strictly greater than `hi`; `for_each_in_score_range_impl::<false>` retains the literal old full scan
+in the same binary. Equal-`hi` ties remain inclusive, and the callback order and raw score are
+unchanged.
+
+BYTE-IDENTICAL: a focused deterministic test compares member bytes and score bits between candidate
+and reference across negative/positive NaNs, infinities, signed zero, equal-upper-bound ties, and
+inverted ranges. The existing generated packed-ZSET property now also compares both arms plus its
+sorted oracle for full, finite, zero, and inverted bounds. The benchmark correctness gate covers
+full, narrow, zero, inverted, and tail ranges. Remote `fr-store` tests passed.
+
+MEASURED (remote-only, one-binary `packed_zset_score_range`, 24 position-balanced
+A/A/reference rounds, 100,000 narrow `[8, 15]` scans per arm): worker `vmi1153651`, binary SHA256
+`674614c51143cde692f67592f7d704cc6c821d90744117ba29a7d6d1da71c6ac`; candidate was ~111.826M
+instructions versus ~730.025M reference, or **6.528252x reference/candidate** (**84.68% fewer
+instructions**). The A/A null median was **1.000001341**, p5..p95
+**[0.999993606, 1.000007172]**, CV **0.000565%**; effect CV **0.000240%**. Three `perf record`
+trials had zero lost samples and verified the old
+`PackedZSet::for_each_in_score_range_impl::<false>` at **66.47% median self-time** (CV **6.7252%**),
+so the timed workload reached the changed function. Rollback: make
+`PackedZSet::for_each_in_score_range` call `for_each_in_score_range_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — packed ZRANK/ZREVRANK WITHSCORE decodes only the matching score; 1.1070x fewer instructions, byte-identical
 
 NEGATIVE-LEDGER-FIRST: the plain packed-rank keep below explicitly left `rank_with_score` unchanged,

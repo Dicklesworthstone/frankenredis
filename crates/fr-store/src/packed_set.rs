@@ -4955,13 +4955,38 @@ impl PackedZSet {
     /// the INCLUSIVE range `[lo, hi]`, ascending (mirrors
     /// SortedSet::for_each_in_score_range, which ranges
     /// `min_for_score(lo)..=max_for_score(hi)`).
-    pub fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
+    pub fn for_each_in_score_range(&self, lo: f64, hi: f64, f: impl FnMut(&[u8], f64)) {
+        self.for_each_in_score_range_impl::<true>(lo, hi, f);
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Packed records are sorted by
+    /// canonical `(score, member)`, so production stops at the first score above `hi`; the
+    /// `EARLY_BREAK=false` arm retains the exact pre-change full scan.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn for_each_in_score_range_impl<const EARLY_BREAK: bool>(
+        &self,
+        lo: f64,
+        hi: f64,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
         let (lo, hi) = (canon_zero(lo), canon_zero(hi));
+        if !EARLY_BREAK {
+            for (member, score) in self.iter() {
+                let c = canon_zero(score);
+                if c.total_cmp(&lo) != std::cmp::Ordering::Less
+                    && c.total_cmp(&hi) != std::cmp::Ordering::Greater
+                {
+                    f(member, score);
+                }
+            }
+            return;
+        }
         for (member, score) in self.iter() {
             let c = canon_zero(score);
-            if c.total_cmp(&lo) != std::cmp::Ordering::Less
-                && c.total_cmp(&hi) != std::cmp::Ordering::Greater
-            {
+            if c.total_cmp(&hi) == std::cmp::Ordering::Greater {
+                break;
+            }
+            if c.total_cmp(&lo) != std::cmp::Ordering::Less {
                 f(member, score);
             }
         }
@@ -6245,6 +6270,43 @@ mod tests {
     }
 
     #[test]
+    fn packed_zset_score_range_early_break_matches_total_order_reference() {
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let zset = PackedZSet::from_unique_pairs(vec![
+            (b"negative-nan".to_vec(), negative_nan),
+            (b"negative-infinity".to_vec(), f64::NEG_INFINITY),
+            (b"negative-zero".to_vec(), -0.0),
+            (b"positive-zero".to_vec(), 0.0),
+            (b"hi-a".to_vec(), 15.0),
+            (b"hi-b".to_vec(), 15.0),
+            (b"positive-infinity".to_vec(), f64::INFINITY),
+            (b"positive-nan".to_vec(), positive_nan),
+        ]);
+
+        for (lo, hi) in [
+            (negative_nan, positive_nan),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (-0.0, 0.0),
+            (15.0, 15.0),
+            (f64::INFINITY, f64::INFINITY),
+            (1.0, -1.0),
+            (negative_nan, negative_nan),
+            (positive_nan, positive_nan),
+        ] {
+            let mut candidate = Vec::new();
+            zset.for_each_in_score_range(lo, hi, |member, score| {
+                candidate.push((member.to_vec(), score.to_bits()));
+            });
+            let mut reference = Vec::new();
+            zset.for_each_in_score_range_impl::<false>(lo, hi, |member, score| {
+                reference.push((member.to_vec(), score.to_bits()));
+            });
+            assert_eq!(candidate, reference, "range [{lo:?}, {hi:?}] diverged");
+        }
+    }
+
+    #[test]
     fn packed_zset_pop_max_member_only_matches_score_decoding_reference() {
         let pairs: Vec<(Vec<u8>, f64)> = (0_i32..120)
             .map(|index| {
@@ -6339,15 +6401,26 @@ mod tests {
                     prop_assert_eq!(packed.index_slice_desc(start, count), desc_want);
                 }
                 // for_each_in_score_range == sorted filtered to [lo, hi]
-                for (lo, hi) in [(-2.0, 2.0), (0.0, 0.0), (1.0, 3.0)] {
+                for (lo, hi) in [
+                    (f64::NEG_INFINITY, f64::INFINITY),
+                    (-2.0, 2.0),
+                    (-0.0, 0.0),
+                    (1.0, 3.0),
+                    (3.0, 1.0),
+                ] {
                     let mut got_range: Vec<(Vec<u8>, f64)> = Vec::new();
                     packed.for_each_in_score_range(lo, hi, |m, s| got_range.push((m.to_vec(), s)));
+                    let mut old_range: Vec<(Vec<u8>, f64)> = Vec::new();
+                    packed.for_each_in_score_range_impl::<false>(lo, hi, |m, s| {
+                        old_range.push((m.to_vec(), s));
+                    });
                     let want_range: Vec<(Vec<u8>, f64)> = sorted
                         .iter()
                         .filter(|(_, s)| *s >= lo && *s <= hi)
                         .cloned()
                         .collect();
-                    prop_assert_eq!(got_range, want_range);
+                    prop_assert_eq!(&got_range, &old_range);
+                    prop_assert_eq!(&got_range, &want_range);
                 }
             }
         }
