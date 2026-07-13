@@ -7238,3 +7238,32 @@ zero-fill memset (sole residual vs-redis LOSS ~0.79x, blocked on `read_buf`/unsa
 `#![forbid(unsafe_code)]` + fr-server owned + unbenchable server-level); (3) `Store::spop_count`
 O(count)→1 lookup fusion (RNG-replay-trap, fr-store lib.rs, LOCKED). Next agent: don't re-walk
 fr-protocol/fr-persist micro-paths — go structural or wait for the lib.rs lock to free.
+
+## 2026-07-13 SilverBirch: DEAD-CODE TRAP — `crates/fr-store/src/keyspace_dict.rs` (`KeyDict`) is STAGED-NOT-WIRED; optimizing it is ZERO prod impact
+
+**Verified negative — flagged so the next agent doesn't waste a turn.** `keyspace_dict.rs`
+LOOKS like the single hottest target in the whole port (a hand-rolled chaining hash dict for
+the key→value keyspace, with its own arena/free-list, foldhash, RANDOMKEY sampling, reverse-
+binary SCAN). It is NOT wired into `Store`. The ONLY reference to the module outside its own
+body is the `mod keyspace_dict;` declaration at `lib.rs:11`; grep for `KeyDict` / `keyspace_dict::`
+across all of `crates/` returns **zero** non-test hits. The LIVE keyspace still uses the split
+`entries` + `RandomKeySlotIndex` + `ordered_keys` design (`RandomKeySlotIndex`/`ordered_keys`
+appear 67× in lib.rs; RANDOMKEY → `RandomKeySlotIndex`, SCAN → sorted `ordered_keys`). `KeyDict`
+is the proposed structural REPLACEMENT (the module header's "RANDOMKEY through
+`KeyDict::random_sample`" is aspirational), parked pending the owner-blocked `uhthd` RAM-swap —
+same family as [[project_keyspace_ram_gap]].
+
+Concretely, I found and nearly built a real redundancy in it: `KeyDict::random_sample`
+(keyspace_dict.rs:404) walks the picked bucket's chain TWICE — `successors(head).count()` for the
+length, then `successors(head).nth(pick)` — heavy iterator machinery even for the dominant
+single-node bucket. A clean single-node fast-path (draw the pick rand to preserve RNG state, but
+skip both `successors` + `count` + `nth`) would halve the hit-path node reads and be byte/RNG-
+identical. **DO NOT build it: the function is dead** — the win never reaches a client. The same
+lever DOES exist on the LIVE RANDOMKEY (`RandomKeySlotIndex`, lib.rs) but that's a Vec-of-slots
+O(1) index (different shape), and lib.rs is ACTIVELY LOCKED (fr-store `src/lib.rs` reservation
+renewed hourly through the afternoon, latest grant 15:18→16:18 — a live holder, NOT stale).
+
+**RULE (banked):** before optimizing any hand-rolled data-structure module in fr-store, grep
+`crates/` for a non-test constructor/usage first — several structural replacements (`KeyDict`,
+and check others) are compiled-but-unwired, staged behind owner-blocked swaps. A private `mod`
+with only `#[cfg(test)]` callers is a dead lever regardless of how hot it looks.
