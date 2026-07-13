@@ -1772,21 +1772,42 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<true>(input)
+    parse_i64_strict_impl::<true, true>(input)
 }
 
-/// Bench hook: `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks
-/// on every input) for the same-binary A/B `benches/parse_i64_fastpath.rs`. Byte-identical to
-/// `parse_i64_strict` (`FAST = true`); not on any production path.
+/// Bench hook for the same-binary A/B in `benches/parse_i64_fastpath.rs`.
+///
+/// `FAST = false` forces the pre-fast-path guarded loop (per-digit u64-overflow checks on every
+/// input). `ONE_DIGIT = false` forces the prior general-parser path for one-digit inputs. Neither
+/// reference configuration is on a production path.
 #[doc(hidden)]
-pub fn bench_parse_i64_strict<const FAST: bool>(input: &[u8]) -> Result<i64, RespParseError> {
-    parse_i64_strict_impl::<FAST>(input)
+#[inline(never)]
+pub fn bench_parse_i64_strict<const FAST: bool, const ONE_DIGIT: bool>(
+    input: &[u8],
+) -> Result<i64, RespParseError> {
+    parse_i64_strict_impl::<FAST, ONE_DIGIT>(input)
 }
 
-fn parse_i64_strict_impl<const FAST: bool>(input: &[u8]) -> Result<i64, RespParseError> {
+fn parse_i64_strict_impl<const FAST: bool, const ONE_DIGIT: bool>(
+    input: &[u8],
+) -> Result<i64, RespParseError> {
     let slen = input.len();
     if slen == 0 || slen > 20 {
         return Err(RespParseError::InvalidInteger);
+    }
+    // The overwhelmingly common RESP length/count headers are one digit (`$3`, `*2`, ...).
+    // The previous `slen == 1 && input[0] == b'0'` check already paid the length branch, but only
+    // zero returned there; 1..=9 continued through sign detection, range checks, accumulator setup,
+    // and final i64 bounds. Return every valid one-digit integer directly. Multi-digit inputs take
+    // the same not-taken length branch as before, and the reference arm below retains the literal
+    // old path for the in-binary A/B.
+    if ONE_DIGIT && slen == 1 {
+        let digit = input[0].wrapping_sub(b'0');
+        return if digit <= 9 {
+            Ok(i64::from(digit))
+        } else {
+            Err(RespParseError::InvalidInteger)
+        };
     }
     if slen == 1 && input[0] == b'0' {
         return Ok(0);
@@ -2125,8 +2146,20 @@ mod tests {
             Err(RespParseError::InvalidInteger)
         }
 
+        // The one-digit production shortcut must match the literal pre-shortcut path for every
+        // possible input byte, not only valid ASCII digits. This pins invalid signs, high bytes,
+        // and punctuation to the exact same error.
+        for byte in 0_u8..=u8::MAX {
+            let input = [byte];
+            assert_eq!(
+                super::parse_i64_strict(&input),
+                super::parse_i64_strict_impl::<true, false>(&input),
+                "one-byte input={byte:#04x}"
+            );
+        }
+
         // Exhaustive over {digits, sign, non-digit} up to length 5 (leading zeros, signs, junk).
-        let alphabet = [b'0', b'1', b'2', b'9', b'-', b'x'];
+        let alphabet = *b"0129-x";
         for len in 0..=5usize {
             for mut idx in 0..6usize.pow(len as u32) {
                 let mut buf = Vec::with_capacity(len);

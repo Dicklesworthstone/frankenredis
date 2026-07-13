@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — one-digit RESP integer headers return before general sign/range setup; 1.4948x fewer instructions, bit-identical
+
+NEGATIVE-LEDGER-FIRST: the earlier `parse_i64_strict` keep removed per-digit overflow guards for
+2-19 digit inputs but explicitly left the hot one-digit `$N` / `*N` path byte-for-byte unchanged;
+no rejection covered returning all one-digit values directly. The later parse-frontier saturation
+note therefore did not measure this remaining branch. ONE LEVER: after the existing input-length
+guard, production maps one ASCII digit directly to `i64`; invalid one-byte inputs return the same
+`InvalidInteger`, and every multi-byte input takes the same not-taken length branch as before.
+`parse_i64_strict_impl::<true, false>` retains the literal prior one-digit path in the same binary.
+
+BIT-IDENTICAL: the production test compares candidate and exact prior arm for all 256 possible
+one-byte inputs, then the existing exhaustive guarded-reference oracle covers digits/sign/junk to
+length five plus i64/u64 boundaries. The benchmark repeats all 256 one-byte comparisons and
+multi-byte boundary checks before timing. Remote `fr-protocol` tests, crate-scoped all-targets
+clippy, workspace check, and `fr-conformance` passed.
+
+MEASURED (remote-only, one-binary `parse_i64_fastpath`, 24 position-balanced A/A/reference rounds,
+48,000,000 realistic one-digit RESP header parses per arm): worker `vmi1227854`, binary SHA256
+`7fd280fa833e46d5eb8bab9b0e35b9966f55bf76dd8ad0d12b4643da60bbd1cf`; candidate was
+~1.746310B instructions versus ~2.610310B reference, or **1.494757586x
+reference/candidate** (**33.0995% fewer instructions**). The A/A null median was **0.999999936**,
+p5..p95 **[0.999999595, 1.000000910]**, CV **0.000042%**; effect CV **0.000036%**. Three
+`perf record` trials had zero lost samples and verified the exact
+`bench_parse_i64_strict::<true, false>` frame at **1.31% median self-time** (self-time CV
+**52.7178%**), so the timed workload reached the changed function. Rollback: make
+`parse_i64_strict` call `parse_i64_strict_impl::<true, false>`.
+
 ## 2026-07-12: SHIPPED — packed descending index slices materialize only the requested window; 2.4840x fewer instructions, bit-identical
 
 NEGATIVE-LEDGER-FIRST: prior deep-index evidence covers the Full-ZSET adaptive rank tree, not the
