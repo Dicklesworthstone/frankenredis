@@ -41,3 +41,9 @@ required-features = ["bench-reference"]
 [[bench]]
 name = "sort_move"
 harness = false
+
+# Same-binary A/B for command classification dispatch: compute-packed-once + match-on-u64 vs the
+# production linear eq_ascii_command chain, over the (largest) 6-byte command bucket.
+[[bench]]
+name = "classify6_dispatch"
+harness = false

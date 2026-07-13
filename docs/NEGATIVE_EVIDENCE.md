@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — classify_command match-on-packed dispatch (len-6 bucket); 1.1212x fewer instructions, byte-identical (frankenredis-zb2h3)
+
+NEGATIVE-LEDGER-FIRST + PIVOT: the fr-protocol parse fusion vein was closed, so I moved to command
+DISPATCH. `classify_command` maps a command name → `CommandId` via a `match cmd.len()` bucketed
+LINEAR `eq_ascii_command(cmd, b"NAME")` if-else chain — and each `eq_ascii_command` re-computes
+`pack_cmd_u64(cmd)`. The already-shipped work packed the per-COMPARISON (u64 vs byte-fold); nothing
+computed the pack ONCE or replaced the linear scan with a jump table. HYPOTHESIS TESTED: does LLVM
+already CSE the pack + switch-convert the chain? A same-binary A/B on the LARGEST bucket (6-byte, 49
+commands) says NO — a compute-`pack_cmd_u64(cmd)`-once + `match` on const-packed u64 (compiler jump
+table / binary search) beats the linear chain. Shipped that rewrite for the len==6 arm; buckets
+3/4/5/7/8 are follow-ups (bead zb2h3).
+
+BYTE-IDENTICAL: the existing `classify_command_matches_linear_reference` test proves production ==
+`classify_command_linear` over EVERY known command after the rewrite; `bench_classify6_match` ==
+`bench_classify6_linear` over all 49 names + misses; full fr-command lib suite 1172/1172, 0 failed.
+
+MEASURED (`crates/fr-command/benches/classify6_dispatch.rs`, release-perf, 24 rounds, host
+`thinkstation1`, binary SHA256
+`a4e7ea12fc4777eb99919f1375f785477be36ef3b9b37087375b4be7263715ae`; workload = 16 realistic 6-byte
+names, hits spread early/mid/late + one miss): candidate ~3.786301B vs reference ~4.245301B =
+**1.121227x fewer instructions (10.81%)**. Null median 0.999999936, p5..p95
+[0.999999785,1.000000145], null CV 0.000011%; effect CV 0.000010%. Reference frame
+`fr_command::bench_classify6_linear` self-time ~82–86% (the classify dominates the loop). Reference
+arm = the production linear chain. Rollback: restore the len==6 `if eq_ascii_command` chain.
+
 ## 2026-07-13: SHIPPED — completed count/length parse fusion coverage (parse_command_frame + resp3 verbatim/blob_error); reuses the cxq6j/i47l7 primitives, bit-identical (frankenredis-4vwiq)
 
 NEGATIVE-LEDGER-FIRST: the last three un-fused count/length parses in fr-protocol were propagated to

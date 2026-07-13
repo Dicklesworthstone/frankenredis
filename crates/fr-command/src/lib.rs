@@ -3179,106 +3179,110 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         6 => {
-            if eq_ascii_command(cmd, b"EXPIRE") {
-                Some(CommandId::Expire)
-            } else if eq_ascii_command(cmd, b"STRLEN") {
-                Some(CommandId::Strlen)
-            } else if eq_ascii_command(cmd, b"GETSET") {
-                Some(CommandId::Getset)
-            } else if eq_ascii_command(cmd, b"INCRBY") {
-                Some(CommandId::Incrby)
-            } else if eq_ascii_command(cmd, b"DECRBY") {
-                Some(CommandId::Decrby)
-            } else if eq_ascii_command(cmd, b"EXISTS") {
-                Some(CommandId::Exists)
-            } else if eq_ascii_command(cmd, b"RENAME") {
-                Some(CommandId::Rename)
-            } else if eq_ascii_command(cmd, b"DBSIZE") {
-                Some(CommandId::Dbsize)
-            } else if eq_ascii_command(cmd, b"APPEND") {
-                Some(CommandId::Append)
-            } else if eq_ascii_command(cmd, b"HSETNX") {
-                Some(CommandId::Hsetnx)
-            } else if eq_ascii_command(cmd, b"LRANGE") {
-                Some(CommandId::Lrange)
-            } else if eq_ascii_command(cmd, b"LINDEX") {
-                Some(CommandId::Lindex)
-            } else if eq_ascii_command(cmd, b"ZSCORE") {
-                Some(CommandId::Zscore)
-            } else if eq_ascii_command(cmd, b"ZRANGE") {
-                Some(CommandId::Zrange)
-            } else if eq_ascii_command(cmd, b"XGROUP") {
-                Some(CommandId::Xgroup)
-            } else if eq_ascii_command(cmd, b"XRANGE") {
-                Some(CommandId::Xrange)
-            } else if eq_ascii_command(cmd, b"XCLAIM") {
-                Some(CommandId::Xclaim)
-            } else if eq_ascii_command(cmd, b"ZCOUNT") {
-                Some(CommandId::Zcount)
-            } else if eq_ascii_command(cmd, b"PSETEX") {
-                Some(CommandId::Psetex)
-            } else if eq_ascii_command(cmd, b"GETDEL") {
-                Some(CommandId::Getdel)
-            } else if eq_ascii_command(cmd, b"SINTER") {
-                Some(CommandId::Sinter)
-            } else if eq_ascii_command(cmd, b"SUNION") {
-                Some(CommandId::Sunion)
-            } else if eq_ascii_command(cmd, b"SETBIT") {
-                Some(CommandId::Setbit)
-            } else if eq_ascii_command(cmd, b"GETBIT") {
-                Some(CommandId::Getbit)
-            } else if eq_ascii_command(cmd, b"BITPOS") {
-                Some(CommandId::Bitpos)
-            } else if eq_ascii_command(cmd, b"LPUSHX") {
-                Some(CommandId::Lpushx)
-            } else if eq_ascii_command(cmd, b"RPUSHX") {
-                Some(CommandId::Rpushx)
-            } else if eq_ascii_command(cmd, b"SELECT") {
-                Some(CommandId::Select)
-            } else if eq_ascii_command(cmd, b"CONFIG") {
-                Some(CommandId::Config)
-            } else if eq_ascii_command(cmd, b"CLIENT") {
-                Some(CommandId::Client)
-            } else if eq_ascii_command(cmd, b"OBJECT") {
-                Some(CommandId::Object)
-            } else if eq_ascii_command(cmd, b"UNLINK") {
-                Some(CommandId::Unlink)
-            } else if eq_ascii_command(cmd, b"SUBSTR") {
-                Some(CommandId::Substr)
-            } else if eq_ascii_command(cmd, b"GEOADD") {
-                Some(CommandId::Geoadd)
-            } else if eq_ascii_command(cmd, b"GEOPOS") {
-                Some(CommandId::Geopos)
-            } else if eq_ascii_command(cmd, b"MEMORY") {
-                Some(CommandId::Memory)
-            } else if eq_ascii_command(cmd, b"BGSAVE") {
-                Some(CommandId::Bgsave)
-            } else if eq_ascii_command(cmd, b"MSETNX") {
-                Some(CommandId::Msetnx)
-            } else if eq_ascii_command(cmd, b"ZINTER") {
-                Some(CommandId::Zinter)
-            } else if eq_ascii_command(cmd, b"ZUNION") {
-                Some(CommandId::Zunion)
-            } else if eq_ascii_command(cmd, b"SWAPDB") {
-                Some(CommandId::Swapdb)
-            } else if eq_ascii_command(cmd, b"BLMOVE") {
-                Some(CommandId::Blmove)
-            } else if eq_ascii_command(cmd, b"BLMPOP") {
-                Some(CommandId::Blmpop)
-            } else if eq_ascii_command(cmd, b"PUBSUB") {
-                Some(CommandId::Pubsub)
-            } else if eq_ascii_command(cmd, b"SCRIPT") {
-                Some(CommandId::Script)
-            } else if eq_ascii_command(cmd, b"XSETID") {
-                Some(CommandId::Xsetid)
-            } else if eq_ascii_command(cmd, b"LOLWUT") {
-                Some(CommandId::Lolwut)
-            } else if eq_ascii_command(cmd, b"BZMPOP") {
-                Some(CommandId::Bzmpop)
-            } else if eq_ascii_command(cmd, b"MODULE") {
-                Some(CommandId::Module)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE and dispatch via a match on the
+            // const-packed u64 (a compiler jump table / binary search) instead of the
+            // linear per-candidate eq_ascii_command chain that re-packs `cmd` each time.
+            // Byte-identical to the linear reference (classify_command_matches_linear_reference).
+            const PK_EXPIRE: u64 = pack_cmd_u64(b"EXPIRE");
+            const PK_STRLEN: u64 = pack_cmd_u64(b"STRLEN");
+            const PK_GETSET: u64 = pack_cmd_u64(b"GETSET");
+            const PK_INCRBY: u64 = pack_cmd_u64(b"INCRBY");
+            const PK_DECRBY: u64 = pack_cmd_u64(b"DECRBY");
+            const PK_EXISTS: u64 = pack_cmd_u64(b"EXISTS");
+            const PK_RENAME: u64 = pack_cmd_u64(b"RENAME");
+            const PK_DBSIZE: u64 = pack_cmd_u64(b"DBSIZE");
+            const PK_APPEND: u64 = pack_cmd_u64(b"APPEND");
+            const PK_HSETNX: u64 = pack_cmd_u64(b"HSETNX");
+            const PK_LRANGE: u64 = pack_cmd_u64(b"LRANGE");
+            const PK_LINDEX: u64 = pack_cmd_u64(b"LINDEX");
+            const PK_ZSCORE: u64 = pack_cmd_u64(b"ZSCORE");
+            const PK_ZRANGE: u64 = pack_cmd_u64(b"ZRANGE");
+            const PK_XGROUP: u64 = pack_cmd_u64(b"XGROUP");
+            const PK_XRANGE: u64 = pack_cmd_u64(b"XRANGE");
+            const PK_XCLAIM: u64 = pack_cmd_u64(b"XCLAIM");
+            const PK_ZCOUNT: u64 = pack_cmd_u64(b"ZCOUNT");
+            const PK_PSETEX: u64 = pack_cmd_u64(b"PSETEX");
+            const PK_GETDEL: u64 = pack_cmd_u64(b"GETDEL");
+            const PK_SINTER: u64 = pack_cmd_u64(b"SINTER");
+            const PK_SUNION: u64 = pack_cmd_u64(b"SUNION");
+            const PK_SETBIT: u64 = pack_cmd_u64(b"SETBIT");
+            const PK_GETBIT: u64 = pack_cmd_u64(b"GETBIT");
+            const PK_BITPOS: u64 = pack_cmd_u64(b"BITPOS");
+            const PK_LPUSHX: u64 = pack_cmd_u64(b"LPUSHX");
+            const PK_RPUSHX: u64 = pack_cmd_u64(b"RPUSHX");
+            const PK_SELECT: u64 = pack_cmd_u64(b"SELECT");
+            const PK_CONFIG: u64 = pack_cmd_u64(b"CONFIG");
+            const PK_CLIENT: u64 = pack_cmd_u64(b"CLIENT");
+            const PK_OBJECT: u64 = pack_cmd_u64(b"OBJECT");
+            const PK_UNLINK: u64 = pack_cmd_u64(b"UNLINK");
+            const PK_SUBSTR: u64 = pack_cmd_u64(b"SUBSTR");
+            const PK_GEOADD: u64 = pack_cmd_u64(b"GEOADD");
+            const PK_GEOPOS: u64 = pack_cmd_u64(b"GEOPOS");
+            const PK_MEMORY: u64 = pack_cmd_u64(b"MEMORY");
+            const PK_BGSAVE: u64 = pack_cmd_u64(b"BGSAVE");
+            const PK_MSETNX: u64 = pack_cmd_u64(b"MSETNX");
+            const PK_ZINTER: u64 = pack_cmd_u64(b"ZINTER");
+            const PK_ZUNION: u64 = pack_cmd_u64(b"ZUNION");
+            const PK_SWAPDB: u64 = pack_cmd_u64(b"SWAPDB");
+            const PK_BLMOVE: u64 = pack_cmd_u64(b"BLMOVE");
+            const PK_BLMPOP: u64 = pack_cmd_u64(b"BLMPOP");
+            const PK_PUBSUB: u64 = pack_cmd_u64(b"PUBSUB");
+            const PK_SCRIPT: u64 = pack_cmd_u64(b"SCRIPT");
+            const PK_XSETID: u64 = pack_cmd_u64(b"XSETID");
+            const PK_LOLWUT: u64 = pack_cmd_u64(b"LOLWUT");
+            const PK_BZMPOP: u64 = pack_cmd_u64(b"BZMPOP");
+            const PK_MODULE: u64 = pack_cmd_u64(b"MODULE");
+            match pack_cmd_u64(cmd) {
+                PK_EXPIRE => Some(CommandId::Expire),
+                PK_STRLEN => Some(CommandId::Strlen),
+                PK_GETSET => Some(CommandId::Getset),
+                PK_INCRBY => Some(CommandId::Incrby),
+                PK_DECRBY => Some(CommandId::Decrby),
+                PK_EXISTS => Some(CommandId::Exists),
+                PK_RENAME => Some(CommandId::Rename),
+                PK_DBSIZE => Some(CommandId::Dbsize),
+                PK_APPEND => Some(CommandId::Append),
+                PK_HSETNX => Some(CommandId::Hsetnx),
+                PK_LRANGE => Some(CommandId::Lrange),
+                PK_LINDEX => Some(CommandId::Lindex),
+                PK_ZSCORE => Some(CommandId::Zscore),
+                PK_ZRANGE => Some(CommandId::Zrange),
+                PK_XGROUP => Some(CommandId::Xgroup),
+                PK_XRANGE => Some(CommandId::Xrange),
+                PK_XCLAIM => Some(CommandId::Xclaim),
+                PK_ZCOUNT => Some(CommandId::Zcount),
+                PK_PSETEX => Some(CommandId::Psetex),
+                PK_GETDEL => Some(CommandId::Getdel),
+                PK_SINTER => Some(CommandId::Sinter),
+                PK_SUNION => Some(CommandId::Sunion),
+                PK_SETBIT => Some(CommandId::Setbit),
+                PK_GETBIT => Some(CommandId::Getbit),
+                PK_BITPOS => Some(CommandId::Bitpos),
+                PK_LPUSHX => Some(CommandId::Lpushx),
+                PK_RPUSHX => Some(CommandId::Rpushx),
+                PK_SELECT => Some(CommandId::Select),
+                PK_CONFIG => Some(CommandId::Config),
+                PK_CLIENT => Some(CommandId::Client),
+                PK_OBJECT => Some(CommandId::Object),
+                PK_UNLINK => Some(CommandId::Unlink),
+                PK_SUBSTR => Some(CommandId::Substr),
+                PK_GEOADD => Some(CommandId::Geoadd),
+                PK_GEOPOS => Some(CommandId::Geopos),
+                PK_MEMORY => Some(CommandId::Memory),
+                PK_BGSAVE => Some(CommandId::Bgsave),
+                PK_MSETNX => Some(CommandId::Msetnx),
+                PK_ZINTER => Some(CommandId::Zinter),
+                PK_ZUNION => Some(CommandId::Zunion),
+                PK_SWAPDB => Some(CommandId::Swapdb),
+                PK_BLMOVE => Some(CommandId::Blmove),
+                PK_BLMPOP => Some(CommandId::Blmpop),
+                PK_PUBSUB => Some(CommandId::Pubsub),
+                PK_SCRIPT => Some(CommandId::Script),
+                PK_XSETID => Some(CommandId::Xsetid),
+                PK_LOLWUT => Some(CommandId::Lolwut),
+                PK_BZMPOP => Some(CommandId::Bzmpop),
+                PK_MODULE => Some(CommandId::Module),
+                _ => None,
             }
         }
         7 => {
@@ -3601,6 +3605,222 @@ fn eq_ascii_command(lhs: &[u8], rhs: &[u8]) -> bool {
         .zip(rhs.iter())
         .all(|(left, right)| left.to_ascii_uppercase() == *right)
 }
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify6_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"EXPIRE") {
+        1
+    } else if eq_ascii_command(cmd, b"STRLEN") {
+        2
+    } else if eq_ascii_command(cmd, b"GETSET") {
+        3
+    } else if eq_ascii_command(cmd, b"INCRBY") {
+        4
+    } else if eq_ascii_command(cmd, b"DECRBY") {
+        5
+    } else if eq_ascii_command(cmd, b"EXISTS") {
+        6
+    } else if eq_ascii_command(cmd, b"RENAME") {
+        7
+    } else if eq_ascii_command(cmd, b"DBSIZE") {
+        8
+    } else if eq_ascii_command(cmd, b"APPEND") {
+        9
+    } else if eq_ascii_command(cmd, b"HSETNX") {
+        10
+    } else if eq_ascii_command(cmd, b"LRANGE") {
+        11
+    } else if eq_ascii_command(cmd, b"LINDEX") {
+        12
+    } else if eq_ascii_command(cmd, b"ZSCORE") {
+        13
+    } else if eq_ascii_command(cmd, b"ZRANGE") {
+        14
+    } else if eq_ascii_command(cmd, b"XGROUP") {
+        15
+    } else if eq_ascii_command(cmd, b"XRANGE") {
+        16
+    } else if eq_ascii_command(cmd, b"XCLAIM") {
+        17
+    } else if eq_ascii_command(cmd, b"ZCOUNT") {
+        18
+    } else if eq_ascii_command(cmd, b"PSETEX") {
+        19
+    } else if eq_ascii_command(cmd, b"GETDEL") {
+        20
+    } else if eq_ascii_command(cmd, b"SINTER") {
+        21
+    } else if eq_ascii_command(cmd, b"SUNION") {
+        22
+    } else if eq_ascii_command(cmd, b"SETBIT") {
+        23
+    } else if eq_ascii_command(cmd, b"GETBIT") {
+        24
+    } else if eq_ascii_command(cmd, b"BITPOS") {
+        25
+    } else if eq_ascii_command(cmd, b"LPUSHX") {
+        26
+    } else if eq_ascii_command(cmd, b"RPUSHX") {
+        27
+    } else if eq_ascii_command(cmd, b"SELECT") {
+        28
+    } else if eq_ascii_command(cmd, b"CONFIG") {
+        29
+    } else if eq_ascii_command(cmd, b"CLIENT") {
+        30
+    } else if eq_ascii_command(cmd, b"OBJECT") {
+        31
+    } else if eq_ascii_command(cmd, b"UNLINK") {
+        32
+    } else if eq_ascii_command(cmd, b"SUBSTR") {
+        33
+    } else if eq_ascii_command(cmd, b"GEOADD") {
+        34
+    } else if eq_ascii_command(cmd, b"GEOPOS") {
+        35
+    } else if eq_ascii_command(cmd, b"MEMORY") {
+        36
+    } else if eq_ascii_command(cmd, b"BGSAVE") {
+        37
+    } else if eq_ascii_command(cmd, b"MSETNX") {
+        38
+    } else if eq_ascii_command(cmd, b"ZINTER") {
+        39
+    } else if eq_ascii_command(cmd, b"ZUNION") {
+        40
+    } else if eq_ascii_command(cmd, b"SWAPDB") {
+        41
+    } else if eq_ascii_command(cmd, b"BLMOVE") {
+        42
+    } else if eq_ascii_command(cmd, b"BLMPOP") {
+        43
+    } else if eq_ascii_command(cmd, b"PUBSUB") {
+        44
+    } else if eq_ascii_command(cmd, b"SCRIPT") {
+        45
+    } else if eq_ascii_command(cmd, b"XSETID") {
+        46
+    } else if eq_ascii_command(cmd, b"LOLWUT") {
+        47
+    } else if eq_ascii_command(cmd, b"BZMPOP") {
+        48
+    } else if eq_ascii_command(cmd, b"MODULE") {
+        49
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify6_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 6 {
+        return 0;
+    }
+    const PK_EXPIRE: u64 = pack_cmd_u64(b"EXPIRE");
+    const PK_STRLEN: u64 = pack_cmd_u64(b"STRLEN");
+    const PK_GETSET: u64 = pack_cmd_u64(b"GETSET");
+    const PK_INCRBY: u64 = pack_cmd_u64(b"INCRBY");
+    const PK_DECRBY: u64 = pack_cmd_u64(b"DECRBY");
+    const PK_EXISTS: u64 = pack_cmd_u64(b"EXISTS");
+    const PK_RENAME: u64 = pack_cmd_u64(b"RENAME");
+    const PK_DBSIZE: u64 = pack_cmd_u64(b"DBSIZE");
+    const PK_APPEND: u64 = pack_cmd_u64(b"APPEND");
+    const PK_HSETNX: u64 = pack_cmd_u64(b"HSETNX");
+    const PK_LRANGE: u64 = pack_cmd_u64(b"LRANGE");
+    const PK_LINDEX: u64 = pack_cmd_u64(b"LINDEX");
+    const PK_ZSCORE: u64 = pack_cmd_u64(b"ZSCORE");
+    const PK_ZRANGE: u64 = pack_cmd_u64(b"ZRANGE");
+    const PK_XGROUP: u64 = pack_cmd_u64(b"XGROUP");
+    const PK_XRANGE: u64 = pack_cmd_u64(b"XRANGE");
+    const PK_XCLAIM: u64 = pack_cmd_u64(b"XCLAIM");
+    const PK_ZCOUNT: u64 = pack_cmd_u64(b"ZCOUNT");
+    const PK_PSETEX: u64 = pack_cmd_u64(b"PSETEX");
+    const PK_GETDEL: u64 = pack_cmd_u64(b"GETDEL");
+    const PK_SINTER: u64 = pack_cmd_u64(b"SINTER");
+    const PK_SUNION: u64 = pack_cmd_u64(b"SUNION");
+    const PK_SETBIT: u64 = pack_cmd_u64(b"SETBIT");
+    const PK_GETBIT: u64 = pack_cmd_u64(b"GETBIT");
+    const PK_BITPOS: u64 = pack_cmd_u64(b"BITPOS");
+    const PK_LPUSHX: u64 = pack_cmd_u64(b"LPUSHX");
+    const PK_RPUSHX: u64 = pack_cmd_u64(b"RPUSHX");
+    const PK_SELECT: u64 = pack_cmd_u64(b"SELECT");
+    const PK_CONFIG: u64 = pack_cmd_u64(b"CONFIG");
+    const PK_CLIENT: u64 = pack_cmd_u64(b"CLIENT");
+    const PK_OBJECT: u64 = pack_cmd_u64(b"OBJECT");
+    const PK_UNLINK: u64 = pack_cmd_u64(b"UNLINK");
+    const PK_SUBSTR: u64 = pack_cmd_u64(b"SUBSTR");
+    const PK_GEOADD: u64 = pack_cmd_u64(b"GEOADD");
+    const PK_GEOPOS: u64 = pack_cmd_u64(b"GEOPOS");
+    const PK_MEMORY: u64 = pack_cmd_u64(b"MEMORY");
+    const PK_BGSAVE: u64 = pack_cmd_u64(b"BGSAVE");
+    const PK_MSETNX: u64 = pack_cmd_u64(b"MSETNX");
+    const PK_ZINTER: u64 = pack_cmd_u64(b"ZINTER");
+    const PK_ZUNION: u64 = pack_cmd_u64(b"ZUNION");
+    const PK_SWAPDB: u64 = pack_cmd_u64(b"SWAPDB");
+    const PK_BLMOVE: u64 = pack_cmd_u64(b"BLMOVE");
+    const PK_BLMPOP: u64 = pack_cmd_u64(b"BLMPOP");
+    const PK_PUBSUB: u64 = pack_cmd_u64(b"PUBSUB");
+    const PK_SCRIPT: u64 = pack_cmd_u64(b"SCRIPT");
+    const PK_XSETID: u64 = pack_cmd_u64(b"XSETID");
+    const PK_LOLWUT: u64 = pack_cmd_u64(b"LOLWUT");
+    const PK_BZMPOP: u64 = pack_cmd_u64(b"BZMPOP");
+    const PK_MODULE: u64 = pack_cmd_u64(b"MODULE");
+    match pack_cmd_u64(cmd) {
+        PK_EXPIRE => 1,
+        PK_STRLEN => 2,
+        PK_GETSET => 3,
+        PK_INCRBY => 4,
+        PK_DECRBY => 5,
+        PK_EXISTS => 6,
+        PK_RENAME => 7,
+        PK_DBSIZE => 8,
+        PK_APPEND => 9,
+        PK_HSETNX => 10,
+        PK_LRANGE => 11,
+        PK_LINDEX => 12,
+        PK_ZSCORE => 13,
+        PK_ZRANGE => 14,
+        PK_XGROUP => 15,
+        PK_XRANGE => 16,
+        PK_XCLAIM => 17,
+        PK_ZCOUNT => 18,
+        PK_PSETEX => 19,
+        PK_GETDEL => 20,
+        PK_SINTER => 21,
+        PK_SUNION => 22,
+        PK_SETBIT => 23,
+        PK_GETBIT => 24,
+        PK_BITPOS => 25,
+        PK_LPUSHX => 26,
+        PK_RPUSHX => 27,
+        PK_SELECT => 28,
+        PK_CONFIG => 29,
+        PK_CLIENT => 30,
+        PK_OBJECT => 31,
+        PK_UNLINK => 32,
+        PK_SUBSTR => 33,
+        PK_GEOADD => 34,
+        PK_GEOPOS => 35,
+        PK_MEMORY => 36,
+        PK_BGSAVE => 37,
+        PK_MSETNX => 38,
+        PK_ZINTER => 39,
+        PK_ZUNION => 40,
+        PK_SWAPDB => 41,
+        PK_BLMOVE => 42,
+        PK_BLMPOP => 43,
+        PK_PUBSUB => 44,
+        PK_SCRIPT => 45,
+        PK_XSETID => 46,
+        PK_LOLWUT => 47,
+        PK_BZMPOP => 48,
+        PK_MODULE => 49,
+        _ => 0,
+    }
+}
+
 
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     match argv.len() {
