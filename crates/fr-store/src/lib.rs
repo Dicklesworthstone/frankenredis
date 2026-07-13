@@ -18247,6 +18247,53 @@ impl Store {
     /// SRANDMEMBER key count — returns multiple random members.
     /// Positive count: up to `count` distinct members.
     /// Negative count: exactly `|count|` members, possibly with repeats.
+    /// The exact `next_rand()` LCG step as a free function on the raw seed, so a caller can
+    /// advance the RNG while holding a `self.entries` borrow (a disjoint `&mut self.rng_seed`
+    /// field split). Byte-identical to [`Store::next_rand`].
+    #[inline]
+    fn lcg_next_seed(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+        *seed
+    }
+
+    /// Draw the SRANDMEMBER `COUNT` sample indices over a `len`-element set, advancing `rng_seed`
+    /// with the exact `next_rand()` sequence srandmember_count drew inline. Factored out so the
+    /// draw can run while the value borrow is held (the single-lookup collapse below).
+    fn srandmember_sample_indices(rng_seed: &mut u64, count: i64, len: usize) -> Vec<usize> {
+        if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                // Rejection sampling for a small distinct subset.
+                let mut idxs = Vec::with_capacity(n);
+                let mut picked =
+                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
+                while idxs.len() < n {
+                    let idx = (Self::lcg_next_seed(rng_seed) as usize) % len;
+                    if picked.insert(idx) {
+                        idxs.push(idx);
+                    }
+                }
+                idxs
+            } else {
+                // Partial Fisher-Yates over the index space (cheap usize array).
+                let mut order: Vec<usize> = (0..len).collect();
+                for i in 0..n {
+                    let j = i + (Self::lcg_next_seed(rng_seed) as usize % (len - i));
+                    order.swap(i, j);
+                }
+                order.truncate(n);
+                order
+            }
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
+            for _ in 0..abs_count {
+                idxs.push((Self::lcg_next_seed(rng_seed) as usize) % len);
+            }
+            idxs
+        }
+    }
+
     pub fn srandmember_count(
         &mut self,
         key: &[u8],
@@ -18264,74 +18311,34 @@ impl Store {
         } else {
             0
         };
-        // (frankenredis-rndcnt) Don't materialise every member to sample a few.
-        // Find the cardinality + apply the LFU/touch bookkeeping, then draw the
-        // sample indices with the SAME next_rand() sequence as before, and finally
-        // clone only the chosen members via O(1) get_index. For a small count over
-        // a large set this is O(count) clones instead of O(n).
-        let len = match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let len = s.len();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    len
+        // (frankenredis-rndcnt) Don't materialise every member to sample a few — draw the sample
+        // indices with the SAME next_rand() sequence, then clone only the chosen members via O(1)
+        // get_index. (SilverBirch) One keyspace probe, not two: the index draw needs no
+        // `&self.entries`, so it runs on a disjoint `&mut self.rng_seed` field split while the
+        // `get_mut` entry is held, and the materialise reads the SAME entry — folding the prior
+        // 2nd `entries.get(key)` probe. Byte/RNG-identical (same draw sequence, same members).
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                let len = match &entry.value {
+                    Value::Set(s) => s.len(),
+                    _ => return Err(StoreError::WrongType),
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            },
-            None => return Ok(Vec::new()),
-        };
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
-                // Rejection sampling for a small distinct subset.
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
+                entry.touch(now_ms);
+                if len == 0 {
+                    return Ok(Vec::new());
                 }
-                idxs
-            } else {
-                // Partial Fisher-Yates over the index space (cheap usize array).
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
+                let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, len);
+                match &entry.value {
+                    Value::Set(s) => Ok(indices
+                        .iter()
+                        .filter_map(|&idx| s.get_index(idx).map(|c| c.into_owned()))
+                        .collect()),
+                    _ => unreachable!("type checked above"),
                 }
-                order.truncate(n);
-                order
             }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => Ok(indices
-                    .iter()
-                    .filter_map(|&idx| s.get_index(idx).map(|c| c.into_owned()))
-                    .collect()),
-                _ => Ok(Vec::new()),
-            },
             None => Ok(Vec::new()),
         }
     }

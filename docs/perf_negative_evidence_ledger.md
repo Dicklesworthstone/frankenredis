@@ -7352,3 +7352,31 @@ mechanism is the same one already benched at 1.6-2.1x isolated in the RANDMEMBER
 not a gate-clearing number. **SipHash-trap vein now CLOSED in fr-store:** 2 headline wins (eviction
 7.5-9.9x cfd9a8eff, RANDMEMBER dedup 1.6-2.1x 337f2a0be) + this cleanup; all remaining default-SipHash
 sets are cold (pubsub/ACL/OBJECT-ENCODING) or the intentional A/B `_orig_bench` arm.
+
+## 2026-07-13 SilverBirch: MEASURED SUB-GATE (shipped inline as Pareto-safe) — SRANDMEMBER COUNT single keyspace-probe collapse via `rng_seed` field split; + REUSABLE field-split technique
+
+`srandmember_count` did `entries.get_mut(key)` (cardinality + LFU bump + touch), released the
+borrow to draw the sample indices (which need `&mut self` for `next_rand()`), then a SECOND
+`entries.get(key)` to materialise — two keyspace-`HashMap` probes for one command. **NEW REUSABLE
+UNBLOCK:** the memory said this class was blocked ("can't hoist the lookup while drawing RNG per
+pop", [[project_persist_decode_frontier]] SPOP note) — but `next_rand()` only mutates ONE `u64`
+field (`rng_seed`), so a free fn `lcg_next_seed(&mut u64)` (byte-identical LCG) lets the draw run on
+a **disjoint `&mut self.rng_seed` field split** WHILE the `get_mut` entry (borrowing `self.entries`)
+is held. Rust allows simultaneous `&mut` of disjoint struct fields; the trick is avoiding the
+`&mut self` METHOD (`self.next_rand()`) in favor of the field. Collapses 2 probes → 1; the
+materialise reads the same held entry. Byte/RNG-identical (6 srandmember lib tests incl.
+`srandmember_count_avoids_materializing_whole_set_and_reports_ab_ratio` + `..._bumps_lfu_frequency`
++ `..._does_not_remove`, green via rch).
+
+Same-binary A/B (const-toggle `_impl<COLLAPSE>`, 50k-key keyspace + 256-member target set, worker
+vmi1152480 cv 13-21%): count1 **1.144x**, count5 1.057x, count16 1.004x, count_neg8 1.008x — ALL
+**inside the null p5..p95** (indistinguishable). The win shrinks as COUNT grows (materialise is
+O(count); at count1 the probe is the largest fraction). Unlike the TOUCH 2N→N multi-key collapse
+(1.45x, probes were ~half the work), ONE probe of a single-key command is only ~14% at count1, and
+1.1x needs cv<6% to gate on this noisy worker [[setkeepttl_subgate_and_drop_dedup]]. So NOT a
+gate-clearing win. **SHIPPED the collapse INLINE anyway** (dropped the A/B scaffolding + bench): it
+is a strict Pareto-safe **simplification** — one keyspace probe not two, byte/RNG-identical, one
+code path, can never regress. NOT dressed as a perf headline. **REUSABLE:** the `rng_seed`
+field-split unblocks the same single-lookup collapse for `hrandfield_count`/`zrandmember` (same
+2-probe shape) and, bigger, `Store::spop_count`'s O(count) get_mut loop → 1 (the deferred
+RNG-trap lever) — draw all pops on the field split while holding the set borrow.
