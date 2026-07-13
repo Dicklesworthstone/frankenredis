@@ -7407,3 +7407,28 @@ the field-split pattern (draw on `&mut self.rng_seed` while an `entries` entry i
 general unblock for "must draw RNG per element while holding the value borrow" — the class the
 `persist_decode_frontier`/`afe3a9da2` note called blocked. srandmember 2-probe collapse (31eb56e77)
 was sub-gate at ~1.14x (single-key, probe ~14%); this O(count)→1 multi-pop version clears easily.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU TOUCH 2 probes/key → 1 (rng_seed field split) — **1.78–1.94x**
+
+Third field-split cash-in. TOUCH's LFU branch did `record_keyspace_lookup` (drop_if_expired probe +
+hit/miss accounting) + a separate value `get_mut` PER key — its comment even named "the structural
+LFU wall" (the per-key rand draw borrows `&mut self`, so the entry borrow couldn't be held across
+it, unlike the non-LFU fast path which uses `lookup_live_for_read_mut`). Broke the wall: inline the
+same fold directly against `self.entries.get_mut(key)`, draw the per-key `rand_sample` on a disjoint
+`&mut self.rng_seed` field split while the entry is held, bump + touch — ONE probe per key. TOUCH's
+per-key work (LFU bump + LRU touch) is tiny, so the two probes ARE the cost.
+
+Null-gated same-binary A/B (`benches/touch_lfu_collapse.rs`, allkeys-lfu, 50k-key keyspace, all
+present keys, median-of-61): n8 **1.940x**, n64 **1.823x**, n512 **1.780x** — all WIN, flat across n
+(probes dominate at every size). Byte/RNG-identical: new `touch_lfu_collapsed_matches_twoprobe`
+(collapsed `_bench` vs two-probe `_bench` over mixed hit/miss/expired key lists, ± TTL; asserts
+count, `rng_seed`, keyspace hits/misses, per-key OBJECT FREQ) + 10 touch lib tests, green via rch.
+Clippy-clean.
+
+**BORROW LESSON (banked):** the field split ONLY works when the entry comes from
+`self.entries.get_mut(key)` DIRECTLY (borrows the `entries` FIELD). Routing it through a `&mut self`
+METHOD (I first tried `lookup_live_for_read_mut_unchecked`) makes the returned entry borrow ALL of
+`self` → `&mut self.rng_seed` then fails E0499. So INLINE the record+get_mut fold at the call site;
+don't extract it behind a `&mut self` helper. `lookup_live_for_read_mut` kept its debug-assert
+(non-LFU); the LFU TOUCH path inlines the identical fold. Field-split scoreboard: spop_count LFU
+O(count)→1 1.6-1.7x (9a36ff518), TOUCH LFU 2/key→1 1.8-1.9x (this), srandmember 2→1 sub-gate.

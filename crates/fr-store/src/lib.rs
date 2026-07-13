@@ -6997,7 +6997,10 @@ impl Store {
         // shared helper (9 callers: EXISTS, TYPE, STRLEN, … single-lookup fast paths),
         // pure waste when the store holds no TTL-bearing keys. Byte-identical — with no
         // expiry the key never evicts, so `should_evict` is already false and the stats
-        // path is unchanged. Mirrors GET's no-TTL fast path.
+        // path is unchanged. Mirrors GET's no-TTL fast path. (The LFU TOUCH collapse inlines
+        // this same fold directly against `self.entries` so it can field-split `self.rng_seed`
+        // while the entry is held — it cannot come through this `&mut self` method, whose return
+        // borrows all of `self`.)
         if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
             self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -27302,20 +27305,72 @@ impl Store {
             }
             return count;
         }
+        count + self.touch_lfu_impl::<true>(keys, now_ms)
+    }
+
+    /// A/B toggle for the TOUCH LFU keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` + the value `get_mut` into ONE probe per key via
+    /// `lookup_live_for_read_mut_unchecked`, drawing the per-key `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split (breaking the documented "structural LFU wall" — the rand
+    /// no longer needs a `&mut self` between the two probes). `false` is the prior two-probe form.
+    /// Byte/RNG-identical: same keyspace hit/miss accounting, same `next_rand()` draw per hit key,
+    /// same LFU bump + LRU touch, same hit count.
+    fn touch_lfu_impl<const COLLAPSE: bool>(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        for &key in keys {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                continue;
+        let mut count = 0i64;
+        if COLLAPSE {
+            for &key in keys {
+                // Inline the `lookup_live_for_read_mut` fold (record_keyspace_lookup + get_mut) so the
+                // entry borrows `self.entries` ONLY — then the per-key `rand_sample` draws on the
+                // disjoint `&mut self.rng_seed` field split while the entry is held. Byte-identical
+                // hit/miss accounting to the two-probe form.
+                if self.expires_count != 0
+                    && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+                {
+                    self.drop_if_expired(key, now_ms);
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    continue;
+                }
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        entry.touch(now_ms);
+                        count += 1;
+                    }
+                    None => {
+                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    }
+                }
             }
-            let rand_sample = self.next_rand();
-            if let Some(entry) = self.entries.get_mut(key) {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                entry.touch(now_ms);
-                count += 1;
+        } else {
+            for &key in keys {
+                if !self.record_keyspace_lookup(key, now_ms) {
+                    continue;
+                }
+                let rand_sample = self.next_rand();
+                if let Some(entry) = self.entries.get_mut(key) {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    count += 1;
+                }
             }
         }
         count
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn touch_lfu_collapsed_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
+        self.touch_lfu_impl::<true>(keys, now_ms)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn touch_lfu_twoprobe_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
+        self.touch_lfu_impl::<false>(keys, now_ms)
     }
 
     /// COPY: copy value from source to destination.
@@ -46191,6 +46246,63 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn touch_lfu_collapsed_matches_twoprobe() {
+        // Under allkeys-lfu the collapsed TOUCH (one `lookup_live_for_read_mut_unchecked` + a
+        // `rng_seed` field-split rand draw) must be byte-identical to the prior
+        // record_keyspace_lookup + get_mut two-probe form across EVERY observable: return count,
+        // keyspace hits/misses, RNG state, per-key LFU freq, and LRU touch — over hits, misses,
+        // and expired keys mixed in one key list.
+        fn build(with_ttl: bool) -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            for i in 0..200usize {
+                s.set(format!("k{i:04}").into_bytes(), b"v".to_vec(), None, 1);
+            }
+            if with_ttl {
+                // A key that will be expired at the touch time, to exercise the expiry-evict miss.
+                s.set(b"ttl".to_vec(), b"v".to_vec(), Some(5), 1);
+            }
+            s
+        }
+        for &with_ttl in &[false, true] {
+            // Mix present keys, absent keys, a repeat, and (when built) an expired key.
+            let keys_owned: Vec<Vec<u8>> = vec![
+                b"k0001".to_vec(),
+                b"absent-a".to_vec(),
+                b"k0050".to_vec(),
+                b"k0001".to_vec(),
+                b"ttl".to_vec(),
+                b"k0199".to_vec(),
+                b"absent-b".to_vec(),
+            ];
+            let keys: Vec<&[u8]> = keys_owned.iter().map(|k| k.as_slice()).collect();
+            let now = 10; // > the 5ms TTL ⇒ `ttl` is expired
+            let mut a = build(with_ttl);
+            let mut b = build(with_ttl);
+            let ca = a.touch_lfu_collapsed_bench(&keys, now);
+            let cb = b.touch_lfu_twoprobe_bench(&keys, now);
+            assert_eq!(ca, cb, "count with_ttl={with_ttl}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed with_ttl={with_ttl}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits with_ttl={with_ttl}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses with_ttl={with_ttl}"
+            );
+            for probe in [b"k0001".as_slice(), b"k0050", b"k0199"] {
+                assert_eq!(
+                    a.object_freq(probe, now),
+                    b.object_freq(probe, now),
+                    "object_freq {probe:?} with_ttl={with_ttl}"
+                );
+            }
+        }
     }
 
     #[test]
