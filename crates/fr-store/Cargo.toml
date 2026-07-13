@@ -96,6 +96,13 @@ name = "packed_zset_score_range"
 harness = false
 required-features = ["bench-reference"]
 
+# Same-binary, null-gated instruction benchmark for avoiding the packed descending slice's
+# full-record temporary materialization.
+[[bench]]
+name = "packed_zset_index_slice_desc"
+harness = false
+required-features = ["bench-reference"]
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]

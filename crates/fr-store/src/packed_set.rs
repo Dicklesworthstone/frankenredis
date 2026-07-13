@@ -4944,11 +4944,34 @@ impl PackedZSet {
     /// (0 = highest), in descending order.
     #[must_use]
     pub fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        self.iter_desc()
-            .skip(start_idx)
-            .take(count)
-            .map(|(m, s)| (m.to_vec(), s))
-            .collect()
+        self.index_slice_desc_impl::<true>(start_idx, count)
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Production maps the requested
+    /// descending ranks to one ascending packed window and reverses only that result; the
+    /// `DIRECT=false` arm retains the exact pre-change full materialization.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn index_slice_desc_impl<const DIRECT: bool>(
+        &self,
+        start_idx: usize,
+        count: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        if !DIRECT {
+            return self
+                .iter_desc()
+                .skip(start_idx)
+                .take(count)
+                .map(|(m, s)| (m.to_vec(), s))
+                .collect();
+        }
+        if count == 0 || start_idx >= self.len {
+            return Vec::new();
+        }
+        let take = count.min(self.len - start_idx);
+        let asc_start = self.len - start_idx - take;
+        let mut out = self.index_slice_asc(asc_start, take);
+        out.reverse();
+        out
     }
 
     /// Invoke `f(member, score)` for each member whose canonical score lies in
@@ -6399,6 +6422,10 @@ mod tests {
                     let desc_want: Vec<(Vec<u8>, f64)> =
                         sorted_rev.iter().skip(start).take(count).cloned().collect();
                     prop_assert_eq!(packed.index_slice_desc(start, count), desc_want);
+                    prop_assert_eq!(
+                        packed.index_slice_desc(start, count),
+                        packed.index_slice_desc_impl::<false>(start, count)
+                    );
                 }
                 // for_each_in_score_range == sorted filtered to [lo, hi]
                 for (lo, hi) in [
@@ -6455,6 +6482,45 @@ mod tests {
             prop_assert_eq!(packed.pop_min(), None);
             prop_assert_eq!(packed.pop_max(), None);
             prop_assert_eq!(packed.len(), 0);
+        }
+    }
+
+    #[test]
+    fn packed_zset_desc_slice_matches_full_materialization_reference() {
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let zset = PackedZSet::from_unique_pairs(vec![
+            (b"negative-nan".to_vec(), negative_nan),
+            (b"negative-infinity".to_vec(), f64::NEG_INFINITY),
+            (b"negative-zero".to_vec(), -0.0),
+            (b"positive-zero".to_vec(), 0.0),
+            (b"tie-a".to_vec(), 15.0),
+            (b"tie-b".to_vec(), 15.0),
+            (b"positive-infinity".to_vec(), f64::INFINITY),
+            (b"positive-nan".to_vec(), positive_nan),
+        ]);
+
+        for (start, count) in [
+            (0, 0),
+            (0, 1),
+            (0, usize::MAX),
+            (1, 3),
+            (zset.len() - 1, 2),
+            (zset.len(), 1),
+            (zset.len() + 1, 1),
+            (usize::MAX, usize::MAX),
+        ] {
+            let candidate: Vec<_> = zset
+                .index_slice_desc(start, count)
+                .into_iter()
+                .map(|(member, score)| (member, score.to_bits()))
+                .collect();
+            let reference: Vec<_> = zset
+                .index_slice_desc_impl::<false>(start, count)
+                .into_iter()
+                .map(|(member, score)| (member, score.to_bits()))
+                .collect();
+            assert_eq!(candidate, reference, "slice ({start}, {count}) diverged");
         }
     }
 

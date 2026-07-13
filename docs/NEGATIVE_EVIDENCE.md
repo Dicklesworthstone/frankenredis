@@ -4,6 +4,34 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — packed descending index slices materialize only the requested window; 2.4840x fewer instructions, bit-identical
+
+NEGATIVE-LEDGER-FIRST: prior deep-index evidence covers the Full-ZSET adaptive rank tree, not the
+Packed representation, and no rejection covered `PackedZSet::index_slice_desc`. That helper called
+`iter_desc`, which decoded all records and allocated a full `Vec<(&[u8], f64)>` before applying even
+an empty or narrow `skip/take`. ONE LEVER: production maps descending ranks to the corresponding
+ascending packed window, materializes only that window through the existing ascending helper, then
+reverses the result. `index_slice_desc_impl::<false>` retains the literal old full materialization in
+the same binary. Packed ZREVRANGE and ZREVRANGE WITHSCORES share this helper.
+
+BIT-IDENTICAL: the deterministic candidate/reference test compares member bytes plus raw score bits
+across count zero, full/partial windows, boundary and out-of-range starts, `usize::MAX`, tied scores,
+signed zero, infinities, and signed NaNs. The generated packed-ZSET property also compares candidate,
+the exact old arm, and an independently reversed sorted oracle. The benchmark correctness gate
+covers 40 start/count combinations over tied scores and variable-length members.
+
+MEASURED (remote-only, one-binary `packed_zset_index_slice_desc`, 24 position-balanced
+A/A/reference rounds, 100,000 `(start=96, count=8)` slices from 120 packed records per arm): worker
+`vmi1227854`, binary SHA256
+`796e4814b79f9825537c60887e8fbe5d4f9e52cd06ee1d20373d4283dbe3dbca`; candidate was ~389.072M
+instructions versus ~966.473M reference, or **2.484048x reference/candidate** (**59.743% fewer
+instructions**). The A/A null median was **0.999999969**, p5..p95
+**[0.999997754, 1.000002038]**, CV **0.000116%**; effect CV **0.000085%**. Three `perf record`
+trials had zero lost samples and verified the exact
+`PackedZSet::index_slice_desc_impl::<false>` at **7.80% median self-time** (CV **18.5623%**); the
+removed full temporary's `Vec::from_iter` was the top reference frame at 39.14-47.36% self.
+Rollback: make `PackedZSet::index_slice_desc` call `index_slice_desc_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — packed score-range scans stop after the inclusive upper bound; 6.5283x fewer instructions, byte-identical
 
 NEGATIVE-LEDGER-FIRST: prior GEO evidence rejected reply encoding and dispatch variants, while the
