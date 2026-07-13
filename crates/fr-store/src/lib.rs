@@ -8968,33 +8968,81 @@ impl Store {
                 None => Ok(0),
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(0);
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        self.strlen_lfu_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU STRLEN keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` + the value `get_mut` AND drops the separate `contains_key` gate —
+    /// 3 probes → 1 — drawing `rand_sample` on the disjoint `&mut self.rng_seed` field split (before
+    /// the WRONGTYPE check, so a present non-string key still consumes one draw + skips touch_access).
+    /// `false` is the prior three-probe form. STRLEN returns only a length (no value read), so the
+    /// probes are nearly all its work. Byte/RNG-identical. Only reached with LFU tracking on.
+    fn strlen_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                let Some(len) = entry.value.string_len() else {
-                    return Err(StoreError::WrongType);
-                };
-                entry.touch_access(
-                    now_ms,
-                    lfu_tracking_enabled,
-                    lfu_decay,
-                    lfu_log_factor,
-                    rand_sample,
-                );
-                Ok(len)
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(0);
             }
-            None => Ok(0),
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    let Some(len) = entry.value.string_len() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
+                    Ok(len)
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(0)
+                }
+            }
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(0);
+            }
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    let Some(len) = entry.value.string_len() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
+                    Ok(len)
+                }
+                None => Ok(0),
+            }
         }
+    }
+
+    #[doc(hidden)]
+    pub fn strlen_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.strlen_lfu_impl::<true>(key, now_ms)
+    }
+
+    #[doc(hidden)]
+    pub fn strlen_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.strlen_lfu_impl::<false>(key, now_ms)
     }
 
     /// MGET returns values for each key; non-string keys return None (like Redis).
@@ -46342,6 +46390,36 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn strlen_lfu_collapsed_matches_threeprobe() {
+        // Under allkeys-lfu the collapsed STRLEN (one get_mut fold + rng_seed field-split draw, no
+        // contains_key) must be byte-identical to the prior record + contains_key + get_mut three-
+        // probe form for a present string, an absent key, a wrong-type key (draw before WRONGTYPE,
+        // no touch), and an expired key: result, keyspace hits/misses, RNG state, LFU freq.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.set(b"str".to_vec(), b"hello".to_vec(), None, 1);
+            s.rpush(b"list", &[b"a".to_vec()], 1).unwrap();
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1);
+            s
+        }
+        let now = 10;
+        for key in [b"str".as_slice(), b"absent", b"list", b"ttl"] {
+            let mut a = build();
+            let mut b = build();
+            let ra = a.strlen_lfu_collapsed_bench(key, now);
+            let rb = b.strlen_lfu_threeprobe_bench(key, now);
+            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
+            assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
+            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
+            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
+            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+            assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq key={key:?}");
+        }
     }
 
     #[test]

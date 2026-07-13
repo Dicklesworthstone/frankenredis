@@ -7478,3 +7478,22 @@ AND for single-key commands whose non-probe work is minimal (GET; likely STRLEN,
 EXISTS). It's sub-gate only when heavy per-op work (clone/sample/scan) dwarfs the probe. Field-split
 scoreboard: spop_count 1.6-1.7x, TOUCH 1.8-1.9x, MGET 1.5-1.8x, **GET 1.6x**, srandmember sub-gate.
 Next candidates (single-key, low non-probe work, LFU 2-probe): STRLEN, GETBIT, GETRANGE(small).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU STRLEN 3 probes → 1 (rng_seed field split) — **2.22–2.37x** (biggest field-split win; length-only work)
+
+STRLEN's LFU path did `record_keyspace_lookup` + `contains_key` (rand gate) + `get_mut` — THREE
+probes (like MGET, unlike GET which drops the contains_key). STRLEN returns only a length
+(`string_len`, no value read/borrow), so the three probes are nearly ALL its work. Folded
+record+get_mut inline + dropped contains_key, drawing `rand_sample` on the disjoint `&mut
+self.rng_seed` field split (before the WRONGTYPE check → present non-string keys still consume one
+draw + skip touch). 3 probes → 1. Null-gated A/B (`benches/strlen_lfu_collapse.rs`, allkeys-lfu, 50k
+keyspace, looped single-STRLENs, median-of-61): n32 **2.371x**, n256 **2.224x** — WIN, the biggest
+yet (3 probes eliminated on the emptiest-work command). Byte/RNG-identical: new
+`strlen_lfu_collapsed_matches_threeprobe` (present/absent/wrong-type/expired; asserts result,
+`rng_seed`, hits/misses, OBJECT FREQ) + `strlen_existing_string_bumps_lfu_frequency`, green via rch.
+Clippy-clean (the 2 dead_code warnings — `refresh_entry_digest` @11680, a set-encoding helper @7393 —
+are PRE-EXISTING on origin/main, not mine). Confirms the refined rule: probe-fraction, not
+key-count, decides — STRLEN (3 probes, ~0 other work) beats GET (2 probes, borrow). Field-split
+scoreboard: STRLEN 2.2-2.4x, TOUCH 1.8-1.9x, spop_count 1.6-1.7x, GET 1.6x, MGET 1.5-1.8x,
+srandmember sub-gate. Same-shape candidates remaining: GETBIT/GETRANGE-small/EXISTS/TYPE (LFU 2-3
+probe walls, tiny work).
