@@ -21,3 +21,10 @@ harness = false
 [[bench]]
 name = "encode_integer_fastpath"
 harness = false
+
+# Same-binary A/B for the RESP length-header primitive (`<prefix><n>\r\n`): fused single-buffer
+# extend_from_slice vs the prior extend(prefix)+push_usize+extend("\r\n") shape, on the
+# borrow-encode reply path (bulk-string / aggregate / map headers).
+[[bench]]
+name = "push_len_header_fastpath"
+harness = false

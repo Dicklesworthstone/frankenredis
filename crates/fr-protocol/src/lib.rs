@@ -121,6 +121,60 @@ fn push_usize(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&buf[pos..]);
 }
 
+/// Append a RESP length-prefixed header (`<prefix><n>\r\n`, e.g. `$14\r\n`, `*3\r\n`, `%2\r\n`).
+///
+/// `FUSED == true` (production) builds the prefix, digits, and `\r\n` terminator right-aligned in
+/// one stack buffer and emits them with a SINGLE `extend_from_slice` — the digits are written
+/// exactly ONCE (two-at-a-time via `DIGIT_PAIRS`, same core as `write_u64_digits`) directly into
+/// their final position, no intermediate copy. This replaces the prior three-call header shape
+/// (`extend(prefix)` + `push_usize` + `extend("\r\n")`) on the borrow-encode reply path that fronts
+/// every bulk-string / aggregate / map reply (GET / MGET / HGETALL / LRANGE / SMEMBERS / ZRANGE...).
+/// `FUSED == false` retains that exact prior shape for the same-binary A/B in
+/// `benches/push_len_header_fastpath.rs`; it is not on a production path. Byte-identical: the digit
+/// core matches `push_usize`. `n` is a length/count, always non-negative (max 20 u64 digits fit).
+#[inline]
+fn push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n: u64) {
+    if FUSED {
+        // prefix (1) + up to 20 digits (u64::MAX) + "\r\n" (2) = 23 bytes; 24 leaves buf[0] slack.
+        let mut buf = [0u8; 24];
+        buf[22] = b'\r';
+        buf[23] = b'\n';
+        let mut val = n;
+        let mut pos = 22;
+        while val >= 100 {
+            let pair = (val % 100) as usize * 2;
+            val /= 100;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        if val < 10 {
+            pos -= 1;
+            buf[pos] = b'0' + val as u8;
+        } else {
+            let pair = val as usize * 2;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        pos -= 1;
+        buf[pos] = prefix;
+        out.extend_from_slice(&buf[pos..24]);
+    } else {
+        out.extend_from_slice(&[prefix]);
+        push_usize(out, n as usize);
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
+/// Bench hook for the same-binary A/B in `benches/push_len_header_fastpath.rs`. `FUSED = false`
+/// forces the prior three-call header path. Not on a production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n: u64) {
+    push_len_header::<FUSED>(out, prefix, n)
+}
+
 /// Encode a bulk-string reply from borrowed bytes.
 ///
 /// This is byte-identical to `RespFrame::BulkString(...).encode_into*` while
@@ -130,9 +184,7 @@ pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec
     match value {
         Some(bytes) => {
             out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
-            out.extend_from_slice(b"$");
-            push_usize(out, bytes.len());
-            out.extend_from_slice(b"\r\n");
+            push_len_header::<true>(out, b'$', bytes.len() as u64);
             out.extend_from_slice(bytes);
             out.extend_from_slice(b"\r\n");
         }
@@ -148,9 +200,7 @@ pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec
 /// `encode_bulk_string_slice` per element.
 pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
     out.reserve(1 + decimal_usize_len(len) + 2);
-    out.extend_from_slice(if resp3_set { b"~" } else { b"*" });
-    push_usize(out, len);
-    out.extend_from_slice(b"\r\n");
+    push_len_header::<true>(out, if resp3_set { b'~' } else { b'*' }, len as u64);
 }
 
 /// Write a field-value collection header for `pairs` entries: a RESP3 map
@@ -162,15 +212,12 @@ pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
 pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
     if resp3 {
         out.reserve(1 + decimal_usize_len(pairs) + 2);
-        out.extend_from_slice(b"%");
-        push_usize(out, pairs);
+        push_len_header::<true>(out, b'%', pairs as u64);
     } else {
         let flat = pairs * 2;
         out.reserve(1 + decimal_usize_len(flat) + 2);
-        out.extend_from_slice(b"*");
-        push_usize(out, flat);
+        push_len_header::<true>(out, b'*', flat as u64);
     }
-    out.extend_from_slice(b"\r\n");
 }
 
 /// How Redis's `zzlInsertAt` encodes `score` as a sorted-set listpack entry: it renders
@@ -2180,11 +2227,69 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_integer, decimal_u64_len, decimal_usize_len,
+        RespParseError, bench_encode_integer, bench_push_len_header, decimal_u64_len,
+        decimal_usize_len, encode_aggregate_header, encode_bulk_string_slice, encode_map_header,
         encode_redis_double, format_redis_double, parse_command_args_borrowed_into,
         parse_command_frame, parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
         push_i64, push_redis_double_ascii, push_usize,
     };
+
+    // The fused single-buffer length header (`<prefix><n>\r\n` in one extend_from_slice) must be
+    // byte-identical to the prior `extend(prefix) + push_usize + extend("\r\n")` shape across every
+    // RESP prefix and a dense scan of small lengths plus the digit-width boundaries and u64 edge.
+    // Also pins the three borrow-encode helpers that now front the reply path.
+    #[test]
+    fn fused_len_header_matches_three_call_and_helpers() {
+        let mut sample: Vec<u64> = vec![
+            0,
+            9,
+            10,
+            99,
+            100,
+            999,
+            1000,
+            65_535,
+            1_000_000,
+            u64::from(u32::MAX),
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for n in 0_u64..=5000 {
+            sample.push(n);
+        }
+        for &prefix in &[b'$', b'*', b'~', b'%', b'>', b'|', b'='] {
+            for &n in &sample {
+                let mut fused = Vec::new();
+                let mut old = Vec::new();
+                bench_push_len_header::<true>(&mut fused, prefix, n);
+                bench_push_len_header::<false>(&mut old, prefix, n);
+                assert_eq!(fused, old, "fused vs three-call differ for {prefix:?} n={n}");
+                assert_eq!(fused[0], prefix);
+                assert_eq!(&fused[fused.len() - 2..], b"\r\n");
+            }
+        }
+        // Non-empty destination appends, never overwrites.
+        let mut buf = b"X".to_vec();
+        bench_push_len_header::<true>(&mut buf, b'$', 128);
+        assert_eq!(buf, b"X$128\r\n");
+
+        // The borrow-encode helpers stay byte-identical to their documented wire form.
+        let mut b = Vec::new();
+        encode_bulk_string_slice(Some(b"hello"), false, &mut b);
+        assert_eq!(b, b"$5\r\nhello\r\n");
+        let mut a = Vec::new();
+        encode_aggregate_header(3, false, &mut a);
+        assert_eq!(a, b"*3\r\n");
+        let mut s = Vec::new();
+        encode_aggregate_header(2, true, &mut s);
+        assert_eq!(s, b"~2\r\n");
+        let mut m3 = Vec::new();
+        encode_map_header(2, true, &mut m3);
+        assert_eq!(m3, b"%2\r\n");
+        let mut m2 = Vec::new();
+        encode_map_header(2, false, &mut m2);
+        assert_eq!(m2, b"*4\r\n");
+    }
 
     // The fused single-buffer integer reply (`:<n>\r\n` in one extend_from_slice) must be
     // byte-identical to both the prior three-extend path and the canonical RespFrame encoder,
