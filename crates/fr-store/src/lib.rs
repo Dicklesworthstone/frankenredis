@@ -27832,6 +27832,19 @@ impl Store {
         volatile_only: bool,
         sample_limit: usize,
     ) -> Vec<Vec<u8>> {
+        self.sampled_eviction_candidate_keys_impl::<true>(volatile_only, sample_limit)
+    }
+
+    /// A/B toggle for the sampling optimizations. `OPT = true` is the shipped
+    /// path (O(1) eligible count for allkeys policies + a sorted-index merge walk
+    /// for the select pass); the doc-hidden bench hooks pass `false` to time the
+    /// original O(n) count-walk + per-element `HashSet::contains` select. Not
+    /// called with `false` in production. Byte- and RNG-identical either way.
+    fn sampled_eviction_candidate_keys_impl<const OPT: bool>(
+        &mut self,
+        volatile_only: bool,
+        sample_limit: usize,
+    ) -> Vec<Vec<u8>> {
         // (frankenredis-sa0uk) The previous implementation cloned EVERY eligible
         // key into `candidates` on every call (O(n) heap allocations per
         // eviction, O(n * evicted) when freeing memory under pressure) just to
@@ -27839,11 +27852,22 @@ impl Store {
         // (no clones), draw the SAME random indices the old loop would (identical
         // `next_rand()` sequence and modulus, same distinct-index set), then
         // clone ONLY the up-to-`sample_limit` sampled keys in a single pass.
-        let eligible_len = self
-            .entries
-            .keys()
-            .filter(|key| !volatile_only || self.key_has_expiry(key.as_ref()))
-            .count();
+        //
+        // (SilverBirch) When `!volatile_only` the eligibility filter is always
+        // true (`!false || _`), so the eligible count is the entire keyspace — an
+        // O(1) `HashMap::len()` instead of the full O(n) `keys().filter().count()`
+        // walk. The volatile path still needs the per-key expiry walk. The
+        // `eligible_len` VALUE is identical either way, so the `next_rand() %
+        // eligible_len` draw sequence, the distinct-index set, and the sampled
+        // victim are all unchanged (byte- and RNG-identical).
+        let eligible_len = if OPT && !volatile_only {
+            self.entries.len()
+        } else {
+            self.entries
+                .keys()
+                .filter(|key| !volatile_only || self.key_has_expiry(key.as_ref()))
+                .count()
+        };
 
         let sample_limit = sample_limit.max(1);
         if eligible_len <= sample_limit {
@@ -27854,6 +27878,45 @@ impl Store {
                 .filter(|(key, _)| !volatile_only || self.key_has_expiry(key.as_ref()))
                 .map(|(key, _)| key.to_vec())
                 .collect();
+        }
+
+        if OPT {
+            // (SilverBirch) The select pass dominates this function: the prior code
+            // did a `HashSet::contains(&eligible_idx)` probe for EVERY entry — an
+            // O(n) stream of hash lookups to place only `sample_limit` (≤ ~10)
+            // samples. Draw the SAME distinct indices (identical `next_rand() %
+            // eligible_len` sequence; a ≤sample_limit linear `contains` dedups
+            // exactly as the HashSet did), SORT them (≤10 elements), then merge them
+            // against the ascending `enumerate()` walk with a single pointer: an
+            // integer compare per entry instead of a hash lookup, and break as soon
+            // as the last sample is placed (no tail walk). Byte-identical sampled
+            // Vec (same index set, same ascending order) and RNG-identical.
+            let mut targets: Vec<usize> = Vec::with_capacity(sample_limit);
+            while targets.len() < sample_limit {
+                let idx = self.next_rand() as usize % eligible_len;
+                if !targets.contains(&idx) {
+                    targets.push(idx);
+                }
+            }
+            targets.sort_unstable();
+
+            let mut sampled = Vec::with_capacity(sample_limit);
+            let mut ti = 0usize;
+            for (eligible_idx, (key, _entry)) in self
+                .entries
+                .iter()
+                .filter(|(key, _)| !volatile_only || self.key_has_expiry(key.as_ref()))
+                .enumerate()
+            {
+                if eligible_idx == targets[ti] {
+                    sampled.push(key.to_vec());
+                    ti += 1;
+                    if ti == targets.len() {
+                        break;
+                    }
+                }
+            }
+            return sampled;
         }
 
         // Identical index draw to the prior loop: pull `next_rand() % eligible_len`
@@ -27880,6 +27943,26 @@ impl Store {
             }
         }
         sampled
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sampled_eviction_candidate_keys_orig_bench(
+        &mut self,
+        volatile_only: bool,
+        sample_limit: usize,
+    ) -> Vec<Vec<u8>> {
+        self.sampled_eviction_candidate_keys_impl::<false>(volatile_only, sample_limit)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sampled_eviction_candidate_keys_new_bench(
+        &mut self,
+        volatile_only: bool,
+        sample_limit: usize,
+    ) -> Vec<Vec<u8>> {
+        self.sampled_eviction_candidate_keys_impl::<true>(volatile_only, sample_limit)
     }
 
     fn select_lru_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {

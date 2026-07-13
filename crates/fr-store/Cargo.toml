@@ -327,3 +327,10 @@ harness = false
 [[bench]]
 name = "script_cache_hasher"
 harness = false
+
+# A/B for eviction candidate sampling: the eligible-count step for allkeys (!volatile_only)
+# policies uses O(1) entries.len() instead of a full O(n) keys().filter().count() walk.
+# Byte/RNG-identical (same eligible_len value); isolates the eliminated keyspace walk.
+[[bench]]
+name = "eviction_count_len"
+harness = false

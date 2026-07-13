@@ -7267,3 +7267,38 @@ renewed hourly through the afternoon, latest grant 15:18→16:18 — a live hold
 `crates/` for a non-test constructor/usage first — several structural replacements (`KeyDict`,
 and check others) are compiled-but-unwired, staged behind owner-blocked swaps. A private `mod`
 with only `#[cfg(test)]` callers is a dead lever regardless of how hot it looks.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. Eviction candidate sampling **7.5–9.9x** — the `HashSet<usize>` select probe was a per-entry SipHash; REFUTES this session's "frontier exhausted" calls
+
+`Store::sampled_eviction_candidate_keys` (maxmemory victim sampling; the hot path when freeing
+memory under pressure, called per victim × `maxmemory-samples`). Two byte/RNG-identical fixes,
+gated behind `_impl<const OPT: bool>` for the A/B (real method = `::<true>`):
+(1) **count → `entries.len()`**: for allkeys-* policies (`volatile_only == false`) the eligibility
+filter is always-true, so the eligible count is the whole keyspace — O(1) `HashMap::len()` not an
+O(n) `keys().filter().count()` walk. Measured ALONE = ~1.03x flat (the count is only ~3% of the fn).
+(2) **select pass `HashSet::contains` → sorted-index merge-walk**: the prior code built a
+`HashSet<usize>` and probed `contains(&eligible_idx)` for EVERY entry — and `HashSet`'s default
+`RandomState` is **std SipHash**, so that was a full cryptographic hash PER ENTRY to place ≤
+`sample_limit` (~5) samples. Replaced by drawing the same distinct indices (identical `next_rand()
+% eligible_len` sequence; a ≤sample_limit linear `contains` dedups exactly as the HashSet did),
+sorting them (≤10 elems), then merge-walking `entries.iter().enumerate()` with one pointer — an
+integer compare per entry instead of a SipHash, plus an early `break` once the last sample lands.
+
+Null-gated same-binary A/B (`benches/eviction_count_len.rs`, worker vmi1152480, median-of-61,
+noisy cv 20-32%): n256 **7.46x**, n2000 **9.88x**, n10000 **7.99x**, n50000 **8.00x** — candidate
+median 8-10x, WAY outside null p5..p95 (~1.5) at every size. Byte/RNG-identical: the differential
+`eviction_sampling_matches_old_clone_all_and_reports_ab_ratio` + `eviction_candidate_defers_clone`
++ `ttl_eviction_candidate_defers_clone` + `allkeys_lfu_eviction_prefers_lowest_decayed_frequency`
++ 12 more eviction lib tests all green via rch (my code clippy-clean; pre-existing fr-simd
+`needless_range_loop` + other-bench PI/precision lints are NOT mine).
+
+**LESSONS.** (a) A `std::collections::HashSet<integer>` used for a TINY (≤10) set inside an O(n)
+`contains` loop is a **SipHash trap** — n cryptographic hashes to test membership of a handful of
+values. Draw+sort the indices and merge-walk the ordered sequence (integer compares, early break)
+instead. REUSABLE: grep for `HashSet::…contains(` inside `for … in …iter()`/`.enumerate()` loops
+with a small target set. (b) A weak first profile IS the profile — the count-only A/B (~1.03x) told
+me the count wasn't the cost and pointed straight at the select pass; don't ledger-and-revert a
+sub-gate probe before asking *what it revealed*. (c) This REFUTES my own two earlier "frontier
+exhausted" entries THIS session — a real 8x sat in the eviction path the whole time. The
+"exhausted" calls were drive-by-only; profiling a colder-looking command family (eviction) still
+had a large structural lever. Don't over-trust "exhausted" for command families nobody bench-swept.
