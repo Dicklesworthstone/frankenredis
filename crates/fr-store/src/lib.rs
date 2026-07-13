@@ -11899,7 +11899,16 @@ impl Store {
             // the canonical `entries` map.
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             self.mark_random_key_index_dirty(db);
-            self.forget_volatile_key(key);
+            // (frankenredis-sszgp) Only a key that HAD a TTL was ever in `volatile_keys`
+            // (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; `forget_volatile_key`
+            // early-returns when dirty), so on the common no-TTL key removal (DEL/GETDEL/expiry of
+            // a key without a deadline) `forget_volatile_key` is a guaranteed no-op — a wasted
+            // BTreeSet remove-miss (O(log n) when the set is clean & non-empty, e.g. deleting a
+            // no-TTL key alongside TTL'd keys). Gate it on `old_expiry.is_some()` (already read
+            // above). Byte-identical (an absent key's remove is a no-op).
+            if old_expiry.is_some() {
+                self.forget_volatile_key(key);
+            }
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);

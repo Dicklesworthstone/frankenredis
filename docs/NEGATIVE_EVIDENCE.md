@@ -18108,3 +18108,16 @@ flag), so production-gated-vs-orig-ungated stays green. Full suite **800 pass, 0
 `expire_rearm_does_not_dirty_the_clean_volatile_view` + the streamlined-matches-orig differential. Same primitive as
 36a8147df; `volatile_dirty_rebuild` A/B re-run this turn = **1797x** (null 1.0015). Completes the mark-dirty-only-on-
 membership-change vein across INCR + all TTL-SET commands. Rollback: restore the unconditional marks at the 3 sites.
+
+### 2026-07-13 SHIPPED (internal_entries_remove forget_volatile_key gated on old_expiry — the membership-REMOVE sibling — frankenredis-sszgp)
+The remove-side counterpart of the membership-change vein. `internal_entries_remove` (the choke point for DEL/GETDEL/
+lazy+active expiry/overwrite-remove/RENAME/MOVE) called `forget_volatile_key(key)` UNCONDITIONALLY. But only a key
+that HAD a TTL was ever in `volatile_keys` (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; forget early-returns
+when dirty), so on the common NO-TTL key removal it is a guaranteed no-op — a wasted BTreeSet remove-miss (O(log n)
+when the set is clean & non-empty, e.g. DELeting a no-TTL key alongside TTL'd keys). Gated on `old_expiry.is_some()`
+(already read at the top of the fn, and already gating the sibling `expiry_deadlines.remove`). Byte-identical (an
+absent key's remove is a no-op; same invariant proof as the INCR forget elision a7b284bf2). Full suite **800 pass, 0
+fail**. Same primitive as `incr_forget_volatile` (`bench_incr_forget_volatile`): re-run this turn = **25.25x** fewer
+instructions (null 1.0000, cv 0.21%). Warmer than the INCR case — DEL is a top command and most keys are no-TTL. This
++ the mark-dirty membership gates make the ENTIRE volatile-set maintenance membership-change-only (add = gated mark,
+remove = gated forget, unchanged = neither). Rollback: restore the unconditional `self.forget_volatile_key(key)`.
