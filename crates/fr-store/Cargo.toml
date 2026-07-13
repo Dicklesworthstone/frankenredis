@@ -370,3 +370,9 @@ harness = false
 [[bench]]
 name = "strlen_lfu_collapse"
 harness = false
+
+# A/B for LFU GETBIT probe collapse: fold record+get_mut + drop contains_key via rng_seed field-split
+# (1 probe) vs the prior 3-probe form; GETBIT returns a single bit so probes dominate. Byte-identical.
+[[bench]]
+name = "getbit_lfu_collapse"
+harness = false

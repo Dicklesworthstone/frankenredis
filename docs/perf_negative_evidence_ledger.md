@@ -7497,3 +7497,21 @@ key-count, decides — STRLEN (3 probes, ~0 other work) beats GET (2 probes, bor
 scoreboard: STRLEN 2.2-2.4x, TOUCH 1.8-1.9x, spop_count 1.6-1.7x, GET 1.6x, MGET 1.5-1.8x,
 srandmember sub-gate. Same-shape candidates remaining: GETBIT/GETRANGE-small/EXISTS/TYPE (LFU 2-3
 probe walls, tiny work).
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU GETBIT 3 probes → 1 (rng_seed field split) — **2.36–2.61x** (new biggest)
+
+Same 3-probe LFU wall (record + contains_key + get_mut); GETBIT returns a single BIT (offset arith on
+`string_bytes`, no value read), so probes are ~all its work → the biggest field-split win yet.
+Folded record+get_mut inline + dropped contains_key, rand on the `&mut self.rng_seed` field split.
+Conditional touch preserved (`if is_string_like`), so a present wrong-type key still draws + bumps
+but does NOT touch, then WRONGTYPE — matched by the two-probe reference. Null-gated A/B
+(`benches/getbit_lfu_collapse.rs`, allkeys-lfu, 50k keyspace, looped single-GETBITs, median-of-61):
+n32 **2.606x** (null cv 9.8%), n256 **2.362x** — WIN. Byte/RNG-identical: new
+`getbit_lfu_collapsed_matches_threeprobe` (bitmap/absent/wrong-type/expired × offsets; asserts
+result, `rng_seed`, hits/misses, OBJECT FREQ) + `getbit_existing_string_bumps_lfu_frequency`, green
+via rch. Clippy-clean. **Field-split scoreboard (7 wins): GETBIT 2.4-2.6x ≈ STRLEN 2.2-2.4x >
+TOUCH 1.8-1.9x > spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x; srandmember sub-gate.** Remaining
+same-shape: GETRANGE-small / EXISTS / TYPE / HGET (HGET is 4-probe incl a field-TTL reap + clones the
+field value → smaller/more-involved; the string-bit-length trio are the cleanest). The 3-probe
+(redundant-`contains_key`) commands win MORE than 2-probe ones; the win tracks probe-count × (1 −
+other-work-fraction).
