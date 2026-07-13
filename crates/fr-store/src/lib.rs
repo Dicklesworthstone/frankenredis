@@ -15840,12 +15840,17 @@ impl Store {
                         } else {
                             let s = s as usize;
                             let e = e as usize;
-                            for _ in 0..s {
-                                l.pop_front();
-                            }
-                            while l.len() > (e - s + 1) {
-                                l.pop_back();
-                            }
+                            let keep = e - s + 1;
+                            // (cc_fr) Batch the two-sided trim: ONE drain off the front + ONE
+                            // scan+truncate off the back, instead of `s` `pop_front`s (each an
+                            // O(len) shift on a packed list) plus back `pop_back`s (each an O(len)
+                            // front scan) — the old loops were O((s+back)*len). Byte-identical:
+                            // same removed elements + per-element `on_remove_one` accounting, and
+                            // the discarded returns mirror the loops discarding each pop. The Deque
+                            // repr keeps its O(1)/element loops inside pop_front_n/pop_back_n.
+                            l.pop_front_n(s);
+                            let back = l.len().saturating_sub(keep);
+                            l.pop_back_n(back);
                         }
                         let removed = old_len - l.len();
                         if l.is_empty() {
@@ -46280,6 +46285,51 @@ mod tests {
         // Redis parity: LTRIM 0 -100 clears the list
         store.ltrim(b"l", 0, -100, 0).unwrap();
         assert!(!store.exists(b"l", 0));
+    }
+
+    #[test]
+    fn ltrim_batch_residual_matches_lrange_cc() {
+        // (cc_fr) Metamorphic gate for the batch (pop_front_n + pop_back_n) LTRIM: after
+        // `LTRIM key start stop`, the residual list must equal what `LRANGE key start stop` returned
+        // on the ORIGINAL — both keep exactly the window [start, stop]. Exercises packed (<=128) and
+        // deque (>128) lists and every start/stop sign combo incl. empty-range clears. LRANGE
+        // (unchanged) is the independent reference for the s/e/keep/back index math.
+        let ranges: &[(i64, i64)] = &[
+            (0, -1),
+            (1, 2),
+            (0, 0),
+            (-1, -1),
+            (2, 1),
+            (5, 3),
+            (-100, 100),
+            (0, -100),
+            (10, 10),
+            (-3, -1),
+            (3, 500),
+            (-500, -1),
+            (50, 70),
+            (-70, -50),
+        ];
+        for &total in &[0usize, 1, 4, 10, 128, 200] {
+            let elems: Vec<Vec<u8>> =
+                (0..total).map(|i| format!("e{i:04}").into_bytes()).collect();
+            for &(start, stop) in ranges {
+                let want = {
+                    let mut r = Store::new();
+                    if total > 0 {
+                        r.rpush(b"l", &elems, 0).unwrap();
+                    }
+                    r.lrange(b"l", start, stop, 0).unwrap()
+                };
+                let mut store = Store::new();
+                if total > 0 {
+                    store.rpush(b"l", &elems, 0).unwrap();
+                }
+                store.ltrim(b"l", start, stop, 0).unwrap();
+                let got = store.lrange(b"l", 0, -1, 0).unwrap();
+                assert_eq!(got, want, "total={total} start={start} stop={stop}");
+            }
+        }
     }
 
     #[test]

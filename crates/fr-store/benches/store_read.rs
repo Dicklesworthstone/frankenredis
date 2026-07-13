@@ -281,6 +281,21 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) LTRIM a 120-element PACKED list to the middle window [40, 79]: removes 40 off the
+    // front + 40 off the back. The batch does one drain + one scan+truncate instead of 40 front
+    // shifts + 40 back front-scans (the old two loops were O((s+back)*len)).
+    g.bench_function("ltrim_middle_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.rpush(b"l", &lpop_members, 1_000).unwrap();
+                s
+            },
+            |mut s| std::hint::black_box(s.ltrim(std::hint::black_box(b"l"), 40, 79, 2_000)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // Existing-key variadic HSET into a packed hash: ORIG is the old
     // per-field packed-map insert loop (K repeated listpack scans). The
     // candidate builds a transient borrowed overlay and rebuilds the packed map
