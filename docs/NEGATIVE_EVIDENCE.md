@@ -18054,3 +18054,19 @@ also saturated.
 FULL PICTURE: command hot path, fr-simd, random-sampling, set-algebra, AND persistence are ALL saturated. The ONLY
 remaining perf work is the multi-day structural b1o02 [[project_b1o02_hash_listpack_ceiling]] (or borrowed RdbValue /
 the dedicated INCR mark_dirty). There is no further one-turn drive-by lever anywhere in the benchable surface.
+
+### 2026-07-13 NEGATIVE (last flagged-open crate lever verified server-blocked — exhaustion map COMPLETE)
+Verified the final flagged-open "clean-crate-adjacent" lever, the clone-vs-move residual
+[[project_clone_vs_move_vein_map]]: RPOPLPUSH/LMOVE + MOVE. CODE-CONFIRMED there is nothing rch-benchable left:
+- RPOPLPUSH/LMOVE: pop is already owned (0 copy); the intermediate-clone elision shipped (f653ced07,
+  `push_front_borrowed`); the ONE remaining copy is dest-buffer-fill vs redis's refcount zero-copy, removable only via
+  a reply-borrow SINK threaded through fr-server dispatch (no linked binary → NOT rch-benchable) or Arc'd list elements
+  (structural). The owned `Option<Vec<u8>>` store API cannot go below one copy without that.
+- MOVE (cross-db): `copy_no_stat` deep-clone + `del`; entangled notif/refcount, server-blocked (bead ek8p9).
+EXHAUSTION MAP COMPLETE — every flagged-open lever is now one of: SHIPPED, STRUCTURAL/multi-day (b1o02, borrowed
+RdbValue), DEDICATED-turn-blocked (INCR mark_dirty — differential test), or SERVER-blocked (RPOPLPUSH/LMOVE/MOVE
+reply-borrow sink, large-value IO — fr-server has no rch linked binary). Across 5 turns / ~20 commands / all
+subsystems (command hot path, fr-simd, random-sampling, set-algebra, persistence, clone-vs-move), the one-turn
+rch-benchable drive-by frontier is CLOSED. A "pick ONE lever, land often" loop cannot make further progress on the
+crate-level surface; the next gain requires an explicit MODE CHANGE (multi-session structural worktree, or fr-server
+work once a linked-binary bench exists).
