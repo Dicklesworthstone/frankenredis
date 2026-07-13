@@ -18018,3 +18018,22 @@ levers are (a) STRUCTURAL/multi-day (b1o02 hash-listpack RESTORE-build [[project
 Arc RdbValue [[project_persist_decode_frontier]]) or (b) the DEDICATED-turn INCR `mark_volatile_keys_dirty` elision
 (needs test-intent review + rate-limiter rebuild-frequency profiling — do NOT drive-by). Future turns should pick one of
 these deliberately rather than re-sweep the hot path.
+
+### 2026-07-13 NEGATIVE (final closure — set-algebra + MSET + GETDEL saturated; drive-by frontier DEFINITIVELY exhausted)
+Ruled out the LAST suggested pivot ("less-trodden command family"): those are optimized to the same exceptional depth
+as the hot path.
+- **SINTERCARD**: picks the smallest set as the base AND walks it in a DE-CLUSTERED order (random start + coprime
+  stride, gated on hashtable/intset encoding) so the LIMIT early-stop fires fast even when matches are bunched —
+  byte-identical (visit order doesn't change the count). Nothing to add.
+- **MSET**: uses `set_plain_borrowed` per pair (no per-pair key/value clones), already the borrowed fast path.
+- **GETDEL**: triple→double lookup collapse + `drop_stream_side_metadata` guarded + MOVES the value out (`into_vec` /
+  `integer_decimal_bytes`) since it removes — no clone.
+CONCLUSION (3 turns of sweeping, ~15 commands + fr-simd): the one-turn drive-by perf frontier is DEFINITIVELY EXHAUSTED.
+STOP re-sweeping the command hot path — it is optimized to a rare degree (single-lookup collapse everywhere, borrow/`_into`
+twins, move-out on remove, SIMD kernels wired, de-clustering walks, encoding-aware fast paths). The ONLY remaining perf
+work is MODE-CHANGE, not a small increment: (a) b1o02 hash-listpack `HashFieldMap::Listpack` — multi-day, all-or-nothing,
+touches every hash accessor + write-promotion + DUMP + dedup reconciliation, peer-contended `packed_set.rs`, needs a
+RESERVED worktree + multi-session commitment (40-120x RESTORE-build ceiling, ~2x command-level → HASH RESTORE 0.47x→~0.9x)
+[[project_b1o02_hash_listpack_ceiling]]; (b) borrowed/Arc `RdbValue` [[project_persist_decode_frontier]]; (c) the
+dedicated-turn INCR `mark_volatile_keys_dirty` elision (blocked by a deliberate equivalence test). A "pick ONE lever,
+land often" drive-by will keep returning negatives — the next real gain requires committing to (a).
