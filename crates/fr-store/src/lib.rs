@@ -9502,33 +9502,13 @@ impl Store {
                 None => Ok(Vec::new()),
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
-                let Some(v) = entry.value.string_bytes() else {
-                    return Err(StoreError::WrongType);
-                };
-                match Self::resolve_getrange_bounds(v.len(), start, end) {
-                    Some((s, e_idx)) => Ok(v[s..=e_idx].to_vec()),
-                    None => Ok(Vec::new()),
-                }
-            }
-            None => Ok(Vec::new()),
-        }
+        self.getrange_with_lfu_impl::<true, Vec<u8>>(
+            key,
+            start,
+            end,
+            now_ms,
+            <[u8]>::to_vec,
+        )
     }
 
     /// Resolve a GETRANGE (`start`, `end`) pair against a string of length
@@ -9604,33 +9584,98 @@ impl Store {
                 None => Ok(f(&[])),
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(f(&[]));
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        self.getrange_with_lfu_impl::<true, R>(key, start, end, now_ms, f)
+    }
+
+    /// A/B toggle for the LFU borrowing-GETRANGE keyspace-probe collapse. `COLLAPSE = true`
+    /// (shipped) folds `record_keyspace_lookup` + the value `get_mut` and drops the separate
+    /// `contains_key` rand gate — 3 probes to 1 — drawing `rand_sample` through the disjoint
+    /// `rng_seed` field. `false` is the prior three-probe form. Unlike [`Store::getrange`], this
+    /// path hands a borrowed slice to `f`, so it does not clone the substring. Byte/RNG-identical.
+    fn getrange_with_lfu_impl<const COLLAPSE: bool, R>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        end: i64,
+        now_ms: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, StoreError> {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(f(&[]));
+            }
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    let Some(v) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    match Self::resolve_getrange_bounds(v.len(), start, end) {
+                        Some((s, e_idx)) => Ok(f(&v[s..=e_idx])),
+                        None => Ok(f(&[])),
+                    }
                 }
-                entry.touch(now_ms);
-                let Some(v) = entry.value.string_bytes() else {
-                    return Err(StoreError::WrongType);
-                };
-                match Self::resolve_getrange_bounds(v.len(), start, end) {
-                    Some((s, e_idx)) => Ok(f(&v[s..=e_idx])),
-                    None => Ok(f(&[])),
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(f(&[]))
                 }
             }
-            None => Ok(f(&[])),
+        } else {
+            if !self.record_keyspace_lookup(key, now_ms) {
+                return Ok(f(&[]));
+            }
+            let rand_sample = if self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    let Some(v) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    match Self::resolve_getrange_bounds(v.len(), start, end) {
+                        Some((s, e_idx)) => Ok(f(&v[s..=e_idx])),
+                        None => Ok(f(&[])),
+                    }
+                }
+                None => Ok(f(&[])),
+            }
         }
+    }
+
+    #[doc(hidden)]
+    pub fn getrange_with_lfu_collapsed_bench<R>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        end: i64,
+        now_ms: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, StoreError> {
+        self.getrange_with_lfu_impl::<true, R>(key, start, end, now_ms, f)
+    }
+
+    #[doc(hidden)]
+    pub fn getrange_with_lfu_threeprobe_bench<R>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        end: i64,
+        now_ms: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, StoreError> {
+        self.getrange_with_lfu_impl::<false, R>(key, start, end, now_ms, f)
     }
 
     pub fn setrange(
@@ -46989,6 +47034,103 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn getrange_lfu_collapsed_matches_threeprobe() {
+        // Both production GETRANGE entry points share the collapsed LFU helper. Compare the
+        // borrowing and allocating forms with the exact prior three-probe path across bounds,
+        // misses, WRONGTYPE, and lazy expiry: bytes/error, RNG, stats, and LFU frequency.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            s.set(b"str".to_vec(), b"Hello World".to_vec(), None, 1);
+            s.set(b"int".to_vec(), b"12345".to_vec(), None, 1);
+            s.rpush(b"list", &[b"x".to_vec()], 1).unwrap();
+            s.set(b"ttl".to_vec(), b"expired".to_vec(), Some(5), 1);
+            s
+        }
+        let now = 10;
+        let probes: &[(&[u8], i64, i64)] = &[
+            (b"str", 0, 4),
+            (b"str", -5, -1),
+            (b"str", 100, 200),
+            (b"str", -1, -2),
+            (b"int", 1, 3),
+            (b"absent", 0, -1),
+            (b"list", 0, -1),
+            (b"ttl", 0, -1),
+        ];
+        for &(key, start, end) in probes {
+            let mut borrowed = build();
+            let mut allocating = build();
+            let mut prior = build();
+            let borrowed_sink_calls = std::cell::Cell::new(0usize);
+            let prior_sink_calls = std::cell::Cell::new(0usize);
+            let ra = borrowed.getrange_with_lfu_collapsed_bench(
+                key,
+                start,
+                end,
+                now,
+                |slice| {
+                    borrowed_sink_calls.set(borrowed_sink_calls.get() + 1);
+                    slice.to_vec()
+                },
+            );
+            let rb = allocating.getrange(key, start, end, now);
+            let rc = prior.getrange_with_lfu_threeprobe_bench(
+                key,
+                start,
+                end,
+                now,
+                |slice| {
+                    prior_sink_calls.set(prior_sink_calls.get() + 1);
+                    slice.to_vec()
+                },
+            );
+            assert_eq!(ra.is_err(), rc.is_err(), "borrowed error key={key:?}");
+            assert_eq!(rb.is_err(), rc.is_err(), "allocating error key={key:?}");
+            assert_eq!(ra.as_ref().ok(), rc.as_ref().ok(), "borrowed bytes key={key:?}");
+            assert_eq!(rb.as_ref().ok(), rc.as_ref().ok(), "allocating bytes key={key:?}");
+            assert_eq!(
+                borrowed_sink_calls.get(),
+                prior_sink_calls.get(),
+                "sink calls key={key:?}"
+            );
+            assert_eq!(
+                borrowed_sink_calls.get(),
+                usize::from(key != b"list"),
+                "WRONGTYPE must not call sink key={key:?}"
+            );
+            for candidate in [&mut borrowed, &mut allocating] {
+                assert_eq!(candidate.rng_seed, prior.rng_seed, "rng_seed key={key:?}");
+                assert_eq!(
+                    candidate.stat_keyspace_hits, prior.stat_keyspace_hits,
+                    "hits key={key:?}"
+                );
+                assert_eq!(
+                    candidate.stat_keyspace_misses, prior.stat_keyspace_misses,
+                    "misses key={key:?}"
+                );
+                assert_eq!(
+                    candidate.entries.get(key).map(|entry| entry.last_access_ms),
+                    prior.entries.get(key).map(|entry| entry.last_access_ms),
+                    "last access key={key:?}"
+                );
+                assert_eq!(
+                    candidate
+                        .entries
+                        .get(key)
+                        .map(|entry| (entry.lfu_freq, entry.lfu_last_touch_min)),
+                    prior
+                        .entries
+                        .get(key)
+                        .map(|entry| (entry.lfu_freq, entry.lfu_last_touch_min)),
+                    "LFU metadata key={key:?}"
+                );
+            }
+        }
     }
 
     #[test]

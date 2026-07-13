@@ -7681,6 +7681,28 @@ focused tests and workspace/all-targets check passed via fail-closed RCH. The cl
 probe-fold vein is now complete; the remaining string/collection scan tail needs fresh attribution
 before another lever.
 
+## 2026-07-13 SwiftWillow: WIN — KEEP. LFU GETRANGE 3 probes → 1 on the borrowing production path — **1.72–2.08x**
+
+This corrects the ledger's repeated “GETRANGE clones a substring, so the probe fold is diluted”
+exclusion. The generic `Store::getrange` does clone, but the server's hot `_into` route calls
+`Store::getrange_with`, which hands the resolved slice directly to the RESP encoder. Its LFU branch
+was still `record_keyspace_lookup` + a redundant `contains_key` rand gate + `get_mut` — three
+keyspace probes around a nonallocating borrowed read. Folded hit/miss accounting into the single
+`get_mut`, drew the same rand sample through the disjoint `rng_seed` field, and shared that helper
+with the allocating fallback so both GETRANGE entry points keep identical LFU semantics.
+
+One-binary, one-invocation, position-balanced A/B on remote worker `vmi1149989`
+(`benches/getrange_with_lfu_collapse.rs`, `release-perf`, allkeys-lfu, 50k 32-byte nonnumeric
+strings, full-range borrowing closure, median-of-61): n32 distinct keys **2.079x** vs three-probe
+(A/A null median `0.9940`, p5..p95 `[0.724, 1.161]`, cv `12.20%`); n256 **1.724x** (null median
+`1.0066`, p5..p95 `[0.629, 1.625]`, cv `24.30%`). Both candidate medians clear their own per-size
+null spread. `getrange_lfu_collapsed_matches_threeprobe` proves bytes/error, sink-call count, RNG,
+hit/miss stats, last access, and LFU metadata across ordinary and integer-encoded strings,
+positive/negative/inverted/out-of-range bounds, absence, WRONGTYPE, and lazy expiry, for both
+borrowing and allocating production entry points. Focused parity and workspace/all-targets check
+passed via fail-closed RCH; `fr-conformance` passed 347/347 remotely (`-j 1`, worker `vmi1152480`).
+The remaining tail is the actual O(n) BITCOUNT/BITPOS scan family, not GETRANGE.
+
 ## 2026-07-13 SwiftWillow: WIN — LANDED (`2ca468c5b`). LFU HDEL write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.53–1.585x**
 
 Opens the WRITE side of the LFU probe-collapse vein — the read-side family (GET/EXISTS/TYPE/… plus the

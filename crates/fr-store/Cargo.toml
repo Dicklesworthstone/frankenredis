@@ -435,6 +435,13 @@ harness = false
 name = "hexists_lfu_collapse"
 harness = false
 
+# A/B for LFU GETRANGE on the borrowing runtime path: fold record+get_mut + drop contains_key via
+# rng_seed field split (1 probe) vs the prior 3-probe form. The closure consumes the borrowed slice,
+# so this measures the production zero-copy store path rather than the allocating fallback.
+[[bench]]
+name = "getrange_with_lfu_collapse"
+harness = false
+
 # A/B for the LFU HDEL write-side keyspace-probe collapse: get_mut-first + rng_seed field-split draw
 # (1 probe) with inlined with_mutated_entry digest bookkeeping vs the prior contains_key rand-gate +
 # with_mutated_entry (2 probes). First write-side member of the field-split vein. Byte/RNG/digest-
