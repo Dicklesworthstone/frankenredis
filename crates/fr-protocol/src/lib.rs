@@ -1433,9 +1433,7 @@ pub fn parse_command_frame(
     if input.first() != Some(&b'*') {
         return parse_frame_with_config(input, config);
     }
-    let (line, mut cursor) =
-        read_line(input, 1).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let (len, mut cursor) = parse_multibulk_count::<true>(input, 1)?;
     // (frankenredis-6dpyk) Upstream networking.c::processMultibulkBuffer consumes
     // ANY multibulk count <= 0 as a no-op (no command, no reply), not just the
     // canonical *-1 null array — `*-2`/`*-3` must NOT error. Surface every
@@ -1814,8 +1812,8 @@ fn parse_resp3_verbatim(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (line, consumed) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    let (len, consumed) =
+        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
     if len < 0 {
         return Err(RespParseError::InvalidBulkLength);
     }
@@ -1847,8 +1845,8 @@ fn parse_resp3_blob_error(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
-    let (line, consumed) = read_line(input, start)?;
-    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    let (len, consumed) =
+        parse_frame_len_line::<true>(input, start, RespParseError::InvalidBulkLength)?;
     if len < 0 {
         return Err(RespParseError::InvalidBulkLength);
     }

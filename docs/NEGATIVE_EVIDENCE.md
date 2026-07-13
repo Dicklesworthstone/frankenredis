@@ -4,6 +4,32 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-13: SHIPPED — completed count/length parse fusion coverage (parse_command_frame + resp3 verbatim/blob_error); reuses the cxq6j/i47l7 primitives, bit-identical (frankenredis-4vwiq)
+
+NEGATIVE-LEDGER-FIRST: the last three un-fused count/length parses in fr-protocol were propagated to
+the already-shipped, already-benched fusion primitives — no new mechanism:
+- `parse_command_frame` (the OWNED command parser, fr-server main.rs:11176) count line → reuse
+  `parse_multibulk_count::<true>` (its `read_line`+`parse_i64` mapping was byte-for-byte that
+  helper's slow path; its per-arg loop already calls the fused `parse_bulk`).
+- `parse_resp3_verbatim` and `parse_resp3_blob_error` length lines → reuse
+  `parse_frame_len_line::<true>(.., InvalidBulkLength)`.
+
+BYTE-IDENTICAL by construction: each old call site was exactly the corresponding helper's slow path,
+and the helpers' exhaustive `fast == slow` tests (`parse_multibulk_count_fast_matches_slow`,
+`parse_frame_len_line_fast_matches_slow`, over {digits,sign,CR,LF,junk}^≤5 + boundaries) already
+prove `::<true>` == the two-pass path. Verified end-to-end: full fr-protocol suite — lib 96/96
+(incl. `parse_command_frame_borrowed_matches_owned_command_parser`, which directly compares the
+changed owned parser against the borrowed one), golden 41/41 (incl. the resp3 verbatim/blob golden
+cases), fuzz + oracle green.
+
+MEASUREMENT: the per-call instruction reduction is the primitives' own, re-confirmed live this turn
+— `parse_multibulk_count` A/B (the count parse `parse_command_frame` now uses) still passes its keep
+gate at **1.385576x fewer instructions**, null median 1.000000086, bit-identical (release-perf, 24
+rounds). See the 2026-07-13 cxq6j (1.3856x) and i47l7 (1.3856x) entries. This closes the fr-protocol
+count/length parse fusion vein: every command-arg, multibulk-count, owned-frame, and owned-command
+count/length line now takes the single-pass path. Rollback: point the three call sites back at
+`read_line` + `parse_i64_strict`.
+
 ## 2026-07-13: SHIPPED — fused owned-frame count/length line parse; 1.3856x fewer instructions, bit-identical (frankenredis-i47l7)
 
 NEGATIVE-LEDGER-FIRST: extends the inbound-parser fusion (fr5ri, cxq6j) from the borrowed command
