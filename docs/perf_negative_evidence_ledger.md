@@ -7641,3 +7641,21 @@ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x; srandmember
 `is_empty()` trick confirmed on HGET+HLEN. Remaining same-shape hash reads: HSTRLEN, HEXISTS (both
 length/bool, ~2.2x expected). HMGET already collapsed (per-field within one lookup). Then only the
 GETRANGE/bitcount/bitpos diluted tail. 14 commands folded; the LFU keyspace-read wall is nearly gone.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU HSTRLEN 3 probes → 1 (is_empty fast path + field split) — **1.82–1.96x**
+
+HSTRLEN is the HGET shape (field arg + `drop_hash_field_if_expired`) but returns `m.get(field)
+.map_or(0, len)` (a length, no clone). Same `is_empty()`-gated LFU fast path: skip the reap, fold
+record+get_mut, drop contains_key, field-split rand → 1 probe; field-TTL fallback preserved (bump/
+rand `lfu_tracking_enabled`-guarded for the LFU-off case). ~1.9x — between HGET's 1.8x (borrows the
+value) and HLEN's 2.2x (no field lookup), as expected: HSTRLEN does the field `get` but returns only
+a length. Null-gated A/B (`benches/hstrlen_lfu_collapse.rs`, allkeys-lfu, 50k single-field hashes,
+median-of-61): n32 **1.960x**, n256 **1.822x** (tight null cv 10-12%) — WIN. Byte/RNG-identical: new
+`hstrlen_lfu_collapsed_matches_threeprobe` (present/missing-field/absent/wrong-type/expired) +
+`hstrlen_returns_field_length` + `hstrlen_existing_hash_bumps_lfu_frequency`, green via rch. Clippy-
+clean. **Probe-fold scoreboard (15 wins): GETBIT 2.4-2.6x ≈ HLEN 2.2-2.35x ≈ STRLEN 2.2-2.4x ≈ ZCARD
+2.05-2.33x ≈ LLEN 2.2-2.3x > TYPE 1.8-1.9x ≈ HSTRLEN 1.8-1.96x ≈ TOUCH 1.8-1.9x ≈ HGET 1.7-1.8x ≈
+SCARD 1.6-1.85x ≈ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈ GET 1.6x ≈ MGET 1.5-1.8x; srandmember
+sub-gate.** LAST clean same-shape read: HEXISTS (bool, field lookup → ~1.7-1.9x). Then ONLY the
+diluted tail (GETRANGE substring clone, bitcount/bitpos O(n) SIMD popcount). 15 read commands folded
+across string/keyspace/list/set/zset/hash families — the LFU keyspace-read wall is essentially closed.
