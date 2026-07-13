@@ -7736,3 +7736,29 @@ rand-gate the field-split fuses — append/getset/setrange/setbit/lpush/rpush/lp
 HDEL is the first. CLEANEST are the direct-`get_mut` writes (lpush/rpush/lpop) needing NO digest
 replication; the `with_mutated_entry`-wrapped ones (setbit/setrange/append/hdel) need the inline digest
 replica. Shows only on the ISOLATED store op (writes stay syscall-bound end-to-end), same as reads.
+
+## 2026-07-13 SwiftWillow: NEGATIVE — REVERTED. LFU LSET write-side collapse byte-identical + correct but wallclock SUB-GATE (~1.17x indistinguishable) — owned-value dilution
+
+Tried the direct-`get_mut` LFU LSET collapse (would-be second member of the write-side field-split
+vein [[project_lfu_write_side_field_split_vein]], the FIRST direct-get_mut one — no
+`with_mutated_entry` digest replica, a ~10-line rand-draw relocation via the disjoint
+`&mut self.rng_seed` field split). Byte/RNG-identical: `lset_lfu_collapsed_matches_twoprobe` PASSED
+(valid / negative / out-of-range index × absent / wrongtype / expired × LFU on&off — result, RNG,
+OBJECT FREQ, dirty, DEBUG DIGEST). But the wallclock A/B was INDISTINGUISHABLE on BOTH sizes
+(`benches/lset_lfu_collapse.rs`, allkeys-lfu, 50k 3-elem lists, LSET index 0 → 1-byte value,
+median-of-61, LOADED worker):
+- n32  **1.186x** — null med 1.0038, p5..p95 [0.878, **1.294**], cv 27.18% → below p95, indistinguishable
+- n256 **1.167x** — null med 1.0250, p5..p95 [0.908, **1.168**], cv 8.03% → 0.001 below p95, indistinguishable
+
+ROOT CAUSE: LSET takes an OWNED `value: Vec<u8>` — the per-call value handling (alloc + `l.set` element
+replace) makes the op heavy enough that the single eliminated `contains_key` probe is < the noise.
+CONTRAST: BORROWED-arg writes gate cleanly — HDEL (`&[&[u8]]` fields) **1.53-1.585x**, and SREM
+(`&[&[u8]]` members, concurrent this turn) is the same clean shape. The ~1.17x is a real directional
+signal (n256 cv 8% is tight, consistently above the null median) but does NOT clear the strict p95 gate
+under load; confirming it would need **instructions:u** (memory-endorsed for small probe elisions on a
+loaded machine), not wallclock.
+
+DECISION: **REVERTED** the LSET code (byte-identical + tested, but not a measurable win → negative-ledger
+per commit-or-negative-ledger). VEIN LESSON: prioritize BORROWED-arg writes (fields/members) — they gate
+cleanly. OWNED-value writes (LSET, GETSET, APPEND-grows) dilute the single-probe collapse below the
+wallclock gate; confirm via instructions:u before shipping, or skip.
