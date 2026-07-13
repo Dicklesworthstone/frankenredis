@@ -13937,7 +13937,56 @@ impl Store {
         self.hget_with_lfu_impl::<false, R>(key, field, now_ms, f)
     }
 
+    /// Shared HDEL mutation: delete each field in place, reporting how many were removed and
+    /// whether the hash is now empty. Factored out of the closure so the LFU keyspace-probe
+    /// collapse (`hdel_impl::<true>`) and its prior-path baseline (`::<false>`) run byte-identical
+    /// bodies.
+    fn hdel_apply(
+        entry: &mut Entry,
+        fields: &[&[u8]],
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+    ) -> Result<(u64, bool), StoreError> {
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let mut removed = 0_u64;
+        for field in fields {
+            // (frankenredis-sremfast) Order-agnostic O(1) remove for
+            // hashtable-encoded hashes (was O(n) per field shift).
+            // (frankenredis-ym6ih) `delete` skips the discarded-value alloc.
+            if m.delete(field) {
+                removed += 1;
+            }
+        }
+        let is_empty = m.is_empty();
+        if removed > 0 {
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+        }
+        Ok((removed, is_empty))
+    }
+
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
+        self.hdel_impl::<true>(key, fields, now_ms)
+    }
+
+    /// A/B toggle for the LFU HDEL keyspace-probe collapse. `COLLAPSE = true` (shipped) resolves the
+    /// entry with a single `get_mut`-first probe and draws `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split — dropping the separate `contains_key` LFU rand-gate (2
+    /// probes → 1 under allkeys-lfu). It inlines `with_mutated_entry`'s exact stale/fresh digest
+    /// bookkeeping (the `&mut Entry` closure cannot reach `self.rng_seed`, so the draw must move
+    /// inside the get_mut borrow). `false` is the prior path (`contains_key` rand-gate +
+    /// `with_mutated_entry`). Byte/RNG/digest-identical: the LFU bump is digest-neutral
+    /// (`entry_state_digest` hashes only key+value+expiry, not the LFU/access fields), so `old_hash`
+    /// is the same taken before or after it; the field-split draw advances `rng_seed` exactly as
+    /// `next_rand` did, present-key-gated as before. With LFU off both arms do identical work (no
+    /// `contains_key` was drawn) — the collapse only removes the LFU-only rand-gate probe.
+    fn hdel_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the get_mut below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -13946,33 +13995,59 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let Some(result) = self.with_mutated_entry(key, |entry| {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-            }
-            let Value::Hash(m) = &mut entry.value else {
-                return Err(StoreError::WrongType);
-            };
-            let mut removed = 0_u64;
-            for field in fields {
-                // (frankenredis-sremfast) Order-agnostic O(1) remove for
-                // hashtable-encoded hashes (was O(n) per field shift).
-                // (frankenredis-ym6ih) `delete` skips the discarded-value alloc.
-                if m.delete(field) {
-                    removed += 1;
+
+        let result_opt: Option<Result<(u64, bool), StoreError>> = if COLLAPSE {
+            // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing `rand_sample` on the
+            // disjoint `rng_seed` field split while the entry is held. Inlines the exact
+            // `with_mutated_entry` digest bookkeeping (stale: `bump_digest_mutations` only; fresh:
+            // before/after `entry_state_digest`). The LFU bump is digest-neutral, so `old_hash` is
+            // identical whether taken before or after it.
+            if self.digest_stale {
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        if lfu_tracking_enabled {
+                            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        let r = Self::hdel_apply(entry, fields, now_ms, lfu_tracking_enabled);
+                        self.bump_digest_mutations();
+                        Some(r)
+                    }
+                    None => None,
+                }
+            } else {
+                let expiry = self.expiry_ms(key);
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        let old_hash = Self::entry_state_digest(key, entry, expiry);
+                        if lfu_tracking_enabled {
+                            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        let r = Self::hdel_apply(entry, fields, now_ms, lfu_tracking_enabled);
+                        let new_hash = Self::entry_state_digest(key, entry, expiry);
+                        self.update_digest_hashes(Some(old_hash), Some(new_hash));
+                        Some(r)
+                    }
+                    None => None,
                 }
             }
-            let is_empty = m.is_empty();
-            if removed > 0 {
-                entry.touch_write(now_ms, lfu_tracking_enabled);
-            }
-            Ok((removed, is_empty))
-        }) else {
+        } else {
+            // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            self.with_mutated_entry(key, |entry| {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                Self::hdel_apply(entry, fields, now_ms, lfu_tracking_enabled)
+            })
+        };
+
+        let Some(result) = result_opt else {
             return Ok(0);
         };
         let (removed, is_empty) = result?;
@@ -13998,6 +14073,18 @@ impl Store {
             self.drop_stream_side_metadata(key);
         }
         Ok(removed)
+    }
+
+    /// Prior-path (two-probe) HDEL baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// plus `with_mutated_entry`. Not on any production path (`hdel` uses `hdel_impl::<true>`).
+    #[doc(hidden)]
+    pub fn hdel_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.hdel_impl::<false>(key, fields, now_ms)
     }
 
     pub fn hexists(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<bool, StoreError> {
@@ -46938,6 +47025,70 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn hdel_lfu_collapsed_matches_twoprobe() {
+        // The get_mut-first LFU HDEL collapse (one probe + rng_seed field-split draw + inlined
+        // with_mutated_entry digest bookkeeping) must be byte/RNG/digest-identical to the prior
+        // contains_key rand-gate + with_mutated_entry path — across present-with-removal,
+        // present-without-removal, multi-field partial, remove-to-empty (key removed), absent,
+        // wrong-type, and expired keys, under BOTH allkeys-lfu (draw + bump) and a non-LFU policy
+        // (no draw; the inline digest replica must still equal with_mutated_entry). Asserts result,
+        // RNG state, keyspace stats, OBJECT FREQ, dirty, and the full DEBUG DIGEST bookkeeping.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.hset(b"h3", b"f".to_vec(), b"1".to_vec(), 1).unwrap();
+            s.hset(b"h3", b"g".to_vec(), b"2".to_vec(), 1).unwrap();
+            s.hset(b"h3", b"i".to_vec(), b"3".to_vec(), 1).unwrap();
+            s.hset(b"h1", b"only".to_vec(), b"v".to_vec(), 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let cases: &[(&[u8], &[&[u8]])] = &[
+            (b"h3", &[b"f".as_slice()]),                     // present, remove 1
+            (b"h3", &[b"missing".as_slice()]),               // present, remove 0
+            (b"h3", &[b"f".as_slice(), b"g", b"nope"]),      // present, remove 2 of 3
+            (b"h1", &[b"only".as_slice()]),                  // remove to empty (key removed)
+            (b"absent", &[b"f".as_slice()]),                 // absent key
+            (b"str", &[b"f".as_slice()]),                    // wrong type
+            (b"ttl", &[b"f".as_slice()]),                    // expired key
+        ];
+        for lfu in [true, false] {
+            // `force_fresh` calls state_digest() first (digest_stale = false) so the collapse takes
+            // its inlined before/after entry_state_digest path; otherwise the build's stale digest
+            // routes the bump_digest_mutations-only path. Both must equal the with_mutated_entry
+            // baseline.
+            for force_fresh in [false, true] {
+                for &(key, fields) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    if force_fresh {
+                        a.state_digest();
+                        b.state_digest();
+                    }
+                    let ra = a.hdel(key, fields, now);
+                    let rb = b.hdel_lfu_twoprobe_bench(key, fields, now);
+                    let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} fields={fields:?}");
+                    assert_eq!(ra.is_err(), rb.is_err(), "is_err {tag}");
+                    assert_eq!(ra.ok(), rb.ok(), "value {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                    assert_eq!(a.object_freq(b"h3", now), b.object_freq(b"h3", now), "freq {tag}");
+                    assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
         }
     }
 

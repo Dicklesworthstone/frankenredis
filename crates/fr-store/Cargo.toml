@@ -434,3 +434,11 @@ harness = false
 [[bench]]
 name = "hexists_lfu_collapse"
 harness = false
+
+# A/B for the LFU HDEL write-side keyspace-probe collapse: get_mut-first + rng_seed field-split draw
+# (1 probe) with inlined with_mutated_entry digest bookkeeping vs the prior contains_key rand-gate +
+# with_mutated_entry (2 probes). First write-side member of the field-split vein. Byte/RNG/digest-
+# identical (hdel_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "hdel_lfu_collapse"
+harness = false
