@@ -3021,88 +3021,91 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         4 => {
-            if eq_ascii_command(cmd, b"PING") {
-                Some(CommandId::Ping)
-            } else if eq_ascii_command(cmd, b"ECHO") {
-                Some(CommandId::Echo)
-            } else if eq_ascii_command(cmd, b"INCR") {
-                Some(CommandId::Incr)
-            } else if eq_ascii_command(cmd, b"PTTL") {
-                Some(CommandId::Pttl)
-            } else if eq_ascii_command(cmd, b"MGET") {
-                Some(CommandId::Mget)
-            } else if eq_ascii_command(cmd, b"MSET") {
-                Some(CommandId::Mset)
-            } else if eq_ascii_command(cmd, b"DECR") {
-                Some(CommandId::Decr)
-            } else if eq_ascii_command(cmd, b"TYPE") {
-                Some(CommandId::Type)
-            } else if eq_ascii_command(cmd, b"KEYS") {
-                Some(CommandId::Keys)
-            } else if eq_ascii_command(cmd, b"HGET") {
-                Some(CommandId::Hget)
-            } else if eq_ascii_command(cmd, b"HSET") {
-                Some(CommandId::Hset)
-            } else if eq_ascii_command(cmd, b"HDEL") {
-                Some(CommandId::Hdel)
-            } else if eq_ascii_command(cmd, b"HLEN") {
-                Some(CommandId::Hlen)
-            } else if eq_ascii_command(cmd, b"LPOP") {
-                Some(CommandId::Lpop)
-            } else if eq_ascii_command(cmd, b"RPOP") {
-                Some(CommandId::Rpop)
-            } else if eq_ascii_command(cmd, b"LLEN") {
-                Some(CommandId::Llen)
-            } else if eq_ascii_command(cmd, b"LSET") {
-                Some(CommandId::Lset)
-            } else if eq_ascii_command(cmd, b"SADD") {
-                Some(CommandId::Sadd)
-            } else if eq_ascii_command(cmd, b"SREM") {
-                Some(CommandId::Srem)
-            } else if eq_ascii_command(cmd, b"ZADD") {
-                Some(CommandId::Zadd)
-            } else if eq_ascii_command(cmd, b"ZREM") {
-                Some(CommandId::Zrem)
-            } else if eq_ascii_command(cmd, b"SPOP") {
-                Some(CommandId::Spop)
-            } else if eq_ascii_command(cmd, b"LPOS") {
-                Some(CommandId::Lpos)
-            } else if eq_ascii_command(cmd, b"LREM") {
-                Some(CommandId::Lrem)
-            } else if eq_ascii_command(cmd, b"QUIT") {
-                Some(CommandId::Quit)
-            } else if eq_ascii_command(cmd, b"INFO") {
-                Some(CommandId::Info)
-            } else if eq_ascii_command(cmd, b"TIME") {
-                Some(CommandId::Time)
-            } else if eq_ascii_command(cmd, b"WAIT") {
-                Some(CommandId::Wait)
-            } else if eq_ascii_command(cmd, b"DUMP") {
-                Some(CommandId::Dump)
-            } else if eq_ascii_command(cmd, b"SORT") {
-                Some(CommandId::Sort)
-            } else if eq_ascii_command(cmd, b"COPY") {
-                Some(CommandId::Copy)
-            } else if eq_ascii_command(cmd, b"SAVE") {
-                Some(CommandId::Save)
-            } else if eq_ascii_command(cmd, b"SCAN") {
-                Some(CommandId::Scan)
-            } else if eq_ascii_command(cmd, b"XADD") {
-                Some(CommandId::Xadd)
-            } else if eq_ascii_command(cmd, b"XLEN") {
-                Some(CommandId::Xlen)
-            } else if eq_ascii_command(cmd, b"XDEL") {
-                Some(CommandId::Xdel)
-            } else if eq_ascii_command(cmd, b"XACK") {
-                Some(CommandId::Xack)
-            } else if eq_ascii_command(cmd, b"EVAL") {
-                Some(CommandId::Eval)
-            } else if eq_ascii_command(cmd, b"ROLE") {
-                Some(CommandId::Role)
-            } else if eq_ascii_command(cmd, b"MOVE") {
-                Some(CommandId::Move)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_PING: u64 = pack_cmd_u64(b"PING");
+            const PK_ECHO: u64 = pack_cmd_u64(b"ECHO");
+            const PK_INCR: u64 = pack_cmd_u64(b"INCR");
+            const PK_PTTL: u64 = pack_cmd_u64(b"PTTL");
+            const PK_MGET: u64 = pack_cmd_u64(b"MGET");
+            const PK_MSET: u64 = pack_cmd_u64(b"MSET");
+            const PK_DECR: u64 = pack_cmd_u64(b"DECR");
+            const PK_TYPE: u64 = pack_cmd_u64(b"TYPE");
+            const PK_KEYS: u64 = pack_cmd_u64(b"KEYS");
+            const PK_HGET: u64 = pack_cmd_u64(b"HGET");
+            const PK_HSET: u64 = pack_cmd_u64(b"HSET");
+            const PK_HDEL: u64 = pack_cmd_u64(b"HDEL");
+            const PK_HLEN: u64 = pack_cmd_u64(b"HLEN");
+            const PK_LPOP: u64 = pack_cmd_u64(b"LPOP");
+            const PK_RPOP: u64 = pack_cmd_u64(b"RPOP");
+            const PK_LLEN: u64 = pack_cmd_u64(b"LLEN");
+            const PK_LSET: u64 = pack_cmd_u64(b"LSET");
+            const PK_SADD: u64 = pack_cmd_u64(b"SADD");
+            const PK_SREM: u64 = pack_cmd_u64(b"SREM");
+            const PK_ZADD: u64 = pack_cmd_u64(b"ZADD");
+            const PK_ZREM: u64 = pack_cmd_u64(b"ZREM");
+            const PK_SPOP: u64 = pack_cmd_u64(b"SPOP");
+            const PK_LPOS: u64 = pack_cmd_u64(b"LPOS");
+            const PK_LREM: u64 = pack_cmd_u64(b"LREM");
+            const PK_QUIT: u64 = pack_cmd_u64(b"QUIT");
+            const PK_INFO: u64 = pack_cmd_u64(b"INFO");
+            const PK_TIME: u64 = pack_cmd_u64(b"TIME");
+            const PK_WAIT: u64 = pack_cmd_u64(b"WAIT");
+            const PK_DUMP: u64 = pack_cmd_u64(b"DUMP");
+            const PK_SORT: u64 = pack_cmd_u64(b"SORT");
+            const PK_COPY: u64 = pack_cmd_u64(b"COPY");
+            const PK_SAVE: u64 = pack_cmd_u64(b"SAVE");
+            const PK_SCAN: u64 = pack_cmd_u64(b"SCAN");
+            const PK_XADD: u64 = pack_cmd_u64(b"XADD");
+            const PK_XLEN: u64 = pack_cmd_u64(b"XLEN");
+            const PK_XDEL: u64 = pack_cmd_u64(b"XDEL");
+            const PK_XACK: u64 = pack_cmd_u64(b"XACK");
+            const PK_EVAL: u64 = pack_cmd_u64(b"EVAL");
+            const PK_ROLE: u64 = pack_cmd_u64(b"ROLE");
+            const PK_MOVE: u64 = pack_cmd_u64(b"MOVE");
+            match pack_cmd_u64(cmd) {
+                PK_PING => Some(CommandId::Ping),
+                PK_ECHO => Some(CommandId::Echo),
+                PK_INCR => Some(CommandId::Incr),
+                PK_PTTL => Some(CommandId::Pttl),
+                PK_MGET => Some(CommandId::Mget),
+                PK_MSET => Some(CommandId::Mset),
+                PK_DECR => Some(CommandId::Decr),
+                PK_TYPE => Some(CommandId::Type),
+                PK_KEYS => Some(CommandId::Keys),
+                PK_HGET => Some(CommandId::Hget),
+                PK_HSET => Some(CommandId::Hset),
+                PK_HDEL => Some(CommandId::Hdel),
+                PK_HLEN => Some(CommandId::Hlen),
+                PK_LPOP => Some(CommandId::Lpop),
+                PK_RPOP => Some(CommandId::Rpop),
+                PK_LLEN => Some(CommandId::Llen),
+                PK_LSET => Some(CommandId::Lset),
+                PK_SADD => Some(CommandId::Sadd),
+                PK_SREM => Some(CommandId::Srem),
+                PK_ZADD => Some(CommandId::Zadd),
+                PK_ZREM => Some(CommandId::Zrem),
+                PK_SPOP => Some(CommandId::Spop),
+                PK_LPOS => Some(CommandId::Lpos),
+                PK_LREM => Some(CommandId::Lrem),
+                PK_QUIT => Some(CommandId::Quit),
+                PK_INFO => Some(CommandId::Info),
+                PK_TIME => Some(CommandId::Time),
+                PK_WAIT => Some(CommandId::Wait),
+                PK_DUMP => Some(CommandId::Dump),
+                PK_SORT => Some(CommandId::Sort),
+                PK_COPY => Some(CommandId::Copy),
+                PK_SAVE => Some(CommandId::Save),
+                PK_SCAN => Some(CommandId::Scan),
+                PK_XADD => Some(CommandId::Xadd),
+                PK_XLEN => Some(CommandId::Xlen),
+                PK_XDEL => Some(CommandId::Xdel),
+                PK_XACK => Some(CommandId::Xack),
+                PK_EVAL => Some(CommandId::Eval),
+                PK_ROLE => Some(CommandId::Role),
+                PK_MOVE => Some(CommandId::Move),
+                _ => None,
             }
         }
         5 => {
@@ -3821,6 +3824,185 @@ pub fn bench_classify6_match(cmd: &[u8]) -> u32 {
     }
 }
 
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify4_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"PING") {
+        1
+    } else if eq_ascii_command(cmd, b"ECHO") {
+        2
+    } else if eq_ascii_command(cmd, b"INCR") {
+        3
+    } else if eq_ascii_command(cmd, b"PTTL") {
+        4
+    } else if eq_ascii_command(cmd, b"MGET") {
+        5
+    } else if eq_ascii_command(cmd, b"MSET") {
+        6
+    } else if eq_ascii_command(cmd, b"DECR") {
+        7
+    } else if eq_ascii_command(cmd, b"TYPE") {
+        8
+    } else if eq_ascii_command(cmd, b"KEYS") {
+        9
+    } else if eq_ascii_command(cmd, b"HGET") {
+        10
+    } else if eq_ascii_command(cmd, b"HSET") {
+        11
+    } else if eq_ascii_command(cmd, b"HDEL") {
+        12
+    } else if eq_ascii_command(cmd, b"HLEN") {
+        13
+    } else if eq_ascii_command(cmd, b"LPOP") {
+        14
+    } else if eq_ascii_command(cmd, b"RPOP") {
+        15
+    } else if eq_ascii_command(cmd, b"LLEN") {
+        16
+    } else if eq_ascii_command(cmd, b"LSET") {
+        17
+    } else if eq_ascii_command(cmd, b"SADD") {
+        18
+    } else if eq_ascii_command(cmd, b"SREM") {
+        19
+    } else if eq_ascii_command(cmd, b"ZADD") {
+        20
+    } else if eq_ascii_command(cmd, b"ZREM") {
+        21
+    } else if eq_ascii_command(cmd, b"SPOP") {
+        22
+    } else if eq_ascii_command(cmd, b"LPOS") {
+        23
+    } else if eq_ascii_command(cmd, b"LREM") {
+        24
+    } else if eq_ascii_command(cmd, b"QUIT") {
+        25
+    } else if eq_ascii_command(cmd, b"INFO") {
+        26
+    } else if eq_ascii_command(cmd, b"TIME") {
+        27
+    } else if eq_ascii_command(cmd, b"WAIT") {
+        28
+    } else if eq_ascii_command(cmd, b"DUMP") {
+        29
+    } else if eq_ascii_command(cmd, b"SORT") {
+        30
+    } else if eq_ascii_command(cmd, b"COPY") {
+        31
+    } else if eq_ascii_command(cmd, b"SAVE") {
+        32
+    } else if eq_ascii_command(cmd, b"SCAN") {
+        33
+    } else if eq_ascii_command(cmd, b"XADD") {
+        34
+    } else if eq_ascii_command(cmd, b"XLEN") {
+        35
+    } else if eq_ascii_command(cmd, b"XDEL") {
+        36
+    } else if eq_ascii_command(cmd, b"XACK") {
+        37
+    } else if eq_ascii_command(cmd, b"EVAL") {
+        38
+    } else if eq_ascii_command(cmd, b"ROLE") {
+        39
+    } else if eq_ascii_command(cmd, b"MOVE") {
+        40
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify4_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 4 {
+        return 0;
+    }
+    const PK_PING: u64 = pack_cmd_u64(b"PING");
+    const PK_ECHO: u64 = pack_cmd_u64(b"ECHO");
+    const PK_INCR: u64 = pack_cmd_u64(b"INCR");
+    const PK_PTTL: u64 = pack_cmd_u64(b"PTTL");
+    const PK_MGET: u64 = pack_cmd_u64(b"MGET");
+    const PK_MSET: u64 = pack_cmd_u64(b"MSET");
+    const PK_DECR: u64 = pack_cmd_u64(b"DECR");
+    const PK_TYPE: u64 = pack_cmd_u64(b"TYPE");
+    const PK_KEYS: u64 = pack_cmd_u64(b"KEYS");
+    const PK_HGET: u64 = pack_cmd_u64(b"HGET");
+    const PK_HSET: u64 = pack_cmd_u64(b"HSET");
+    const PK_HDEL: u64 = pack_cmd_u64(b"HDEL");
+    const PK_HLEN: u64 = pack_cmd_u64(b"HLEN");
+    const PK_LPOP: u64 = pack_cmd_u64(b"LPOP");
+    const PK_RPOP: u64 = pack_cmd_u64(b"RPOP");
+    const PK_LLEN: u64 = pack_cmd_u64(b"LLEN");
+    const PK_LSET: u64 = pack_cmd_u64(b"LSET");
+    const PK_SADD: u64 = pack_cmd_u64(b"SADD");
+    const PK_SREM: u64 = pack_cmd_u64(b"SREM");
+    const PK_ZADD: u64 = pack_cmd_u64(b"ZADD");
+    const PK_ZREM: u64 = pack_cmd_u64(b"ZREM");
+    const PK_SPOP: u64 = pack_cmd_u64(b"SPOP");
+    const PK_LPOS: u64 = pack_cmd_u64(b"LPOS");
+    const PK_LREM: u64 = pack_cmd_u64(b"LREM");
+    const PK_QUIT: u64 = pack_cmd_u64(b"QUIT");
+    const PK_INFO: u64 = pack_cmd_u64(b"INFO");
+    const PK_TIME: u64 = pack_cmd_u64(b"TIME");
+    const PK_WAIT: u64 = pack_cmd_u64(b"WAIT");
+    const PK_DUMP: u64 = pack_cmd_u64(b"DUMP");
+    const PK_SORT: u64 = pack_cmd_u64(b"SORT");
+    const PK_COPY: u64 = pack_cmd_u64(b"COPY");
+    const PK_SAVE: u64 = pack_cmd_u64(b"SAVE");
+    const PK_SCAN: u64 = pack_cmd_u64(b"SCAN");
+    const PK_XADD: u64 = pack_cmd_u64(b"XADD");
+    const PK_XLEN: u64 = pack_cmd_u64(b"XLEN");
+    const PK_XDEL: u64 = pack_cmd_u64(b"XDEL");
+    const PK_XACK: u64 = pack_cmd_u64(b"XACK");
+    const PK_EVAL: u64 = pack_cmd_u64(b"EVAL");
+    const PK_ROLE: u64 = pack_cmd_u64(b"ROLE");
+    const PK_MOVE: u64 = pack_cmd_u64(b"MOVE");
+    match pack_cmd_u64(cmd) {
+        PK_PING => 1,
+        PK_ECHO => 2,
+        PK_INCR => 3,
+        PK_PTTL => 4,
+        PK_MGET => 5,
+        PK_MSET => 6,
+        PK_DECR => 7,
+        PK_TYPE => 8,
+        PK_KEYS => 9,
+        PK_HGET => 10,
+        PK_HSET => 11,
+        PK_HDEL => 12,
+        PK_HLEN => 13,
+        PK_LPOP => 14,
+        PK_RPOP => 15,
+        PK_LLEN => 16,
+        PK_LSET => 17,
+        PK_SADD => 18,
+        PK_SREM => 19,
+        PK_ZADD => 20,
+        PK_ZREM => 21,
+        PK_SPOP => 22,
+        PK_LPOS => 23,
+        PK_LREM => 24,
+        PK_QUIT => 25,
+        PK_INFO => 26,
+        PK_TIME => 27,
+        PK_WAIT => 28,
+        PK_DUMP => 29,
+        PK_SORT => 30,
+        PK_COPY => 31,
+        PK_SAVE => 32,
+        PK_SCAN => 33,
+        PK_XADD => 34,
+        PK_XLEN => 35,
+        PK_XDEL => 36,
+        PK_XACK => 37,
+        PK_EVAL => 38,
+        PK_ROLE => 39,
+        PK_MOVE => 40,
+        _ => 0,
+    }
+}
 
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     match argv.len() {
