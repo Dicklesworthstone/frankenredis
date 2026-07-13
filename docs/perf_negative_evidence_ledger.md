@@ -7582,3 +7582,22 @@ srandmember sub-gate.** ZCARD (19720, 3-probe like LLEN → ~2.2x) is the last c
 diluted tail. NOTE the 2-probe vs 3-probe split: SCARD/GET/EXISTS draw unconditionally after a
 record-hit (2 probes → ~1.6-1.85x); LLEN/STRLEN/GETBIT/ZCARD keep the redundant `contains_key`
 rand-gate (3 probes → ~2.2-2.6x). Both fold to 1; the 3-probe ones win more.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU ZCARD 3 probes → 1 (rng_seed field split) — **2.05–2.33x**
+
+Last clean length-read. ZCARD is 3-probe (record + contains_key + get_mut) like LLEN, bump before the
+type match, touch inside the `Value::SortedSet` arm, length-only work. Folded record+get_mut inline +
+dropped contains_key, rand on the `&mut self.rng_seed` field split (before the type check → present
+wrong-type key draws + bumps but no touch, then WRONGTYPE). Null-gated A/B
+(`benches/zcard_lfu_collapse.rs`, allkeys-lfu, 50k 2-elem-zset keyspace, median-of-61): n32 **2.329x**,
+n256 **2.052x** — WIN. Byte/RNG-identical: new `zcard_lfu_collapsed_matches_threeprobe`
+(present-zset/absent/wrong-type/expired; asserts result, `rng_seed`, hits/misses, OBJECT FREQ) +
+`zcard_existing_zset_bumps_lfu_frequency`, green via rch. Clippy-clean.
+**Probe-fold scoreboard (12 wins): GETBIT 2.4-2.6x ≈ STRLEN 2.2-2.4x ≈ ZCARD 2.05-2.33x ≈ LLEN
+2.2-2.3x > TYPE 1.8-1.9x ≈ TOUCH 1.8-1.9x ≈ SCARD 1.6-1.85x ≈ EXISTS 1.65x ≈ spop_count 1.6-1.7x ≈
+GET 1.6x ≈ MGET 1.5-1.8x; srandmember sub-gate.** The clean tiny-work single-key LFU read walls are
+now DONE (GET/STRLEN/GETBIT/TYPE/EXISTS/LLEN/SCARD/ZCARD) + the multi-key/count ones (MGET/TOUCH/
+spop). Remaining are the DILUTED tail only: GETRANGE (clones a substring), bitcount/bitpos (O(n)
+popcount, SIMD-fast → probe fraction small except tiny bitmaps), HGET (4-probe: + drop_hash_field_
+if_expired + clones the field value). Next agent: the high-ROI LFU probe-fold vein is essentially
+mined; the tail wins are marginal/size-dependent — profile before investing.
