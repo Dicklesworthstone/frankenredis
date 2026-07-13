@@ -465,3 +465,12 @@ harness = false
 [[bench]]
 name = "setbit_lfu_collapse"
 harness = false
+
+# A/B for the LFU SETRANGE write-side keyspace-probe collapse: get_mut-first + rng_seed field-split
+# draw (1 probe) on both the empty-value length path and the mutating path, with inlined
+# with_mutated_entry digest bookkeeping, vs the prior contains_key rand-gate + with_mutated_entry
+# (2 probes). Borrowed value slice (&[u8], no owned alloc). Byte/RNG/digest-identical
+# (setrange_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "setrange_lfu_collapse"
+harness = false

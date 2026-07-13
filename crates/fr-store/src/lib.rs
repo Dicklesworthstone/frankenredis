@@ -9678,7 +9678,63 @@ impl Store {
         self.getrange_with_lfu_impl::<false, R>(key, start, end, now_ms, f)
     }
 
+    /// Shared SETRANGE in-place mutation on an existing entry: materialize to a raw string, extend
+    /// (zero-filling only the gap) or overwrite in bounds, and report the new length. Factored out
+    /// of the closure so the LFU keyspace-probe collapse (`setrange_impl::<true>`) and its prior-path
+    /// baseline (`::<false>`) run byte-identical bodies. `needed == offset + value.len()`.
+    fn setrange_apply(
+        entry: &mut Entry,
+        offset: usize,
+        value: &[u8],
+        needed: usize,
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+    ) -> Result<usize, StoreError> {
+        let Some(v) = entry.value.materialize_string() else {
+            return Err(StoreError::WrongType);
+        };
+        // (CobaltHarbor) Zero-fill only the GAP `[old_len, offset)`, then write `value` ONCE
+        // (overwrite the part overlapping existing bytes, extend the new tail). Avoids the wasted
+        // `memset` of `value.len()` on every EXTENDING SETRANGE.
+        if v.len() < needed {
+            if v.len() < offset {
+                v.resize(offset, 0);
+            }
+            let overlap = v.len() - offset;
+            v[offset..offset + overlap].copy_from_slice(&value[..overlap]);
+            v.extend_from_slice(&value[overlap..]);
+        } else {
+            v[offset..offset + value.len()].copy_from_slice(value);
+        }
+        let len = v.len();
+        entry.touch_write(now_ms, lfu_tracking_enabled);
+        // (br-frankenredis-84bv)
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+        Ok(len)
+    }
+
     pub fn setrange(
+        &mut self,
+        key: &[u8],
+        offset: usize,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.setrange_impl::<true>(key, offset, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU SETRANGE keyspace-probe collapse. `COLLAPSE = true` (shipped) resolves
+    /// the existing entry with a single `get_mut`-first probe and draws `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split — dropping the separate `contains_key` LFU rand-gate (2
+    /// probes → 1 under allkeys-lfu) on BOTH the empty-value length path and the mutating path. The
+    /// mutating path inlines `with_mutated_entry`'s exact stale/fresh digest bookkeeping (the
+    /// `&mut Entry` closure cannot reach `self.rng_seed`); the absent-key create branch is shared and
+    /// unchanged. `false` is the prior path (`contains_key` rand-gate + `with_mutated_entry`).
+    /// Byte/RNG/digest-identical: the LFU bump is digest-neutral, so `old_hash` is the same before or
+    /// after it; the field-split draw advances `rng_seed` exactly as `next_rand`, present-key-gated as
+    /// before. Borrowed value slice (`&[u8]`, no owned alloc), so a small-range write keeps the probe
+    /// a meaningful fraction.
+    fn setrange_impl<const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         offset: usize,
@@ -9693,53 +9749,92 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside each get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe (shared by both paths).
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
         };
+
         if value.is_empty() {
+            // Empty value: report the current string length, no mutation (direct get_mut, no digest).
             return match self.entries.get_mut(key) {
                 Some(entry) => {
                     if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        let rs = if COLLAPSE {
+                            Self::lcg_next_seed(&mut self.rng_seed)
+                        } else {
+                            rand_sample
+                        };
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                     }
                     entry.value.string_len().ok_or(StoreError::WrongType)
                 }
                 None => Ok(0),
             };
         }
+
         let needed = offset + value.len();
-        match self.with_mutated_entry(key, |entry| {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-            }
-            let Some(v) = entry.value.materialize_string() else {
-                return Err(StoreError::WrongType);
-            };
-            // (CobaltHarbor) Zero-fill only the GAP `[old_len, offset)`, then write `value` ONCE
-            // (overwrite the part overlapping existing bytes, extend the new tail). The old
-            // `resize(needed, 0)` zero-filled the value region `[offset, offset+len)` too, which
-            // `copy_from_slice` then immediately overwrote — a wasted `memset` of `value.len()` on
-            // every EXTENDING SETRANGE (redis double-writes the same way, sdsgrowzero + memcpy).
-            // Byte-identical final content (isolated A/B: extending 64K–256K = 1.36–1.70x); the
-            // in-bounds (non-extending) path is unchanged.
-            if v.len() < needed {
-                if v.len() < offset {
-                    v.resize(offset, 0);
+        let result_opt: Option<Result<usize, StoreError>> = if COLLAPSE {
+            // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing on the disjoint
+            // `rng_seed` field split. Inlines the exact `with_mutated_entry` digest bookkeeping (the
+            // LFU bump is digest-neutral, so `old_hash` is identical before or after it).
+            if self.digest_stale {
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::setrange_apply(
+                            entry,
+                            offset,
+                            value,
+                            needed,
+                            now_ms,
+                            lfu_tracking_enabled,
+                        );
+                        self.bump_digest_mutations();
+                        Some(r)
+                    }
+                    None => None,
                 }
-                let overlap = v.len() - offset;
-                v[offset..offset + overlap].copy_from_slice(&value[..overlap]);
-                v.extend_from_slice(&value[overlap..]);
             } else {
-                v[offset..offset + value.len()].copy_from_slice(value);
+                let expiry = self.expiry_ms(key);
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        let old_hash = Self::entry_state_digest(key, entry, expiry);
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::setrange_apply(
+                            entry,
+                            offset,
+                            value,
+                            needed,
+                            now_ms,
+                            lfu_tracking_enabled,
+                        );
+                        let new_hash = Self::entry_state_digest(key, entry, expiry);
+                        self.update_digest_hashes(Some(old_hash), Some(new_hash));
+                        Some(r)
+                    }
+                    None => None,
+                }
             }
-            let len = v.len();
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            // (br-frankenredis-84bv)
-            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            Ok(len)
-        }) {
+        } else {
+            // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
+            self.with_mutated_entry(key, |entry| {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                Self::setrange_apply(entry, offset, value, needed, now_ms, lfu_tracking_enabled)
+            })
+        };
+
+        match result_opt {
             Some(result) => {
                 if result.is_ok() {
                     self.dirty = self.dirty.saturating_add(1);
@@ -9747,10 +9842,7 @@ impl Store {
                 result
             }
             None => {
-                // (CobaltHarbor) Same double-write elision as the existing-key path above: the old
-                // `vec![0; needed]` zero-filled the value region `[offset, offset+len)` too, which the
-                // `copy_from_slice` then overwrote. Allocate the gap `[0, offset)` as zeros, then
-                // append `value` once. Byte-identical (leading zeros + value); new_len == needed.
+                // (CobaltHarbor) Allocate the gap `[0, offset)` as zeros, then append `value` once.
                 let mut current = Vec::with_capacity(needed);
                 current.resize(offset, 0);
                 current.extend_from_slice(value);
@@ -9763,6 +9855,19 @@ impl Store {
                 Ok(new_len)
             }
         }
+    }
+
+    /// Prior-path (two-probe) SETRANGE baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// plus `with_mutated_entry`. Not on any production path (`setrange` uses `setrange_impl::<true>`).
+    #[doc(hidden)]
+    pub fn setrange_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        offset: usize,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.setrange_impl::<false>(key, offset, value, now_ms)
     }
 
     // ── Bitmap (string extension) operations ─────────────────────
@@ -47357,6 +47462,64 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn setrange_lfu_collapsed_matches_twoprobe() {
+        // The get_mut-first LFU SETRANGE collapse (one probe + rng_seed field-split draw on both the
+        // empty-value length path and the mutating path + inlined with_mutated_entry digest
+        // bookkeeping) must be byte/RNG/digest-identical to the prior contains_key rand-gate +
+        // with_mutated_entry path — across in-bounds overwrite, extend, gap-fill, empty value,
+        // absent (create), wrong-type, and expired keys, under BOTH allkeys-lfu and a non-LFU policy,
+        // and BOTH stale and forced-fresh digest state. Asserts result, RNG, OBJECT FREQ, dirty,
+        // DEBUG DIGEST.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set(b"str".to_vec(), b"hello".to_vec(), None, 1);
+            s.set(b"si".to_vec(), b"12345".to_vec(), None, 1); // integer-encoded string
+            s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap(); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, offset, value)
+        let cases: &[(&[u8], usize, &[u8])] = &[
+            (b"str", 0, b"HE"),       // in-bounds overwrite (non-extending)
+            (b"str", 3, b"WORLD"),    // extend past end (overlap + tail)
+            (b"str", 8, b"Z"),        // gap past end (zero-fill gap + value)
+            (b"str", 1, b""),         // empty value -> current length, no mutation
+            (b"si", 0, b"9"),         // setrange on integer-encoded string (materialize + raw)
+            (b"absent", 2, b"AB"),    // create new string with leading zeros
+            (b"absent", 0, b""),      // empty value on absent -> Ok(0), no create
+            (b"lst", 0, b"AB"),       // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, b"AB"),       // expired -> create
+        ];
+        for lfu in [true, false] {
+            for force_fresh in [false, true] {
+                for &(key, offset, value) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    if force_fresh {
+                        let _ = a.state_digest();
+                        let _ = b.state_digest();
+                    }
+                    let ra = a.setrange(key, offset, value, now);
+                    let rb = b.setrange_lfu_twoprobe_bench(key, offset, value, now);
+                    let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} off={offset}");
+                    assert_eq!(ra, rb, "result {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq {tag}");
+                    assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
         }
     }
 
