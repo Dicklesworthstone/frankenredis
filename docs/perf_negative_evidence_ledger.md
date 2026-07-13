@@ -7680,3 +7680,37 @@ absent/wrong-type/expired key and asserts reply/error, RNG state, keyspace stats
 focused tests and workspace/all-targets check passed via fail-closed RCH. The clean hash-family LFU
 probe-fold vein is now complete; the remaining string/collection scan tail needs fresh attribution
 before another lever.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`2ca468c5b`). LFU HDEL write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.53–1.585x**
+
+Opens the WRITE side of the LFU probe-collapse vein — the read-side family (GET/EXISTS/TYPE/… plus the
+hash reads HGET/HLEN/HSTRLEN/HEXISTS) was exhausted, so this is a fresh command family. On 2026-07-12
+the mutate-existing writes (SETRANGE/SETBIT/HDEL/APPEND) had their "LFU 2nd probe" declared UNFUSEABLE
+(rand needs `&mut self`, conflicting with the entry `&mut` borrow — the "structural LFU wall"). That
+wall PREDATES the rng_seed field-split trick (2026-07-13): `lcg_next_seed(&mut self.rng_seed)` draws the
+LFU rand from a DISJOINT struct field while the entry from `self.entries.get_mut` is held. Wall broken.
+
+Under allkeys-lfu HDEL did TWO `entries` probes: a `contains_key` LFU rand-gate + `with_mutated_entry`'s
+`get_mut`. The collapse resolves the entry with a single get_mut-first probe, draws `rand_sample` on the
+rng_seed field split, and INLINES `with_mutated_entry`'s exact stale/fresh digest bookkeeping (the
+`&mut Entry` closure cannot reach `self.rng_seed`). Byte/RNG/digest-identical: the LFU bump is
+digest-neutral (`entry_state_digest` hashes only key+value+expiry, NOT the LFU/access fields), so
+`old_hash` is identical taken before or after it; the field-split draw advances `rng_seed` exactly as
+`next_rand`, present-key-gated as before. With LFU off both arms do identical work — the collapse only
+removes the LFU-only rand-gate probe. Const-generic `hdel_impl<COLLAPSE>` + `hdel_lfu_twoprobe_bench`
+baseline + shared `hdel_apply` mutation helper.
+
+A/B (`benches/hdel_lfu_collapse.rs`, allkeys-lfu, 50k single-field hashes, HDEL of a MISSING field =
+non-destructive/repeatable on the common already-stale-digest path, median-of-61; machine LOADED by peer
+builds so cv is high): n32 **1.585x** (null med 1.0248, p5..p95 [0.729, 1.452], cv 23.84%), n256
+**1.530x** (null med 1.0433, p5..p95 [0.727, 1.278], cv 18.02%). Both speedups clear their own null p95.
+Gated by `hdel_lfu_collapsed_matches_twoprobe` (present-remove / no-remove / multi-partial /
+remove-to-empty / absent / wrongtype / expired × LFU on&off × stale&fresh digest — asserts result, RNG
+state, keyspace stats, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store lib suite 815/815 correctness
+pass (2 unrelated foldhash-vs-siphash timing-ratio tests flaked under load).
+
+NEW VEIN (write side): ~40 write commands carry the same `lfu_tracking_enabled && contains_key` LFU
+rand-gate the field-split fuses — append/getset/setrange/setbit/lpush/rpush/lpop/… (grep the pattern).
+HDEL is the first. CLEANEST are the direct-`get_mut` writes (lpush/rpush/lpop) needing NO digest
+replication; the `with_mutated_entry`-wrapped ones (setbit/setrange/append/hdel) need the inline digest
+replica. Shows only on the ISOLATED store op (writes stay syscall-bound end-to-end), same as reads.
