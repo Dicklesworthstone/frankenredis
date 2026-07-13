@@ -2341,10 +2341,19 @@ impl SortedSet {
     /// no rank-tree build); `None` for Tree/Packed. A contiguous score/lex run starts at
     /// this index, so ZREMRANGEBYSCORE/BYLEX can bulk-drain [start, start+count) instead
     /// of count× O(len) `remove(member)`.
-    fn compact_run_start(&self, member: &[u8], score: f64) -> Option<usize> {
+    /// Start rank of a contiguous run whose first element is `(score, member)`, when the
+    /// encoding supports draining a rank range in one shift (`remove_rank_range`). Returns
+    /// `Some(rank)` for a Full-compact (Vec) order and for a Packed (listpack) zset — both
+    /// store members in `(score, member)` order, so a ZREMRANGEBYSCORE/BYLEX run is a
+    /// contiguous rank span. `None` for a Full rank-tree (its callers keep the per-member path).
+    fn contiguous_run_start(&self, member: &[u8], score: f64) -> Option<usize> {
         match &self.inner {
             SortedSetInner::Full(f) => f.compact_position(score, member),
-            SortedSetInner::Packed(_) => None,
+            // (cc_fr) Packed is rank-ordered too, so drain the run in one `drain_rank_range`
+            // (O(len)) instead of count× O(len) `remove(member)` (O(count·len)) — the SCORE/LEX
+            // twin of the ZREMRANGEBYRANK packed drain (821b6dd0b). `rank` is member-keyed
+            // (members are unique); its O(len) scan is dominated by the drain that follows.
+            SortedSetInner::Packed(p) => p.rank(member),
         }
     }
 
@@ -21314,11 +21323,12 @@ impl Store {
                     // order, so on a Compact(Vec) zset bulk-drain [start, start+count) in
                     // one shift instead of count× O(len) remove(member) — O(count·len)
                     // -> O(len). start = the run's first member's order index (binary_search,
-                    // no rank-tree build). Tree/Packed keep the per-member path (unchanged).
+                    // no rank-tree build). (cc_fr) Packed also drains now (contiguous_run_start
+                    // -> rank -> drain_rank_range); only the Full rank-tree keeps per-member.
                     // Byte-identical: same members removed, same residual.
                     let run = zs.score_bound_range(min, max, false);
                     let removed_count = run.len();
-                    if let Some(start) = run.first().and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    if let Some(start) = run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
                     {
                         zs.remove_rank_range(start, removed_count);
                     } else {
@@ -21372,11 +21382,13 @@ impl Store {
                     // fall back to the identical exact iter+filter, so the removed
                     // membership is byte-for-byte unchanged.
                     // (CrimsonHawk) Same contiguous-run bulk-drain as ZREMRANGEBYSCORE:
-                    // a Compact(Vec) zset drains [start, start+count) in one shift; Tree/
-                    // Packed keep the per-member remove. Byte-identical membership.
+                    // a Compact(Vec) zset drains [start, start+count) in one shift. (cc_fr)
+                    // Packed drains too now; only the Full rank-tree keeps per-member remove.
+                    // Byte-identical membership (a lex range on a single-score set is a
+                    // contiguous rank span; multi-score lex falls to the same iter+filter run).
                     let run = zs.lex_range_asc(min, max);
                     let removed_count = run.len();
-                    if let Some(start) = run.first().and_then(|(m, s)| zs.compact_run_start(m, *s))
+                    if let Some(start) = run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
                     {
                         zs.remove_rank_range(start, removed_count);
                     } else {
@@ -38356,6 +38368,81 @@ mod tests {
                 let expected: Vec<Vec<u8>> =
                     before.iter().filter(|m| !drop.contains(m)).cloned().collect();
                 assert_eq!(after, expected, "total={total} start={start} stop={stop}");
+            }
+        }
+    }
+
+    #[test]
+    fn zremrangebyscore_packed_drain_matches_zrangebyscore_reference_cc() {
+        // (cc_fr) ZREMRANGEBYSCORE on a PACKED zset now drains the contiguous rank span
+        // (contiguous_run_start -> rank -> drain_rank_range) instead of count× remove(member).
+        // It MUST remove exactly ZRANGEBYSCORE(min,max) and leave the same residual as filtering
+        // that window out of the original (the unchanged ZRANGEBYSCORE is the reference). Covers
+        // packed (<=128) + Full (>128), inclusive/exclusive/infinite bounds, and empty ranges.
+        let inc = ScoreBound::Inclusive;
+        let exc = ScoreBound::Exclusive;
+        let ranges: Vec<(ScoreBound, ScoreBound)> = vec![
+            (inc(2.0), inc(5.0)),
+            (exc(2.0), exc(5.0)),
+            (inc(f64::NEG_INFINITY), inc(f64::INFINITY)),
+            (inc(-100.0), inc(100.0)),
+            (inc(10.0), inc(3.0)),      // inverted -> empty
+            (inc(1000.0), inc(2000.0)), // out of range -> empty
+            (inc(0.0), inc(0.0)),       // single
+            (exc(0.0), inc(f64::INFINITY)),
+        ];
+        for &total in &[0usize, 1, 5, 64, 200] {
+            for (ri, &(min, max)) in ranges.iter().enumerate() {
+                let members: Vec<(f64, Vec<u8>)> =
+                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let mut store = Store::new();
+                if total > 0 {
+                    store.zadd(b"z", &members, 0).unwrap();
+                }
+                let before = store.zrange(b"z", 0, -1, 0).unwrap();
+                let removed_range = store.zrangebyscore(b"z", min, max, 0).unwrap();
+                let removed = store.zremrangebyscore(b"z", min, max, 0).unwrap();
+                let after = store.zrange(b"z", 0, -1, 0).unwrap();
+                assert_eq!(removed, removed_range.len(), "count total={total} ri={ri}");
+                let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
+                let expected: Vec<Vec<u8>> =
+                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                assert_eq!(after, expected, "residual total={total} ri={ri}");
+            }
+        }
+    }
+
+    #[test]
+    fn zremrangebylex_packed_drain_matches_zrangebylex_reference_cc() {
+        // (cc_fr) ZREMRANGEBYLEX on a single-score PACKED zset drains the contiguous rank span
+        // instead of count× remove(member). Residual MUST equal before minus ZRANGEBYLEX(min,max),
+        // and the count MUST match. Single score so the lex order is well-defined; packed + Full.
+        let ranges: &[(&[u8], &[u8])] = &[
+            (b"-", b"+"),
+            (b"[m00010", b"[m00050"),
+            (b"(m00010", b"(m00050"),
+            (b"[m00000", b"[m00000"),
+            (b"[m00100", b"[m00050"), // inverted -> empty
+            (b"-", b"[m00030"),
+            (b"[m00030", b"+"),
+        ];
+        for &total in &[0usize, 1, 5, 64, 200] {
+            for (ri, &(min, max)) in ranges.iter().enumerate() {
+                let members: Vec<(f64, Vec<u8>)> =
+                    (0..total).map(|i| (0.0, format!("m{i:05}").into_bytes())).collect();
+                let mut store = Store::new();
+                if total > 0 {
+                    store.zadd(b"z", &members, 0).unwrap();
+                }
+                let before = store.zrange(b"z", 0, -1, 0).unwrap();
+                let removed_range = store.zrangebylex(b"z", min, max, 0).unwrap();
+                let removed = store.zremrangebylex(b"z", min, max, 0).unwrap();
+                let after = store.zrange(b"z", 0, -1, 0).unwrap();
+                assert_eq!(removed, removed_range.len(), "count total={total} ri={ri}");
+                let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
+                let expected: Vec<Vec<u8>> =
+                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                assert_eq!(after, expected, "residual total={total} ri={ri}");
             }
         }
     }

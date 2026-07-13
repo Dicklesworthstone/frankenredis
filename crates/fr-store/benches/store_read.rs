@@ -313,6 +313,28 @@ fn bench_get(c: &mut Criterion) {
         )
     });
 
+    // (cc_fr) ZREMRANGEBYSCORE [30,90] on a 120-member PACKED zset (removes 61, the same middle span
+    // as the RANK bench): the contiguous score run is a rank span, so drain it in ONE shift
+    // (contiguous_run_start -> rank -> drain_rank_range) instead of 61x O(len) remove(member).
+    g.bench_function("zremrangebyscore_middle_120_packed", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Store::new();
+                s.zadd(b"z", &zrem_members, 1_000).unwrap();
+                s
+            },
+            |mut s| {
+                std::hint::black_box(s.zremrangebyscore(
+                    std::hint::black_box(b"z"),
+                    fr_store::ScoreBound::Inclusive(30.0),
+                    fr_store::ScoreBound::Inclusive(90.0),
+                    2_000,
+                ))
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     // (cc_fr) ZPOPMAX count popping 60 of a 120-member PACKED zset: the batch pop_max_n scans once
     // to the split + truncates instead of 60x `pop_max` (each an O(len) FRONT scan to the last
     // record) — the old O(count*len) packed path.
