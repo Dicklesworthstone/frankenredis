@@ -3444,6 +3444,68 @@ fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
     lhs.eq_ignore_ascii_case(rhs)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplconfOption {
+    Ack,
+    Fack,
+    Getack,
+    ListeningPort,
+    IpAddress,
+    Capa,
+}
+
+#[inline]
+fn classify_replconf_option(option: &[u8]) -> Option<ReplconfOption> {
+    if eq_ascii_token(option, b"ACK") {
+        Some(ReplconfOption::Ack)
+    } else if eq_ascii_token(option, b"FACK") {
+        Some(ReplconfOption::Fack)
+    } else if eq_ascii_token(option, b"GETACK") {
+        Some(ReplconfOption::Getack)
+    } else if eq_ascii_token(option, b"listening-port") {
+        Some(ReplconfOption::ListeningPort)
+    } else if eq_ascii_token(option, b"ip-address") {
+        Some(ReplconfOption::IpAddress)
+    } else if eq_ascii_token(option, b"capa") {
+        Some(ReplconfOption::Capa)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(test, feature = "bench-reference"))]
+#[inline(never)]
+fn classify_replconf_option_owned_reference(option: &[u8]) -> Option<ReplconfOption> {
+    let option = String::from_utf8_lossy(option).into_owned();
+    if option.eq_ignore_ascii_case("ACK") {
+        Some(ReplconfOption::Ack)
+    } else if option.eq_ignore_ascii_case("FACK") {
+        Some(ReplconfOption::Fack)
+    } else if option.eq_ignore_ascii_case("GETACK") {
+        Some(ReplconfOption::Getack)
+    } else if option.eq_ignore_ascii_case("listening-port") {
+        Some(ReplconfOption::ListeningPort)
+    } else if option.eq_ignore_ascii_case("ip-address") {
+        Some(ReplconfOption::IpAddress)
+    } else if option.eq_ignore_ascii_case("capa") {
+        Some(ReplconfOption::Capa)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_classify_replconf_option(option: &[u8]) -> u8 {
+    classify_replconf_option(option).map_or(u8::MAX, |option| option as u8)
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_classify_replconf_option_owned_reference(option: &[u8]) -> u8 {
+    classify_replconf_option_owned_reference(option).map_or(u8::MAX, |option| option as u8)
+}
+
 /// Commands that vendored Redis propagates to replicas only (PROPAGATE_REPL)
 /// and never to the AOF (no PROPAGATE_AOF): PUBLISH and SPUBLISH. They flow
 /// down the replication stream so subscribers attached to a replica receive
@@ -41757,8 +41819,8 @@ replica_announced:1\r\n",
         }
         let mut idx = 1;
         while idx < argv.len() {
-            let option = String::from_utf8_lossy(&argv[idx]).into_owned();
-            if option.eq_ignore_ascii_case("ACK") {
+            let option = classify_replconf_option(&argv[idx]);
+            if option == Some(ReplconfOption::Ack) {
                 if matches!(
                     self.server.replication_runtime_state.role,
                     ReplicationRoleState::Replica { .. }
@@ -41792,7 +41854,7 @@ replica_announced:1\r\n",
                 self.server.refresh_replica_ack_snapshots();
                 return RespFrame::SimpleString("OK".to_string());
             }
-            if option.eq_ignore_ascii_case("FACK") {
+            if option == Some(ReplconfOption::Fack) {
                 if matches!(
                     self.server.replication_runtime_state.role,
                     ReplicationRoleState::Replica { .. }
@@ -41820,7 +41882,7 @@ replica_announced:1\r\n",
                 self.server.refresh_replica_ack_snapshots();
                 return RespFrame::SimpleString("OK".to_string());
             }
-            if option.eq_ignore_ascii_case("GETACK") {
+            if option == Some(ReplconfOption::Getack) {
                 self.server.refresh_replica_ack_snapshots();
                 return RespFrame::Array(Some(vec![
                     hello_bulk("REPLCONF"),
@@ -41835,7 +41897,7 @@ replica_announced:1\r\n",
                     ),
                 ]));
             }
-            if option.eq_ignore_ascii_case("listening-port") {
+            if option == Some(ReplconfOption::ListeningPort) {
                 let value = match parse_i64_arg(&argv[idx + 1]) {
                     Ok(value) => value,
                     Err(err) => return err.to_resp(),
@@ -41848,12 +41910,12 @@ replica_announced:1\r\n",
                     .replication_runtime_state
                     .ensure_replica(self.session.client_id)
                     .listening_port = port;
-            } else if option.eq_ignore_ascii_case("ip-address") {
+            } else if option == Some(ReplconfOption::IpAddress) {
                 self.server
                     .replication_runtime_state
                     .ensure_replica(self.session.client_id)
                     .ip_address = Some(String::from_utf8_lossy(&argv[idx + 1]).into_owned());
-            } else if option.eq_ignore_ascii_case("capa") {
+            } else if option == Some(ReplconfOption::Capa) {
                 if argv[idx + 1].eq_ignore_ascii_case(b"psync2") {
                     self.server
                         .replication_runtime_state
@@ -41861,6 +41923,7 @@ replica_announced:1\r\n",
                         .psync2_capable = true;
                 }
             } else {
+                let option = String::from_utf8_lossy(&argv[idx]);
                 return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
             }
             idx += 2;
@@ -43343,6 +43406,68 @@ pub mod ecosystem {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    #[test]
+    fn replconf_option_classifier_matches_owned_reference() {
+        use super::{Runtime, classify_replconf_option, classify_replconf_option_owned_reference};
+
+        for option in [
+            b"ACK".as_slice(),
+            b"ack",
+            b"FaCk",
+            b"GETACK",
+            b"getack",
+            b"LISTENING-PORT",
+            b"listening-port",
+            b"IP-ADDRESS",
+            b"ip-address",
+            b"CAPA",
+            b"capa",
+            b"unknown",
+            b"",
+            b"\xffACK",
+        ] {
+            assert_eq!(
+                classify_replconf_option(option),
+                classify_replconf_option_owned_reference(option),
+                "option={option:?}",
+            );
+        }
+        for byte in 0_u8..=u8::MAX {
+            let option = [byte];
+            assert_eq!(
+                classify_replconf_option(&option),
+                classify_replconf_option_owned_reference(&option),
+                "single byte={byte:#04x}",
+            );
+        }
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for len in 0..=20 {
+            for _ in 0..2_000 {
+                let mut option = vec![0_u8; len];
+                for byte in &mut option {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = state as u8;
+                }
+                assert_eq!(
+                    classify_replconf_option(&option),
+                    classify_replconf_option_owned_reference(&option),
+                    "generated option={option:?}",
+                );
+            }
+        }
+
+        let mut runtime = Runtime::default_strict();
+        let invalid_utf8 = [0xff];
+        let argv: [&[u8]; 3] = [b"REPLCONF", &invalid_utf8, b"value"];
+        assert_eq!(
+            runtime.execute_frame(command(&argv), 0),
+            fr_protocol::RespFrame::Error("ERR Unrecognized REPLCONF option: �".to_string()),
+        );
+    }
 
     // (CrimsonHawk) The SSCAN/HSCAN borrow `_into` extend-past-cursor-0 strict cursor parse accepts
     // ONLY clean canonical base-10 u64s and declines everything the generic `parse_scan_cursor`

@@ -4,6 +4,45 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — recognized REPLCONF options classify without an owned String; 4.0959x fewer classifier instructions, reply-identical
+
+NEGATIVE-LEDGER-FIRST: the replication WRITE rows reject a risky structured-argv rewrite for a
+syscall-bound workload, and the dispatch/option frontier rows cover user-command fast paths; neither
+measured the eager option-name allocation inside the already-selected runtime REPLCONF handler.
+The REPLCONF ledger entries are correctness/interop proofs for ACK/FACK/GETACK, not performance
+rejections. ONE LEVER: the six recognized options (`ACK`, `FACK`, `GETACK`, `listening-port`,
+`ip-address`, and `capa`) are now classified case-insensitively from their borrowed bytes. The lossy
+UTF-8 string is constructed only for the unknown-option error, preserving its exact rendering, and
+the independently no-inline `classify_replconf_option_owned_reference` retains the literal prior
+lossy-to-owned allocation and ordered string comparisons in the same binary. The required
+`ip-address` value remains owned. Scope is periodic/control-plane REPLCONF traffic, not a claim about
+general request throughput.
+
+REPLY-IDENTICAL: candidate and exact prior classifier compare equal for every 65,536 two-byte value,
+42,000 deterministic byte strings of lengths 0..=20, all known lower/upper/mixed-case spellings,
+empty/unknown values, and invalid UTF-8. A handler regression also pins the replacement-character
+text for an invalid UTF-8 unknown option. ACK/FACK/GETACK early returns, combined ACK+FACK update
+ordering, arity ordering, and owned replica state are unchanged. The focused remote `release-perf`
+runtime differential test passed. A full normal-profile runtime run passed 567 tests (including the
+new and existing REPLCONF cases) and hit only the unrelated pre-existing
+`acl_log_marks_script_denials_as_lua` failure, which reproduced alone. Remote workspace check and
+the complete `fr-conformance` suite passed; touched-crate clippy remained blocked before reaching
+runtime by the pre-existing `fr-simd/src/lib.rs:795` needless-range-loop warning. Rustfmt and diff
+checks were clean. The benchmark repeats the exhaustive/generated correctness gate before timing.
+
+MEASURED (remote-only, one-binary `replconf_option`, `release-perf`, 24 position-balanced
+A/A/reference rounds, 4,000,000 ACK-heavy recognized-option classifications per arm): worker
+`vmi1149989`, binary SHA256
+`66d11db336da38cf47b414df6c49f6b86bd729078c6a6dbf3b211693eed628ff`; candidate median was
+~282.308M instructions versus ~1.156308B reference, or **4.095912846x reference/candidate**
+(**75.5854% fewer instructions**). The A/A null median was **0.999999554**, p5..p95
+**[0.999998052, 1.000002434]**, CV **0.000200%**; effect CV **0.000120%**. Three `perf record`
+trials lost zero samples and verified the exact old
+`classify_replconf_option_owned_reference` frame at **25.63% median self-time** (self-time CV
+**6.0680%**), with `malloc`, `cfree`, UTF-8 chunking, and `String::from_utf8_lossy` also prominent.
+Rollback: restore the eager `String::from_utf8_lossy(&argv[idx]).into_owned()` and its string
+comparisons in `handle_replconf_command`.
+
 ## 2026-07-12: SHIPPED — positive two-digit RESP integers return before sign/accumulator setup; 1.4959x fewer instructions, bit-identical
 
 NEGATIVE-LEDGER-FIRST: the rejected borrowed-command specialized/fused length parsers changed a
