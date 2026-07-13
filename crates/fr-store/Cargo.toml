@@ -103,6 +103,13 @@ name = "packed_zset_index_slice_desc"
 harness = false
 required-features = ["bench-reference"]
 
+# Same-binary, null-gated instruction benchmark for skipping discarded score decodes before a
+# packed ascending index window.
+[[bench]]
+name = "packed_zset_index_slice_asc"
+harness = false
+required-features = ["bench-reference"]
+
 # (cc_fr) Same-binary null-gated A/B for GETSET's old value: clone (MOVE=false) vs move-out
 # (MOVE=true).
 [[bench]]

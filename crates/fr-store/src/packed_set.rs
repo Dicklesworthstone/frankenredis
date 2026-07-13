@@ -4933,11 +4933,42 @@ impl PackedZSet {
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
     #[must_use]
     pub fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        self.iter()
-            .skip(start_idx)
-            .take(count)
-            .map(|(m, s)| (m.to_vec(), s))
-            .collect()
+        self.index_slice_asc_impl::<true>(start_idx, count)
+    }
+
+    /// Shared candidate/reference body for same-binary proof. Production walks discarded records
+    /// by member length and fixed-width score bytes, then decodes only the requested window;
+    /// `SKIP_SCORES=false` retains the exact pre-change iterator chain.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn index_slice_asc_impl<const SKIP_SCORES: bool>(
+        &self,
+        start_idx: usize,
+        count: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        if !SKIP_SCORES {
+            return self
+                .iter()
+                .skip(start_idx)
+                .take(count)
+                .map(|(m, s)| (m.to_vec(), s))
+                .collect();
+        }
+        if count == 0 || start_idx >= self.len {
+            return Vec::new();
+        }
+        let take = count.min(self.len - start_idx);
+        let mut pos = 0;
+        for _ in 0..start_idx {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let mut out = Vec::new();
+        for _ in 0..take {
+            let (member, score, end) = self.record_at(pos);
+            out.push((member.to_vec(), score));
+            pos = end;
+        }
+        out
     }
 
     /// `count` (member, score) pairs starting at descending index `start_idx`
@@ -6419,6 +6450,10 @@ mod tests {
                     let asc_want: Vec<(Vec<u8>, f64)> =
                         sorted.iter().skip(start).take(count).cloned().collect();
                     prop_assert_eq!(packed.index_slice_asc(start, count), asc_want);
+                    prop_assert_eq!(
+                        packed.index_slice_asc(start, count),
+                        packed.index_slice_asc_impl::<false>(start, count)
+                    );
                     let desc_want: Vec<(Vec<u8>, f64)> =
                         sorted_rev.iter().skip(start).take(count).cloned().collect();
                     prop_assert_eq!(packed.index_slice_desc(start, count), desc_want);
@@ -6517,6 +6552,45 @@ mod tests {
                 .collect();
             let reference: Vec<_> = zset
                 .index_slice_desc_impl::<false>(start, count)
+                .into_iter()
+                .map(|(member, score)| (member, score.to_bits()))
+                .collect();
+            assert_eq!(candidate, reference, "slice ({start}, {count}) diverged");
+        }
+    }
+
+    #[test]
+    fn packed_zset_asc_slice_skips_scores_bit_identically() {
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let zset = PackedZSet::from_unique_pairs(vec![
+            (b"negative-nan".to_vec(), negative_nan),
+            (b"negative-infinity".to_vec(), f64::NEG_INFINITY),
+            (b"negative-zero".to_vec(), -0.0),
+            (b"positive-zero".to_vec(), 0.0),
+            (b"tie-a".to_vec(), 15.0),
+            (b"tie-b".to_vec(), 15.0),
+            (b"positive-infinity".to_vec(), f64::INFINITY),
+            (b"positive-nan".to_vec(), positive_nan),
+        ]);
+
+        for (start, count) in [
+            (0, 0),
+            (0, 1),
+            (0, usize::MAX),
+            (1, 3),
+            (zset.len() - 1, 2),
+            (zset.len(), 1),
+            (zset.len() + 1, 1),
+            (usize::MAX, usize::MAX),
+        ] {
+            let candidate: Vec<_> = zset
+                .index_slice_asc(start, count)
+                .into_iter()
+                .map(|(member, score)| (member, score.to_bits()))
+                .collect();
+            let reference: Vec<_> = zset
+                .index_slice_asc_impl::<false>(start, count)
                 .into_iter()
                 .map(|(member, score)| (member, score.to_bits()))
                 .collect();

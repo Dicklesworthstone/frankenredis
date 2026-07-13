@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-12: SHIPPED — packed ascending index slices skip discarded score decodes; 1.6409x fewer instructions, bit-identical
+
+NEGATIVE-LEDGER-FIRST: prior deep-index evidence covers the Full-ZSET adaptive rank tree, while the
+packed-ZSET ledger shipped descending-window materialization and member-only rank scans but neither
+measured nor rejected `PackedZSet::index_slice_asc`. That helper decoded every skipped record's
+eight-byte score even though a deep ascending window cannot observe those values. ONE LEVER:
+production advances across discarded packed records using only each member's encoded length and the
+fixed score width, then calls `record_at` only for the requested window.
+`index_slice_asc_impl::<false>` retains the literal prior iterator `skip/take/map/collect` chain in
+the same binary.
+
+BIT-IDENTICAL: the deterministic candidate/reference test compares member bytes plus raw score bits
+across empty, partial, full, boundary, out-of-range, and `usize::MAX` windows with tied scores,
+signed zero, infinities, and signed NaNs. The generated packed-ZSET property also compares the two
+arms after every generated mutation sequence, and the benchmark correctness gate covers 45 deep,
+boundary, empty, and oversized start/count combinations. Remote focused and full `fr-store` tests,
+workspace check, and the complete `fr-conformance` suite passed; rustfmt and diff checks were clean.
+
+MEASURED (remote-only, one-binary `packed_zset_index_slice_asc`, 24 position-balanced
+A/A/reference rounds, 100,000 `(start=112, count=8)` slices from 120 packed records per arm): worker
+`vmi1227854`, binary SHA256
+`0db5d582a495ba479df9a672473320f9c001e213d9945ecfc845057d73da7632`; candidate was ~535.172M
+instructions versus ~878.171M reference, or **1.640915796x reference/candidate** (**39.0584% fewer
+instructions**). The A/A null median was **1.000000183**, p5..p95
+**[0.999998731, 1.000001256]**, CV **0.000077%**; effect CV **0.000054%**. Three `perf record`
+trials had zero lost samples and verified the exact old
+`PackedZSet::index_slice_asc_impl::<false>` frame at **5.39% median self-time** (self-time CV
+**21.1777%**); its iterator `next` was the top reference frame at 53.16-58.32% self. Rollback: make
+`PackedZSet::index_slice_asc` call `index_slice_asc_impl::<false>`.
+
 ## 2026-07-12: SHIPPED — one-digit RESP integer headers return before general sign/range setup; 1.4948x fewer instructions, bit-identical
 
 NEGATIVE-LEDGER-FIRST: the earlier `parse_i64_strict` keep removed per-digit overflow guards for
