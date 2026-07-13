@@ -7432,3 +7432,25 @@ METHOD (I first tried `lookup_live_for_read_mut_unchecked`) makes the returned e
 don't extract it behind a `&mut self` helper. `lookup_live_for_read_mut` kept its debug-assert
 (non-LFU); the LFU TOUCH path inlines the identical fold. Field-split scoreboard: spop_count LFU
 O(count)→1 1.6-1.7x (9a36ff518), TOUCH LFU 2/key→1 1.8-1.9x (this), srandmember 2→1 sub-gate.
+
+## 2026-07-13 SilverBirch: WIN — LANDED. LFU MGET 3 probes/key → 1 (rng_seed field split) — **1.51–1.80x**
+
+Fourth field-split cash-in, and the hottest command yet. MGET's LFU path did `record_keyspace_lookup`
++ `contains_key` (the lfu_rand gate) + value `get_mut` PER key — THREE keyspace probes each (the
+non-LFU fast path was already collapsed to 1). Folded record+get_mut inline against
+`self.entries.get_mut(key)` and dropped the `contains_key` probe entirely: draw `rand_sample` on the
+disjoint `&mut self.rng_seed` field split while the entry is held (present ⇔ `get_mut` Some ⇔ the
+old `contains_key`-after-record-hit, so the draw condition + value are identical). 3 probes → 1.
+Also hoisted the loop-invariant `!lfu` branch OUT of the per-key loop (the non-LFU fast-path body is
+byte-for-byte the same, just no longer re-tested each element).
+
+Null-gated same-binary A/B (`benches/mget_lfu_collapse.rs`, allkeys-lfu, 50k-key keyspace, SMALL
+values, all-hits, median-of-61): n8 **1.796x**, n64 **1.604x**, n512 **1.510x** — all WIN. A touch
+below TOUCH (1.8-1.9x) because MGET also clones the value (`string_owned`) per key; the win shrinks
+toward 1.0 for LARGE values (clone dominates) but never regresses (strictly fewer probes). Byte/RNG-
+identical: new `mget_lfu_collapsed_matches_threeprobe` (collapsed vs three-probe `_bench` over string
+values / misses / a non-string key / an expired key; asserts results, `rng_seed`, keyspace
+hits/misses, OBJECT FREQ) + 9 mget lib tests, green via rch. Clippy-clean. Field-split scoreboard:
+spop_count LFU 1.6-1.7x, TOUCH LFU 1.8-1.9x, MGET LFU 1.5-1.8x, srandmember 2→1 sub-gate. The LFU
+"structural wall" — `record_keyspace_lookup`(+`contains_key`)+`get_mut` per element with a between
+`next_rand()` — is a REPEATING shape; grep other multi-key/count LFU reads (HMGET already collapsed).

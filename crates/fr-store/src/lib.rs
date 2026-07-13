@@ -8950,25 +8950,14 @@ impl Store {
     /// MGET returns values for each key; non-string keys return None (like Redis).
     #[must_use]
     pub fn mget(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            // (frankenredis-cc get-ttl-lru-single-lookup) Per-key cache-config collapse:
-            // with LFU off, MGET consumes no RNG and only LRU-touches, so the slow path's
-            // `record_keyspace_lookup` (drop_if_expired probe) + value `get_mut` double
-            // keyspace lookup collapses to ONE `get_mut`. Peek expiry (delegating an
-            // expired key to the full `drop_if_expired`), else a single `get_mut` serves
-            // hit/miss accounting + the value. Byte-identical to the LFU path below for a
-            // non-LFU read (no RNG, same drops/stats/touch/non-string→None behaviour).
-            if !lfu_tracking_enabled {
-                // (CrimsonHawk) Short-circuit the per-key expiry PEEK when the store holds
-                // no TTL-bearing keys at all (`expires_count == 0`): `expiry_ms` otherwise
-                // foldhash-hashes every key + probes the deadline map on each MGET element,
-                // pure waste when nothing can expire. Byte-identical — with no expiry the
-                // key never evicts, so `should_evict` is already false. Mirrors GET's
-                // no-TTL fast path; the hoist matters per-element on multi-key MGET.
+        // (frankenredis-cc get-ttl-lru-single-lookup) With LFU off, MGET consumes no RNG and only
+        // LRU-touches, so `record_keyspace_lookup` (drop_if_expired probe) + value `get_mut`
+        // collapses to ONE `get_mut` per key. (CrimsonHawk) Short-circuit the per-key expiry PEEK
+        // when the store holds no TTL-bearing keys (`expires_count == 0`) — pure waste otherwise.
+        // The lfu branch is loop-invariant, so it is hoisted OUT of the per-key loop (byte-identical).
+        if !self.lfu_tracking_enabled() {
+            let mut results = Vec::with_capacity(keys.len());
+            for key in keys {
                 if self.expires_count != 0
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
@@ -8991,33 +8980,90 @@ impl Store {
                         results.push(None);
                     }
                 }
-                continue;
             }
-            if !self.record_keyspace_lookup(key, now_ms) {
-                results.push(None);
-                continue;
-            }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(*key) {
-                self.next_rand()
-            } else {
-                0
-            };
-            let val = match self.entries.get_mut(*key) {
-                Some(entry) => {
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    let v = entry.value.string_owned();
-                    if v.is_some() {
-                        entry.touch(now_ms);
-                    }
-                    v
+            return results;
+        }
+        self.mget_lfu_impl::<true>(keys, now_ms)
+    }
+
+    /// A/B toggle for the LFU MGET keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` + the value `get_mut` into ONE probe per key AND drops the separate
+    /// `contains_key` probe (the prior lfu_rand gate) — 3 probes/key → 1 — by drawing `rand_sample`
+    /// on the disjoint `&mut self.rng_seed` field split while the `get_mut` entry is held (breaking
+    /// the "structural LFU wall"). `false` is the prior three-probe form. Byte/RNG-identical: same
+    /// keyspace hit/miss accounting, same `next_rand()` draw per PRESENT key, same LFU bump, LRU
+    /// touch, and non-string→None. Only reached with LFU tracking on.
+    fn mget_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Vec<Option<Vec<u8>>> {
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            if COLLAPSE {
+                if self.expires_count != 0
+                    && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+                {
+                    self.drop_if_expired(key, now_ms);
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    results.push(None);
+                    continue;
                 }
-                None => None,
-            };
-            results.push(val);
+                match self.entries.get_mut(*key) {
+                    Some(entry) => {
+                        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        let v = entry.value.string_owned();
+                        if v.is_some() {
+                            entry.touch(now_ms);
+                        }
+                        results.push(v);
+                    }
+                    None => {
+                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                        results.push(None);
+                    }
+                }
+            } else {
+                if !self.record_keyspace_lookup(key, now_ms) {
+                    results.push(None);
+                    continue;
+                }
+                let rand_sample = if self.entries.contains_key(*key) {
+                    self.next_rand()
+                } else {
+                    0
+                };
+                let val = match self.entries.get_mut(*key) {
+                    Some(entry) => {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        let v = entry.value.string_owned();
+                        if v.is_some() {
+                            entry.touch(now_ms);
+                        }
+                        v
+                    }
+                    None => None,
+                };
+                results.push(val);
+            }
         }
         results
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn mget_lfu_collapsed_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+        self.mget_lfu_impl::<true>(keys, now_ms)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn mget_lfu_threeprobe_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+        self.mget_lfu_impl::<false>(keys, now_ms)
     }
 
     pub fn setnx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
@@ -46246,6 +46292,47 @@ mod tests {
         assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
         assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
         assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
+    }
+
+    #[test]
+    fn mget_lfu_collapsed_matches_threeprobe() {
+        // Under allkeys-lfu the collapsed MGET (one get_mut fold + rng_seed field-split draw) must
+        // be byte-identical to the prior record + contains_key + get_mut three-probe form across
+        // values, misses, a non-string key, and an expired key: results, keyspace hits/misses, RNG
+        // state, and per-key LFU freq.
+        fn build() -> Store {
+            let mut s = Store::new();
+            s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            s.lfu_decay_time = 0;
+            for i in 0..64usize {
+                s.set(format!("s{i:03}").into_bytes(), format!("v{i}").into_bytes(), None, 1);
+            }
+            s.rpush(b"list", &[b"a".to_vec()], 1).unwrap(); // non-string ⇒ None but still a hit+bump
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let keys_owned: Vec<Vec<u8>> = vec![
+            b"s000".to_vec(),
+            b"absent".to_vec(),
+            b"s010".to_vec(),
+            b"list".to_vec(),
+            b"ttl".to_vec(),
+            b"s063".to_vec(),
+            b"s000".to_vec(),
+        ];
+        let keys: Vec<&[u8]> = keys_owned.iter().map(|k| k.as_slice()).collect();
+        let now = 10;
+        let mut a = build();
+        let mut b = build();
+        let ra = a.mget_lfu_collapsed_bench(&keys, now);
+        let rb = b.mget_lfu_threeprobe_bench(&keys, now);
+        assert_eq!(ra, rb, "results");
+        assert_eq!(a.rng_seed, b.rng_seed, "rng_seed");
+        assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits");
+        assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses");
+        for probe in [b"s000".as_slice(), b"s010", b"s063", b"list"] {
+            assert_eq!(a.object_freq(probe, now), b.object_freq(probe, now), "object_freq {probe:?}");
+        }
     }
 
     #[test]
