@@ -8967,3 +8967,39 @@ formatted. UBS ran with Rust build categories disabled; its nonzero output is th
 legacy/test heuristic inventory (including false security matches on flags and internal decode
 names), with no actionable finding in the owned visitor or call-site hunks. Every Cargo invocation
 used strict remote RCH with no local fallback.
+## 2026-07-14 CalmHeron: INVALID HOLD — NO-SHIP. LFU ZREVRANK WITHSCORE probe-collapse harness aborted before the timed path (frankenredis-n9pjx)
+
+Negative-ledger-first routing took the explicitly untouched `ZREVRANK key member WITHSCORE`
+sibling of the landed plain-ZREVRANK collapse. Source attribution was concrete: the live WITHSCORE
+route still performs `record_keyspace_lookup` + `entries.contains_key` + `entries.get_mut` under
+allkeys-LFU, while the preceding packed-singleton ZREVRANK profile attributed **23.81% self** to the
+removable `HashMap::contains_key`, **19.03%** to the retained `get_mut`, and **8.66%** to hashing.
+
+The one allowed foreground invocation was fail-closed and remote-only:
+`RCH_WORKER=vmi1152480 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench
+--profile release -p fr-store --features bench-reference --bench
+zrevrank_withscore_lfu_collapse`. It built and launched release executable SHA-256
+`b752ee4f157ba4ba6deb6c72d5e5b79a75ec41a14bc64864981a09b226f12d64` on worker
+`vmi1152480`, then aborted before `perf record` started because that worker's perf version rejects
+the harness's `--stats` option (`Error: unknown option 'stats'`). Therefore the exact changed
+function has **no self-time sample**, the timed A/A+A/B routine never ran, and there is no null
+median, spread, candidate ratio, or `cv_pct`. This is **INVALID evidence**, not a performance reject.
+
+No production optimization shipped. `Store::zrank_withscore` retains its exact prior body; the
+one-probe candidate and three-probe control are available only under `cfg(test)` or the
+`bench-reference` feature. The harness was corrected by removing the unsupported perf flag and is
+retained for a future one-invocation remeasurement; the one-benchmark constraint prohibited a retry
+this turn.
+
+Correctness evidence before the aborted measurement was green: the focused state-isomorphism test
+passed remotely across packed/full zsets, member hit/miss, cold/warm rank cache, live/expired TTL,
+absent/wrong-type keys, LFU on/off, result bits, RNG, hit/miss counters, entry/access metadata,
+expiry/lazy-expiry state, dirty state, and the full digest. Workspace/all-target check passed, and
+`fr-conformance` passed all 347 asserting tests (194 library + 99 smoke + 54 auxiliary/integration),
+including live `core_zset` 324/324. The live oracle retained only its known non-asserting surface:
+1 config-ordering mismatch, 1 function-ordering mismatch, 8 replication-state mismatches, and 2
+transport timeouts. Focused UBS exited 0 with zero criticals after disabling its build and broad
+heuristic packs; remaining warnings are deterministic benchmark indexing/setup. Workspace clippy
+remains blocked outside this hunk by the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop` and the existing fr-store lint inventory. No Cargo command fell back
+locally.

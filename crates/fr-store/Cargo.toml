@@ -452,6 +452,13 @@ harness = false
 name = "zrevrank_lfu_collapse"
 harness = false
 
+# (frankenredis-n9pjx) Same-binary A/B for the explicitly untouched reverse WITHSCORE sibling:
+# collapse record + contains_key + get_mut into one LFU get_mut while keeping ZRANK unchanged.
+[[bench]]
+name = "zrevrank_withscore_lfu_collapse"
+harness = false
+required-features = ["bench-reference"]
+
 # A/B for LFU HGET (borrowing hget_with) probe collapse: no-field-TTL fast path skips the reap +
 # folds record+get_mut + drops contains_key via rng_seed field-split (1 probe) vs the prior 3-probe
 # form; hget_with borrows the value so probes dominate. Byte/RNG-identical.

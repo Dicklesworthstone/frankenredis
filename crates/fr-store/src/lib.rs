@@ -22557,6 +22557,60 @@ impl Store {
         }
     }
 
+    /// Exact prior three-probe LFU `ZREVRANK ... WITHSCORE` path for same-binary measurement.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "bench-reference"))]
+    pub fn zrevrank_withscore_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<(usize, f64)>, StoreError> {
+        self.zrank_withscore(key, member, true, now_ms)
+    }
+
+    /// Collapsed LFU `ZREVRANK ... WITHSCORE` arm for a symmetric same-binary A/B harness.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "bench-reference"))]
+    pub fn zrevrank_withscore_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<(usize, f64)>, StoreError> {
+        if !self.lfu_tracking_enabled() {
+            return self.zrank_withscore(key, member, true, now_ms);
+        }
+        if self.expires_count != 0
+            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+            return Ok(None);
+        }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let result = zs.rev_rank_with_score(member);
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                Ok(None)
+            }
+        }
+    }
+
     /// Return elements sorted ascending by score, by index range.
     pub fn zrange(
         &mut self,
@@ -52840,6 +52894,100 @@ mod tests {
                     );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zrevrank_withscore_lfu_collapsed_matches_threeprobe() {
+        // The WITHSCORE reverse-rank route must preserve result bits, LFU sampling, access
+        // metadata, expiry behavior, mutable rank caches, and the complete store digest.
+        fn build(lfu: bool) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store.zset_max_listpack_entries = 1;
+            store
+                .zadd(b"packed", &[(1.25, b"m".to_vec())], 1)
+                .unwrap();
+            store
+                .zadd(
+                    b"full",
+                    &[(2.5, b"m".to_vec()), (3.5, b"n".to_vec())],
+                    1,
+                )
+                .unwrap();
+            store.zadd(b"live", &[(4.5, b"m".to_vec())], 1).unwrap();
+            assert!(store.expire_at_milliseconds(b"live", 100, 1));
+            store
+                .zadd(b"expired", &[(5.5, b"m".to_vec())], 1)
+                .unwrap();
+            assert!(store.expire_at_milliseconds(b"expired", 5, 1));
+            store.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            store
+        }
+
+        let now = 10;
+        let probes: &[(&[u8], &[u8], usize)] = &[
+            (b"packed", b"m", 1),
+            (b"packed", b"x", 1),
+            // Repeat the full representation to compare cold rank-tree construction and its cache.
+            (b"full", b"m", 2),
+            (b"full", b"x", 2),
+            (b"live", b"m", 1),
+            (b"absent", b"m", 1),
+            (b"str", b"m", 1),
+            (b"expired", b"m", 1),
+        ];
+        for lfu in [true, false] {
+            for &(key, member, repeats) in probes {
+                let mut collapsed = build(lfu);
+                let mut prior = build(lfu);
+                for repeat in 0..repeats {
+                    let collapsed_result = collapsed
+                        .zrevrank_withscore_lfu_collapsed_bench(key, member, now);
+                    let prior_result =
+                        prior.zrevrank_withscore_lfu_threeprobe_bench(key, member, now);
+                    let tag =
+                        format!("lfu={lfu} key={key:?} member={member:?} repeat={repeat}");
+                    assert_eq!(collapsed_result, prior_result, "result {tag}");
+                    assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                    assert_eq!(
+                        collapsed.stat_keyspace_hits, prior.stat_keyspace_hits,
+                        "hits {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.entries.get(key),
+                        prior.entries.get(key),
+                        "entry {tag}"
+                    );
+                    assert_eq!(collapsed.expiry_ms(key), prior.expiry_ms(key), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.expires_count, prior.expires_count,
+                        "expires_count {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_expired_keys, prior.stat_expired_keys,
+                        "expired stats {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.lazy_expired_propagation,
+                        prior.lazy_expired_propagation,
+                        "lazy expiry {tag}"
+                    );
+                    assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                    assert_eq!(
+                        collapsed.state_digest(),
+                        prior.state_digest(),
+                        "state_digest {tag}"
+                    );
                 }
             }
         }
