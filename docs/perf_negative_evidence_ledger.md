@@ -8,6 +8,43 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — skip completed nodes for tail-bounded XRANGE (`frankenredis-haws3`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the explicitly multi-day
+  `frankenredis-b1o02` packed-hash representation project unassigned.  Existing rows had already
+  closed the bounded XADD append seams, so this turn pivoted to a fresh stream-read residual:
+  lower-bounded XRANGE requests wholly inside the active tail still backed the completed-node
+  B-tree range up to the preceding node and filtered its entries one by one.
+- **Profile/attribution first:** one strict-remote `--profile release` run on worker
+  `vmi1149989` exercised the production tail-bounded range over 10,000 entries and collected 318
+  `instructions:u` samples with zero lost.  Completed-node iterator `try_fold` carried **55.95%
+  self**, `FieldsRefIter::next` **11.99%**, the exact profile driver **10.30%**, the two B-tree
+  range searches **6.12% + 6.02%**, and chained iteration **5.62%**.  Binary SHA-256 was
+  `858ce050378cf7352c3e20ffadced5e51917d5366eac56ab8af4ce77706ad351`; total RCH wall time
+  was **105.7 s**.  This non-zero attribution selected exactly one lever.
+- **One concrete lever:** when an included or excluded lower bound is at or beyond the active
+  tail's first ID, `PackedStreamLog::range` now gives that same bound to the completed-node
+  B-tree range instead of backing up to the last completed node.  Completed-node keys are
+  strictly below the tail, so that arm becomes empty while the existing chained tail iterator and
+  exact entry-bound filter remain unchanged.  The same binary retained the former completed-node
+  lower-bound logic as the reference arm.
+- **Foreground A/A+A/B result:** the single decisive strict-remote command was
+  `cargo bench --profile release -p fr-store --bench xrange_borrow_scan_lfu_collapse -- --tail-range`
+  on `vmi1152480`; total RCH wall time was **122.8 s** and binary SHA-256 was
+  `41a37daa118a49c00327acdefd9644903c84c9cfdf47f357f239eea665939ef9`.  One binary ran
+  21 measured, position-balanced rounds at 200,000 repetitions for XRANGE COUNT 8 starting at
+  the first active-tail ID.  Reference/direct measured **2.930220x**, clearing the
+  reference/reference null median **1.000000x** and p05..p95 **[0.999999, 1.000001]**; null and
+  effect CV were both **0.0001%**.
+- **Behavior and gates:** the same-binary harness asserted exact ID and field-pair parity before
+  timing.  A focused strict-remote release test also covered included/excluded tail starts,
+  mid-tail bounds, above-last bounds, completed-node-to-tail spans, unbounded ranges, and forward
+  plus reverse iteration; it passed 1/1 on `vmi1152480`.  Direct rustfmt, whitespace validation,
+  and Rust UBS with the established project exclusions passed; UBS reported no critical findings.
+- **Boundary:** **SHIP only for lower bounds at or beyond the active tail's first ID.**  Completed-
+  node and unbounded XRANGE behavior, reverse traversal, stream encoding, and XADD semantics are
+  unchanged.
+
 ## 2026-07-14 CalmHeron: NEGATIVE — NO-SHIP. active-expire live-key clone elision is null-drowned (`frankenredis-auer7`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the explicitly multi-day

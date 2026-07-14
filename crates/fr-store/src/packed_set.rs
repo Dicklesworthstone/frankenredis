@@ -2220,18 +2220,30 @@ impl PackedStreamLog {
             .flat_map(|node| node.entries.iter().map(|entry| &entry.id))
     }
 
-    /// Iterate `(&id, FieldsRef)` over a stream-id range; double-ended for
-    /// XREVRANGE's `.rev()`.
-    pub fn range<R: std::ops::RangeBounds<(u64, u64)>>(
+    fn range_impl<const TAIL_DIRECT: bool, R: std::ops::RangeBounds<(u64, u64)>>(
         &self,
         bounds: R,
     ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
         let lower = match bounds.start_bound() {
-            std::ops::Bound::Included(id) | std::ops::Bound::Excluded(id) => self
-                .nodes
-                .range(..=*id)
-                .next_back()
-                .map_or(*id, |(key, _)| *key),
+            std::ops::Bound::Included(id) | std::ops::Bound::Excluded(id) => {
+                let starts_in_tail = TAIL_DIRECT
+                    && self
+                        .tail
+                        .as_ref()
+                        .and_then(StreamNode::first_id)
+                        .is_some_and(|tail_first| *id >= tail_first);
+                if starts_in_tail {
+                    // Completed-node keys are strictly below the active tail. Starting the B-tree
+                    // range at the requested tail id therefore suppresses the prior last-node
+                    // replay while leaving the chained tail and exact bound filter unchanged.
+                    *id
+                } else {
+                    self.nodes
+                        .range(..=*id)
+                        .next_back()
+                        .map_or(*id, |(key, _)| *key)
+                }
+            }
             std::ops::Bound::Unbounded => (0, 0),
         };
         self.nodes
@@ -2244,6 +2256,24 @@ impl PackedStreamLog {
                     .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
             })
             .filter(move |(id, _)| stream_id_in_bounds(&bounds, id))
+    }
+
+    /// Iterate `(&id, FieldsRef)` over a stream-id range; double-ended for
+    /// XREVRANGE's `.rev()`.
+    pub fn range<R: std::ops::RangeBounds<(u64, u64)>>(
+        &self,
+        bounds: R,
+    ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
+        self.range_impl::<true, R>(bounds)
+    }
+
+    /// Exact pre-tail-direct range lower bound for same-binary benchmark and parity proof.
+    #[doc(hidden)]
+    pub fn bench_range_completed_node_reference<R: std::ops::RangeBounds<(u64, u64)>>(
+        &self,
+        bounds: R,
+    ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
+        self.range_impl::<false, R>(bounds)
     }
 
     fn maybe_compact(&mut self) {
@@ -5612,6 +5642,49 @@ mod tests {
             fallback.bench_insert_fallback((500, 0), &after_empty)
         );
         assert_same(&candidate, &fallback);
+    }
+
+    #[test]
+    fn packed_stream_tail_direct_range_matches_completed_node_reference_haws3() {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let mut log = PackedStreamLog::new();
+        for sequence in 1..=250_u64 {
+            let fields = [(b"field".to_vec(), sequence.to_string().into_bytes())];
+            assert!(!log.insert((1, sequence), &fields));
+        }
+
+        let bounds = [
+            (Included((1, 201)), Unbounded),
+            (Excluded((1, 201)), Unbounded),
+            (Included((1, 225)), Included((1, 240))),
+            (Excluded((1, 250)), Unbounded),
+            (Included((1, 151)), Included((1, 225))),
+            (Unbounded, Included((1, 8))),
+        ];
+        for bounds in bounds {
+            let candidate = log
+                .range(bounds)
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            let reference = log
+                .bench_range_completed_node_reference(bounds)
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            assert_eq!(candidate, reference, "forward bounds {bounds:?}");
+
+            let candidate_rev = log
+                .range(bounds)
+                .rev()
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            let reference_rev = log
+                .bench_range_completed_node_reference(bounds)
+                .rev()
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            assert_eq!(candidate_rev, reference_rev, "reverse bounds {bounds:?}");
+        }
     }
 
     use indexmap::{IndexMap, IndexSet};
