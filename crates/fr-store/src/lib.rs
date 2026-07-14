@@ -16636,7 +16636,7 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpush_impl::<M, true, true>(key, values, now_ms)
+        self.lpush_impl::<M, true, true, true>(key, values, now_ms)
     }
 
     /// Bench-only baseline: LPUSH that materializes an owned `Vec` per element (`BORROW = false`)
@@ -16650,7 +16650,19 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpush_impl::<M, false, true>(key, values, now_ms)
+        self.lpush_impl::<M, false, true, true>(key, values, now_ms)
+    }
+
+    /// Bench-only baseline retaining `PackedList`'s former temporary-Vec plus `splice` prepend.
+    /// The borrowed command/store path and every non-packed representation remain production-identical.
+    #[doc(hidden)]
+    pub fn lpush_splice_bench<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.lpush_impl::<M, true, true, false>(key, values, now_ms)
     }
 
     /// Bench-only baseline: LPUSH with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
@@ -16665,10 +16677,15 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpush_impl::<M, true, false>(key, values, now_ms)
+        self.lpush_impl::<M, true, false, true>(key, values, now_ms)
     }
 
-    fn lpush_impl<M: AsRef<[u8]>, const BORROW: bool, const COLLAPSE: bool>(
+    fn lpush_impl<
+        M: AsRef<[u8]>,
+        const BORROW: bool,
+        const COLLAPSE: bool,
+        const DIRECT_PREPEND: bool,
+    >(
         &mut self,
         key: &[u8],
         values: &[M],
@@ -16711,10 +16728,14 @@ impl Store {
                             let bytes = v.as_ref();
                             raw_add += bytes.len() as u64;
                             if BORROW {
-                l.push_front_borrowed(bytes);
-            } else {
-                l.push_front(bytes.to_vec());
-            }
+                                if DIRECT_PREPEND {
+                                    l.push_front_borrowed(bytes);
+                                } else {
+                                    l.push_front_borrowed_splice_bench(bytes);
+                                }
+                            } else {
+                                l.push_front(bytes.to_vec());
+                            }
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
@@ -16736,10 +16757,14 @@ impl Store {
                     let bytes = v.as_ref();
                     raw_add += bytes.len() as u64;
                     if BORROW {
-                l.push_front_borrowed(bytes);
-            } else {
-                l.push_front(bytes.to_vec());
-            }
+                        if DIRECT_PREPEND {
+                            l.push_front_borrowed(bytes);
+                        } else {
+                            l.push_front_borrowed_splice_bench(bytes);
+                        }
+                    } else {
+                        l.push_front(bytes.to_vec());
+                    }
                 }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),

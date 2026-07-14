@@ -2865,10 +2865,31 @@ impl PackedList {
         self.len += 1;
     }
 
-    pub fn push_front(&mut self, elem: &[u8]) {
-        let enc = Self::encode(elem);
-        self.buf.splice(0..0, enc);
+    fn push_front_impl<const DIRECT: bool>(&mut self, elem: &[u8]) {
+        if DIRECT {
+            let (prefix, prefix_len) = encode_varint_array(elem.len());
+            let record_len = prefix_len + elem.len();
+            let old_len = self.buf.len();
+            self.buf.reserve(record_len);
+            self.buf.resize(old_len + record_len, 0);
+            self.buf.copy_within(0..old_len, record_len);
+            self.buf[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+            self.buf[prefix_len..record_len].copy_from_slice(elem);
+        } else {
+            let enc = Self::encode(elem);
+            self.buf.splice(0..0, enc);
+        }
         self.len += 1;
+    }
+
+    pub fn push_front(&mut self, elem: &[u8]) {
+        self.push_front_impl::<true>(elem);
+    }
+
+    /// Exact pre-optimization prepend retained for same-binary LPUSH measurement.
+    #[doc(hidden)]
+    pub fn push_front_splice_bench(&mut self, elem: &[u8]) {
+        self.push_front_impl::<false>(elem);
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
@@ -4175,13 +4196,24 @@ impl ListValue {
         }
     }
 
-    pub fn push_front_borrowed(&mut self, elem: &[u8]) {
+    fn push_front_borrowed_impl<const DIRECT: bool>(&mut self, elem: &[u8]) {
         self.add_entry_bytes(elem);
         self.maybe_promote(elem.len());
         match &mut self.repr {
-            ListRepr::Packed(p) => p.push_front(elem),
+            ListRepr::Packed(p) if DIRECT => p.push_front(elem),
+            ListRepr::Packed(p) => p.push_front_splice_bench(elem),
             ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem.to_vec(), self.fill),
         }
+    }
+
+    pub fn push_front_borrowed(&mut self, elem: &[u8]) {
+        self.push_front_borrowed_impl::<true>(elem);
+    }
+
+    /// Exact splice-prepend reference for the same-binary packed LPUSH A/B.
+    #[doc(hidden)]
+    pub fn push_front_borrowed_splice_bench(&mut self, elem: &[u8]) {
+        self.push_front_borrowed_impl::<false>(elem);
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
@@ -6269,6 +6301,23 @@ mod tests {
         assert_eq!(right.get(right.len() - 1), Some(&b"suffix__"[..]));
         assert_eq!(left.len(), original_len - 1);
         assert_eq!(right.len(), original_len + 2);
+    }
+
+    #[test]
+    fn packed_list_direct_prepend_matches_splice_reference() {
+        let values = [0, 1, 2, 63, 64, 127, 128, 255, 16_383, 16_384].map(|len| {
+            (0..len)
+                .map(|idx| u8::try_from(idx % 251).expect("modulo result fits u8"))
+                .collect::<Vec<_>>()
+        });
+        let mut direct = PackedList::new();
+        let mut splice = PackedList::new();
+        for value in values {
+            direct.push_front(&value);
+            splice.push_front_splice_bench(&value);
+            assert_eq!(direct.buf, splice.buf, "length {}", value.len());
+            assert_eq!(direct.len(), splice.len());
+        }
     }
 
     proptest! {

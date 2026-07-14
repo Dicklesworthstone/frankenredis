@@ -8,6 +8,41 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — prepend packed LPUSH elements in place (`frankenredis-6lgnu`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` surfaced the stale broad hot-write bead.
+  Recent ledger rows already showed ZADD/SADD at parity or faster, while the earlier packed-list
+  direct-prepend rejection explicitly allowed a retry only if a fresh profile named
+  `PackedList::push_front`.  This turn therefore claimed only the remaining packed LPUSH slice;
+  batch wrappers and the previously rejected large-list representation ideas were not retried.
+- **Profile/attribution first:** one strict-remote `--profile release` run on worker
+  `vmi1152480` profiled 1.28 million production small packed LPUSH operations with 96 `cycles:u`
+  samples and zero lost samples.  The exact old path attributed **39.01% self** to
+  `Vec::splice::Splice::drop`, **16.99%** to `PackedList::encode`, **14.25%** to `memmove`,
+  **3.51%** each to `PackedList::push_front` and `ListValue::push_front_borrowed`, plus visible
+  allocator frames.  That non-zero attribution satisfied the old row's retry condition.
+- **One concrete lever:** the packed-list LPUSH path now reserves and grows its encoded byte
+  buffer once, shifts the existing payload with `copy_within`, and writes the varint length plus
+  element bytes directly into the new prefix.  It removes the temporary encoded `Vec` and
+  `Vec::splice` machinery; deque-backed lists, command semantics, and reply construction are
+  unchanged.  The hidden reference arm retains the former splice path solely for same-binary
+  measurement.
+- **Foreground A/A+A/B result:** the single strict-remote command was
+  `cargo bench --profile release -p fr-store --bench lpush_borrow` on `vmi1152480`; total RCH wall
+  time was **122.1 s** and binary SHA-256 was
+  `1026739ea99fdf13d6b553dc359bdb6e6aaa64895629734f6b136c202bb4a5b7`.  One binary interleaved
+  position-balanced 8 ms segments for 41 rounds over 50 keys x 100 24-byte elements.  Direct over
+  splice measured **1.8152x** with effect CV **16.61%**, clearing the direct/direct null median
+  **0.9981x** and p05..p95 **[0.797, 1.310]** (null CV 27.02%).
+- **Behavior and gates:** the harness asserted identical LLEN and full LRANGE replies before
+  timing.  The focused direct-vs-splice boundary test passed for element lengths 0, 1, 2, 63, 64,
+  127, 128, 255, 16,383, and 16,384, checking byte-identical packed buffers after every prepend.
+  That strict-remote release test passed 1/1; direct rustfmt and `git diff --check` passed.  UBS
+  exited zero with no critical findings.  Strict-remote `cargo fmt --check` was refused
+  fail-closed as non-compilation (`RCH-E301`), so the owned Rust files were checked directly.
+- **Boundary:** **SHIP for small packed LPUSH only.**  This remains an O(n) in-buffer move and
+  makes no claim about deque-backed or large-list structural gaps.
+
 ## 2026-07-14 CalmHeron: NEGATIVE — NO-SHIP. cold compact-ZSET DUMP bitwise score classifier is null-drowned (`frankenredis-hdyw0`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` surfaced the broad stale
