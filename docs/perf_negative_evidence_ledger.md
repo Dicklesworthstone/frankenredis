@@ -7899,3 +7899,27 @@ DIGEST). Full fr-store lib suite correctness pass.
 VEIN: direct-get_mut shape now has a CLEAN land (LTRIM) — proves the LSET sub-gate was OWNED-VALUE
 dilution, NOT the direct-get_mut shape. LSET reverted; the grow/shrink list ops (lpush/rpush/lpop/
 linsert/lrem) that also take values or grow still need instructions:u or an idempotent non-growing form.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`6bc647124`). LFU LPOP-count write-side 2 probes → 1 (DIRECT get_mut + rng_seed field split) — **1.34-1.37x**
+
+Another direct-`get_mut` member of the LFU write-side field-split vein
+([[project_lfu_write_side_field_split_vein]]), value-free like LTRIM (takes only a `count: usize`, no
+owned value → no dilution). `lpop_count` under allkeys-lfu did two `entries` probes: a `contains_key`
+LFU rand-gate before `get_mut`. It is a direct-`get_mut` write (no `with_mutated_entry` — it
+`mark_digest_stale`s), so the collapse just RELOCATES the `rand_sample` draw inside the `get_mut` borrow
+via the disjoint `&mut self.rng_seed` field split — no digest replica. Byte/RNG-identical: the
+field-split draw advances `rng_seed` exactly as `next_rand`, present-key-gated as before (a `None`
+get_mut draws nothing; LFU off neither draws). Const-generic `lpop_count_impl<COLLAPSE>` +
+`lpop_count_lfu_twoprobe_bench`.
+
+BENCH PROXY: `LPOP key 0` pops nothing (non-growing, no value arg) — the same probe collapse that helps
+`LPOP key N` for any N (batch queue-drain). A/B (`benches/lpop_count_lfu_collapse.rs`, allkeys-lfu, 50k
+3-element lists, count-0, common already-stale-digest path, median-of-61): n32 **1.365x** (null med 1.0144, p5..p95 [0.917, **1.226**], cv 10.56%); n256 **1.343x** (null med 1.0170, p5..p95 [0.888, **1.139**], cv 8.36%) — BOTH clean gate-clear WINs. Gated by
+`lpop_count_lfu_collapsed_matches_twoprobe` (count=0 no-op / partial / single / pop-all-removes-key /
+absent / wrongtype / expired × LFU on&off — asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST).
+Full fr-store lib suite correctness pass.
+
+VEIN direct-get_mut value-free family: LTRIM + LPOP-count landed. SIBLINGS still uncollapsed (same
+identical pattern, follow-ups): single `lpop`/`rpop` (16168/16291) + `rpop_count` — but they
+SHRINK/single-pop → need count-0/idempotent proxies or instructions:u. Value-taking list ops
+(lpush/rpush/linsert/lrem) risk owned-value dilution → instructions:u.
