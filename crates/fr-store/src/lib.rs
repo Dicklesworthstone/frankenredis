@@ -20980,6 +20980,21 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
+        self.zscore_impl::<true>(key, member, now_ms)
+    }
+
+    /// A/B toggle for the LFU ZSCORE keyspace-probe collapse. `COLLAPSE = true` folds
+    /// `record_keyspace_lookup` + the `contains_key` random-sample gate + the value `get_mut`
+    /// from three `entries` probes into one. The successful `get_mut` is the presence gate and
+    /// advances `rng_seed` through the byte-identical field-split LCG before the type check, so a
+    /// present wrong-type key still draws and bumps LFU but does not touch. `false` retains the
+    /// exact prior LFU path for same-binary measurement. The non-LFU path is unchanged.
+    fn zscore_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
@@ -20994,22 +21009,47 @@ impl Store {
                 None => Ok(None),
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(None);
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    match &entry.value {
+                        Value::SortedSet(zs) => {
+                            let result = zs.get_score(member);
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(None)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
         };
         match self.entries.get_mut(key) {
             Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         let result = zs.get_score(member);
@@ -21021,6 +21061,28 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// Exact prior three-probe LFU ZSCORE path for the same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn zscore_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
+        self.zscore_impl::<false>(key, member, now_ms)
+    }
+
+    /// Collapsed LFU ZSCORE arm for a symmetric same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn zscore_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
+        self.zscore_impl::<true>(key, member, now_ms)
     }
 
     /// Return cardinality of sorted set.
@@ -49081,6 +49143,71 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq");
+        }
+    }
+
+    #[test]
+    fn zscore_lfu_collapsed_matches_threeprobe() {
+        // The LFU ZSCORE collapse must preserve the prior three-probe path's complete observable
+        // state. In particular, a missing member remains a keyspace hit with a draw, bump, and
+        // touch; WRONGTYPE draws and bumps but does not touch; absent/expired keys do not draw.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.zset_max_listpack_entries = 1;
+            s.zadd(b"packed", &[(1.25, b"m".to_vec())], 1).unwrap();
+            s.zadd(b"full", &[(2.5, b"m".to_vec()), (3.5, b"n".to_vec())], 1)
+                .unwrap();
+            s.zadd(b"live", &[(4.5, b"m".to_vec())], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"live", 100, 1));
+            s.zadd(b"expired", &[(5.5, b"m".to_vec())], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"expired", 5, 1));
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s
+        }
+
+        let now = 10;
+        let probes: &[(&[u8], &[u8])] = &[
+            (b"packed", b"m"),
+            (b"packed", b"x"),
+            (b"full", b"m"),
+            (b"full", b"x"),
+            (b"live", b"m"),
+            (b"absent", b"m"),
+            (b"str", b"m"),
+            (b"expired", b"m"),
+        ];
+        for lfu in [true, false] {
+            for &(key, member) in probes {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.zscore_lfu_collapsed_bench(key, member, now);
+                let rb = b.zscore_lfu_threeprobe_bench(key, member, now);
+                let tag = format!("lfu={lfu} key={key:?} member={member:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(a.entries.get(key), b.entries.get(key), "entry {tag}");
+                assert_eq!(a.expiry_ms(key), b.expiry_ms(key), "expiry {tag}");
+                assert_eq!(a.expires_count, b.expires_count, "expires_count {tag}");
+                assert_eq!(
+                    a.stat_expired_keys, b.stat_expired_keys,
+                    "expired stats {tag}"
+                );
+                assert_eq!(
+                    a.lazy_expired_propagation, b.lazy_expired_propagation,
+                    "lazy expiry {tag}"
+                );
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 

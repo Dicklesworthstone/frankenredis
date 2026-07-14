@@ -8175,3 +8175,40 @@ lib.rs edits mid-turn (working tree reverted, their zscore re-applied) — re-ap
 ran test+bench SNAPSHOT-protected (rch snapshots at launch), re-verified + committed fast. LESSON: under
 an active peer, launch the rch test IMMEDIATELY after editing (snapshots your work), and re-grep your
 symbols before staging. FOLLOW-UP: SMEMBERS/`sscan0_borrow_scan` (same shape).
+
+## 2026-07-13 MistyOsprey: WIN — KEEP. LFU ZSCORE 3 probes -> 1 — **1.82-1.94x**
+
+Negative-ledger-first routing found ZSCORE still had the exact missed lightweight-read pattern that
+already gated for ZCARD/LPOS/XLEN: under allkeys-lfu it ran `record_keyspace_lookup`, a separate
+`contains_key` random-sample gate, then `entries.get_mut`. Production `zscore_impl::<true>` now peeks
+expiry, records hit/miss inline around one `get_mut`, and draws the identical LCG sample through the
+disjoint `rng_seed` field before the unchanged LFU bump/type check/member lookup/touch. The non-LFU
+single-lookup path is unchanged; `<false>` preserves the exact prior LFU arm in the same binary.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/zscore_lfu_collapse.rs`,
+`release-perf`, allkeys-lfu, 50k singleton packed zsets, present member, median-of-61) ran fail-closed
+on remote worker `vmi1152480`:
+
+- n32 **1.940x**, A/A null median `0.9997`, p5..p95 `[0.722, 1.271]`, cv `15.25%` — WIN.
+- n256 **1.822x**, A/A null median `1.0111`, p5..p95 `[0.820, 1.272]`, cv `17.06%` — WIN.
+
+The exact-input ORIG profile ran fail-closed on remote worker `vmi1149989`: 2K `cycles:u` samples,
+zero lost, with `Store::zscore_lfu_threeprobe_bench` at **13.61% self** and its separately resolved
+probe work at `HashMap::contains_key` **27.42%**, `HashMap::get_mut` **11.74%**, byte hashing **9.44%**,
+and `PackedZSet::locate` **7.31%** (`run_threeprobe` itself **10.17%**). This proves the timed input
+executes ZSCORE with non-zero self-time and attributes the measured delta to the removed probes.
+
+`zscore_lfu_collapsed_matches_threeprobe` passed fail-closed on `vmi1153651`, proving exact result,
+RNG, hit/miss, full entry access/LFU metadata, live/expired TTL state, dirty/lazy-expiry effects, and
+digest parity across packed/full zsets, member hit/miss, live TTL, absent, wrong-type, and expired keys
+with LFU on/off. Missing members remain hits that draw+bump+touch; WRONGTYPE draws+bumps without touch;
+absent/expired keys remain misses without a draw. This is a store-path keep, not an end-to-end Redis
+throughput claim.
+
+Final fail-closed remote gates: focused parity rerun green on `vmi1152480`; workspace/all-target check
+green on `vmi1227854`; `fr-conformance` green on `vmi1153651` (194 library tests, 99 smoke tests,
+auxiliary binaries/integrations, and `core_zset` live-oracle 324/324). Workspace clippy was attempted
+on `vmi1293453` and stopped before fr-store at the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop`, already tracked as `frankenredis-dyaks`. Fail-closed RCH correctly
+refused non-compilation `cargo fmt --check` with `RCH-E301`; direct Rust 2024 rustfmt check of the new
+harness plus `git diff --check` are green, with no local Cargo fallback.
