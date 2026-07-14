@@ -16214,7 +16214,7 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpush_impl::<M, true>(key, values, now_ms)
+        self.lpush_impl::<M, true, true>(key, values, now_ms)
     }
 
     /// Bench-only baseline: LPUSH that materializes an owned `Vec` per element (`BORROW = false`)
@@ -16228,10 +16228,25 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpush_impl::<M, false>(key, values, now_ms)
+        self.lpush_impl::<M, false, true>(key, values, now_ms)
     }
 
-    fn lpush_impl<M: AsRef<[u8]>, const BORROW: bool>(
+    /// Bench-only baseline: LPUSH with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, as
+    /// opposed to production's single `get_mut` that draws the rand on the disjoint `rng_seed` field
+    /// split inside the `Some` arm. `BORROW = true` (same as production) so this isolates ONLY the
+    /// probe collapse. Byte/RNG-identical to `lpush`. Not on any production path.
+    #[doc(hidden)]
+    pub fn lpush_lfu_twoprobe_bench<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.lpush_impl::<M, true, false>(key, values, now_ms)
+    }
+
+    fn lpush_impl<M: AsRef<[u8]>, const BORROW: bool, const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         values: &[M],
@@ -16243,7 +16258,13 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // (BlackThrush) LFU write-side probe collapse: `COLLAPSE = true` (production) draws the LFU
+        // rand on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm,
+        // dropping the separate `self.entries.contains_key(key)` rand-gate probe (2 -> 1). The prior
+        // path drew only for a PRESENT key under LFU (`contains_key` true) = exactly the `Some`+LFU
+        // case here; the create arm (`None`, incl. a just-expired key) draws NOTHING either way, so
+        // this is byte/RNG-identical. `next_rand()` == `Self::lcg_next_seed(&mut self.rng_seed)`.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -16251,6 +16272,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -50090,6 +50116,46 @@ mod tests {
                 let ra = a.lpop_count(key, count, now);
                 let rb = b.lpop_count_lfu_twoprobe_bench(key, count, now);
                 let tag = format!("lfu={lfu} key={key:?} count={count}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn lpush_lfu_collapsed_matches_twoprobe() {
+        // The LFU LPUSH write-side collapse (rand drawn inside the get_mut Some arm via rng_seed
+        // field split, no contains_key rand-gate) must be byte/RNG/stat-identical to the prior
+        // two-probe path — across an existing-list append, a new-key create (None arm draws nothing),
+        // a wrong-type key (draws + bumps then WRONGTYPE), and an expired key (dropped -> create),
+        // under BOTH allkeys-lfu and a non-LFU policy. Asserts result, RNG state, OBJECT FREQ, dirty,
+        // and the full DEBUG DIGEST bookkeeping.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let vals: &[&[u8]] = &[b"x", b"y"];
+        let cases: &[&[u8]] = &[b"lst", b"absent", b"str", b"ttl"];
+        for lfu in [true, false] {
+            for &key in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.lpush(key, vals, now);
+                let rb = b.lpush_lfu_twoprobe_bench(key, vals, now);
+                let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");

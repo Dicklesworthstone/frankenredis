@@ -670,3 +670,12 @@ harness = false
 [[bench]]
 name = "zrangebyscore_members_limit_borrow_scan_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU LPUSH WRITE-side probe collapse: the contains_key
+# rand-gate + get_mut (2 probes) folded to ONE get_mut drawing the LFU rand on the rng_seed field split
+# in the Some arm. LPUSH grows the list (no repeatable wallclock), so this counts retired user-space
+# instructions via perf stat, subtracting an identical build baseline. Byte/RNG-identical
+# (lpush_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "lpush_lfu_collapse"
+harness = false
