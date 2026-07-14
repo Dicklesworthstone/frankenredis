@@ -16726,6 +16726,32 @@ impl Store {
     }
 
     pub fn rpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        self.rpop_impl::<true>(key, now_ms)
+    }
+
+    /// Bench-only baseline: RPOP with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, vs
+    /// production's single `get_mut` drawing the rand on the disjoint `rng_seed` field split inside
+    /// the `Some` arm. Byte/RNG-identical to `rpop`. Not on any production path.
+    #[doc(hidden)]
+    pub fn rpop_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.rpop_impl::<false>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU RPOP write-side keyspace-probe collapse — the tail-pop twin of
+    /// [`Store::lpop_impl`]. `COLLAPSE = true` (production) draws the LFU rand on the disjoint
+    /// `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm, dropping the separate
+    /// `contains_key` rand-gate probe (2 -> 1). Byte/RNG-identical: the prior path drew only for a
+    /// PRESENT key under LFU = exactly the `Some`+LFU case; the `None` arm draws NOTHING either way.
+    fn rpop_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -16733,7 +16759,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -16741,6 +16767,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
