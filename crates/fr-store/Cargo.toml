@@ -639,3 +639,11 @@ harness = false
 [[bench]]
 name = "zrangebyscore_withscores_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU ZREVRANGEBYSCORE WITHSCORES collapse on the ZERO-COPY production path
+# (zrevrangebyscore_withscores_borrow_scan): the descending twin — fold record + contains_key rand-gate
+# + get_mut (3 probes) into ONE get_mut via rng_seed field split, same min>max guard order.
+# Byte/RNG/stat-identical (zrevrangebyscore_withscores_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "zrevrangebyscore_withscores_borrow_scan_lfu_collapse"
+harness = false

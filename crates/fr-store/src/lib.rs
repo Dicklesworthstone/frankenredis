@@ -22155,6 +22155,26 @@ impl Store {
         min: ScoreBound,
         max: ScoreBound,
         now_ms: u64,
+        sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrevrangebyscore_withscores_borrow_scan_impl::<true>(key, min, max, now_ms, sink)
+    }
+
+    /// A/B toggle for the LFU ZREVRANGEBYSCORE WITHSCORES keyspace-probe collapse on the ZERO-COPY
+    /// production path — the descending twin of [`Store::zrangebyscore_withscores_borrow_scan_impl`].
+    /// `COLLAPSE = true` (shipped) folds the LFU path's three `entries` probes
+    /// (`record_keyspace_lookup` + the `contains_key` rand-gate + `get_mut`) into ONE `get_mut`
+    /// (expiry peek + inline hit/miss + `rand_sample` on the disjoint `&mut self.rng_seed` field
+    /// split). The `min > max` empty-guard keeps its exact observable position: AFTER the keyspace hit
+    /// is recorded but BEFORE the LFU draw/bump/touch (inverted bounds on a present key are a HIT that
+    /// draws no RNG and does not bump). `false` retains the exact prior three-probe LFU path. The sole
+    /// difference from the ascending twin is `score_bound_range_desc_refs`. Byte/RNG/stat-identical.
+    fn zrevrangebyscore_withscores_borrow_scan_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup fast path — see zrangebyscore_members_borrow_scan.
@@ -22183,6 +22203,48 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                sink(ZRangeWithScoresScanEvent::Len(0));
+                return Ok(());
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    // Preserve the prior order: the hit is recorded, THEN the empty-guard
+                    // short-circuits before any RNG draw / LFU bump / touch.
+                    if score_bound_value(min) > score_bound_value(max) {
+                        sink(ZRangeWithScoresScanEvent::Len(0));
+                        return Ok(());
+                    }
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    match &entry.value {
+                        Value::SortedSet(zs) => {
+                            let refs = zs.score_bound_range_desc_refs(min, max);
+                            sink(ZRangeWithScoresScanEvent::Len(refs.len()));
+                            for (member, score) in refs {
+                                sink(ZRangeWithScoresScanEvent::Pair(member, score));
+                            }
+                            entry.touch(now_ms);
+                            Ok(())
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    sink(ZRangeWithScoresScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(ZRangeWithScoresScanEvent::Len(0));
             return Ok(());
@@ -22192,8 +22254,6 @@ impl Store {
             return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -22222,6 +22282,20 @@ impl Store {
                 Ok(())
             }
         }
+    }
+
+    /// Prior-path (three-probe) ZREVRANGEBYSCORE WITHSCORES borrow-scan baseline for the same-binary
+    /// A/B. Not on any production path (`zrevrangebyscore_withscores_borrow_scan` uses `::<true>`).
+    #[doc(hidden)]
+    pub fn zrevrangebyscore_withscores_borrow_scan_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
+        sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrevrangebyscore_withscores_borrow_scan_impl::<false>(key, min, max, now_ms, sink)
     }
 
     /// (frankenredis-zrange-into) Member-only borrow-scan for the plain (no
@@ -43448,6 +43522,82 @@ mod tests {
                 s.zrangebyscore_withscores_borrow_scan(key, min, max, now, &mut sink)
             } else {
                 s.zrangebyscore_withscores_borrow_scan_lfu_threeprobe_bench(
+                    key, min, max, now, &mut sink,
+                )
+            };
+            (r, lens, pairs)
+        }
+        let now = 10;
+        let probes: &[(&[u8], ScoreBound, ScoreBound)] = &[
+            (b"z", inc(f64::NEG_INFINITY), inc(f64::INFINITY)),
+            (b"z", inc(2.0), inc(3.0)),
+            (b"z", inc(3.0), inc(1.0)),
+            (b"absent", inc(1.0), inc(3.0)),
+            (b"str", inc(1.0), inc(3.0)),
+            (b"ttl", inc(1.0), inc(3.0)),
+        ];
+        for lfu in [true, false] {
+            for &(key, min, max) in probes {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let (ra, la, pa) = collect(&mut a, true, key, min, max, now);
+                let (rb, lb, pb) = collect(&mut b, false, key, min, max, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(la, lb, "lens {tag}");
+                assert_eq!(pa, pb, "pairs {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn zrevrangebyscore_withscores_borrow_scan_lfu_collapsed_matches_threeprobe() {
+        use crate::{ScoreBound, ZRangeWithScoresScanEvent};
+        // Descending twin of the ZRANGEBYSCORE WITHSCORES LFU collapse check (3 probes -> 1 get_mut):
+        // byte/RNG/stat-identical to the prior path across present zset (full / sub / inverted
+        // min>max), absent, wrong-type, and expired keys, under BOTH allkeys-lfu and a non-LFU
+        // policy. Inverted bounds on a present key is a keyspace HIT that draws no rand.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.zadd(
+                b"z",
+                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                1,
+            )
+            .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.zadd(b"ttl", &[(1.0, b"m".to_vec())], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"ttl", 5, 1));
+            s
+        }
+        let inc = ScoreBound::Inclusive;
+        fn collect(
+            s: &mut Store,
+            collapse: bool,
+            key: &[u8],
+            min: ScoreBound,
+            max: ScoreBound,
+            now: u64,
+        ) -> (Result<(), StoreError>, Vec<usize>, Vec<(Vec<u8>, u64)>) {
+            let mut lens = Vec::new();
+            let mut pairs: Vec<(Vec<u8>, u64)> = Vec::new();
+            let mut sink = |ev: ZRangeWithScoresScanEvent<'_>| match ev {
+                ZRangeWithScoresScanEvent::Len(n) => lens.push(n),
+                ZRangeWithScoresScanEvent::Pair(m, sc) => pairs.push((m.to_vec(), sc.to_bits())),
+            };
+            let r = if collapse {
+                s.zrevrangebyscore_withscores_borrow_scan(key, min, max, now, &mut sink)
+            } else {
+                s.zrevrangebyscore_withscores_borrow_scan_lfu_threeprobe_bench(
                     key, min, max, now, &mut sink,
                 )
             };
