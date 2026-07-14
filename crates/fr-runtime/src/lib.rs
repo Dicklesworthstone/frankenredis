@@ -7641,9 +7641,8 @@ impl Runtime {
 
     /// (BlackThrush) Borrowed WRITE fast path for `SET key value KEEPTTL` — the one
     /// difference from plain SET is that any existing TTL is preserved instead of
-    /// cleared. Mirrors fr_command's `ExpiryMode::KeepTtl` arm exactly: read the
-    /// current absolute expiry (get_expires_at_ms — a write-path read, no
-    /// keyspace_hits) and re-apply it via set_with_abs_expiry. The parser only
+    /// cleared. Mirrors fr_command's `ExpiryMode::KeepTtl` arm exactly through the
+    /// fused borrowed store specialization. The parser only
     /// matches *4 with a literal KEEPTTL token; KEEPTTL GET / NX KEEPTTL / any other
     /// shape is *5+ and falls through to the generic. Gated identically to plain SET.
     pub fn execute_plain_set_keepttl_borrowed(
@@ -7676,13 +7675,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let existing_expiry = self.server.store.get_expires_at_ms(key, now_ms);
-        self.server.store.set_with_abs_expiry(
-            key.to_vec(),
-            value.to_vec(),
-            existing_expiry,
-            now_ms,
-        );
+        self.server.store.set_keep_ttl_borrowed(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_set_borrowed_metrics(
@@ -44035,6 +44028,62 @@ mod tests {
                 .expect("generic SET captures AOF")
                 .argv,
             argv(&[b"SET", b"aof-key", b"value"])
+        );
+    }
+
+    #[test]
+    fn plain_set_keepttl_borrowed_fast_path_matches_generic_ttl_and_missing() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"hot", b"old", b"PX", b"5000"]), 10),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let gate = fast.plain_borrowed_default_key_write_gate(20);
+        let fast_reply = fast
+            .execute_plain_set_keepttl_borrowed(b"hot", b"new", 20, gate)
+            .expect("borrowed SET KEEPTTL should engage");
+        let generic_reply =
+            generic.execute_frame(command(&[b"SET", b"hot", b"new", b"KEEPTTL"]), 20);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast_reply, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"hot"]), 21),
+            generic.execute_frame(command(&[b"GET", b"hot"]), 21)
+        );
+        assert_eq!(
+            fast.server.store.get_expires_at_ms(b"hot", 21),
+            generic.server.store.get_expires_at_ms(b"hot", 21)
+        );
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.state_digest(),
+            generic.server.store.state_digest()
+        );
+
+        let gate = fast.plain_borrowed_default_key_write_gate(30);
+        let fast_reply = fast
+            .execute_plain_set_keepttl_borrowed(b"missing", b"value", 30, gate)
+            .expect("borrowed SET KEEPTTL miss should engage");
+        let generic_reply =
+            generic.execute_frame(command(&[b"SET", b"missing", b"value", b"KEEPTTL"]), 30);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(
+            fast.server.store.get_expires_at_ms(b"missing", 31),
+            generic.server.store.get_expires_at_ms(b"missing", 31)
+        );
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"missing"]), 31),
+            generic.execute_frame(command(&[b"GET", b"missing"]), 31)
+        );
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.state_digest(),
+            generic.server.store.state_digest()
         );
     }
 

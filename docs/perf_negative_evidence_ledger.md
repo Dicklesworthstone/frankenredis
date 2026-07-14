@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14: SHIPPED — fuse the exact borrowed `SET KEEPTTL` overwrite (`frankenredis-6tx3u`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` surfaced stale RESTORE work already
+  owned or shipped.  The unclaimed `frankenredis-6lgnu` set/list/zset lane was broad and its
+  skiplist headline is already refuted by current ZADD evidence; `frankenredis-b1o02` is an
+  explicitly multi-day listpack-hash representation project.  The narrow live sub-gate was
+  `frankenredis-6tx3u`: exact borrowed `SET key value KEEPTTL` still called
+  `get_expires_at_ms` and then `set_with_abs_expiry`, so the command owned key/value bytes,
+  re-probed expiry/presence, replaced the whole entry, and re-ran deadline bookkeeping.
+- **Profile/attribution before keeping the lever:** the same-binary old-sequence profile had
+  zero lost samples and 393 samples.  Its exact control wrapper had **6.53% self**;
+  `internal_entries_insert_with_expiry_impl::<true>` was **15.22% self**,
+  `drop_if_expired` **13.84%**, `set_with_abs_expiry` **12.23%**, and
+  `get_expires_at_ms` **1.77%**.  The fused arm also had zero lost samples (131 samples) and
+  put the exact production `set_keep_ttl_borrowed` symbol at **10.41% self**, proving both
+  arms reached their timed production/store sequence.
+- **One concrete lever:** `Store::set_keep_ttl_borrowed` resolves expiry/presence once,
+  preserves a live absolute deadline in place, and overwrites the existing entry without an
+  owned-key allocation or expiry-map reinsertion.  Missing or lazily expired keys still insert
+  without a TTL.  LFU/LRU metadata, modification count, stream side metadata, write-cache
+  invalidation, state digest, dirty accounting, expiry propagation, and fresh-key bookkeeping
+  mirror the previous sequence.  Only the exact borrowed runtime specialization is routed to
+  it; generic SET forms remain unchanged.
+- **Foreground A/B result:** one strict-remote invocation used
+  `cargo bench --profile release -p fr-store --bench set_ex_rearm --features bench-reference -- --keepttl-borrowed`
+  on worker `vmi1149989`; binary SHA-256
+  `067dc68bb2d8dec97547d04a5605363e077a317c576cd76841b927c242fe441d`.
+  Nine position-balanced `instructions:u` rounds over 500,000 overwrites measured
+  old/fused median **3.022480945x**, or **66.9146% fewer retired instructions** for the
+  fused path (about 1.255331B old versus 415.331M fused), with effect CV **0.000116%**.
+  The fused/fused null median was **1.000000544x**, p05/p95
+  **0.999999126x/1.000001329x**, CV **0.000063%**.
+- **Behavior and gates:** the store parity test covers missing, persistent, volatile, expired,
+  list, and stream starting states with integer and heap-string replacements (12 cases),
+  comparing value/encoding, TTL maps and counts, DB counts, LFU, memory, stream metadata,
+  RNG, lazy-expiry propagation, digest, and dirty count.  Runtime coverage compares the exact
+  fast path with generic SET for live-TTL and missing keys.  Strict-remote package/all-target
+  check and focused tests passed.  Full remote `fr-conformance` passed 194/194 library tests,
+  99/99 smoke tests, all auxiliary targets, and doc tests.  Strict remote clippy remains
+  blocked before the changed crates by the existing `fr-simd` `needless_range_loop` finding at
+  `crates/fr-simd/src/lib.rs:795`.
+- **Boundary:** this closes only canonical exact-packet `SET key value KEEPTTL`.  It does not
+  claim `SET ... KEEPTTL GET`, conditional SET variants, or the generic owned command path.
+  Revert the store/runtime specialization together if state or reply parity ever fails.
+
 ## 2026-07-14: SHIPPED — LMOVE direct reply sink owns-moves deque elements (`frankenredis-5098y`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` surfaced RESTORE quick wins, but

@@ -8066,6 +8066,87 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    /// SET KEEPTTL specialization for an already-borrowed command packet. It preserves a live
+    /// deadline in place and overwrites an existing entry without allocating an owned key or
+    /// re-inserting the deadline. Missing or expired keys are inserted without a TTL.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn set_keep_ttl_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+        let key_present = if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms)
+        } else {
+            self.entries.contains_key(key)
+        };
+
+        // `set_with_abs_expiry`, the previous KEEPTTL path, performs this cleanup before replacing
+        // the entry regardless of its current type. Preserve that behavior for leaked side-map
+        // metadata as well as real stream entries.
+        self.drop_stream_side_metadata(key);
+
+        if !key_present {
+            let lfu_tracking_enabled = self.lfu_tracking_enabled();
+            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            entry.lfu_freq = if lfu_tracking_enabled {
+                LFU_INIT_VAL
+            } else {
+                0
+            };
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
+            self.internal_entries_insert(key.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return;
+        }
+
+        self.invalidate_write_side_caches(key);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let old_was_stream = {
+            let Some(entry) = self.entries.get_mut(key) else {
+                // `drop_if_expired` / `contains_key` and `get_mut` cannot disagree in this
+                // single-threaded store. Keep a behavior-correct fallback for defensive parity.
+                self.set_with_abs_expiry(key.to_vec(), value.to_vec(), None, now_ms);
+                return;
+            };
+            let old_was_stream = matches!(&entry.value, Value::Stream(_));
+            let next_lfu_freq = if lfu_tracking_enabled {
+                entry
+                    .current_lfu_freq(now_ms, lfu_decay_time)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            entry.value = canonical_string_value_from_slice(value);
+            entry.last_access_ms = lru_access_millis(now_ms);
+            entry.lfu_freq = next_lfu_freq;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.clear_entry_flags();
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
+            old_was_stream
+        };
+
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        if old_was_stream {
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+        }
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
+    /// Bench-only reference for the pre-fusion runtime sequence. The two public calls are kept in
+    /// one non-inlined symbol so a same-binary profile can prove the old path executed.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn set_keep_ttl_owned_roundtrip_bench(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+        let existing_expiry = self.get_expires_at_ms(key, now_ms);
+        self.set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
+    }
+
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
         if !self.drop_if_expired(key.as_slice(), now_ms) {
             let mut entry = Entry::new(canonical_string_value(value), now_ms);
@@ -41366,6 +41447,118 @@ mod tests {
         assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
         assert_eq!(actual.dirty, expected.dirty);
         assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    #[test]
+    fn set_keep_ttl_borrowed_matches_owned_roundtrip_for_all_entry_states() {
+        #[derive(Clone, Copy, Debug)]
+        enum Seed {
+            Missing,
+            PersistentString,
+            VolatileString,
+            ExpiredString,
+            List,
+            Stream,
+        }
+
+        let seed_store = |seed| {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.lfu_decay_time = 0;
+            match seed {
+                Seed::Missing => {}
+                Seed::PersistentString => {
+                    store.set(b"k".to_vec(), b"old".to_vec(), None, 100);
+                }
+                Seed::VolatileString => {
+                    store.set(b"k".to_vec(), b"old".to_vec(), Some(5_000), 100);
+                }
+                Seed::ExpiredString => {
+                    store.set(b"k".to_vec(), b"old".to_vec(), Some(10), 100);
+                }
+                Seed::List => {
+                    store.rpush(b"k", &[b"old".to_vec()], 100).unwrap();
+                }
+                Seed::Stream => {
+                    store
+                        .xadd(b"k", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 100)
+                        .unwrap();
+                }
+            }
+            store
+        };
+
+        for seed in [
+            Seed::Missing,
+            Seed::PersistentString,
+            Seed::VolatileString,
+            Seed::ExpiredString,
+            Seed::List,
+            Seed::Stream,
+        ] {
+            for value in [b"42".as_slice(), b"replacement payload".as_slice()] {
+                let mut expected = seed_store(seed);
+                let mut actual = seed_store(seed);
+                let now_ms = 400;
+
+                let existing_expiry = expected.get_expires_at_ms(b"k", now_ms);
+                expected.set_with_abs_expiry(
+                    b"k".to_vec(),
+                    value.to_vec(),
+                    existing_expiry,
+                    now_ms,
+                );
+                actual.set_keep_ttl_borrowed(b"k", value, now_ms);
+
+                assert_eq!(actual.expires_count, expected.expires_count, "{seed:?}");
+                assert_eq!(actual.db_key_counts, expected.db_key_counts, "{seed:?}");
+                assert_eq!(actual.db_expires_counts, expected.db_expires_counts, "{seed:?}");
+                assert_eq!(actual.expiry_deadlines, expected.expiry_deadlines, "{seed:?}");
+                assert_eq!(
+                    actual.expiry_deadline_counts, expected.expiry_deadline_counts,
+                    "{seed:?}"
+                );
+                assert_eq!(actual.stream_groups, expected.stream_groups, "{seed:?}");
+                assert_eq!(actual.stream_last_ids, expected.stream_last_ids, "{seed:?}");
+                assert_eq!(
+                    actual.stream_entries_added, expected.stream_entries_added,
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.stream_max_deleted_ids, expected.stream_max_deleted_ids,
+                    "{seed:?}"
+                );
+                assert_eq!(actual.dirty, expected.dirty, "{seed:?}");
+                assert_eq!(actual.rng_seed, expected.rng_seed, "{seed:?}");
+                assert_eq!(actual.state_digest(), expected.state_digest(), "{seed:?}");
+                assert_eq!(
+                    actual.take_lazy_expired_propagation(),
+                    expected.take_lazy_expired_propagation(),
+                    "{seed:?}"
+                );
+                assert_eq!(actual.get(b"k", 401), expected.get(b"k", 401), "{seed:?}");
+                assert_eq!(
+                    actual.get_expires_at_ms(b"k", 401),
+                    expected.get_expires_at_ms(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.object_encoding(b"k", 401),
+                    expected.object_encoding(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.object_freq(b"k", 401),
+                    expected.object_freq(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.memory_usage_for_key(b"k", 401),
+                    expected.memory_usage_for_key(b"k", 401),
+                    "{seed:?}"
+                );
+            }
+        }
     }
 
     // (CrimsonHawk) Per-crate A/B for the no-TTL expiry-guard in set_plain_borrowed:
