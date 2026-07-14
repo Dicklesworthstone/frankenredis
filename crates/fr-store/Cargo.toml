@@ -576,3 +576,10 @@ harness = false
 [[bench]]
 name = "lrange_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU HGETALL collapse on the ZERO-COPY production path (hgetall_borrow_scan): add the LFU
+# 3->1 fast path (get_mut-first + rng_seed field split) matching the already-present non-LFU one.
+# Byte/RNG/stat-identical (hgetall_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "hgetall_borrow_scan_lfu_collapse"
+harness = false

@@ -14702,6 +14702,24 @@ impl Store {
         &mut self,
         key: &[u8],
         now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hgetall_borrow_scan_impl::<true>(key, now_ms, sink)
+    }
+
+    /// A/B toggle for the LFU HGETALL keyspace-probe collapse on the ZERO-COPY production path (the
+    /// fr-runtime borrow-scan encoder). The non-LFU path already single-probes via
+    /// `lookup_live_for_read_mut`; `COLLAPSE = true` (shipped) adds the matching LFU fast path for the
+    /// common `hash_field_expires.is_empty()` case: skip the `drop_expired_hash_fields` no-op and fold
+    /// `record_keyspace_lookup` + the `contains_key` rand-gate + `get_mut` into ONE `get_mut` — 3
+    /// probes → 1 — with the expiry peek + inline hit/miss + `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split. Per-field TTLs fall back to the exact prior path. `false` is
+    /// the prior three-probe LFU path. Read (bumps LFU + touches, no digest). Byte/RNG/stat-identical;
+    /// same `SmembersScanEvent` pair sequence (`Len(n)` then `Member(field)`,`Member(value)` per field).
+    fn hgetall_borrow_scan_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hget`.
@@ -14727,14 +14745,48 @@ impl Store {
                 }
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE && self.hash_field_expires.is_empty() {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => {
+                            sink(SmembersScanEvent::Len(m.len()));
+                            for (k, v) in m.iter() {
+                                sink(SmembersScanEvent::Member(k));
+                                sink(SmembersScanEvent::Member(v));
+                            }
+                            Ok(())
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    sink(SmembersScanEvent::Len(0));
+                    Ok(())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         }
         self.drop_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -14763,6 +14815,18 @@ impl Store {
                 Ok(())
             }
         }
+    }
+
+    /// Prior-path (three-probe) HGETALL borrow-scan baseline for the same-binary A/B. Not on any
+    /// production path (`hgetall_borrow_scan` uses `::<true>`).
+    #[doc(hidden)]
+    pub fn hgetall_borrow_scan_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hgetall_borrow_scan_impl::<false>(key, now_ms, sink)
     }
 
     /// Borrow-scan variant of `hkeys` (`values = false`) / `hvals` (`values =
@@ -48203,6 +48267,64 @@ mod tests {
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
                 assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
                 assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn hgetall_borrow_scan_lfu_collapsed_matches_threeprobe() {
+        use crate::SmembersScanEvent;
+        // The LFU HGETALL collapse on the zero-copy borrow-scan production path (3 probes -> 1 get_mut)
+        // must be byte/RNG/stat-identical to the prior three-probe path and drive the SAME
+        // SmembersScanEvent pair sequence — across a present hash, absent, wrong-type, and expired
+        // keys, under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 1).unwrap();
+            s.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1);
+            s
+        }
+        fn collect(
+            s: &mut Store,
+            collapse: bool,
+            key: &[u8],
+            now: u64,
+        ) -> (Result<(), StoreError>, Vec<usize>, Vec<Vec<u8>>) {
+            let mut lens = Vec::new();
+            let mut members: Vec<Vec<u8>> = Vec::new();
+            let mut sink = |ev: SmembersScanEvent<'_>| match ev {
+                SmembersScanEvent::Len(n) => lens.push(n),
+                SmembersScanEvent::Member(m) => members.push(m.to_vec()),
+            };
+            let r = if collapse {
+                s.hgetall_borrow_scan(key, now, &mut sink)
+            } else {
+                s.hgetall_borrow_scan_lfu_threeprobe_bench(key, now, &mut sink)
+            };
+            (r, lens, members)
+        }
+        let now = 10;
+        for lfu in [true, false] {
+            for key in [b"h".as_slice(), b"absent", b"str", b"ttl"] {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let (ra, la, ma) = collect(&mut a, true, key, now);
+                let (rb, lb, mb) = collect(&mut b, false, key, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(la, lb, "lens {tag}");
+                assert_eq!(ma, mb, "members {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
