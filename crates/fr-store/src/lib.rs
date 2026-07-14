@@ -17692,6 +17692,36 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
+        self.lrem_impl::<true>(key, count, value, now_ms)
+    }
+
+    /// Bench-only baseline: LREM with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, vs
+    /// production's single `get_mut` drawing the rand on the disjoint `rng_seed` field split in the
+    /// `Some` arm. Byte/RNG-identical to `lrem`. Not on any production path.
+    #[doc(hidden)]
+    pub fn lrem_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.lrem_impl::<false>(key, count, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU LREM write-side keyspace-probe collapse. `COLLAPSE = true` (production)
+    /// draws the LFU rand on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some`
+    /// arm and drops the separate `contains_key` rand-gate (2 -> 1). Byte/RNG-identical: the prior
+    /// path drew only for a PRESENT key under LFU (`contains_key` true) = exactly the `Some`+LFU case
+    /// here; the `None` arm (absent / just-expired key) draws NOTHING either way.
+    fn lrem_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -17700,7 +17730,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -17708,6 +17738,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -50770,6 +50805,95 @@ mod tests {
                 let ra = a.rpushx(key, &vals, now);
                 let rb = b.rpushx_lfu_twoprobe_bench(key, &vals, now);
                 let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn rpop_lfu_collapsed_matches_twoprobe() {
+        // Tail-pop twin of lpop_lfu_collapsed_matches_twoprobe: the LFU RPOP collapse (rand drawn
+        // inside the get_mut Some arm via rng_seed field split, no contains_key rand-gate) must be
+        // byte/RNG/stat-identical to the prior two-probe path across a multi-element pop, a last-
+        // element pop (removes the key), an absent key, a wrong-type key, and an expired key, under
+        // BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+                .unwrap();
+            s.rpush(b"one", &[b"z".to_vec()], 1).unwrap(); // pop -> empties -> removes key
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let cases: &[&[u8]] = &[b"lst", b"one", b"absent", b"str", b"ttl"];
+        for lfu in [true, false] {
+            for &key in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.rpop(key, now);
+                let rb = b.rpop_lfu_twoprobe_bench(key, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn lrem_lfu_collapsed_matches_twoprobe() {
+        // The LFU LREM write-side collapse (rand drawn inside the get_mut Some arm via rng_seed field
+        // split, no contains_key rand-gate) must be byte/RNG/stat-identical to the prior two-probe
+        // path across a present-value removal, an absent-value removal (scans, removes nothing,
+        // non-growing), a remove-all (empties -> removes the key), an absent key (Ok(0), no draw), a
+        // wrong-type key, and an expired key, under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"a".to_vec(), b"c".to_vec()], 1)
+                .unwrap();
+            s.rpush(b"allx", &[b"x".to_vec(), b"x".to_vec()], 1).unwrap(); // LREM 0 x -> empties
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, count, value)
+        let cases: &[(&[u8], i64, &[u8])] = &[
+            (b"lst", 1, b"a"),   // remove first "a"
+            (b"lst", 0, b"z"),   // absent value -> scans, removes nothing (non-growing)
+            (b"lst", -2, b"a"),  // remove from tail
+            (b"allx", 0, b"x"),  // remove all -> empties -> removes key
+            (b"absent", 0, b"a"), // absent key -> Ok(0), no draw
+            (b"str", 0, b"a"),   // wrong type
+            (b"ttl", 0, b"a"),   // expired -> absent -> Ok(0)
+        ];
+        for lfu in [true, false] {
+            for &(key, count, value) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.lrem(key, count, value, now);
+                let rb = b.lrem_lfu_twoprobe_bench(key, count, value, now);
+                let tag = format!("lfu={lfu} key={key:?} count={count} value={value:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
