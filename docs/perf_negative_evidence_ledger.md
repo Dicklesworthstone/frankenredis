@@ -8284,3 +8284,46 @@ entry removed). LESSON: the borrow-scan collapse gates cleanly for **3-probe** r
 `record`+`contains_key`) but a **2-probe** read that also allocates a result Vec (lex/withscores
 index-range/sscan/zscan cursor variants) dilutes to ~1.1x — negative-ledger these rather than probing
 each; ship 2-probe collapses only when the body is allocation-free (e.g. SMEMBERS sink stream, 1.25x).
+
+## 2026-07-14 IcyBridge: WIN — KEEP. LFU ZRANK 3 probes -> 1 — **1.78-1.94x**
+
+Negative-ledger-first routing continued the proved lightweight-read seam instead of retrying the
+alloc-diluted two-probe families: plain ZRANK still did THREE `entries` probes under allkeys-lfu —
+`record_keyspace_lookup`, a separate `contains_key` random-sample gate, then `entries.get_mut`.
+Production `zrank_impl::<true, true>` now peeks expiry, records hit/miss inline around one `get_mut`,
+and draws the identical LCG sample through the disjoint `rng_seed` field before the unchanged LFU
+bump/type check/rank lookup/touch. The existing packed-member-only score-decode toggle remains
+orthogonal; `<true, false>` preserves the exact prior acquisition path for same-binary measurement.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/zrank_lfu_collapse.rs`, `release`,
+allkeys-lfu, 50k singleton packed zsets, present member at rank 0, median-of-61) ran fail-closed on
+remote worker `vmi1152480`:
+
+- n32 **1.941x**, A/A null median `0.9749`, p5..p95 `[0.490, 1.908]`, cv `43.41%` — WIN. The
+  worker was noisy and the clearance is narrow, so this row is not presented as more precise than
+  the null gate supports.
+- n256 **1.776x**, A/A null median `0.9934`, p5..p95 `[0.652, 1.367]`, cv `22.63%` — WIN.
+
+The exact n256 ORIG profile ran fail-closed on `vmi1152480`: 2K `cycles:u` samples, zero lost, with
+`Store::zrank_lfu_threeprobe_bench` at **9.67% self**, the removed `HashMap::contains_key` at
+**36.42%**, retained `HashMap::get_mut` at **11.75%**, `run_threeprobe` at **10.22%**, byte compare
+at **14.45%**, byte hashing at **7.79%**, and packed rank work at **5.29%**. This verifies non-zero
+self-time in the exact timed function and attributes the measured delta to the redundant probes.
+
+`zrank_lfu_collapsed_matches_threeprobe` passed fail-closed on `vmi1152480`. It compares packed and
+full zsets, member hit/miss, cold and warm full-set rank-tree paths, live TTL, absent, wrong-type,
+and expired keys with LFU on/off; it asserts result/error, RNG, hit/miss stats, full entry/cache and
+access metadata, expiry/lazy-expiry effects, dirty state, and digest parity after every call. Missing
+members remain hits that draw+bump+touch; WRONGTYPE draws+bumps without touch; absent/expired keys
+remain misses without a draw. This is a store-path keep on the real plain-ZRANK runtime route, not an
+end-to-end Redis throughput claim.
+
+Final fail-closed gates: the fr-store library suite passed on `vmi1152480` (843 passed, 13 ignored),
+workspace/all-target `cargo check` passed on `vmi1152480`, and `fr-conformance` passed on
+`vmi1149989` (347 asserting tests: 194 library + 99 smoke + 54 auxiliary/integration; `core_zset`
+324/324 and `core_bitmap` 110/110). The live oracle also reported its known non-strict surface:
+3,970/3,980 counted cases, with 1 config, 1 function-ordering, and 8 replication-state mismatches,
+plus two non-asserting transport timeouts; all wrapper tests passed. Workspace clippy stopped before
+fr-store at the pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_range_loop`, tracked as
+`frankenredis-dyaks`. Strict RCH refused non-compilation `cargo fmt --check` with `RCH-E301`; direct
+Rust 2024 rustfmt of the owned harness plus `git diff --check` are green, with no local Cargo fallback.
