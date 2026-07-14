@@ -498,6 +498,13 @@ harness = false
 name = "zrem_lfu_collapse"
 harness = false
 
+# A/B for the LFU ZPOPMIN-count write-side keyspace-probe collapse: resolve the entry once and draw
+# through the disjoint rng_seed field after a hit (1 probe) vs the prior contains_key rand gate +
+# get_mut (2 probes). ZPOPMIN key 0 is the repeatable, non-destructive timed shape.
+[[bench]]
+name = "zpopmin_count_lfu_collapse"
+harness = false
+
 # A/B for the LFU LPOP-count write-side keyspace-probe collapse: direct-get_mut with the rand draw
 # relocated inside the get_mut borrow via rng_seed field split (1 probe) vs the prior contains_key
 # rand-gate (2 probes). LPOP key 0 pops nothing (no value arg) — the non-growing repeatable timed

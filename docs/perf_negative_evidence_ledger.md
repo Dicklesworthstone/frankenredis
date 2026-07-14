@@ -8025,3 +8025,30 @@ OBJECT FREQ, state_digest). Full fr-store lib suite pass.
 Confirms the "diluted-tail reopens on SMALL inputs" seam extends beyond bitmaps to any previously-skipped
 O(n)-scan read (BITCOUNT bitmap → LPOS list). The record_keyspace_lookup + contains_key + get_mut 3-probe
 read pattern is the SAME one collapsed for GET/EXISTS/GETBIT — LPOS was simply missed in that sweep.
+
+## 2026-07-13 SwiftWillow: WIN — KEEP. LFU ZPOPMIN-count write-side 2 probes → 1 — **1.503x at n32**
+
+Followed the landed LPOP-count value-free/count-zero shape into sorted-set writes. Under allkeys-lfu,
+`zpopmin_count` still did a `contains_key` random-sample gate followed immediately by
+`entries.get_mut`: two keyspace probes before the sorted-set type check and bulk pop. Production
+`zpopmin_count_impl::<true>` now uses the successful `get_mut` as the presence gate and draws the
+identical sample through the disjoint `rng_seed` field; `<false>` retains the exact prior path for
+same-binary measurement. This is direct `get_mut`, takes only `count`, and needs no digest-wrapper
+replication. Earlier ZPOP no-TTL expiry-guard and positive-count bulk-drain wins are orthogonal.
+
+One-binary, one-invocation, position-balanced A/B (`benches/zpopmin_count_lfu_collapse.rs`,
+`release-perf`, allkeys-lfu, 50k singleton packed zsets, repeated production-valid `ZPOPMIN key 0`,
+median-of-61) ran fail-closed on `vmi1152480`:
+
+- n32 **1.503x**, A/A null median `1.0053`, p5..p95 `[0.663, 1.341]`, cv `25.94%` — WIN.
+- n256 `1.370x`, A/A null median `1.0244`, p5..p95 `[0.689, 1.819]`, cv `30.93%` — unclaimed.
+
+The keep claim is deliberately bounded to n32: its candidate median clears the per-size null p95;
+n256 does not. COUNT 0 reaches the real `SortedSet::pop_min_n(0)` path, performs the entry lookup,
+LFU draw/bump, and type check, returns an empty vector, and leaves the zset/dirty/digest state intact,
+so the timed shape is repeatable rather than dead code. `zpopmin_count_lfu_collapsed_matches_twoprobe`
+proves result, RNG, full entry/LFU/access metadata, dirty count, and incremental/full-scan digest
+parity across count-zero, partial, exact, over-count/remove-to-empty, singleton, absent, wrong-type,
+and lazy-expired cases with LFU on/off and stale/fresh digest state. It passed remotely on
+`vmi1152480`; remote workspace/all-target check plus 194 conformance library and 99 smoke tests also
+passed on that worker.

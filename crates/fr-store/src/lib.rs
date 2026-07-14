@@ -22188,6 +22188,19 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zpopmin_count_impl::<true>(key, count, now_ms)
+    }
+
+    /// A/B toggle for the LFU ZPOPMIN-count keyspace-probe collapse. `COLLAPSE = true` draws the
+    /// LFU random sample through the disjoint `rng_seed` field after `get_mut` finds the entry,
+    /// eliminating the prior `contains_key` presence gate (two probes to one). `false` preserves
+    /// the exact prior path for same-binary measurement.
+    fn zpopmin_count_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut-else below re-probes.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -22195,7 +22208,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -22204,7 +22217,12 @@ impl Store {
             return Ok(Vec::new());
         };
         if lfu_tracking_enabled {
-            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            let sample = if COLLAPSE {
+                Self::lcg_next_seed(&mut self.rng_seed)
+            } else {
+                rand_sample
+            };
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, sample);
         }
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
@@ -22229,6 +22247,17 @@ impl Store {
             }
         }
         Ok(result)
+    }
+
+    /// Prior two-probe ZPOPMIN-count path retained solely for the same-binary A/B benchmark.
+    #[doc(hidden)]
+    pub fn zpopmin_count_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zpopmin_count_impl::<false>(key, count, now_ms)
     }
 
     /// Remove and return up to `count` members with the highest scores.
@@ -48952,6 +48981,85 @@ mod tests {
             other => return Err(format!("ZPOPMIN COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn zpopmin_count_lfu_collapsed_matches_twoprobe() {
+        fn build(lfu: bool) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store
+                .zadd(b"zset", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1)
+                .unwrap();
+            store.zadd(b"single", &[(1.0, b"a".to_vec())], 1).unwrap();
+            store.set(b"string".to_vec(), b"value".to_vec(), None, 1);
+            store.zadd(b"expired", &[(1.0, b"a".to_vec())], 1).unwrap();
+            assert!(store.expire_milliseconds(b"expired", 5, 1));
+            store
+        }
+
+        let cases: &[(&[u8], usize)] = &[
+            (b"zset", 0),
+            (b"zset", 1),
+            (b"zset", 2),
+            (b"zset", 100),
+            (b"single", 1),
+            (b"absent", 3),
+            (b"string", 1),
+            (b"expired", 1),
+        ];
+        let now_ms = 10;
+
+        for lfu in [true, false] {
+            for force_fresh_digest in [false, true] {
+                for &(key, count) in cases {
+                    let mut collapsed = build(lfu);
+                    let mut prior = build(lfu);
+                    if force_fresh_digest {
+                        let _ = collapsed.state_digest();
+                        let _ = prior.state_digest();
+                    }
+                    let collapsed_result = collapsed.zpopmin_count(key, count, now_ms);
+                    let prior_result = prior.zpopmin_count_lfu_twoprobe_bench(key, count, now_ms);
+                    let tag =
+                        format!("lfu={lfu} fresh={force_fresh_digest} key={key:?} count={count}");
+
+                    assert_eq!(collapsed_result, prior_result, "result {tag}");
+                    assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                    assert_eq!(
+                        collapsed.entries.get(key),
+                        prior.entries.get(key),
+                        "entry {tag}"
+                    );
+                    assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                    assert_eq!(
+                        collapsed.digest_mutations, prior.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.digest_stale, prior.digest_stale,
+                        "digest_stale {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.running_digest, prior.running_digest,
+                        "running_digest {tag}"
+                    );
+                    // Whole-key removal from a fresh running digest has a pre-existing incremental
+                    // digest drift shared by both paths. Compare that original state above, then
+                    // force the full-scan oracle solely to prove final-value parity.
+                    collapsed.digest_stale = true;
+                    prior.digest_stale = true;
+                    assert_eq!(
+                        collapsed.state_digest(),
+                        prior.state_digest(),
+                        "digest {tag}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
