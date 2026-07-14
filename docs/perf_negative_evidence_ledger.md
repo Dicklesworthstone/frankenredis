@@ -8072,3 +8072,25 @@ REUSABLE: `grep "record_keyspace_lookup"` then filter to sites also having the `
 = the previously-missed 3-probe LFU reads. Light O(1)/small ones (XLEN, single-value lookups) gate
 strongest; collection reads (HGETALL/HKEYS/HVALS/LRANGE) dilute via the result build but still gate on
 small collections (the zero-copy `*_borrow_scan` variants are lighter but need a sink-closure A/B).
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU HKEYS 3→1 + non-LFU 2→1 (fold record+field-reap+contains_key+get_mut) — **1.48-1.56x (LFU) + non-LFU 2->1**
+
+HIGH-VALUE distinct read: HKEYS (top-tier common hash command) was missed in BOTH sweeps — its LFU path
+did THREE `entries` probes (`record_keyspace_lookup` + `contains_key` rand-gate + `get_mut`) AND its
+NON-LFU path did TWO (record + get_mut, no `lookup_live_for_read_mut` fast path). Applied the proven
+HEXISTS field-TTL-gated pattern: on the common `hash_field_expires.is_empty()` (HEXPIRE unused) case,
+skip the `drop_expired_hash_fields` no-op and fold to ONE probe — LFU via get_mut-first + rng_seed
+field-split (3→1), non-LFU via `lookup_live_for_read_mut` (2→1, a DEFAULT-config win on top). Field-TTLs
+present ⇒ exact prior path. HKEYS is a read (bumps LFU + touches, no digest). Byte/RNG/stat-identical.
+Const-generic `hkeys_lfu_impl<COLLAPSE>` + `hkeys_lfu_threeprobe_bench`.
+
+A/B (`benches/hkeys_lfu_collapse.rs`, allkeys-lfu, 50k 1-field hashes, median-of-61 — measures the LFU
+3→1; the collection re-collect (1-elem Vec) is paid by BOTH arms): n32 **1.556x** (null med 0.9914, p5..p95 [0.801, **1.182**], cv 10.73%); n256 **1.477x** (null med 0.9837, p5..p95 [0.845, **1.175**], cv 9.46%) — BOTH clean WINs (smaller than XLEN's 2.2x: the collection Vec build dilutes, but a common command + a free non-LFU default-config win). Gated by
+`hkeys_lfu_collapsed_matches_threeprobe` (present / absent / wrongtype / expired × LFU on&off — covers
+BOTH the 3→1 LFU fast path and the 2→1 non-LFU fast path vs the baseline; asserts result (key order),
+RNG, keyspace stats, OBJECT FREQ, state_digest). Full fr-store lib suite pass.
+
+SIBLINGS (same pattern, distinct commands — follow-ups): `hvals` (m.values()) + `hgetall` — identical
+structure, and both ALSO lack the non-LFU fast path (default-config win each). A shared
+`<const VALUES: bool>` impl could fold hkeys+hvals. Collection reads dilute vs light O(1) (XLEN 2.2x)
+but gate on small; the zero-copy `*_borrow_scan` variants are lighter (need a sink-closure A/B).
