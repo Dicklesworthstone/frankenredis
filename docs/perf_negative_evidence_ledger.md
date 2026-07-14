@@ -7924,6 +7924,39 @@ identical pattern, follow-ups): single `lpop`/`rpop` (16168/16291) + `rpop_count
 SHRINK/single-pop → need count-0/idempotent proxies or instructions:u. Value-taking list ops
 (lpush/rpush/linsert/lrem) risk owned-value dilution → instructions:u.
 
+## 2026-07-13 SwiftWillow: WIN — KEEP. LFU ZREM write-side 2 probes → 1 on borrowed members — **1.456–1.468x at n32**
+
+Followed the LSET negative's borrowed-argument routing rule and the shipped SREM sibling into the
+sorted-set write family. Under allkeys-lfu, ZREM still did a `contains_key` random-sample gate
+followed immediately by `entries.get_mut`: two keyspace probes before the member removal. Production
+`zrem_impl::<true>` now uses the successful `get_mut` as the presence gate and draws the identical
+sample through the disjoint `rng_seed` field; `zrem_impl::<false>` retains the exact prior path as a
+same-binary reference. ZREM takes borrowed `&[&[u8]]` members and mutates through direct `get_mut`, so
+there is no owned-value dilution or `with_mutated_entry` digest-wrapper replication. Earlier ZREM
+dispatch and no-TTL expiry-guard wins are orthogonal to this LFU probe collapse.
+
+One-binary, one-invocation, position-balanced A/B (`benches/zrem_lfu_collapse.rs`, `release-perf`,
+allkeys-lfu, 50k singleton packed zsets, repeated ZREM of a same-length missing borrowed member,
+median-of-61) was independently repeated on two fail-closed RCH workers:
+
+- `vmi1152480`: n32 **1.468x**, A/A null median `0.9601`, p5..p95 `[0.758, 1.457]`, cv `22.78%`
+  — narrow WIN. n256 `1.408x`, null `1.0213`, `[0.717, 1.490]`, cv `21.82%` — unclaimed.
+- `vmi1149989`: n32 **1.456x**, A/A null median `1.0441`, p5..p95 `[0.899, 1.207]`, cv `11.08%`
+  — confirming WIN. n256 `1.320x`, null `0.9776`, `[0.614, 1.498]`, cv `28.04%` — unclaimed.
+
+The keep claim is deliberately bounded to n32: both independent workers clear their own n32 null
+p95, while neither n256 observation clears its per-size spread. The timed path is production-valid,
+nondestructive, and reaches `SortedSet::remove`; equal-length stored/missing members avoid a trivial
+length-only miss. `zrem_lfu_collapsed_matches_twoprobe` proves result, RNG, full entry/access/LFU and
+modification metadata, dirty count, incremental digest state, and final full-scan digest across
+missing/partial/mixed/duplicate/empty/remove-to-empty, absent, wrong-type, and lazy-expired cases,
+with LFU on/off and stale/fresh digest state. It passed remotely on `vmi1227854`.
+
+That parity matrix also exposed a pre-existing whole-key-removal incremental-digest drift shared by
+both arms after a fresh digest; it is tracked separately as `frankenredis-ne7sg` and is not folded
+into this performance lever. The test compares the original running digest/stale state between arms,
+then forces the full-scan oracle for final-value parity.
+
 ## 2026-07-13 SwiftWillow: WIN — LANDED (byte-identical mirror of LPOP-count; wallclock noise-drowned this run). LFU RPOP-count 2 probes → 1 (DIRECT get_mut + rng_seed field split)
 
 Line-for-line MIRROR of the landed LPOP-count collapse (`6bc647124`, clean 1.365x/1.343x at cv ~10%)
