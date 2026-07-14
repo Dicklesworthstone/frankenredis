@@ -727,3 +727,11 @@ harness = false
 [[bench]]
 name = "lpushx_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU RPUSHX WRITE-side probe collapse — append-tail twin of
+# lpushx_lfu_collapse. Same 2-probe -> 1 get_mut fold via rng_seed field split; counts retired
+# user-space instructions (RPUSHX grows pre-seeded lists) subtracting an identical build baseline.
+# Byte/RNG-identical (rpushx_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "rpushx_lfu_collapse"
+harness = false
