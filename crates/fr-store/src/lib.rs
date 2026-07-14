@@ -18277,6 +18277,35 @@ impl Store {
         members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
+        self.sadd_impl::<M, true>(key, members, now_ms)
+    }
+
+    /// Bench-only baseline: SADD with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, as
+    /// opposed to production's single `get_mut` that draws the rand on the disjoint `rng_seed` field
+    /// split inside the `Some` arm. Byte/RNG-identical to `sadd`. Not on any production path.
+    #[doc(hidden)]
+    pub fn sadd_lfu_twoprobe_bench<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.sadd_impl::<M, false>(key, members, now_ms)
+    }
+
+    /// A/B toggle for the LFU SADD write-side keyspace-probe collapse (the set-add member of the
+    /// write family; cf. `lpush_impl`). `COLLAPSE = true` (production) draws the LFU rand on the
+    /// disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm, dropping the
+    /// separate `contains_key` rand-gate probe (2 -> 1). Byte/RNG-identical: the prior path drew only
+    /// for a PRESENT key under LFU (`contains_key` true) = exactly the `Some`+LFU case here; the
+    /// create arm (`None`, incl. a just-expired key) draws NOTHING either way. `false` = prior path.
+    fn sadd_impl<M: AsRef<[u8]>, const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
         // (CrimsonHawk) drop_if_expired always probes entries + expiry_deadlines (it has
         // no expires_count fast-exit); when NO key in the DB carries a TTL the target key
         // cannot be expired, so skip it (mirrors lpush/rpush/setnx). The get_mut below
@@ -18291,7 +18320,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -18299,6 +18328,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 // (frankenredis-hrq50) Update LRU/last-access on the write lookup
@@ -50368,6 +50402,50 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn sadd_lfu_collapsed_matches_twoprobe() {
+        // The LFU SADD write-side collapse (rand drawn inside the get_mut Some arm via rng_seed field
+        // split, no contains_key rand-gate) must be byte/RNG/stat-identical to the prior two-probe
+        // path across an add-new-members, an add-duplicate (added=0 but still draws+bumps), a new-key
+        // create, a wrong-type key, and an expired key, under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.sadd(b"s", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, members) — includes an all-duplicate add (added=0, still draws+bumps).
+        let cases: &[(&[u8], &[&[u8]])] = &[
+            (b"s", &[b"c", b"d"]),   // add new
+            (b"s", &[b"a", b"b"]),   // all duplicates -> added 0
+            (b"absent", &[b"x"]),    // create
+            (b"str", &[b"x"]),       // wrong type
+            (b"ttl", &[b"x"]),       // expired -> create
+        ];
+        for lfu in [true, false] {
+            for &(key, members) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.sadd(key, members, now);
+                let rb = b.sadd_lfu_twoprobe_bench(key, members, now);
+                let tag = format!("lfu={lfu} key={key:?} members={members:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"s", now), b.object_freq(b"s", now), "freq {tag}");
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
                 assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");

@@ -701,3 +701,12 @@ harness = false
 [[bench]]
 name = "lpop_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU SADD WRITE-side probe collapse (set-add member of the
+# write family). Same 2-probe -> 1 get_mut fold via rng_seed field split; the timed workload re-adds an
+# already-present member (added=0, non-growing) so it stays on the existing-key Some arm. Counts
+# retired user-space instructions, subtracting an identical build baseline. Byte/RNG-identical
+# (sadd_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "sadd_lfu_collapse"
+harness = false
