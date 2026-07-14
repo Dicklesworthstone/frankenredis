@@ -8052,3 +8052,23 @@ parity across count-zero, partial, exact, over-count/remove-to-empty, singleton,
 and lazy-expired cases with LFU on/off and stale/fresh digest state. It passed remotely on
 `vmi1152480`; remote workspace/all-target check plus 194 conformance library and 99 smoke tests also
 passed on that worker.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU XLEN 3 probes → 1 (fold record+contains_key+get_mut, rng_seed field split) — **2.19-2.34x**
+
+Continues the "previously-missed 3-PROBE reads" hunt (LPOS 1.8x was the first). XLEN's non-LFU path was
+already single-probe (`lookup_live_for_read_mut`); the LFU path did THREE `entries` probes —
+`record_keyspace_lookup` (drop + hit/miss) + `contains_key` rand-gate + `get_mut` — the SAME 3-probe
+read pattern collapsed for GET/EXISTS/GETBIT/LPOS, XLEN was just missed in that sweep. Folded to ONE
+`get_mut` (expiry peek + inline hit/miss + field-split draw). XLEN is a LIGHT O(1) read (`entries.len()`,
+no scan, no alloc), so the three probes dominate → strong ratio. Stream family (distinct from the
+concurrent zset work). Byte/RNG/stat-identical. Const-generic `xlen_impl<COLLAPSE>` +
+`xlen_lfu_threeprobe_bench`.
+
+A/B (`benches/xlen_lfu_collapse.rs`, allkeys-lfu, 50k 1-entry streams, median-of-61): n32 **2.341x** (null med 1.0293, p5..p95 [0.776, **1.306**], cv 21.96%); n256 **2.194x** (null med 0.9891, p5..p95 [0.796, **1.223**], cv 14.40%) — BOTH strong clean WINs (biggest ratio yet: a LIGHT O(1) read where the 3 probes are nearly all the work — bigger than LPOS's 1.8x, which scanned).
+Gated by `xlen_lfu_collapsed_matches_threeprobe` (present stream / absent / wrongtype / expired × LFU
+on&off — asserts result, RNG, keyspace stats, OBJECT FREQ, state_digest). Full fr-store lib suite pass.
+
+REUSABLE: `grep "record_keyspace_lookup"` then filter to sites also having the `contains_key` rand-gate
+= the previously-missed 3-probe LFU reads. Light O(1)/small ones (XLEN, single-value lookups) gate
+strongest; collection reads (HGETALL/HKEYS/HVALS/LRANGE) dilute via the result build but still gate on
+small collections (the zero-copy `*_borrow_scan` variants are lighter but need a sink-closure A/B).
