@@ -9306,7 +9306,7 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.getset_impl::<true>(key, value, now_ms)
+        self.getset_impl::<true, true>(key, value, now_ms)
     }
 
     /// Bench-only baseline: GETSET that CLONES the old value (`MOVE = false`) instead of
@@ -9319,7 +9319,22 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.getset_impl::<false>(key, value, now_ms)
+        self.getset_impl::<false, true>(key, value, now_ms)
+    }
+
+    /// Bench-only baseline: GETSET with the prior THREE-probe LFU read path (`COLLAPSE = false`) —
+    /// `record_keyspace_lookup` + a `contains_key` rand-gate + `get_mut`, as opposed to production's
+    /// single `get_mut` (expiry peek + inline hit/miss + `rand_sample` on the disjoint `rng_seed`
+    /// field split). `MOVE = true` (same as `getset`). Byte/RNG-identical to `getset`. Not on any
+    /// production path.
+    #[doc(hidden)]
+    pub fn getset_lfu_threeprobe_bench(
+        &mut self,
+        key: Vec<u8>,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.getset_impl::<true, false>(key, value, now_ms)
     }
 
     /// Extract GETSET's old string value. `MOVE = true` moves it out (`SmallStr::into_vec`
@@ -9344,7 +9359,7 @@ impl Store {
         }
     }
 
-    fn getset_impl<const MOVE: bool>(
+    fn getset_impl<const MOVE: bool, const COLLAPSE: bool>(
         &mut self,
         key: Vec<u8>,
         value: &[u8],
@@ -9365,6 +9380,47 @@ impl Store {
                 None => None,
             };
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            self.internal_entries_insert(key, new_entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok(old);
+        }
+        if COLLAPSE {
+            // (BlackThrush) LFU 3->1: fold `record_keyspace_lookup` + the `contains_key` rand-gate +
+            // the old-value `get_mut` into ONE `get_mut` (expiry peek + inline hit/miss + `rand_sample`
+            // on the disjoint `&mut self.rng_seed` field split). A present key is a hit that draws +
+            // bumps (a wrong-type key draws+bumps then WRONGTYPE with no overwrite, via `?`); an
+            // absent/expired key is a miss that draws nothing. Then the overwrite insert (unchanged).
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key.as_slice())).should_evict
+            {
+                self.drop_if_expired(key.as_slice(), now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                self.internal_entries_insert(key, new_entry);
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(None);
+            }
+            let (old, lfu_state) = match self.entries.get_mut(key.as_slice()) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
+                    let v = Self::take_or_clone_old_string::<MOVE>(entry)?;
+                    (Some(v), Some(lfu))
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    (None, None)
+                }
+            };
+            let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            if let Some((freq, last_touch)) = lfu_state {
+                new_entry.lfu_freq = freq;
+                new_entry.lfu_last_touch_min = last_touch;
+            }
             self.internal_entries_insert(key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(old);
@@ -51187,6 +51243,45 @@ mod tests {
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn getset_lfu_collapsed_matches_threeprobe() {
+        // The LFU GETSET collapse (3 probes -> 1 get_mut: record + contains_key gate + get_mut folded
+        // via rng_seed field split, reading the old value + copying the LFU counter) must be
+        // byte/RNG/stat-identical to the prior three-probe path across an existing-string overwrite,
+        // an absent key (create, returns None), a wrong-type key (draws+bumps then WRONGTYPE, no
+        // overwrite), and an expired key (dropped -> create), under BOTH allkeys-lfu and non-LFU.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set(b"k".to_vec(), b"old".to_vec(), None, 1);
+            s.rpush(b"lst", &[b"a".to_vec()], 1).unwrap(); // wrong type (list)
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let cases: &[&[u8]] = &[b"k", b"absent", b"lst", b"ttl"];
+        for lfu in [true, false] {
+            for &key in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.getset(key.to_vec(), b"NEW", now);
+                let rb = b.getset_lfu_threeprobe_bench(key.to_vec(), b"NEW", now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"k", now), b.object_freq(b"k", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
     }

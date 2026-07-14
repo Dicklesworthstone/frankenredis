@@ -773,3 +773,12 @@ harness = false
 [[bench]]
 name = "linsert_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU GETSET probe collapse (3 probes -> 1: record +
+# contains_key rand-gate + get_mut folded via rng_seed field split, reading the old value + copying the
+# LFU counter). The timed workload GETSETs an existing key (overwrite -> non-growing keyspace). Counts
+# retired user-space instructions, subtracting an identical build baseline. Byte/RNG/stat-identical
+# (getset_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "getset_lfu_collapse"
+harness = false
