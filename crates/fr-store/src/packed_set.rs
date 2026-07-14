@@ -4976,7 +4976,6 @@ impl PackedZSet {
     /// Borrow each `(member, score)` in the descending rank window. Packed records are encoded
     /// ascending, so only the requested ascending-equivalent window is materialized before its
     /// borrowed pairs are visited in reverse order.
-    #[cfg(any(test, feature = "bench-reference"))]
     pub fn for_each_index_slice_desc(
         &self,
         start_idx: usize,
@@ -4988,7 +4987,6 @@ impl PackedZSet {
 
     /// Shared candidate/reference body for same-binary proof. `WINDOW=false` retains the exact
     /// prior `iter_desc().skip().take()` traversal used by the zero-copy ZREVRANGE WITHSCORES path.
-    #[cfg(any(test, feature = "bench-reference"))]
     #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn for_each_index_slice_desc_impl<const WINDOW: bool>(
         &self,

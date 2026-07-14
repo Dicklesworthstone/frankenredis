@@ -8734,3 +8734,56 @@ and `git diff --check`. UBS ran with Rust build categories disabled; its nonzero
 large store file's legacy/test heuristic inventory (including false JWT matches on internal
 `*_decode` names) plus bounded test/benchmark indexing, with no actionable finding in the retained
 proof-only helper. Every Cargo invocation used strict remote RCH with no local fallback.
+
+## 2026-07-14 MossyTrout: WIN — KEEP. packed zero-copy ZREVRANGE WITHSCORES windows before materialization — **7.0133x**
+
+Negative-ledger-first routing reopened only the immediately preceding INVALID HOLD: that row had
+already profile-verified the real server route and repaired its parser, but the one allowed run
+aborted before A/A+A/B and therefore made no performance claim. The keyspace-RAM `KeyDict` swap
+remains blocked on its structural SCAN-order sign-off, while this distinct bounded lever had exact
+hotspot evidence: `Store::zrevrange_withscores_borrow_scan`, reached by canonical
+`ZREVRANGE key start stop WITHSCORES`, still invoked `PackedZSet::iter_desc`, decoding and
+collecting the entire packed set before applying a narrow descending rank window.
+
+Production now routes the borrowed descending rank window through
+`SortedSet::for_each_index_slice_desc`. Packed zsets map descending ranks to the corresponding
+ascending physical window, skip encoded records before that window by member length plus the fixed
+eight score bytes, materialize only the requested borrowed pairs, and visit them in reverse. Full
+zsets retain the exact prior `iter_desc().skip().take()` traversal. Rank normalization, empty and
+out-of-range handling, expiry, LFU draw/bump, access touch, callback order, member bytes, raw score
+bits, and reply streaming are unchanged. The const-generic `WINDOW=false` arm retains the literal
+old packed traversal for same-binary proof.
+
+The ONE foreground benchmark invocation was the corrected one-binary, one-invocation,
+position-balanced A/A+A/B (`packed_zset_borrow_slice_desc`, `release`, 120 packed records,
+descending `start=96,count=8`, 9 balanced rounds), run fail-closed on remote worker `vmi1152480`.
+Both arms shared executable SHA-256
+`849b04304ad956dc08415a95268a1b649051aaa2a1683a2c110dfffc727cac10`. The literal prior arm used
+**7717.396 instructions/op** and production used **1100.398 instructions/op**:
+reference/candidate **7.013273x**, or **85.7413% fewer instructions**. Effect CV was
+**0.000080%**. The candidate/candidate A/A null median was `0.999999209`, p5..p95
+`[0.999997578, 1.000001041]`, CV **0.000109%**; the result clears the null-p95 gate by orders of
+magnitude.
+
+Exact-input profiles ran inside that same invocation and executable with zero lost samples.
+Candidate (52 samples) resolved `for_each_index_slice_desc_impl::<true>` at **96.19% self** and
+`record_at` at **0.11%**. Reference (245 samples) resolved the removed full temporary's
+`Vec::from_iter` at **52.21% self**, `iter_desc` at **3.56%**, and the exact
+`for_each_index_slice_desc_impl::<false>` wrapper at **2.32% self**, with realloc/malloc/free frames
+prominent. Both arms therefore reached the intended function with non-zero self-time, and the
+measured delta is attributable to avoiding whole-set decode/materialization on the deep narrow
+window. This is a packed store-primitive result, not a whole-server throughput claim.
+
+The production-path `zrange_withscores_borrow_scan_guard_matches` test and raw-bit
+`packed_zset_borrowed_desc_slice_windows_bit_identically` test passed fail-closed on
+`vmi1152480`. Together they cover the real descending store route plus empty/full/interior/tail,
+oversized and out-of-range windows, `usize::MAX`, signed NaNs, infinities, signed zeros, and ties.
+Workspace/all-target `cargo check` passed. Full `fr-conformance` passed with 347 asserting tests
+(194 library + 54 auxiliary/integration + 99 smoke), zero failures; the live `core_zset` oracle was
+324/324. Workspace clippy stopped before this lane at the pre-existing
+`fr-simd/src/lib.rs:795` `clippy::needless_range_loop`. `git diff --check` is green; direct file-wide
+rustfmt continues to expose broad unrelated store formatting drift, while the owned hunks are
+formatted. UBS ran with Rust build categories disabled; its nonzero output is the two large files'
+legacy/test heuristic inventory (including false security matches on flags and internal decode
+names), with no actionable finding in the owned visitor or call-site hunks. Every Cargo invocation
+used strict remote RCH with no local fallback.

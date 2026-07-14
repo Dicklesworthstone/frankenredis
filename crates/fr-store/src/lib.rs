@@ -2278,6 +2278,26 @@ impl SortedSet {
         }
     }
 
+    /// Borrow a descending rank window. Packed zsets materialize only the requested borrowed
+    /// window; Full zsets retain the prior ordered iterator traversal.
+    fn for_each_index_slice_desc(
+        &self,
+        start_idx: usize,
+        count: usize,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
+        match &self.inner {
+            SortedSetInner::Packed(packed) => {
+                packed.for_each_index_slice_desc(start_idx, count, f);
+            }
+            SortedSetInner::Full(full) => {
+                for (member, score) in full.iter_desc().skip(start_idx).take(count) {
+                    f(member, *score);
+                }
+            }
+        }
+    }
+
     /// `count` (member, score) pairs starting at ascending index `start_idx`,
     /// adaptively warming the rank treap on repeated deep access. The only
     /// SortedSet-level slice path (ZRANGE-by-index, ZREMRANGEBYRANK, ZSCAN all
@@ -24329,7 +24349,7 @@ impl Store {
     /// — the descending twin of [`Store::zrange_withscores_borrow_scan`]. Byte-identical
     /// bookkeeping to `zrevrange_withscores` (same `drop_if_expired`, LFU bump,
     /// `touch`-on-non-empty, and `normalize_index` rank math) but streams borrowed
-    /// `(member, score)` pairs in DESCENDING rank order via `iter_desc().skip(s).take(count)`
+    /// `(member, score)` pairs in DESCENDING rank order via a borrowed rank-window visitor
     /// so the WITHSCORES reply avoids the `Vec<(Vec<u8>, f64)>` member clone. `Len(0)`
     /// for a missing / out-of-range / empty result; `Err(WrongType)` for a non-zset value.
     pub fn zrevrange_withscores_borrow_scan(
@@ -24370,9 +24390,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         sink(ZRangeWithScoresScanEvent::Len(count));
-                        for (member, score) in zs.iter_desc().skip(s_idx).take(count) {
+                        zs.for_each_index_slice_desc(s_idx, count, |member, score| {
                             sink(ZRangeWithScoresScanEvent::Pair(member, score));
-                        }
+                        });
                         entry.touch(now_ms);
                         Ok(())
                     }
