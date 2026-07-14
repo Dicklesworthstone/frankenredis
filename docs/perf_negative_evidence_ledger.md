@@ -8430,3 +8430,58 @@ and `git diff --check` are green; file-wide lib formatting still exposes unrelat
 UBS ran with local Cargo/build disabled and exited 0 on the owned harness with zero criticals; its
 warnings are benchmark-only assertions, deterministic nonempty-vector indexing, casts, and setup
 allocation. No Cargo invocation fell back locally.
+
+## 2026-07-14 QuietCardinal: WIN — KEEP. LFU ZCOUNT 3 probes -> 1 — **1.74-1.95x**
+
+Negative-ledger-first routing distinguished the old whole-server/default-policy ZCOUNT residual
+(dispatch/setup noise plus rank-tree structure) from a narrower unmeasured allkeys-LFU acquisition
+cost. Plain ZCOUNT's real server route (borrowed parser -> `execute_plain_zcount_borrowed` ->
+`Store::zcount`) returns one integer without allocating, but its valid-range LFU path still did
+THREE `entries` probes: `record_keyspace_lookup`, a separate `contains_key` random-sample gate, then
+`entries.get_mut`. Production `zcount_impl::<true>` now peeks expiry, records hit/miss inline around
+one `get_mut`, and draws the identical LCG sample through the disjoint `rng_seed` field before the
+unchanged LFU bump/type/range-count/touch sequence. `<false>` retains the exact prior three-probe
+LFU path in the same binary; non-LFU is unchanged. Inverted bounds preserve the existing direct-store
+quirk: record one hit/miss and return zero before RNG, LFU, type, or touch effects.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/zcount_lfu_collapse.rs`, `release`,
+allkeys-lfu, 50k singleton packed zsets, inclusive full range, median-of-61) ran fail-closed on
+remote worker `vmi1152480`. Both arms shared executable SHA-256
+`fa43d94b5052c83acb26caca3b2efa77861f46419131cdde0c414509429d4561`:
+
+- n32 **1.949x**, A/A null median `0.9628`, p5..p95 `[0.720, 1.323]`, cv `25.25%` — WIN.
+- n256 **1.742x**, A/A null median `0.9744`, p5..p95 `[0.567, 1.445]`, cv `67.04%` — WIN.
+
+The worker was noisy, especially at n256, so these rows claim only the predeclared gate: each
+candidate median clears its own size's A/A p95. They are store-path evidence, not a whole-server
+throughput claim and not evidence that the separate rank-tree structural residual is closed.
+
+The exact-input dual-arm profile ran fail-closed on `vmi1149989`: 1K `cycles:u` samples, zero lost,
+with both arms and the unchanged range-count body at non-zero self-time —
+`Store::zcount_lfu_threeprobe_bench` **5.37%**, `Store::zcount_impl::<true>` **4.13%**,
+`run_threeprobe` **7.25%**, `run_collapse` **9.21%**, and
+`score_bound_count_adaptive` **7.41%**. The keyspace cost was explicit: removed
+`HashMap::contains_key` **21.74%**, retained `HashMap::get_mut` **24.20%**, byte hashing **6.96%**,
+plus `drop_if_expired` **0.68%**. This verifies that the timed input executes both ZCOUNT arms and
+attributes the delta to redundant acquisition probes rather than dead code or a different command.
+
+`zcount_lfu_collapsed_matches_threeprobe` passed fail-closed on `vmi1152480`. It compares singleton
+packed and 512-member full zsets (including repeated cold-to-warm adaptive rank-tree calls),
+inclusive and equal-exclusive bounds, live TTL, absent, wrong-type, inverted-range present/wrong-type/
+absent, and expired keys with LFU on/off. It asserts result/error, RNG, hit/miss stats, complete entry
+and cache/access metadata, expiry/lazy-expiry effects, dirty state, and digest parity after every
+call. Absent/expired keys remain misses without a draw; valid WRONGTYPE draws and bumps without
+touch; inverted ranges remain stats-only.
+
+Final fail-closed remote gates: the full fr-store library suite passed on `vmi1149989` (858 passed,
+13 ignored); workspace/all-target `cargo check` passed on `vmi1152480`; and `fr-conformance` passed
+on `vmi1153651` (347 asserting tests, zero failures). The live oracle emitted its known non-strict
+configuration/replication diagnostics and two transport timeouts, but every enclosing test passed.
+Workspace clippy stopped before fr-store at the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop`, outside this lane. Direct Rust 2024 rustfmt of the owned harness and
+owned-hunk inspection plus `git diff --check` are green; the file-wide library check still exposes
+unrelated repository formatting drift. UBS's Cargo categories were disabled for its changed-Rust-
+file scan; the nonzero file-wide legacy/test heuristic inventory had no finding in the owned ZCOUNT
+production hunk. Its focused owned-harness scan exited zero with no critical finding, and its
+warnings are deterministic benchmark-only setup, assertions, and bounded indexing. Every Cargo
+invocation used strict remote RCH with no local fallback.

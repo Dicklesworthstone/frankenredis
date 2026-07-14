@@ -23260,6 +23260,21 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.zcount_impl::<true>(key, min, max, now_ms)
+    }
+
+    /// A/B toggle for the LFU ZCOUNT keyspace-probe collapse. `COLLAPSE = true` folds
+    /// `record_keyspace_lookup`, the random-sample `contains_key` gate, and the value `get_mut`
+    /// from three `entries` probes into one for valid ranges. Inverted ranges preserve the Redis
+    /// quirk: record exactly one hit/miss, then return zero before RNG, LFU, type, or touch effects.
+    /// `false` retains the exact prior LFU path for same-binary measurement; non-LFU is unchanged.
+    fn zcount_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. The inverted-bounds
         // early-return is kept INSIDE the hit branch (before the type check), byte-for-byte
         // matching the slow path's order: an inverted range on a present key returns 0 after
@@ -23282,6 +23297,43 @@ impl Store {
                 None => Ok(0),
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(0);
+            }
+            if score_bound_value(min) > score_bound_value(max) {
+                if self.entries.contains_key(key) {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                } else {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                }
+                return Ok(0);
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    match &mut entry.value {
+                        Value::SortedSet(zs) => {
+                            let result = zs.score_bound_count_adaptive(min, max);
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(0)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
@@ -23297,8 +23349,6 @@ impl Store {
             return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -23320,6 +23370,30 @@ impl Store {
             }
             None => Ok(0),
         }
+    }
+
+    /// Exact prior three-probe LFU ZCOUNT path for the same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn zcount_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zcount_impl::<false>(key, min, max, now_ms)
+    }
+
+    /// Collapsed LFU ZCOUNT arm for a symmetric same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn zcount_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zcount_impl::<true>(key, min, max, now_ms)
     }
 
     /// Increment score of member by delta. Creates member with delta as score if absent.
@@ -43013,6 +43087,94 @@ mod tests {
             full + probe,
             (full + probe) / full
         );
+    }
+
+    #[test]
+    fn zcount_lfu_collapsed_matches_threeprobe() {
+        use crate::ScoreBound::{Exclusive, Inclusive};
+
+        fn build(lfu: bool) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store
+                .zadd(b"packed", &[(1.0, b"a".to_vec())], 1)
+                .unwrap();
+            store.zset_max_listpack_entries = 1;
+            let full_pairs: Vec<(f64, Vec<u8>)> = (0..512)
+                .map(|i| (f64::from(i), format!("m{i:04}").into_bytes()))
+                .collect();
+            store.zadd(b"full", &full_pairs, 1).unwrap();
+            store.zadd(b"live", &[(1.0, b"a".to_vec())], 1).unwrap();
+            assert!(store.expire_at_milliseconds(b"live", 100, 1));
+            store
+                .zadd(b"expired", &[(1.0, b"a".to_vec())], 1)
+                .unwrap();
+            assert!(store.expire_at_milliseconds(b"expired", 5, 1));
+            store.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            store
+        }
+
+        let cases = [
+            (b"packed".as_slice(), Inclusive(0.0), Inclusive(2.0), 1),
+            (b"packed".as_slice(), Exclusive(1.0), Exclusive(1.0), 1),
+            (b"full".as_slice(), Inclusive(0.0), Inclusive(600.0), 2),
+            (b"live".as_slice(), Inclusive(0.0), Inclusive(2.0), 1),
+            (b"absent".as_slice(), Inclusive(0.0), Inclusive(2.0), 1),
+            (b"str".as_slice(), Inclusive(0.0), Inclusive(2.0), 1),
+            (b"packed".as_slice(), Inclusive(2.0), Inclusive(0.0), 1),
+            (b"str".as_slice(), Inclusive(2.0), Inclusive(0.0), 1),
+            (b"absent".as_slice(), Inclusive(2.0), Inclusive(0.0), 1),
+            (b"expired".as_slice(), Inclusive(0.0), Inclusive(2.0), 1),
+            (b"expired".as_slice(), Inclusive(2.0), Inclusive(0.0), 1),
+        ];
+        let now = 10;
+        for lfu in [true, false] {
+            for &(key, min, max, repeats) in &cases {
+                let mut collapsed = build(lfu);
+                let mut prior = build(lfu);
+                for repeat in 0..repeats {
+                    let got = collapsed.zcount_lfu_collapsed_bench(key, min, max, now);
+                    let expected = prior.zcount_lfu_threeprobe_bench(key, min, max, now);
+                    let tag = format!(
+                        "lfu={lfu} key={key:?} min={min:?} max={max:?} repeat={repeat}"
+                    );
+                    assert_eq!(got, expected, "result {tag}");
+                    assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                    assert_eq!(
+                        collapsed.stat_keyspace_hits, prior.stat_keyspace_hits,
+                        "hits {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(collapsed.entries.get(key), prior.entries.get(key), "entry {tag}");
+                    assert_eq!(collapsed.expiry_ms(key), prior.expiry_ms(key), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.expires_count, prior.expires_count,
+                        "expires_count {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_expired_keys, prior.stat_expired_keys,
+                        "expired stats {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.lazy_expired_propagation,
+                        prior.lazy_expired_propagation,
+                        "lazy expiry {tag}"
+                    );
+                    assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                    assert_eq!(
+                        collapsed.state_digest(),
+                        prior.state_digest(),
+                        "state_digest {tag}"
+                    );
+                }
+            }
+        }
     }
 
     // (CrimsonHawk) LPOS non-LFU collapse + ZLEXCOUNT bare-drop guard: byte-identical.

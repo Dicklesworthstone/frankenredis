@@ -420,6 +420,12 @@ harness = false
 name = "zscore_lfu_collapse"
 harness = false
 
+# A/B for LFU ZCOUNT acquisition: fold record + contains_key rand-gate + get_mut (3 probes) into
+# one get_mut via rng_seed field split. Singleton packed full-range count keeps probe cost visible.
+[[bench]]
+name = "zcount_lfu_collapse"
+harness = false
+
 # A/B for LFU ZRANK acquisition: fold record + contains_key rand-gate + get_mut (3 probes) into
 # one get_mut via rng_seed field split. Singleton packed rank lookup keeps probe cost visible.
 [[bench]]
