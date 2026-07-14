@@ -741,6 +741,14 @@ harness = false
 name = "hsetnx_lfu_collapse"
 harness = false
 
+# (CrimsonIsland) instructions:u A/A+A/B for the LFU HMGET keyspace-probe collapse. The timed
+# workload requests one present small field through the real owned-result path, folding record +
+# contains_key + get_mut into one lookup while retaining Vec/value allocation in both arms.
+# Byte/RNG/stat-identical (hmget_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "hmget_lfu_collapse"
+harness = false
+
 # (BlackThrush) instructions:u A/B for the LFU LPUSHX WRITE-side probe collapse — existing-only push
 # (no create arm). Same 2-probe -> 1 get_mut fold via rng_seed field split; counts retired user-space
 # instructions (LPUSHX grows pre-seeded lists) subtracting an identical build baseline. Byte/RNG-

@@ -15279,6 +15279,50 @@ impl Store {
                 None => Ok(fields.iter().map(|_| None).collect()),
             };
         }
+        self.hmget_lfu_impl::<true>(key, fields, now_ms)
+    }
+
+    /// A/B toggle for the LFU HMGET keyspace-probe collapse. `COLLAPSE = true` (shipped) adds a
+    /// fast path for the common `hash_field_expires.is_empty()` case: skip the guaranteed-no-op
+    /// field-TTL reap and fold `record_keyspace_lookup` + the `contains_key` rand gate + `get_mut`
+    /// into one mutable lookup. The owned result construction remains identical. When any hash
+    /// field TTL exists, or LFU is disabled, the exact prior path remains in use.
+    fn hmget_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE && lfu_tracking_enabled && self.hash_field_expires.is_empty() {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(fields.iter().map(|_| None).collect());
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(fields
+                            .iter()
+                            .map(|field| m.get(field).map(<[u8]>::to_vec))
+                            .collect()),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(fields.iter().map(|_| None).collect())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(fields.iter().map(|_| None).collect());
         }
@@ -15289,9 +15333,6 @@ impl Store {
                 self.drop_hash_field_if_expired(key, field, now_ms);
             }
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -15313,6 +15354,18 @@ impl Store {
             }
             None => Ok(fields.iter().map(|_| None).collect()),
         }
+    }
+
+    /// Exact prior three-probe LFU HMGET path for the same-binary A/B harness.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn hmget_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+        self.hmget_lfu_impl::<false>(key, fields, now_ms)
     }
 
     /// (frankenredis-hmgetinto) Borrowed HMGET: invokes `emit` once per requested
@@ -48893,6 +48946,121 @@ mod tests {
     }
 
     #[test]
+    fn hmget_lfu_collapsed_matches_threeprobe() {
+        fn build(case: &str, fresh: bool) -> Store {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.lfu_decay_time = 0;
+            store.set(b"other".to_vec(), b"v".to_vec(), None, 1);
+            match case {
+                "present" => {
+                    store.hset(b"h", b"a".to_vec(), b"one".to_vec(), 1).unwrap();
+                    store.hset(b"h", b"b".to_vec(), b"two".to_vec(), 1).unwrap();
+                }
+                "absent" => {}
+                "wrongtype" => {
+                    store.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                "expired" | "live_ttl" => {
+                    store.hset(b"h", b"a".to_vec(), b"one".to_vec(), 1).unwrap();
+                    store.hset(b"h", b"b".to_vec(), b"two".to_vec(), 1).unwrap();
+                    let deadline = if case == "expired" { 5 } else { 100 };
+                    assert!(store.expire_at_milliseconds(b"h", deadline, 1));
+                }
+                "field_expired" => {
+                    store.hset(b"h", b"a".to_vec(), b"one".to_vec(), 1).unwrap();
+                    store.hset(b"h", b"b".to_vec(), b"two".to_vec(), 1).unwrap();
+                    store
+                        .hash_field_expires
+                        .insert((b"h".to_vec(), b"b".to_vec()), 5);
+                }
+                _ => unreachable!(),
+            }
+            if fresh {
+                let _ = store.state_digest();
+            }
+            store
+        }
+
+        let fields: &[&[u8]] = &[b"a", b"b", b"missing"];
+        for case in [
+            "present",
+            "absent",
+            "wrongtype",
+            "expired",
+            "live_ttl",
+            "field_expired",
+        ] {
+            // Existing hash-field expiry reaping does not refresh an already-fresh state digest;
+            // that unrelated invariant predates this acquisition-only change. Exercise the exact
+            // field-TTL fallback from stale state while keeping fresh/stale coverage on every path
+            // touched by the new no-field-TTL fast arm.
+            let fresh_modes: &[bool] = if case == "field_expired" {
+                &[false]
+            } else {
+                &[false, true]
+            };
+            for &fresh in fresh_modes {
+                let mut collapsed = build(case, fresh);
+                let mut prior = build(case, fresh);
+                let got = collapsed.hmget(b"h", fields, 10);
+                let expected = prior.hmget_lfu_threeprobe_bench(b"h", fields, 10);
+                let tag = format!("case={case} fresh={fresh}");
+                assert_eq!(got, expected, "result {tag}");
+                assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                assert_eq!(
+                    collapsed.stat_keyspace_hits, prior.stat_keyspace_hits,
+                    "hits {tag}"
+                );
+                assert_eq!(
+                    collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    collapsed.stat_expired_keys, prior.stat_expired_keys,
+                    "expired stats {tag}"
+                );
+                assert_eq!(
+                    collapsed.entries.get(b"h".as_slice()),
+                    prior.entries.get(b"h".as_slice()),
+                    "entry {tag}"
+                );
+                assert_eq!(
+                    collapsed.expiry_ms(b"h"),
+                    prior.expiry_ms(b"h"),
+                    "expiry {tag}"
+                );
+                assert_eq!(
+                    collapsed.hash_field_expires, prior.hash_field_expires,
+                    "field expiry {tag}"
+                );
+                assert_eq!(
+                    collapsed.hash_field_expired_counts, prior.hash_field_expired_counts,
+                    "field expired counts {tag}"
+                );
+                assert_eq!(
+                    collapsed.lazy_expired_propagation, prior.lazy_expired_propagation,
+                    "lazy expiry {tag}"
+                );
+                assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                assert_eq!(
+                    collapsed.digest_mutations, prior.digest_mutations,
+                    "digest_mutations {tag}"
+                );
+                assert_eq!(
+                    collapsed.digest_stale, prior.digest_stale,
+                    "digest_stale {tag}"
+                );
+                assert_eq!(
+                    collapsed.state_digest(),
+                    prior.state_digest(),
+                    "state_digest {tag}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ttl_change_fresh_digest_matches_full_scan() {
         // (bugfix regression) entry_state_digest hashes the expiry, so a pure-TTL op (EXPIRE /
         // EXPIREAT / PERSIST) alters a key's digest. On a FRESH digest the running_digest must stay
@@ -51709,8 +51877,8 @@ mod tests {
                     let mut a = build(lfu);
                     let mut b = build(lfu);
                     if force_fresh {
-                        a.state_digest();
-                        b.state_digest();
+                        let _ = a.state_digest();
+                        let _ = b.state_digest();
                     }
                     let ra = a.hdel(key, fields, now);
                     let rb = b.hdel_lfu_twoprobe_bench(key, fields, now);

@@ -8528,3 +8528,58 @@ harness and `git diff --check` are green. UBS ran with its local Cargo/build cat
 its nonzero results are the file-wide legacy/test inventory plus the benchmark's deliberate
 fail-closed panic for an invalid internal mode, with no actionable finding in the owned production
 hunk. Every Cargo invocation used strict remote RCH with no local fallback.
+
+## 2026-07-14 CrimsonIsland: WIN — KEEP. LFU HMGET no-field-TTL 3 probes -> 1 — **1.4330x**
+
+Negative-ledger-first routing did not reopen the staged-but-unwired `KeyDict`: wiring that side
+index remains the structural, all-keyspace `frankenredis-uhthd` swap rather than a one-lever cut.
+The first apparent borrowed-HMGET seam was also rejected after route audit because the runtime uses
+that path only when maxmemory is disabled, so allkeys-LFU cannot reach it. The real generic
+`Store::hmget` route still did THREE keyspace probes on the common no-field-TTL path:
+`record_keyspace_lookup`, `entries.contains_key` to gate the LFU random draw, then
+`entries.get_mut`. This is distinct from the previously ledgered per-field collapse: HMGET had
+stopped reacquiring once per requested field, but its one command-level acquisition sequence still
+contained three table probes.
+
+Production `hmget_lfu_impl::<true>` now takes a conservative fast arm only when LFU is enabled and
+the global hash-field expiry index is empty. It peeks key expiry, records hit/miss around one
+`get_mut`, draws the identical LCG sample through the disjoint `rng_seed` field on hits, then keeps
+the prior LFU bump, touch, type check, requested-field lookup, and owned `Vec`/value clone behavior.
+Any field TTL anywhere, or non-LFU policy, retains the exact prior path. The hidden `<false>` arm
+keeps that three-probe path for same-binary proof.
+
+The ONE foreground benchmark invocation was a one-binary, one-invocation, position-balanced
+A/A+A/B (`benches/hmget_lfu_collapse.rs`, `release`, allkeys-lfu, 20k hashes with one present small
+field, 16 passes, 9 balanced rounds) run fail-closed on remote worker `vmi1152480`. Both arms shared
+executable SHA-256 `b14d46605455b5909bc42ba28e50ee984d6faf37d2c1cc954103fce97c1e447d`.
+After subtracting an identical build count, the prior arm used **1103.75 instructions/op** and the
+collapsed arm **770.26 instructions/op**: baseline/candidate **1.4330x**, candidate-ratio CV
+**0.01%**. The A/A null median was `1.0000`, p5..p95 `[0.9998, 1.0003]`, CV `0.02%`; the candidate
+therefore clears the predeclared null-p95 gate decisively.
+
+The exact-input dual-arm `cycles:u` profile ran inside that invocation and executable: 725 samples,
+zero lost. Both arms resolved at non-zero self-time: baseline
+`Store::hmget_lfu_threeprobe_bench` **2.72%** / `run_threeprobe` **1.10%**, candidate
+`Store::hmget` **2.32%** / `run_collapsed` **0.19%**. The removed `HashMap::contains_key` was
+**19.33%**, retained `HashMap::get_mut` **14.28%**, byte compare **11.44%**, malloc **8.70%**,
+packed hash-field locate **6.20%**, field get **5.42%**, and byte hashing **5.24%**. This verifies
+that the exact timed input executes both HMGET arms and attributes the delta to the redundant
+keyspace probes while retaining the owned-result allocation cost.
+
+`hmget_lfu_collapsed_matches_threeprobe` passed fail-closed on `vmi1152480`. It covers present,
+absent, WRONGTYPE, expired-key, live-key-TTL, and expired-field fallback cases; for every new fast
+arm it tests both fresh and stale running digests and asserts result/error, RNG, hit/miss/expired
+stats, full entry/access metadata, key and field expiry state, lazy-expiry effects, dirty state,
+digest mutation state, and final state-digest parity. The matrix exposed a separate pre-existing
+invariant: lazy hash-field expiry can leave an already-fresh running digest stale. That repair is
+filed as `frankenredis-tstqi`; this acquisition-only commit neither hides nor expands into it.
+
+Final fail-closed remote gates: workspace/all-target `cargo check` passed on `vmi1152480`.
+Workspace clippy reached Cargo on that worker and stopped before this lane at the pre-existing
+`fr-simd/src/lib.rs:795` `clippy::needless_range_loop` blocker. Direct Rust 2024 rustfmt of the owned
+harness and `git diff --check` are green; the owned source lines are clean while the file-wide
+library check still exposes extensive unrelated repository formatting drift. UBS ran with local
+Cargo/build categories disabled; its nonzero results are the file-wide legacy/test heuristic
+inventory plus deliberate benchmark-only fail-closed panic/assert/index checks, with no actionable
+finding in the owned production hunk. Every Cargo invocation used strict remote RCH with no local
+fallback.
