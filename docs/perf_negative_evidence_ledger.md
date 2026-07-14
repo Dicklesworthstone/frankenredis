@@ -7983,3 +7983,23 @@ the LSET case (LSET was owned-value dilution, ~1.17x at LOW cv — genuinely sub
 LESSON: a byte-identical MIRROR of an already-cleanly-gated lever does not need its own clean gate —
 its own bench is near-ceremonial and vulnerable to transient noise. For such mirrors, cite the
 sibling's clean measurement + differential byte-identity, or use instructions:u.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU BITCOUNT 2 probes → 1 (get_mut-first + rng_seed field split) — **1.24-1.39x**
+
+DISTINCT lever (a READ, not a write-family mirror): BITCOUNT was left in the "diluted tail" months ago
+(O(n) SIMD popcount assumed to dilute the probe). CORRECTION: on SMALL bitmaps the popcount is
+negligible and the two `entries` probes DOMINATE, so the LFU probe collapse gates — and the probe is
+eliminated for bitmaps of ANY size. Under allkeys-lfu BITCOUNT did a `contains_key` LFU rand-gate +
+`get_mut` (2 probes); the collapse draws `rand_sample` on the disjoint `&mut self.rng_seed` field split
+inside the `get_mut` borrow (1 probe). BITCOUNT is a read (bumps LFU + touches, no value mutation → NO
+digest replica). Byte/RNG-identical: the field-split draw advances `rng_seed` exactly as `next_rand`,
+present-key-gated as before (a reaped/absent key draws nothing; LFU off neither draws). Const-generic
+`bitcount_impl<COLLAPSE>` + `bitcount_lfu_twoprobe_bench`.
+
+A/B (`benches/bitcount_lfu_collapse.rs`, allkeys-lfu, 50k 2-byte bitmaps, full BITCOUNT, non-mutating
+repeatable, median-of-61): n32 **1.386x** (null med 1.0138, p5..p95 [0.847, **1.210**], cv 11.47%); n256 **1.240x** (null med 0.9914, p5..p95 [0.883, **1.170**], cv 10.46%) — BOTH clean gate-clear WINs (confirms the small-bitmap probe-dominance hypothesis). Gated by `bitcount_lfu_collapsed_matches_twoprobe` (full /
+byte-range / bit-range / negative-range / integer-encoded string / absent / wrongtype / expired × LFU
+on&off — asserts result, RNG, keyspace stats, OBJECT FREQ, state_digest). Full fr-store lib suite pass.
+
+The remaining diluted-tail read is BITPOS (same skip, same small-input gate) — a clean follow-up. The
+LFU read-collapse family reopens for the previously-skipped O(n)-scan reads when benched on small inputs.
