@@ -544,3 +544,12 @@ harness = false
 [[bench]]
 name = "xlen_lfu_collapse"
 harness = false
+
+# A/B for the LFU HKEYS keyspace-probe collapse: on the no-field-TTL fast path, skip
+# drop_expired_hash_fields + fold record_keyspace_lookup + contains_key rand-gate + get_mut into one
+# get_mut (expiry peek + rng_seed field-split draw) — 3 probes -> 1 — vs the prior three-probe path.
+# Also adds a non-LFU lookup_live_for_read_mut fast path (default-config 2->1). Byte/RNG/stat-identical
+# (hkeys_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "hkeys_lfu_collapse"
+harness = false

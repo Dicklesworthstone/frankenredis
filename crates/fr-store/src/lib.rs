@@ -14854,13 +14854,71 @@ impl Store {
     }
 
     pub fn hkeys(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hexists`. With no
+        // per-field TTLs anywhere (HEXPIRE unused — the overwhelmingly common case) the
+        // `drop_expired_hash_fields` reap is a no-op, so fold `record_keyspace_lookup` + `get_mut`
+        // into one `lookup_live_for_read_mut` probe. Byte/stat-identical; a DEFAULT-config win (no
+        // maxmemory-policy) on top of the LFU collapse below.
+        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => {
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(m.keys().map(<[u8]>::to_vec).collect()),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => Ok(Vec::new()),
+            };
+        }
+        self.hkeys_lfu_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU HKEYS keyspace-probe collapse. `COLLAPSE = true` (shipped) adds a fast
+    /// path for the common `hash_field_expires.is_empty()` (HEXPIRE unused): skip the
+    /// `drop_expired_hash_fields` no-op and fold `record_keyspace_lookup` + the `contains_key`
+    /// rand-gate + `get_mut` into ONE `get_mut` — 3 probes → 1 — with the expiry peek + inline
+    /// hit/miss + `rand_sample` on the disjoint `&mut self.rng_seed` field split. When per-field TTLs
+    /// exist (rare) it falls back to the exact prior path (reaps the fields first). `false` is the
+    /// prior three-probe path — also reached with field-TTLs. HKEYS is a read (bumps LFU + touches,
+    /// no value mutation → no digest). Byte/RNG/stat-identical.
+    fn hkeys_lfu_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE && self.hash_field_expires.is_empty() {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(Vec::new());
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::Hash(m) => Ok(m.keys().map(<[u8]>::to_vec).collect()),
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(Vec::new())
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
         self.drop_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -14879,6 +14937,17 @@ impl Store {
             }
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Prior-path (three-probe) HKEYS baseline for the same-binary A/B: `record_keyspace_lookup` +
+    /// `drop_expired_hash_fields` + `contains_key` rand-gate + `get_mut`. Not on any production path.
+    #[doc(hidden)]
+    pub fn hkeys_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.hkeys_lfu_impl::<false>(key, now_ms)
     }
 
     pub fn hvals(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -47872,6 +47941,45 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn hkeys_lfu_collapsed_matches_threeprobe() {
+        // The HKEYS collapse must be byte/RNG/stat-identical to the prior three-probe path. Under
+        // allkeys-lfu (a.hkeys → the 3→1 LFU fast path), under a non-LFU policy (a.hkeys → the 2→1
+        // lookup_live_for_read_mut fast path), both vs the baseline (record + drop_expired_hash_fields
+        // + contains_key rand-gate + get_mut). Across a present hash, absent, wrong-type, and expired
+        // keys. Asserts result (key order preserved), RNG, keyspace hits/misses, OBJECT FREQ,
+        // state_digest.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 1).unwrap();
+            s.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 1).unwrap();
+            s.hset(b"h", b"f3".to_vec(), b"v3".to_vec(), 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        for lfu in [true, false] {
+            for key in [b"h".as_slice(), b"absent", b"str", b"ttl"] {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.hkeys(key, now);
+                let rb = b.hkeys_lfu_threeprobe_bench(key, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 
