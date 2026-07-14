@@ -598,3 +598,11 @@ harness = false
 [[bench]]
 name = "smembers_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU ZRANGE collapse on the ZERO-COPY production path (zrange_borrow_scan): fold the LFU
+# path's record + contains_key rand-gate + get_mut (3 probes) into ONE get_mut via rng_seed field
+# split, matching the already-present non-LFU one. Byte/RNG/stat-identical
+# (zrange_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "zrange_borrow_scan_lfu_collapse"
+harness = false
