@@ -7791,6 +7791,16 @@ absent, wrong-type, and lazy-expired cases with LFU both on and off. The focused
 remotely on `vmi1149989`. This overturns the old structural “rand needs &mut self” wall for SREM and
 confirms the LSET row's borrowed-argument routing lesson; it does not claim an end-to-end socket win.
 
+Closeout correction: commit `30617b94e` accidentally staged the SREM scaffold, reference arm,
+parity test, bench, and this row but omitted the two small production-collapse hunks from the shared
+`lib.rs` diff. The measurements above were made against the complete working-tree candidate, but
+that commit alone left production and reference arms identical. This follow-up lands exactly the
+missing conditional rand gate and field-split draw. A fresh fail-closed foreground run on
+`vmi1152480` revalidated n32 at **1.376x** versus A/A null median `1.0056`, p5..p95
+`[0.622, 1.316]`, cv `20.44%` — WIN; n256 `1.247x` versus null `1.0318`,
+`[0.593, 1.419]`, cv `25.51%` remains explicitly unclaimed. The focused parity test also passed on
+remote worker `vmi1227854` before landing the repair.
+
 ## 2026-07-13 SwiftWillow: WIN — LANDED (`48c26f2f2`). LFU SETBIT write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.42x (n32)**
 
 Third member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]),
