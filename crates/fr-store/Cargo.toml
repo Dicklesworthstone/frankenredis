@@ -498,3 +498,11 @@ harness = false
 [[bench]]
 name = "lpop_count_lfu_collapse"
 harness = false
+
+# A/B for the LFU RPOP-count write-side keyspace-probe collapse: direct-get_mut with the rand draw
+# relocated inside the get_mut borrow via rng_seed field split (1 probe) vs the prior contains_key
+# rand-gate (2 probes). RPOP key 0 pops nothing (no value arg) — the non-growing repeatable timed
+# shape. Byte/RNG-identical (rpop_count_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "rpop_count_lfu_collapse"
+harness = false

@@ -16349,6 +16349,23 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        self.rpop_count_impl::<true>(key, count, now_ms)
+    }
+
+    /// A/B toggle for the LFU RPOP-count keyspace-probe collapse. `COLLAPSE = true` (shipped) draws the
+    /// LFU `rand_sample` on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` borrow,
+    /// dropping the separate `contains_key` LFU rand-gate (2 probes → 1 under allkeys-lfu). RPOP-count
+    /// is a DIRECT-`get_mut` write (no `with_mutated_entry` digest wrapper — it `mark_digest_stale`s),
+    /// so the collapse is a pure rand-draw relocation with no digest replica, and it takes NO owned
+    /// value (only a count). Byte/RNG-identical: the field-split draw advances `rng_seed` exactly as
+    /// `next_rand`, present-key-gated as before (a `None` get_mut draws nothing; LFU off neither draws).
+    /// `false` is the prior path. Mirror of `lpop_count_impl`.
+    fn rpop_count_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -16356,7 +16373,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -16364,7 +16383,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let rs = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                 }
                 match &mut entry.value {
                     Value::List(l) => {
@@ -16394,6 +16418,18 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// Prior-path (two-probe) RPOP-count baseline for the same-binary A/B: `contains_key` LFU
+    /// rand-gate before `get_mut`. Not on any production path (`rpop_count` uses `rpop_count_impl::<true>`).
+    #[doc(hidden)]
+    pub fn rpop_count_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        self.rpop_count_impl::<false>(key, count, now_ms)
     }
 
     pub fn llen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
@@ -47622,6 +47658,64 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn rpop_count_lfu_collapsed_matches_twoprobe() {
+        // The direct-get_mut LFU RPOP-count collapse (rand drawn inside the get_mut borrow via
+        // rng_seed field split, no contains_key rand-gate) must be byte/RNG-identical to the prior
+        // contains_key-gated path — across count=0 (no-op), partial pop, single pop, pop-all (removes
+        // key), absent, wrong-type, and expired keys, under BOTH allkeys-lfu and a non-LFU policy.
+        // Asserts result, RNG state, OBJECT FREQ, dirty, and the full DEBUG DIGEST bookkeeping.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(
+                b"lst",
+                &[
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                    b"c".to_vec(),
+                    b"d".to_vec(),
+                    b"e".to_vec(),
+                ],
+                1,
+            )
+            .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, count)
+        let cases: &[(&[u8], usize)] = &[
+            (b"lst", 0),    // no-op pop (empty result, no removal)
+            (b"lst", 2),    // partial pop from back
+            (b"lst", 1),    // single pop
+            (b"lst", 100),  // pop-all -> removes key
+            (b"absent", 3), // absent -> Ok(None)
+            (b"str", 1),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 1),    // expired -> Ok(None)
+        ];
+        for lfu in [true, false] {
+            for &(key, count) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.rpop_count(key, count, now);
+                let rb = b.rpop_count_lfu_twoprobe_bench(key, count, now);
+                let tag = format!("lfu={lfu} key={key:?} count={count}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 
