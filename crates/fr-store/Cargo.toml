@@ -505,6 +505,13 @@ harness = false
 name = "zpopmin_count_lfu_collapse"
 harness = false
 
+# A/B support for the LFU ZPOPMAX-count write-side keyspace-probe experiment: resolve the entry once
+# and draw through the disjoint rng_seed field after a hit (1 probe) vs production's contains_key
+# rand gate + get_mut (2 probes). ZPOPMAX key 0 is the repeatable, non-destructive timed shape.
+[[bench]]
+name = "zpopmax_count_lfu_collapse"
+harness = false
+
 # A/B for the LFU LPOP-count write-side keyspace-probe collapse: direct-get_mut with the rand draw
 # relocated inside the get_mut borrow via rng_seed field split (1 probe) vs the prior contains_key
 # rand-gate (2 probes). LPOP key 0 pops nothing (no value arg) — the non-growing repeatable timed

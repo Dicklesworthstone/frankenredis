@@ -8073,6 +8073,42 @@ REUSABLE: `grep "record_keyspace_lookup"` then filter to sites also having the `
 strongest; collection reads (HGETALL/HKEYS/HVALS/LRANGE) dilute via the result build but still gate on
 small collections (the zero-copy `*_borrow_scan` variants are lighter but need a sink-closure A/B).
 
+## 2026-07-13 SandyMeadow: NEGATIVE HOLD — NO-SHIP. LFU ZPOPMAX-count 2 probes → 1 is directionally faster but wall-clock noise-drowned
+
+Negative-ledger-first routing selected the exact max-side mirror of the landed ZPOPMIN-count collapse.
+Under allkeys-lfu, production `zpopmax_count` still used a `contains_key` random-sample gate followed
+by `entries.get_mut`; the candidate drew the identical sample through the disjoint `rng_seed` field
+only after a successful `get_mut`. `ZPOPMAX key 0` reaches the real `pop_max_n(0)` path, including
+entry resolution, LFU bump, type check, and result construction, while leaving the singleton packed
+zset intact for repeat measurement.
+
+One-binary, one-invocation, position-balanced A/B with an A/A null control
+(`benches/zpopmax_count_lfu_collapse.rs`, `release-perf`, 50k singleton packed zsets, median-of-61)
+ran fail-closed on remote worker `vmi1152480`:
+
+- n32 candidate **1.374x**, A/A null median `1.0042`, p5..p95 `[0.814, 1.750]`, cv `28.43%` —
+  indistinguishable; below its own null p95.
+- n256 candidate **1.230x**, A/A null median `0.9885`, p5..p95 `[0.500, 1.476]`, cv `28.77%` —
+  indistinguishable; below its own null p95.
+
+`zpopmax_count_lfu_collapsed_matches_twoprobe` passed remotely on `vmi1264463` and again after the
+final no-ship routing on `vmi1153651`, proving result, RNG, full entry/LFU/access metadata, dirty count,
+and incremental/full-scan digest parity across count-zero,
+partial, exact, over-count/remove-to-empty, singleton, absent, wrong-type, and lazy-expired cases with
+LFU on/off and stale/fresh digest state. The directional ratios agree with the ZPOPMIN sibling, but
+neither size clears the mandatory per-size null spread, so production remains on
+`zpopmax_count_impl::<false>` (the exact prior two-probe path). The A/B reference and candidate support
+remain available for a future `instructions:u` or quieter-worker confirmation.
+
+The final workspace/all-target check passed fail-closed on `vmi1227854`. Workspace clippy was also
+attempted fail-closed, but stopped before this crate on the pre-existing
+`fr-simd/src/lib.rs:795` `clippy::needless_range_loop` finding, tracked as `frankenredis-dyaks`.
+
+This is a **NO-SHIP HOLD, not a causal REJECT**: RCH does not retrieve the linked bench binary and no
+profile self-time or per-arm binary SHA was captured, so the methodology's admissible-REJECT fields
+are intentionally not claimed. Do not treat the ZPOPMAX family as closed; treat this run only as
+evidence that the wall-clock harness could not decide the one-probe mirror under current fleet load.
+
 ## 2026-07-13 SwiftWillow: WIN — LANDED. LFU HKEYS 3→1 + non-LFU 2→1 (fold record+field-reap+contains_key+get_mut) — **1.48-1.56x (LFU) + non-LFU 2->1**
 
 HIGH-VALUE distinct read: HKEYS (top-tier common hash command) was missed in BOTH sweeps — its LFU path
