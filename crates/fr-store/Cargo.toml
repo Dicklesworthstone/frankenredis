@@ -647,3 +647,11 @@ harness = false
 [[bench]]
 name = "zrevrangebyscore_withscores_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU XRANGE/XREVRANGE collapse on the ZERO-COPY production path (xrange_borrow_scan, the
+# stream borrow-scan encoder): fold record + contains_key rand-gate + get_mut (3 probes) into ONE
+# get_mut via rng_seed field split, matching the already-present non-LFU one. Byte/RNG/stat-identical
+# (xrange_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "xrange_borrow_scan_lfu_collapse"
+harness = false

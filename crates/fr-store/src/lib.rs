@@ -24972,12 +24972,58 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
         rev: bool,
+        sink: impl FnMut(XrangeReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.xrange_borrow_scan_impl::<true>(key, start, end, count, now_ms, rev, sink)
+    }
+
+    /// A/B toggle for the LFU XRANGE/XREVRANGE keyspace-probe collapse on the ZERO-COPY production
+    /// path (the fr-runtime borrow-scan encoder for streams). The non-LFU path already single-probes
+    /// via `lookup_live_for_read_mut`; `COLLAPSE = true` (shipped) folds the LFU path's three
+    /// `entries` probes (`record_keyspace_lookup` + the `contains_key` rand-gate + `get_mut`) into ONE
+    /// `get_mut` (expiry peek + inline hit/miss + `rand_sample` on the disjoint `&mut self.rng_seed`
+    /// field split). Like the prior path, the LFU bump runs unconditionally after a keyspace hit
+    /// (before the `Value::Stream` type check, so a present wrong-type key bumps), while `touch` fires
+    /// only for a non-empty (`start <= end`) range via the shared `should_touch` tail. `false` retains
+    /// the exact prior three-probe LFU path. Byte/RNG/stat-identical; same `XrangeReplyEvent` stream.
+    fn xrange_borrow_scan_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        start: StreamId,
+        end: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+        rev: bool,
         mut sink: impl FnMut(XrangeReplyEvent<'_>),
     ) -> Result<(), StoreError> {
         let entry = if !self.lfu_tracking_enabled() {
             match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => entry,
                 None => {
+                    sink(XrangeReplyEvent::RecordCount(0));
+                    return Ok(());
+                }
+            }
+        } else if COLLAPSE {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                sink(XrangeReplyEvent::RecordCount(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     sink(XrangeReplyEvent::RecordCount(0));
                     return Ok(());
                 }
@@ -25050,6 +25096,23 @@ impl Store {
             entry.touch(now_ms);
         }
         Ok(())
+    }
+
+    /// Prior-path (three-probe) XRANGE borrow-scan baseline for the same-binary A/B. Not on any
+    /// production path (`xrange_borrow_scan` uses `::<true>`).
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn xrange_borrow_scan_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        start: StreamId,
+        end: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+        rev: bool,
+        sink: impl FnMut(XrangeReplyEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.xrange_borrow_scan_impl::<false>(key, start, end, count, now_ms, rev, sink)
     }
 
     pub fn xrevrange(
@@ -45229,6 +45292,94 @@ mod tests {
             "XRANGE full-range @500 entries x3 fields: clone={clone_ns:.0} ns | borrow={borrow_ns:.0} ns = {:.2}x",
             clone_ns / borrow_ns
         );
+    }
+
+    #[test]
+    fn xrange_borrow_scan_lfu_collapsed_matches_threeprobe() {
+        use crate::{StreamId, XrangeReplyEvent};
+        // The LFU XRANGE collapse on the zero-copy borrow-scan production path (3 probes -> 1
+        // get_mut) must be byte/RNG/stat-identical to the prior three-probe path and drive the SAME
+        // XrangeReplyEvent stream — across a present stream (full / sub / count-limited / start>end
+        // empty), absent, wrong-type, and expired keys, both fwd and rev, under BOTH allkeys-lfu and
+        // a non-LFU policy. The LFU bump runs before the type check (wrong-type bumps); touch fires
+        // only on a non-empty (start<=end) range.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            for i in 1..=4u64 {
+                s.xadd(
+                    b"st",
+                    (i, 0),
+                    &[(b"f".to_vec(), format!("v{i}").into_bytes())],
+                    1,
+                )
+                .unwrap();
+            }
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.xadd(b"ttl", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+                .unwrap();
+            assert!(s.expire_at_milliseconds(b"ttl", 5, 1));
+            s
+        }
+        // Materialize the full XrangeReplyEvent stream into a comparable owned form.
+        #[allow(clippy::type_complexity)]
+        fn collect(
+            s: &mut Store,
+            collapse: bool,
+            key: &[u8],
+            start: StreamId,
+            end: StreamId,
+            count: Option<usize>,
+            rev: bool,
+            now: u64,
+        ) -> (Result<(), StoreError>, Vec<usize>, Vec<(u64, u64, usize)>, Vec<Vec<u8>>) {
+            let mut counts = Vec::new();
+            let mut starts: Vec<(u64, u64, usize)> = Vec::new();
+            let mut fields: Vec<Vec<u8>> = Vec::new();
+            let mut sink = |ev: XrangeReplyEvent<'_>| match ev {
+                XrangeReplyEvent::RecordCount(n) => counts.push(n),
+                XrangeReplyEvent::RecordStart(id, nf) => starts.push((id.0, id.1, nf)),
+                XrangeReplyEvent::Field(f) => fields.push(f.to_vec()),
+            };
+            let r = if collapse {
+                s.xrange_borrow_scan(key, start, end, count, now, rev, &mut sink)
+            } else {
+                s.xrange_borrow_scan_lfu_threeprobe_bench(key, start, end, count, now, rev, &mut sink)
+            };
+            (r, counts, starts, fields)
+        }
+        let now = 10;
+        let min = (0u64, 0u64);
+        let max = (u64::MAX, u64::MAX);
+        let cases: &[(&[u8], StreamId, StreamId, Option<usize>)] = &[
+            (b"st", min, max, None),
+            (b"st", (2, 0), (3, 0), None),
+            (b"st", min, max, Some(2)),
+            (b"st", (10, 0), (5, 0), None), // start > end ⇒ empty, no touch
+            (b"absent", min, max, None),
+            (b"str", min, max, None),
+            (b"ttl", min, max, None),
+        ];
+        for lfu in [true, false] {
+            for rev in [false, true] {
+                for &(key, start, end, count) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    let ra = collect(&mut a, true, key, start, end, count, rev, now);
+                    let rb = collect(&mut b, false, key, start, end, count, rev, now);
+                    let tag = format!("lfu={lfu} rev={rev} key={key:?} {start:?}..{end:?} c={count:?}");
+                    assert_eq!(ra, rb, "events {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                    assert_eq!(a.object_freq(b"st", now), b.object_freq(b"st", now), "freq {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
+        }
     }
 
     // (CrimsonHawk) hscan0_borrow_scan yields BYTE-IDENTICAL (next_cursor, [f,v,...]) to clone hscan
