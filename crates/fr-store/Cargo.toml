@@ -513,3 +513,11 @@ harness = false
 [[bench]]
 name = "rpop_count_lfu_collapse"
 harness = false
+
+# A/B for the LFU BITCOUNT keyspace-probe collapse: draw the LFU rand inside the get_mut borrow via
+# rng_seed field split (1 probe) vs the prior contains_key rand-gate (2 probes). BITCOUNT is a read
+# (bumps LFU, no digest); on small bitmaps the probes dominate the O(n) popcount so the collapse
+# gates. Byte/RNG-identical (bitcount_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "bitcount_lfu_collapse"
+harness = false

@@ -10862,6 +10862,26 @@ impl Store {
         unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.bitcount_impl::<true>(key, start, end, unit, now_ms)
+    }
+
+    /// A/B toggle for the LFU BITCOUNT keyspace-probe collapse. `COLLAPSE = true` (shipped) draws the
+    /// LFU `rand_sample` on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` borrow,
+    /// dropping the separate `contains_key` LFU rand-gate (2 probes → 1 under allkeys-lfu). BITCOUNT is
+    /// a read that bumps LFU + touches but does not mutate the value, so there is no digest replica —
+    /// a pure rand-draw relocation. Byte/RNG-identical: the field-split draw advances `rng_seed`
+    /// exactly as `next_rand`, present-key-gated as before (a `None`/reaped key draws nothing; LFU off
+    /// neither draws). Previously left in the "diluted tail" (O(n) popcount), but on SMALL bitmaps the
+    /// probes dominate, so the collapse gates; it helps BITCOUNT of any size (the probe is eliminated
+    /// regardless). `false` is the prior path.
+    fn bitcount_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        start: Option<i64>,
+        end: Option<i64>,
+        unit: BitRangeUnit,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (frankenredis-9s4ls) Use the NO-STAT drop_if_expired, not
         // record_keyspace_lookup: both production callers (the generic
         // bitcountCommand and the borrowed fast path) already record the single
@@ -10880,7 +10900,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -10888,7 +10910,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let rs = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                 }
                 if entry.value.is_string_like() {
                     entry.touch(now_ms);
@@ -10970,6 +10997,20 @@ impl Store {
             }
             None => Ok(0),
         }
+    }
+
+    /// Prior-path (two-probe) BITCOUNT baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// before `get_mut`. Not on any production path (`bitcount` uses `bitcount_impl::<true>`).
+    #[doc(hidden)]
+    pub fn bitcount_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        start: Option<i64>,
+        end: Option<i64>,
+        unit: BitRangeUnit,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.bitcount_impl::<false>(key, start, end, unit, now_ms)
     }
 
     pub fn bitpos(
@@ -47687,6 +47728,55 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn bitcount_lfu_collapsed_matches_twoprobe() {
+        // The LFU BITCOUNT collapse (rand drawn inside the get_mut borrow via rng_seed field split,
+        // no contains_key rand-gate) must be byte/RNG-identical to the prior contains_key-gated path —
+        // across full count, byte range, bit range, negative range, integer-encoded string, absent,
+        // wrong-type, and expired keys, under BOTH allkeys-lfu and a non-LFU policy. BITCOUNT is a read
+        // (bumps LFU + touches, no value mutation), so state_digest is unchanged; asserts result, RNG
+        // state, keyspace stats, OBJECT FREQ, and state_digest.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set(b"bm".to_vec(), vec![0xF0, 0x0F], None, 1); // 2-byte bitmap, 8 bits set
+            s.set(b"si".to_vec(), b"12345".to_vec(), None, 1); // integer-encoded string
+            s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap(); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, start, end, unit)
+        let cases: &[(&[u8], Option<i64>, Option<i64>, BitRangeUnit)] = &[
+            (b"bm", None, None, BitRangeUnit::Byte),      // full count
+            (b"bm", Some(0), Some(0), BitRangeUnit::Byte), // first byte
+            (b"bm", Some(0), Some(7), BitRangeUnit::Bit),  // bit range
+            (b"bm", Some(-1), Some(-1), BitRangeUnit::Byte), // last byte (negative)
+            (b"si", None, None, BitRangeUnit::Byte),       // integer-encoded string
+            (b"absent", None, None, BitRangeUnit::Byte),   // absent -> 0
+            (b"lst", None, None, BitRangeUnit::Byte),      // WRONGTYPE (bump then WrongType)
+            (b"ttl", None, None, BitRangeUnit::Byte),      // expired -> 0
+        ];
+        for lfu in [true, false] {
+            for &(key, start, end, unit) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.bitcount(key, start, end, unit, now);
+                let rb = b.bitcount_lfu_twoprobe_bench(key, start, end, unit, now);
+                let tag = format!("lfu={lfu} key={key:?} {start:?}..{end:?} {unit:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"bm", now), b.object_freq(b"bm", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 
