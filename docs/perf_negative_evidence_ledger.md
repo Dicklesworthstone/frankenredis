@@ -7843,3 +7843,27 @@ RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store lib suite correctness pass
 
 VEIN with_mutated_entry-family: HDEL 1.585x, SETBIT 1.42x, SETRANGE 1.35x (borrowed-arg all gate);
 LSET (owned value) reverted sub-gate; SREM (concurrent, borrowed members). Borrowed-arg rule holds.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`c6db4af43`). LFU APPEND write-side 2 probes → 1 (get_mut-first + rng_seed field split) — **1.29-1.39x**
+
+Fifth member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]),
+borrowed-value write (`value: &[u8]`). APPEND under allkeys-lfu did two `entries` probes: a
+`contains_key` LFU rand-gate + `with_mutated_entry`'s `get_mut`. The collapse resolves the entry with a
+single get_mut-first probe, draws `rand_sample` on the disjoint `&mut self.rng_seed` field split, and
+inlines `with_mutated_entry`'s exact stale/fresh digest bookkeeping; the absent-key create branch is
+shared/unchanged. Byte/RNG/digest-identical: the LFU bump is digest-neutral, so `old_hash` is the same
+before/after it; the field-split draw advances `rng_seed` exactly as `next_rand`, present-key-gated as
+before. Borrowed value slice (`&[u8]`, NO owned alloc). Const-generic `append_impl<COLLAPSE>` +
+`append_lfu_twoprobe_bench` + shared `append_apply`.
+
+A/B (`benches/append_lfu_collapse.rs`, allkeys-lfu, 50k 8-byte strings, EMPTY-value APPEND = a write
+that does not grow the string, so repeatable, borrowed value, common already-stale-digest path,
+median-of-61): n32 **1.394x** (null med 0.9952, p5..p95 [0.820, **1.218**], cv 12.28%); n256 **1.288x** (null med 1.0027, p5..p95 [0.801, **1.246**], cv 11.94%) — BOTH clean gate-clear WINs. Gated by `append_lfu_collapsed_matches_twoprobe` (non-empty append /
+empty append / integer-encoded string / absent-create / absent-empty / wrongtype / expired × LFU
+on&off × stale&fresh digest — asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Full fr-store
+lib suite correctness pass.
+
+VEIN with_mutated_entry-family COMPLETE (all borrowed-arg gate): HDEL 1.585x, SETBIT 1.42x, SETRANGE
+1.35x, APPEND 1.29-1.39x; SREM 30617b94e (concurrent). LSET (owned value) reverted sub-gate. Remaining
+sites are owned-value (GETSET) or grow/shrink list ops (lpush/rpush/lpop/linsert/lrem) — all need
+instructions:u, not a wallclock hammer.
