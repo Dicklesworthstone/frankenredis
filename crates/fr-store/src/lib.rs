@@ -18929,6 +18929,21 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.sismember_impl::<true>(key, member, now_ms)
+    }
+
+    /// A/B toggle for the LFU SISMEMBER keyspace-probe collapse. `COLLAPSE = true` folds
+    /// `record_keyspace_lookup` plus the value `get_mut` from two `entries` probes into one. The
+    /// successful `get_mut` is the presence gate and advances `rng_seed` through the byte-identical
+    /// field-split LCG before the type check; a present wrong-type key still draws but does not bump
+    /// or touch. `false` retains the exact prior LFU path for same-binary measurement. The non-LFU
+    /// single-lookup path is unchanged.
+    fn sismember_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
@@ -18943,12 +18958,39 @@ impl Store {
                 None => Ok(false),
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(false);
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    match &entry.value {
+                        Value::Set(s) => {
+                            let result = s.contains(member);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(false)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(false);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled {
             self.next_rand()
         } else {
@@ -18968,6 +19010,28 @@ impl Store {
             },
             None => Ok(false),
         }
+    }
+
+    /// Exact prior two-probe LFU SISMEMBER path for the same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn sismember_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.sismember_impl::<false>(key, member, now_ms)
+    }
+
+    /// Collapsed LFU SISMEMBER arm for a symmetric same-binary A/B harness.
+    #[doc(hidden)]
+    pub fn sismember_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.sismember_impl::<true>(key, member, now_ms)
     }
 
     pub fn sinter(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -51382,6 +51446,73 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"set", now), b.object_freq(b"set", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn sismember_lfu_collapsed_matches_twoprobe() {
+        // The acquisition fold must preserve membership across the set encodings as well as every
+        // key-level side effect. A missing member remains a keyspace hit with draw+bump+touch;
+        // WRONGTYPE draws without bump/touch; absent and expired keys draw nothing.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set_max_listpack_entries = 1;
+            s.sadd(b"small", &[b"a".to_vec()], 1).unwrap();
+            s.sadd(b"full", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+            s.sadd(b"ints", &[b"1".to_vec(), b"2".to_vec()], 1).unwrap();
+            s.sadd(b"live", &[b"a".to_vec()], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"live", 100, 1));
+            s.sadd(b"expired", &[b"a".to_vec()], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"expired", 5, 1));
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s
+        }
+
+        let now = 10;
+        let probes: &[(&[u8], &[u8])] = &[
+            (b"small", b"a"),
+            (b"small", b"x"),
+            (b"full", b"b"),
+            (b"full", b"x"),
+            (b"ints", b"1"),
+            (b"ints", b"x"),
+            (b"live", b"a"),
+            (b"absent", b"a"),
+            (b"str", b"a"),
+            (b"expired", b"a"),
+        ];
+        for lfu in [true, false] {
+            for &(key, member) in probes {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.sismember_lfu_collapsed_bench(key, member, now);
+                let rb = b.sismember_lfu_twoprobe_bench(key, member, now);
+                let tag = format!("lfu={lfu} key={key:?} member={member:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(a.entries.get(key), b.entries.get(key), "entry {tag}");
+                assert_eq!(a.expiry_ms(key), b.expiry_ms(key), "expiry {tag}");
+                assert_eq!(a.expires_count, b.expires_count, "expires_count {tag}");
+                assert_eq!(
+                    a.stat_expired_keys, b.stat_expired_keys,
+                    "expired stats {tag}"
+                );
+                assert_eq!(
+                    a.lazy_expired_propagation, b.lazy_expired_propagation,
+                    "lazy expiry {tag}"
+                );
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 

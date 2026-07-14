@@ -401,6 +401,12 @@ harness = false
 name = "scard_lfu_collapse"
 harness = false
 
+# A/B for LFU SISMEMBER acquisition: fold record + get_mut (2 probes) into one get_mut via the
+# rng_seed field split. Singleton sets keep the borrowed membership check below the probe saving.
+[[bench]]
+name = "sismember_lfu_collapse"
+harness = false
+
 # A/B for LFU ZCARD probe collapse: fold record+get_mut + drop contains_key via rng_seed field-split
 # (1 probe) vs the prior 3-probe form; ZCARD returns only a length so probes dominate. Byte-identical.
 [[bench]]

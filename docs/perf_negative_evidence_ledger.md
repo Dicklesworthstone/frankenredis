@@ -8381,3 +8381,52 @@ categories disabled; its nonzero file-wide legacy/heuristic inventory had no act
 finding in the owned ZREVRANK hunks. The focused owned-harness rerun exited 0 with zero criticals;
 its warnings are benchmark-only unwraps and nonempty-vector indexing bounded by deterministic setup
 and `ROUNDS = 61`.
+
+## 2026-07-14 QuietCardinal: WIN — KEEP. LFU SISMEMBER 2 probes -> 1 — **1.38-1.42x**
+
+Negative-ledger-first routing stayed on the proven allocation-free read seam and avoided the
+ledgered two-probe families whose result construction dilutes a single removed probe. Plain
+SISMEMBER's real server route (borrowed parser -> `execute_plain_sismember_borrowed` ->
+`Store::sismember`) returns a bool/RESP integer without allocating, but under allkeys-lfu still ran
+`record_keyspace_lookup` and then a separate `entries.get_mut`. Production
+`sismember_impl::<true>` now peeks expiry, records hit/miss inline around one `get_mut`, and draws the
+identical LCG sample through the disjoint `rng_seed` field before the unchanged type/membership/LFU
+bump/touch sequence. `<false>` retains the exact prior two-probe LFU path in the same binary; the
+already-collapsed non-LFU path is unchanged.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/sismember_lfu_collapse.rs`,
+`release`, allkeys-lfu, 50k singleton string sets, present member, median-of-61) ran fail-closed on
+remote worker `vmi1149989`. Both arms shared executable SHA-256
+`9571b2615fa6789b5102664cbb66e6b6142632033346f3d5d70592b67c206e2c`:
+
+- n32 **1.420x**, A/A null median `1.0017`, p5..p95 `[0.830, 1.233]`, cv `13.96%` — WIN.
+- n256 **1.375x**, A/A null median `1.0104`, p5..p95 `[0.860, 1.173]`, cv `9.80%` — WIN.
+
+The exact n256 dual-arm profile ran fail-closed on `vmi1152480`: 1K `cycles:u` samples, zero lost,
+with `Store::sismember_lfu_twoprobe_bench` at **6.63% self**,
+`Store::sismember_impl::<true>` **5.74%**, `run_twoprobe` **10.19%**, and `run_collapse` **12.27%**.
+The keyspace work was explicit: retained `HashMap::get_mut` **24.03%**, removed
+`HashMap::contains_key` **11.95%**, byte compare **10.49%**, byte hashing **6.69%**, and the unchanged
+membership work `GenericSet::contains` **7.10%** / `SetValue::contains` **1.49%**. This verifies that
+the exact timed input executes both SISMEMBER arms with non-zero self-time and attributes the delta
+to the removed acquisition probe.
+
+`sismember_lfu_collapsed_matches_twoprobe` passed fail-closed on `vmi1152480`. It compares compact,
+full, and integer sets; member hit/miss; live TTL; absent; wrong-type; and expired keys with LFU
+on/off, asserting result/error, RNG, hit/miss stats, full entry/access metadata, expiry and
+lazy-expiry effects, dirty state, and digest parity. Missing members remain hits that draw+bump+touch;
+WRONGTYPE draws without bump/touch; absent/expired keys remain misses without a draw. This is a
+store-path keep on the direct SISMEMBER runtime route, not a whole-server throughput claim.
+
+Final fail-closed remote gates: the full fr-store library suite passed on `vmi1153651` (853 passed,
+13 ignored); workspace/all-target `cargo check` passed on `vmi1152480`; and `fr-conformance` passed
+on `vmi1149989` (347 asserting tests: 194 library + 54 binary/integration + 99 smoke). The live
+oracle reported 3,971/3,980 counted cases, with 1 CONFIG SAVE and 8 replication mismatches in its
+known non-strict diagnostics; two additional transport-timeout diagnostics had no numeric totals,
+and every enclosing test passed. Workspace clippy reached Cargo remotely on `vmi1227854` and
+stopped before fr-store at the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop`, tracked outside this lane. The owned Rust 2024 harness rustfmt check
+and `git diff --check` are green; file-wide lib formatting still exposes unrelated repository drift.
+UBS ran with local Cargo/build disabled and exited 0 on the owned harness with zero criticals; its
+warnings are benchmark-only assertions, deterministic nonempty-vector indexing, casts, and setup
+allocation. No Cargo invocation fell back locally.
