@@ -8,6 +8,42 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: NEGATIVE — NO-SHIP. active-expire live-key clone elision is null-drowned (`frankenredis-auer7`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the explicitly multi-day
+  `frankenredis-b1o02` representation project unassigned, while recent command-write and compact
+  encoding rows had already mined their local seams.  This turn therefore opened a fresh,
+  bounded periodic-active-expiry lane: determine whether cloning every sampled live key is a
+  measurable residual cost.  It did not revisit per-command expiry guards or keyspace side
+  indexes.
+- **Profile/attribution first:** one strict-remote `--profile release` run on worker
+  `vmi1149989` executed 200,000 stable 32-live-key cycles (6.4 million inspected keys) and
+  collected 184 `cycles:u` samples with zero lost.  `Store::run_active_expire_cycle` carried
+  **29.37% self**; allocator `malloc` plus `cfree` carried **13.70%**; the exact
+  `Vec<Vec<u8>>::from_iter` clone frame carried **4.86%**; B-tree range lookup carried **3.87%**;
+  and raw-vector growth/reallocation frames were also visible.  That non-zero attribution
+  selected exactly one lever.
+- **One concrete lever tested:** the candidate scanned `volatile_keys` by borrow, retained one
+  reusable owned cursor key, copied only keys proven expired, and reused that expired-key vector
+  for the returned eviction list.  The same binary retained the exact former clone-all loop as
+  the reference arm.  A focused strict-remote release parity test covered live-only, empty-key,
+  mixed expired/live, wraparound, and over-limit samples and matched the cycle result, remaining
+  keys, expiry maps/counts, volatile set, stats, and state digest.
+- **Foreground A/A+A/B result:** the single decisive command was
+  `cargo bench --profile release -p fr-store --bench expire_reset -- --active-expire` on
+  `vmi1149989`; total RCH wall time was **101.9 s** and binary SHA-256 was
+  `de8b4cfde4d37e5b1f8a4e4d3545a394008121ebae55851c3afa28f9168f6d00`.  One binary
+  interleaved position-balanced 10 ms segments for 41 measured rounds at 16,384 repetitions.
+  Clone-all/borrowed measured **1.5787x** with effect CV **19.42%**, but remained inside the
+  clone-all/clone-all null p05..p95 **[0.834, 1.645]** (null median **1.0368x**, null CV
+  **54.66%**).  The directional median therefore does not clear the measured noise floor.
+- **Decision/boundary:** **NO-SHIP; production and benchmark candidate changes reverted after
+  measurement.**  The clone allocation is real and the candidate preserved behavior, but this
+  short wall-clock substrate cannot distinguish its full-cycle effect from drift.  Revisit only
+  with a stable instruction-counter substrate or a demonstrably lower-noise harness.  The focused
+  release parity test passed 1/1, the established Rust UBS exclusions exited zero with no critical
+  findings, and the owned diff passed whitespace validation.
+
 ## 2026-07-14 CalmHeron: SHIPPED — prepend packed LPUSH elements in place (`frankenredis-6lgnu`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` surfaced the stale broad hot-write bead.
