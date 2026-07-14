@@ -536,3 +536,11 @@ harness = false
 [[bench]]
 name = "lpos_lfu_collapse"
 harness = false
+
+# A/B for the LFU XLEN keyspace-probe collapse: fold record_keyspace_lookup + contains_key rand-gate
+# + get_mut into one get_mut (expiry peek + rng_seed field-split draw) — 3 probes -> 1 — vs the prior
+# three-probe path. XLEN is a light O(1) read so the probes dominate.
+# Byte/RNG/stat-identical (xlen_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "xlen_lfu_collapse"
+harness = false

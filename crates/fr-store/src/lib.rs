@@ -23969,6 +23969,18 @@ impl Store {
     }
 
     pub fn xlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        self.xlen_impl::<true>(key, now_ms)
+    }
+
+    /// A/B toggle for the LFU XLEN keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
+    /// `record_keyspace_lookup` (drop_if_expired + hit/miss stat) + the `contains_key` rand-gate +
+    /// `get_mut` into ONE `get_mut` — 3 probes → 1 — peeking the expiry only when a key can carry one
+    /// and drawing `rand_sample` on the disjoint `&mut self.rng_seed` field split. XLEN is a light read
+    /// (`entries.len()` is O(1); bumps LFU + touches, no value mutation → no digest). Byte/RNG/stat-
+    /// identical: same hit/miss accounting (get_mut Some ⇒ hit, absent/reaped ⇒ miss), single
+    /// present-key draw, LFU bump + touch, WRONGTYPE. `false` is the prior three-probe path. Mirrors
+    /// `lpos_impl`; the non-LFU path already single-probes via `lookup_live_for_read_mut`.
+    fn xlen_impl<const COLLAPSE: bool>(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
@@ -23983,12 +23995,42 @@ impl Store {
                 None => Ok(0),
             };
         }
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        if COLLAPSE {
+            // Fold record_keyspace_lookup + contains_key rand-gate + get_mut into ONE probe. Peek the
+            // expiry only when a key can carry one; hit/miss matches record_keyspace_lookup exactly.
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(0);
+            }
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    match &entry.value {
+                        Value::Stream(entries) => {
+                            let result = entries.len();
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(0)
+                }
+            };
+        }
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -24010,6 +24052,17 @@ impl Store {
             }
             None => Ok(0),
         }
+    }
+
+    /// Prior-path (three-probe) XLEN baseline for the same-binary A/B: `record_keyspace_lookup` +
+    /// `contains_key` rand-gate + `get_mut`. Not on any production path (`xlen` uses `xlen_impl::<true>`).
+    #[doc(hidden)]
+    pub fn xlen_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.xlen_impl::<false>(key, now_ms)
     }
 
     pub fn xrange(
@@ -47819,6 +47872,46 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn xlen_lfu_collapsed_matches_threeprobe() {
+        // The LFU XLEN collapse (record_keyspace_lookup + contains_key rand-gate + get_mut folded to
+        // ONE get_mut, expiry peek + field-split draw) must be byte/RNG/stat-identical to the prior
+        // three-probe path — across a present stream, an absent key, a wrong-type key (hit + bump
+        // then WrongType), and an expired key (miss), under BOTH allkeys-lfu and a non-LFU policy.
+        // XLEN is a read (bumps LFU + touches); asserts result, RNG, keyspace stats, OBJECT FREQ,
+        // state_digest.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.xadd(b"strm", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 1)
+                .unwrap();
+            s.xadd(b"strm", (2, 0), &[(b"g".to_vec(), b"w".to_vec())], 1)
+                .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        for lfu in [true, false] {
+            for key in [b"strm".as_slice(), b"absent", b"str", b"ttl"] {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.xlen(key, now);
+                let rb = b.xlen_lfu_threeprobe_bench(key, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"strm", now), b.object_freq(b"strm", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 
