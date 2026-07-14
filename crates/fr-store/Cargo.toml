@@ -687,3 +687,11 @@ harness = false
 [[bench]]
 name = "rpush_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU LPOP WRITE-side probe collapse — single-pop sibling of
+# the list write family. Same 2-probe -> 1 get_mut fold via rng_seed field split; counts retired
+# user-space instructions (LPOP shrinks; lists seeded > PASSES so pops never empty a key) subtracting
+# an identical build baseline. Byte/RNG-identical (lpop_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "lpop_lfu_collapse"
+harness = false
