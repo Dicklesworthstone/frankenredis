@@ -15573,7 +15573,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<true, true>(key, field, value, now_ms)
+        self.hsetnx_impl::<true, true, true>(key, field, value, now_ms)
     }
 
     /// Bench/test-only reference: the pre-`get_mut`-first HSETNX (`ensure_entry` +
@@ -15586,7 +15586,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<false, true>(key, field, value, now_ms)
+        self.hsetnx_impl::<false, true, false>(key, field, value, now_ms)
     }
 
     /// Bench-only baseline: HSETNX with the O(n) re-scanning encoding refresh (`INCR=false`)
@@ -15599,10 +15599,28 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<true, false>(key, field, value, now_ms)
+        self.hsetnx_impl::<true, false, true>(key, field, value, now_ms)
     }
 
-    fn hsetnx_impl<const GETMUT_FIRST: bool, const INCR: bool>(
+    /// Exact prior two-probe LFU HSETNX path for the same-binary A/B harness.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn hsetnx_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hsetnx_impl::<true, true, false>(key, field, value, now_ms)
+    }
+
+    /// `COLLAPSE = true` folds HSETNX's allkeys-LFU presence probe into the existing
+    /// `with_mutated_or_created_entry` resolution on the common stale-digest path. A `get_mut` hit
+    /// draws the identical LCG sample through the disjoint `rng_seed` field and bumps before the
+    /// type/field check; a miss creates without drawing. Fresh incremental-digest and non-LFU paths
+    /// retain the exact prior acquisition so their bookkeeping remains untouched.
+    fn hsetnx_impl<const GETMUT_FIRST: bool, const INCR: bool, const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         field: Vec<u8>,
@@ -15617,7 +15635,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let collapse_lfu_stale =
+            COLLAPSE && GETMUT_FIRST && lfu_tracking_enabled && self.digest_stale;
+        let should_bump_lfu =
+            !collapse_lfu_stale && lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
@@ -15645,7 +15666,29 @@ impl Store {
                 Ok(false)
             }
         };
-        let result = if GETMUT_FIRST {
+        let result = if collapse_lfu_stale {
+            let result = match self.entries.get_mut(key) {
+                Some(entry) => {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    apply(entry)
+                }
+                None => {
+                    self.internal_entries_insert(
+                        key.to_vec(),
+                        Entry::new(Value::Hash(Box::default()), now_ms),
+                    );
+                    let entry = self
+                        .entries
+                        .get_mut(key)
+                        .expect("hash entry inserted above must exist");
+                    apply(entry)
+                }
+            };
+            // Match with_mutated_or_created_entry's stale-digest mutation accounting exactly.
+            self.bump_digest_mutations();
+            result
+        } else if GETMUT_FIRST {
             self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
         } else {
             if lfu_tracking_enabled {
@@ -48939,6 +48982,112 @@ mod tests {
                 assert_eq!(a.digest_mutations, b.digest_mutations, "digmut @ {case} fresh={fresh}");
                 assert_eq!(a.digest_stale, b.digest_stale, "digstale @ {case} fresh={fresh}");
                 assert_eq!(a.state_digest(), b.state_digest(), "digest @ {case} fresh={fresh}");
+            }
+        }
+    }
+
+    #[test]
+    fn hsetnx_lfu_collapsed_matches_twoprobe() {
+        fn build(lfu: bool, fresh: bool, case: &str) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store.set(b"other".to_vec(), b"v".to_vec(), None, 1);
+            match case {
+                "new_key" => {}
+                "existing_field" => {
+                    store
+                        .hsetnx(b"h", b"f".to_vec(), b"old".to_vec(), 1)
+                        .unwrap();
+                }
+                "new_field_existing_hash" => {
+                    store
+                        .hsetnx(b"h", b"g".to_vec(), b"old".to_vec(), 1)
+                        .unwrap();
+                }
+                "wrongtype" => {
+                    store.set(b"h".to_vec(), b"str".to_vec(), None, 1);
+                }
+                "expired" => {
+                    store
+                        .hsetnx(b"h", b"f".to_vec(), b"old".to_vec(), 1)
+                        .unwrap();
+                    assert!(store.expire_at_milliseconds(b"h", 5, 1));
+                }
+                _ => unreachable!(),
+            }
+            if fresh {
+                let _ = store.state_digest();
+            }
+            store
+        }
+
+        let now = 10;
+        for case in [
+            "new_key",
+            "existing_field",
+            "new_field_existing_hash",
+            "wrongtype",
+            "expired",
+        ] {
+            for lfu in [true, false] {
+                for fresh in [false, true] {
+                    let mut collapsed = build(lfu, fresh, case);
+                    let mut prior = build(lfu, fresh, case);
+                    let got = collapsed.hsetnx(b"h", b"f".to_vec(), b"new".to_vec(), now);
+                    let expected = prior.hsetnx_lfu_twoprobe_bench(
+                        b"h",
+                        b"f".to_vec(),
+                        b"new".to_vec(),
+                        now,
+                    );
+                    let tag = format!("case={case} lfu={lfu} fresh={fresh}");
+                    assert_eq!(got, expected, "result {tag}");
+                    assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                    assert_eq!(
+                        collapsed.stat_keyspace_hits, prior.stat_keyspace_hits,
+                        "hits {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.entries.get(b"h".as_slice()),
+                        prior.entries.get(b"h".as_slice()),
+                        "entry {tag}"
+                    );
+                    assert_eq!(collapsed.expiry_ms(b"h"), prior.expiry_ms(b"h"), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.expires_count, prior.expires_count,
+                        "expires_count {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_expired_keys, prior.stat_expired_keys,
+                        "expired stats {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.lazy_expired_propagation,
+                        prior.lazy_expired_propagation,
+                        "lazy expiry {tag}"
+                    );
+                    assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                    assert_eq!(
+                        collapsed.digest_mutations, prior.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.digest_stale, prior.digest_stale,
+                        "digest_stale {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.state_digest(),
+                        prior.state_digest(),
+                        "state_digest {tag}"
+                    );
+                }
             }
         }
     }

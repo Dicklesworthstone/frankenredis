@@ -8485,3 +8485,46 @@ file scan; the nonzero file-wide legacy/test heuristic inventory had no finding 
 production hunk. Its focused owned-harness scan exited zero with no critical finding, and its
 warnings are deterministic benchmark-only setup, assertions, and bounded indexing. Every Cargo
 invocation used strict remote RCH with no local fallback.
+
+## 2026-07-14 QuietCardinal: WIN — KEEP. LFU HSETNX write-side 2 probes -> 1 — **1.1945x**
+
+Negative-ledger-first routing rejected the half-wired keyspace-RAM `KeyDict` prototype as a
+structural, multi-surface change and continued the measured LFU write family. HSETNX still gated its
+allkeys-LFU draw with `entries.contains_key` before `with_mutated_or_created_entry` repeated the
+lookup with `get_mut`. Production now folds those into the existing mutable resolution only on the
+common stale-digest path: a hit draws the identical LCG sample through the disjoint `rng_seed` field
+and bumps LFU before the unchanged type/field check; a miss creates without drawing. Fresh
+incremental-digest and non-LFU paths retain the exact prior acquisition and bookkeeping.
+
+One-binary, one-invocation, position-balanced A/A+A/B
+(`benches/hsetnx_lfu_collapse.rs`, `release`, allkeys-lfu, 20k hashes with an already-present field,
+20 passes, 9 balanced rounds) ran fail-closed on remote worker `vmi1152480`. Both arms shared
+executable SHA-256 `8af221473b5d7889d423ebd4ab590ac12a6a1cc650877f9ef3b6de8de5165d9c`.
+After subtracting an identical build count, the prior arm used **955.98 instructions/op** and the
+collapsed arm **800.41 instructions/op**: baseline/candidate **1.1945x**, candidate-ratio CV
+**0.01%**. The A/A null median was `1.0000`, p5..p95 `[0.9999, 1.0004]`, CV `0.01%`; the candidate
+therefore clears the predeclared null-p95 gate decisively.
+
+The exact-input dual-arm `cycles:u` profile ran inside that same invocation and executable: 1K
+samples, zero lost. Candidate `Store::hsetnx` had **7.69% self** and `run_collapsed` **11.59%**;
+baseline `Store::hsetnx_lfu_twoprobe_bench` had **3.09%** and `run_twoprobe` **1.55%**. The removed
+`HashMap::contains_key` was **10.99%**, while retained `HashMap::get_mut` was **23.89%**; unchanged
+field lookup remained visible in `PackedStrMap::locate` (**6.57%**) and
+`HashFieldMap::contains_key` (**2.06%**). This proves both timed arms execute and attributes the win
+to the keyspace-probe collapse rather than dead code or field mutation.
+
+`hsetnx_lfu_collapsed_matches_twoprobe` passed fail-closed on `vmi1149989`. It covers missing keys,
+existing fields, new fields in existing hashes, WRONGTYPE, and expired keys with LFU on/off and
+fresh/stale digests; it asserts result, RNG, hit/miss stats, full entry/access metadata, expiry and
+lazy-expiry effects, dirty state, digest mutation state, and full state-digest parity. The timed
+field-already-exists workload returns false and does not grow the hash, keeping allocation and
+mutation noise outside the acquisition delta. This is a direct store-path HSETNX keep, not a
+whole-server throughput claim.
+
+Final fail-closed remote gates: workspace/all-target `cargo check` passed on `vmi1152480`.
+Workspace clippy reached Cargo on that worker and stopped before this lane at the pre-existing
+`fr-simd/src/lib.rs:795` `clippy::needless_range_loop` blocker. Direct Rust 2024 rustfmt of the owned
+harness and `git diff --check` are green. UBS ran with its local Cargo/build categories disabled;
+its nonzero results are the file-wide legacy/test inventory plus the benchmark's deliberate
+fail-closed panic for an invalid internal mode, with no actionable finding in the owned production
+hunk. Every Cargo invocation used strict remote RCH with no local fallback.
