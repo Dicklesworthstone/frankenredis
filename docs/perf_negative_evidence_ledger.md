@@ -7877,3 +7877,25 @@ VEIN with_mutated_entry-family COMPLETE (all borrowed-arg gate): HDEL 1.585x, SE
 1.35x, APPEND 1.29-1.39x; SREM 30617b94e (concurrent). LSET (owned value) reverted sub-gate. Remaining
 sites are owned-value (GETSET) or grow/shrink list ops (lpush/rpush/lpop/linsert/lrem) — all need
 instructions:u, not a wallclock hammer.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (n32 gate-clear). LFU LTRIM write-side 2 probes → 1 (DIRECT get_mut + rng_seed field split) — **1.28x (n32)**
+
+Sixth member of the LFU write-side field-split vein ([[project_lfu_write_side_field_split_vein]]), and
+the SECOND direct-`get_mut` one (after LSET) — but unlike LSET it takes NO owned value (only i64
+start/stop indices), so no owned-value dilution. LTRIM under allkeys-lfu did two `entries` probes: a
+`contains_key` LFU rand-gate before `get_mut`. LTRIM is a direct-`get_mut` write (no
+`with_mutated_entry` — it `mark_digest_stale`s), so the collapse just RELOCATES the `rand_sample` draw
+inside the `get_mut` borrow via the disjoint `&mut self.rng_seed` field split — no digest replica, a
+~10-line change. Byte/RNG-identical: the field-split draw advances `rng_seed` exactly as `next_rand`,
+present-key-gated as before (a `None` get_mut draws nothing; LFU off neither draws). Const-generic
+`ltrim_impl<COLLAPSE>` + `ltrim_lfu_twoprobe_bench`.
+
+A/B (`benches/ltrim_lfu_collapse.rs`, allkeys-lfu, 50k 3-element lists, LTRIM 0 -1 = keep-all no-op
+(non-growing, no value arg), common already-stale-digest path, median-of-61): n32 **1.282x** (null med 1.0232, p5..p95 [0.778, **1.228**], cv 11.98%) = clean gate-clear WIN; n256 **1.227x** (null med 0.9977, p5..p95 [0.740, **1.251**], cv 15.19%) = directional but a hair under p95, indistinguishable at moderate cv (the reliable low-cv n32 gates; contrast LSET whose BOTH sizes were cleanly sub-gate). Gated by
+`ltrim_lfu_collapsed_matches_twoprobe` (no-op keep-all / front trim / keep-first / out-of-range-clear /
+keep-last / absent / wrongtype / expired × LFU on&off — asserts result, RNG, OBJECT FREQ, dirty, DEBUG
+DIGEST). Full fr-store lib suite correctness pass.
+
+VEIN: direct-get_mut shape now has a CLEAN land (LTRIM) — proves the LSET sub-gate was OWNED-VALUE
+dilution, NOT the direct-get_mut shape. LSET reverted; the grow/shrink list ops (lpush/rpush/lpop/
+linsert/lrem) that also take values or grow still need instructions:u or an idempotent non-growing form.
