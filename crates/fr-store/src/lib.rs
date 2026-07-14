@@ -18017,6 +18017,34 @@ impl Store {
         values: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.lpushx_impl::<true>(key, values, now_ms)
+    }
+
+    /// Bench-only baseline: LPUSHX with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, vs
+    /// production's single `get_mut` drawing the rand on the disjoint `rng_seed` field split in the
+    /// `Some` arm. Byte/RNG-identical to `lpushx`. Not on any production path.
+    #[doc(hidden)]
+    pub fn lpushx_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        values: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.lpushx_impl::<false>(key, values, now_ms)
+    }
+
+    /// A/B toggle for the LFU LPUSHX write-side keyspace-probe collapse. LPUSHX only mutates an
+    /// EXISTING key (absent ⇒ `Ok(0)`, no create), so `COLLAPSE = true` (production) simply draws the
+    /// LFU rand on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm and
+    /// drops the separate `contains_key` rand-gate (2 -> 1). Byte/RNG-identical: the prior path drew
+    /// only for a PRESENT key under LFU = exactly the `Some`+LFU case; the `None` arm draws nothing.
+    fn lpushx_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        values: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -18025,7 +18053,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -18033,6 +18061,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -50535,6 +50568,45 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn lpushx_lfu_collapsed_matches_twoprobe() {
+        // The LFU LPUSHX write-side collapse (rand drawn inside the get_mut Some arm via rng_seed
+        // field split, no contains_key rand-gate) must be byte/RNG/stat-identical to the prior
+        // two-probe path across an existing-list push, an absent key (Ok(0), no draw — LPUSHX never
+        // creates), a wrong-type key (draws+bumps then WRONGTYPE), and an expired key (dropped ->
+        // absent -> Ok(0)), under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec()], 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        let vals = [b"x".to_vec(), b"y".to_vec()];
+        let cases: &[&[u8]] = &[b"lst", b"absent", b"str", b"ttl"];
+        for lfu in [true, false] {
+            for &key in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.lpushx(key, &vals, now);
+                let rb = b.lpushx_lfu_twoprobe_bench(key, &vals, now);
+                let tag = format!("lfu={lfu} key={key:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
                 assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
