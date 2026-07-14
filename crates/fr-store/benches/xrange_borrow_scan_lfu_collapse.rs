@@ -31,6 +31,11 @@ const TAIL_PROFILE_COUNT: usize = 8;
 const TAIL_PROFILE_REPEATS: usize = 1_000_000;
 const TAIL_STAT_REPEATS: usize = 200_000;
 const TAIL_STAT_ROUNDS: usize = 21;
+const HEAD_PROFILE_END: (u64, u64) = (1, 9_900);
+const HEAD_PROFILE_COUNT: usize = 8;
+const HEAD_PROFILE_REPEATS: usize = 1_000_000;
+const HEAD_STAT_REPEATS: usize = 200_000;
+const HEAD_STAT_ROUNDS: usize = 21;
 
 #[derive(Clone, Copy)]
 enum TailRangeArm {
@@ -80,6 +85,22 @@ fn profile_tail_range_current(entries: &StreamEntries) -> u64 {
 }
 
 #[inline(never)]
+fn profile_head_range_current(entries: &StreamEntries) -> u64 {
+    let mut checksum = 0_u64;
+    for (id, fields) in entries
+        .range(black_box(MIN)..=black_box(HEAD_PROFILE_END))
+        .rev()
+        .take(black_box(HEAD_PROFILE_COUNT))
+    {
+        checksum = checksum.wrapping_add(id.1);
+        for (field, value) in fields.iter() {
+            checksum = checksum.wrapping_add((field.len() + value.len()) as u64);
+        }
+    }
+    black_box(checksum)
+}
+
+#[inline(never)]
 fn tail_range_candidate(entries: &StreamEntries) -> u64 {
     profile_tail_range_current(entries)
 }
@@ -90,6 +111,27 @@ fn tail_range_reference(entries: &StreamEntries) -> u64 {
     for (id, fields) in entries
         .bench_range_completed_node_reference(black_box(TAIL_PROFILE_START)..=black_box(MAX))
         .take(black_box(TAIL_PROFILE_COUNT))
+    {
+        checksum = checksum.wrapping_add(id.1);
+        for (field, value) in fields.iter() {
+            checksum = checksum.wrapping_add((field.len() + value.len()) as u64);
+        }
+    }
+    black_box(checksum)
+}
+
+#[inline(never)]
+fn head_range_candidate(entries: &StreamEntries) -> u64 {
+    profile_head_range_current(entries)
+}
+
+#[inline(never)]
+fn head_range_reference(entries: &StreamEntries) -> u64 {
+    let mut checksum = 0_u64;
+    for (id, fields) in entries
+        .bench_range_completed_node_reference(black_box(MIN)..=black_box(HEAD_PROFILE_END))
+        .rev()
+        .take(black_box(HEAD_PROFILE_COUNT))
     {
         checksum = checksum.wrapping_add(id.1);
         for (field, value) in fields.iter() {
@@ -112,6 +154,19 @@ fn run_tail_range_loop(arm: TailRangeArm, repeats: usize) {
     black_box(checksum);
 }
 
+fn run_head_range_loop(arm: TailRangeArm, repeats: usize) {
+    let entries = build_tail_profile_entries();
+    let operation: fn(&StreamEntries) -> u64 = match arm {
+        TailRangeArm::Candidate => head_range_candidate,
+        TailRangeArm::Reference => head_range_reference,
+    };
+    let mut checksum = 0_u64;
+    for _ in 0..repeats {
+        checksum = checksum.wrapping_add(operation(black_box(&entries)));
+    }
+    black_box(checksum);
+}
+
 fn tail_range_child_args() -> Result<Option<(TailRangeArm, usize)>, String> {
     let args: Vec<String> = env::args().collect();
     if args.get(1).map(String::as_str) != Some("--tail-range-child") {
@@ -123,6 +178,20 @@ fn tail_range_child_args() -> Result<Option<(TailRangeArm, usize)>, String> {
         .ok_or("missing tail-range repeat count")?
         .parse()
         .map_err(|error| format!("invalid tail-range repeat count: {error}"))?;
+    Ok(Some((arm, repeats)))
+}
+
+fn head_range_child_args() -> Result<Option<(TailRangeArm, usize)>, String> {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) != Some("--head-range-child") {
+        return Ok(None);
+    }
+    let arm = TailRangeArm::parse(args.get(2).ok_or("missing head-range child arm")?)?;
+    let repeats = args
+        .get(3)
+        .ok_or("missing head-range repeat count")?
+        .parse()
+        .map_err(|error| format!("invalid head-range repeat count: {error}"))?;
     Ok(Some((arm, repeats)))
 }
 
@@ -250,16 +319,112 @@ fn run_tail_profile_if_requested() -> Result<bool, String> {
     Ok(true)
 }
 
-fn perf_instructions(executable: &Path, arm: TailRangeArm) -> Result<u64, String> {
+fn run_head_profile_if_requested() -> Result<bool, String> {
+    if env::var_os("XREVRANGE_HEAD_PROFILE_CHILD").is_some() {
+        let entries = build_tail_profile_entries();
+        let mut checksum = 0_u64;
+        for _ in 0..HEAD_PROFILE_REPEATS {
+            checksum = checksum.wrapping_add(profile_head_range_current(black_box(&entries)));
+        }
+        black_box(checksum);
+        return Ok(true);
+    }
+    if !env::args().any(|arg| arg == "--profile-head-range") {
+        return Ok(false);
+    }
+
+    let executable = env::current_exe().map_err(|error| format!("current executable: {error}"))?;
+    let hostname = Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("invalid system time: {error}"))?
+        .as_nanos();
+    let data = env::temp_dir().join(format!(
+        "fr_xrevrange_head_profile_{}_{}.data",
+        process::id(),
+        stamp
+    ));
+    if fs::exists(&data).map_err(|error| format!("inspect {}: {error}", data.display()))? {
+        return Err(format!("refusing to overwrite {}", data.display()));
+    }
+
+    println!("WORKER_ID {hostname}");
+    println!("BINARY_SHA256 current={}", binary_sha256(&executable)?);
+    let recorded = Command::new("perf")
+        .env("LC_ALL", "C")
+        .args([
+            "record",
+            "-q",
+            "-F",
+            "997",
+            "-e",
+            "instructions:u",
+            "-g",
+            "-o",
+        ])
+        .arg(&data)
+        .arg("--")
+        .arg(&executable)
+        .env("XREVRANGE_HEAD_PROFILE_CHILD", "1")
+        .output()
+        .map_err(|error| format!("could not launch perf record: {error}"))?;
+    if !recorded.status.success() {
+        return Err(format!(
+            "perf record failed: {}",
+            String::from_utf8_lossy(&recorded.stderr)
+        ));
+    }
+
+    let report = Command::new("perf")
+        .env("LC_ALL", "C")
+        .args([
+            "report",
+            "-i",
+            data.to_str().ok_or("non-UTF-8 perf.data path")?,
+            "--stdio",
+            "--no-children",
+            "--sort=symbol",
+            "--percent-limit",
+            "0.1",
+        ])
+        .output()
+        .map_err(|error| format!("could not launch perf report: {error}"))?;
+    if !report.status.success() {
+        return Err(format!(
+            "perf report failed: {}",
+            String::from_utf8_lossy(&report.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    println!("PROFILE_TABLE_BEGIN\n{stdout}\nPROFILE_TABLE_END");
+    let self_pct = profile_self_pct(&stdout, "profile_head_range_current")
+        .ok_or("profile has no exact head-range wrapper frame; workload INVALID")?;
+    if self_pct <= 0.0 {
+        return Err("exact head-range wrapper has zero self-time; workload INVALID".to_owned());
+    }
+    println!(
+        "PROFILE_SELF function=profile_head_range_current self_pct={self_pct:.4} trigger=last_completed count={HEAD_PROFILE_COUNT} entries={TAIL_PROFILE_ENTRIES} repeats={HEAD_PROFILE_REPEATS}"
+    );
+    Ok(true)
+}
+
+fn perf_instructions(
+    executable: &Path,
+    child_arg: &str,
+    repeats: usize,
+    arm: TailRangeArm,
+) -> Result<u64, String> {
     let output = Command::new("perf")
         .env("LC_ALL", "C")
         .args(["stat", "--no-big-num", "-x,", "-e", "instructions:u", "--"])
         .arg(executable)
-        .args([
-            "--tail-range-child",
-            arm.name(),
-            &TAIL_STAT_REPEATS.to_string(),
-        ])
+        .args([child_arg, arm.name(), &repeats.to_string()])
         .output()
         .map_err(|error| format!("could not launch perf stat: {error}"))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -279,19 +444,21 @@ fn perf_instructions(executable: &Path, arm: TailRangeArm) -> Result<u64, String
         .ok_or_else(|| format!("missing instruction count for {}: {stderr}", arm.name()))
 }
 
-fn measure_tail_pair(
+fn measure_range_pair(
     executable: &Path,
+    child_arg: &str,
+    repeats: usize,
     baseline: TailRangeArm,
     changed: TailRangeArm,
     swapped: bool,
 ) -> Result<f64, String> {
     let (baseline_count, changed_count) = if swapped {
-        let changed_count = perf_instructions(executable, changed)?;
-        let baseline_count = perf_instructions(executable, baseline)?;
+        let changed_count = perf_instructions(executable, child_arg, repeats, changed)?;
+        let baseline_count = perf_instructions(executable, child_arg, repeats, baseline)?;
         (baseline_count, changed_count)
     } else {
-        let baseline_count = perf_instructions(executable, baseline)?;
-        let changed_count = perf_instructions(executable, changed)?;
+        let baseline_count = perf_instructions(executable, child_arg, repeats, baseline)?;
+        let changed_count = perf_instructions(executable, child_arg, repeats, changed)?;
         (baseline_count, changed_count)
     };
     Ok(baseline_count as f64 / changed_count as f64)
@@ -342,14 +509,18 @@ fn run_tail_range_ab_if_requested() -> Result<bool, String> {
     let mut effects = Vec::with_capacity(TAIL_STAT_ROUNDS);
     for round in 0..=TAIL_STAT_ROUNDS {
         let swapped = round % 2 == 1;
-        let null = measure_tail_pair(
+        let null = measure_range_pair(
             &executable,
+            "--tail-range-child",
+            TAIL_STAT_REPEATS,
             TailRangeArm::Reference,
             TailRangeArm::Reference,
             swapped,
         )?;
-        let effect = measure_tail_pair(
+        let effect = measure_range_pair(
             &executable,
+            "--tail-range-child",
+            TAIL_STAT_REPEATS,
             TailRangeArm::Reference,
             TailRangeArm::Candidate,
             swapped,
@@ -379,6 +550,104 @@ fn run_tail_range_ab_if_requested() -> Result<bool, String> {
         "{:<24} {:>8} {:>9.6} {:>16} {:>8.4} {:>10.4} {:>11.6}x {:>18}",
         "xrange_tail_count8",
         TAIL_STAT_REPEATS,
+        null_median,
+        format!("[{lo:.6}, {hi:.6}]"),
+        cv(&nulls),
+        cv(&effects),
+        effect_median,
+        verdict
+    );
+    Ok(true)
+}
+
+fn run_head_range_ab_if_requested() -> Result<bool, String> {
+    if !env::args().any(|arg| arg == "--head-range") {
+        return Ok(false);
+    }
+
+    let entries = build_tail_profile_entries();
+    let candidate = entries
+        .range(MIN..=HEAD_PROFILE_END)
+        .rev()
+        .take(HEAD_PROFILE_COUNT)
+        .map(|(id, fields)| (*id, fields.to_pairs()))
+        .collect::<Vec<_>>();
+    let reference = entries
+        .bench_range_completed_node_reference(MIN..=HEAD_PROFILE_END)
+        .rev()
+        .take(HEAD_PROFILE_COUNT)
+        .map(|(id, fields)| (*id, fields.to_pairs()))
+        .collect::<Vec<_>>();
+    if candidate != reference {
+        return Err("head-range candidate/reference output mismatch".to_owned());
+    }
+
+    let executable = env::current_exe().map_err(|error| format!("current executable: {error}"))?;
+    let hostname = Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("WORKER_ID {hostname}");
+    println!("BINARY_SHA256 both_arms={}", binary_sha256(&executable)?);
+
+    for arm in [TailRangeArm::Reference, TailRangeArm::Candidate] {
+        let status = Command::new(&executable)
+            .args(["--head-range-child", arm.name(), "10000"])
+            .status()
+            .map_err(|error| format!("could not launch {} warm-up: {error}", arm.name()))?;
+        if !status.success() {
+            return Err(format!("{} warm-up failed with {status}", arm.name()));
+        }
+    }
+
+    let mut nulls = Vec::with_capacity(HEAD_STAT_ROUNDS);
+    let mut effects = Vec::with_capacity(HEAD_STAT_ROUNDS);
+    for round in 0..=HEAD_STAT_ROUNDS {
+        let swapped = round % 2 == 1;
+        let null = measure_range_pair(
+            &executable,
+            "--head-range-child",
+            HEAD_STAT_REPEATS,
+            TailRangeArm::Reference,
+            TailRangeArm::Reference,
+            swapped,
+        )?;
+        let effect = measure_range_pair(
+            &executable,
+            "--head-range-child",
+            HEAD_STAT_REPEATS,
+            TailRangeArm::Reference,
+            TailRangeArm::Candidate,
+            swapped,
+        )?;
+        if round != 0 {
+            nulls.push(null);
+            effects.push(effect);
+        }
+    }
+
+    let null_median = median(&mut nulls);
+    let effect_median = median(&mut effects);
+    let lo = pct(&nulls, NULL_LO);
+    let hi = pct(&nulls, NULL_HI);
+    let verdict = if effect_median > 1.0 && effect_median > hi {
+        "WIN(head-direct)"
+    } else if effect_median < 1.0 && effect_median < lo {
+        "REGRESSION"
+    } else {
+        "indistinguishable"
+    };
+    println!(
+        "\n{:<24} {:>8} {:>9} {:>16} {:>8} {:>10} {:>12} {:>18}",
+        "op", "reps", "NULL med", "null p5..p95", "null cv%", "effect cv%", "ref/direct", "verdict"
+    );
+    println!(
+        "{:<24} {:>8} {:>9.6} {:>16} {:>8.4} {:>10.4} {:>11.6}x {:>18}",
+        "xrevrange_head_count8",
+        HEAD_STAT_REPEATS,
         null_median,
         format!("[{lo:.6}, {hi:.6}]"),
         cv(&nulls),
@@ -528,10 +797,20 @@ fn main() {
         run_tail_range_loop(arm, repeats);
         return;
     }
+    if let Some((arm, repeats)) = head_range_child_args().expect("invalid head-range child args") {
+        run_head_range_loop(arm, repeats);
+        return;
+    }
     if run_tail_profile_if_requested().expect("tail-range profile failed") {
         return;
     }
+    if run_head_profile_if_requested().expect("head-range profile failed") {
+        return;
+    }
     if run_tail_range_ab_if_requested().expect("tail-range A/B failed") {
+        return;
+    }
+    if run_head_range_ab_if_requested().expect("head-range A/B failed") {
         return;
     }
     println!(

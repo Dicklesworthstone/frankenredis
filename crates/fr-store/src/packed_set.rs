@@ -2220,13 +2220,13 @@ impl PackedStreamLog {
             .flat_map(|node| node.entries.iter().map(|entry| &entry.id))
     }
 
-    fn range_impl<const TAIL_DIRECT: bool, R: std::ops::RangeBounds<(u64, u64)>>(
+    fn range_impl<const DIRECT_BOUNDS: bool, R: std::ops::RangeBounds<(u64, u64)>>(
         &self,
         bounds: R,
     ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
         let lower = match bounds.start_bound() {
             std::ops::Bound::Included(id) | std::ops::Bound::Excluded(id) => {
-                let starts_in_tail = TAIL_DIRECT
+                let starts_in_tail = DIRECT_BOUNDS
                     && self
                         .tail
                         .as_ref()
@@ -2246,10 +2246,21 @@ impl PackedStreamLog {
             }
             std::ops::Bound::Unbounded => (0, 0),
         };
+        let include_tail = !DIRECT_BOUNDS
+            || match (
+                bounds.end_bound(),
+                self.tail.as_ref().and_then(StreamNode::first_id),
+            ) {
+                // Every active-tail id is at least `tail_first`; a completed-node upper bound can
+                // therefore omit the tail before reverse traversal starts filtering entries.
+                (std::ops::Bound::Included(end), Some(tail_first)) => *end >= tail_first,
+                (std::ops::Bound::Excluded(end), Some(tail_first)) => *end > tail_first,
+                _ => true,
+            };
         self.nodes
             .range(lower..)
             .map(|(_, node)| node)
-            .chain(self.tail.iter())
+            .chain(self.tail.iter().filter(move |_| include_tail))
             .flat_map(move |node| {
                 node.entries
                     .iter()
@@ -2267,7 +2278,7 @@ impl PackedStreamLog {
         self.range_impl::<true, R>(bounds)
     }
 
-    /// Exact pre-tail-direct range lower bound for same-binary benchmark and parity proof.
+    /// Exact pre-direct-bounds range traversal for same-binary benchmark and parity proof.
     #[doc(hidden)]
     pub fn bench_range_completed_node_reference<R: std::ops::RangeBounds<(u64, u64)>>(
         &self,
@@ -5661,6 +5672,51 @@ mod tests {
             (Excluded((1, 250)), Unbounded),
             (Included((1, 151)), Included((1, 225))),
             (Unbounded, Included((1, 8))),
+        ];
+        for bounds in bounds {
+            let candidate = log
+                .range(bounds)
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            let reference = log
+                .bench_range_completed_node_reference(bounds)
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            assert_eq!(candidate, reference, "forward bounds {bounds:?}");
+
+            let candidate_rev = log
+                .range(bounds)
+                .rev()
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            let reference_rev = log
+                .bench_range_completed_node_reference(bounds)
+                .rev()
+                .map(|(id, fields)| (*id, fields.to_pairs()))
+                .collect::<Vec<_>>();
+            assert_eq!(candidate_rev, reference_rev, "reverse bounds {bounds:?}");
+        }
+    }
+
+    #[test]
+    fn packed_stream_head_bound_skips_tail_with_reference_parity_y8d44() {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let mut log = PackedStreamLog::new();
+        for sequence in 1..=250_u64 {
+            let fields = [(b"field".to_vec(), sequence.to_string().into_bytes())];
+            assert!(!log.insert((1, sequence), &fields));
+        }
+
+        let bounds = [
+            (Unbounded, Included((1, 200))),
+            (Unbounded, Excluded((1, 201))),
+            (Included((1, 150)), Included((1, 175))),
+            (Excluded((1, 175)), Excluded((1, 201))),
+            (Unbounded, Included((1, 201))),
+            (Unbounded, Excluded((1, 202))),
+            (Included((1, 190)), Included((1, 225))),
+            (Included((1, 201)), Unbounded),
         ];
         for bounds in bounds {
             let candidate = log

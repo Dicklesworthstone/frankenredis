@@ -8,6 +8,45 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — omit the active tail for head-bounded XREVRANGE (`frankenredis-y8d44`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` again left only the explicitly multi-day
+  `frankenredis-b1o02` packed-hash representation project unassigned; the RESTORE quick wins were
+  already shipped or held as structural in-progress work.  The preceding `frankenredis-haws3`
+  row explicitly bounded its keep to lower-tail XRANGE and left reverse traversal unchanged.
+  This turn therefore took the symmetric live residual: a head-bounded XREVRANGE still entered
+  the active tail from the back and filtered every out-of-range tail entry before reaching the
+  last completed node.
+- **Profile/attribution first:** one strict-remote `--profile release` run on `vmi1152480`
+  profiled the production `range(..=last_completed).rev().take(8)` path over 10,000 entries and
+  collected 418 `instructions:u` samples with zero lost.  Reverse chain `try_rfold` carried
+  **65.28% self**, `FieldsRefIter::next` **13.77%**, the exact profile driver **12.79%**,
+  `PackedStreamLog::range_impl` **2.29%**, and the two B-tree range searches **2.82% + 2.03%**.
+  Binary SHA-256 was `a2c19bf72fa25c2615d1be107d384f31ff1d86f527b31a08e912f612eaf2291c`;
+  total RCH wall time was **114.8 s**.  This non-zero attribution selected exactly one lever.
+- **One concrete lever:** `PackedStreamLog::range` now omits its single active-tail iterator when
+  an included upper bound is below the tail's first ID, or an excluded upper bound is at or below
+  it.  Every tail ID is at least that first ID, so the skipped iterator is provably disjoint from
+  the requested range.  Tail-overlapping bounds retain the existing iterator and exact per-entry
+  filter; the same binary retained the former always-chain-tail path as its reference arm.
+- **Foreground A/A+A/B result:** the single decisive strict-remote command was
+  `cargo bench --profile release -p fr-store --bench xrange_borrow_scan_lfu_collapse -- --head-range`
+  on `vmi1152480`; total RCH wall time was **121.7 s** and binary SHA-256 was
+  `cc61ec97886909acd617555e7813b8ccc1a0299c9c7f71e762fe17c23207e160`.  One binary ran
+  21 measured, position-balanced rounds at 200,000 repetitions for XREVRANGE COUNT 8 ending at
+  the last completed-node ID.  Reference/direct measured **2.912759x**, clearing the
+  reference/reference null median **1.000000x** and p05..p95 **[0.999999, 1.000001]**; null CV
+  was **0.0000%** and effect CV **0.0001%**.
+- **Behavior and gates:** the same-binary harness asserted exact IDs and field pairs before
+  timing.  A focused strict-remote release test compared the production and frozen-reference
+  iterators across included/excluded bounds below, exactly at, and inside the active tail, plus
+  unbounded and completed-to-tail spans, in both forward and reverse order; it passed 1/1 on
+  `vmi1149989`.  Direct rustfmt and whitespace validation passed.  Rust UBS with the established
+  project exclusions exited zero with no critical findings.
+- **Boundary:** **SHIP only when the upper bound proves the active tail is wholly disjoint.**
+  Tail-overlapping and unbounded ranges, the shipped lower-bound routing, stream encoding, XADD,
+  and command reply construction are unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — skip completed nodes for tail-bounded XRANGE (`frankenredis-haws3`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the explicitly multi-day
