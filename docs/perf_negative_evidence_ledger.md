@@ -8153,3 +8153,25 @@ zero-copy `*_borrow_scan` variant is the fr-runtime HOT path for direct clients 
 borrow-scan for real traffic. FOLLOW-UPS: `hgetall_borrow_scan` (HGETALL hot path, same LFU 3-probe),
 `lrange_borrow_scan` (LRANGE, same shape). Sink-closure A/B pattern now proven (collect Len/Member into
 owned Vecs in the differential test; accumulate member lens in the bench sink).
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (`ff3c96415`). LFU LRANGE 3→1 on the ZERO-COPY production path (lrange_borrow_scan) — **1.39-1.53x**
+
+Follow-up to the HKEYS/HVALS borrow-scan collapse, now on the LIST hot path: fr-runtime encodes LRANGE
+straight into the reply buffer via `lrange_borrow_scan` (a `SmembersScanEvent` sink, no Vec). Its
+non-LFU path was already collapsed (`lookup_live_for_read_mut`); the LFU path was still 3-probe
+(`record_keyspace_lookup` + `contains_key` rand-gate + `get_mut`). Added the matching LFU fast path —
+fold to ONE `get_mut` (expiry peek + inline hit/miss + rng_seed field-split draw). Lists have no field
+TTLs so no field-reap guard. LFU bump fires on any present list; `touch` only on a non-empty in-range
+result — preserved exactly (a subtlety over hkeys). Const-generic `lrange_borrow_scan_impl<COLLAPSE>`
+threads `impl FnMut(SmembersScanEvent<'_>)`; byte/RNG/stat-identical + same sink sequence.
+
+A/B (`benches/lrange_borrow_scan_lfu_collapse.rs`, allkeys-lfu, 50k 4-element lists, LRANGE 0 -1 via the
+sink, median-of-61): n32 **1.531x** (null med 1.0055, p5..p95 [0.907, **1.135**], cv 8.40%); n256 **1.393x** (null med 1.0026, p5..p95 [0.830, **1.230**], cv 26.82%) — BOTH clean WINs. Gated by `lrange_borrow_scan_lfu_collapsed_matches_threeprobe`
+(full / sub / out-of-range / negative range / absent / wrongtype / expired × LFU on&off — asserts
+result, emitted (Len, Member…) sequence, RNG, keyspace stats, OBJECT FREQ, state_digest). Full suite pass.
+
+SHARED-TREE HAZARD (this turn): a concurrent SandyMeadow instance doing ZSCORE CLOBBERED my uncommitted
+lib.rs edits mid-turn (working tree reverted, their zscore re-applied) — re-applied from my Edit content,
+ran test+bench SNAPSHOT-protected (rch snapshots at launch), re-verified + committed fast. LESSON: under
+an active peer, launch the rch test IMMEDIATELY after editing (snapshots your work), and re-grep your
+symbols before staging. FOLLOW-UP: SMEMBERS/`sscan0_borrow_scan` (same shape).
