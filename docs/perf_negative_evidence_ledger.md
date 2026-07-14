@@ -8,6 +8,42 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: NEGATIVE — NO-SHIP. cold compact-ZSET DUMP bitwise score classifier is null-drowned (`frankenredis-hdyw0`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` surfaced the broad stale
+  `frankenredis-6lgnu` lane and already-mined store families.  The fresh unowned residual bead was
+  `frankenredis-hdyw0`, created after the compact-ZSET DUMP header-copy rejection specifically to
+  re-profile the cold path before trying another lever.  Current source and prior rows also ruled
+  out revisiting score formatting, scratch reuse, and header copying.
+- **Profile/attribution first:** one strict-remote `--profile release` run on worker
+  `vmi1152480` profiled the exact former-classifier cold DUMP path with 2K `cycles:u` samples and
+  zero lost samples.  `push_redis_double_ascii` had **30.43% self**,
+  `lzf_compress_with_scratch::<true>` **26.40%**, `PackedZSetIter::next` **6.05%**,
+  `Store::dump_key` **4.80%**, and the redundant `f64::fract()` descendant `trunc` **2.29%**
+  (`format_redis_double` was 2.18% and CRC 1.57%).  The non-zero `trunc` attribution selected one
+  narrow lever: classify finite nonzero integral scores directly from IEEE-754 exponent/fraction
+  bits, leaving rendering, listpack encoding, compression, and CRC untouched.
+- **Exactness proof:** the candidate matched the former `fract()` classifier across the vendored
+  Redis double corpus, explicit zero/NaN/infinity/integer-window/subnormal boundaries, and 100,000
+  deterministic random `f64` bit patterns.  Focused strict-remote release tests passed the new
+  classifier test, six store score tests, and the score-roundtrip metamorphic test.  The A/B
+  harness also asserted byte-identical complete DUMP payloads before timing both score mixes.
+- **Foreground A/A+A/B result:** the single strict-remote command was
+  `cargo bench --profile release -p fr-store --bench cold_zset_dump_fusion` on
+  `vmi1152480`; total RCH wall time was **117.0 s** and binary SHA-256 was
+  `0df5265bdd409074a66cf8da1df1a85256c9b7cc85071028c1985ed77c3d1b4d`.  The same binary
+  interleaved position-balanced 25 ms segments for 41 measured rounds per case.  Mixed scores
+  measured bitwise/fract **0.9942x**, inside A/A p05..p95 **[0.661, 1.150]** (null median
+  0.9705, CV 16.57%).  Integral scores measured **1.0027x**, inside **[0.770, 1.178]**
+  (null median 0.9889, CV 15.46%).  Neither case clears the null-control floor.
+- **Decision/boundary:** **NO-SHIP; candidate production and helper changes reverted.**  The
+  visible `trunc` frame is real, but removing it does not move full cold compact-ZSET DUMP through
+  compression/CRC and is not evidence for changing the shared score classifier.  Revisit only
+  with a lower-noise counter substrate or after a larger enclosing DUMP cost is removed.  UBS
+  exited zero with no critical findings; `git diff --check` was clean.  Strict-remote
+  `cargo fmt --check` was refused fail-closed as non-compilation (`RCH-E301`); the owned harness
+  passed its direct rustfmt check.
+
 ## 2026-07-14: SHIPPED — fuse borrowed `SET KEEPTTL GET` read plus overwrite (`frankenredis-lb17j`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` surfaced the broad, stale
