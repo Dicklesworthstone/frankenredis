@@ -22524,6 +22524,47 @@ impl Store {
         reverse: bool,
         now_ms: u64,
     ) -> Result<Option<(usize, f64)>, StoreError> {
+        self.zrank_withscore_impl::<true>(key, member, reverse, now_ms)
+    }
+
+    fn zrank_withscore_impl<const COLLAPSE_REVERSE_LFU: bool>(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        reverse: bool,
+        now_ms: u64,
+    ) -> Result<Option<(usize, f64)>, StoreError> {
+        if COLLAPSE_REVERSE_LFU && reverse && self.lfu_tracking_enabled() {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                return Ok(None);
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            return match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    match &mut entry.value {
+                        Value::SortedSet(zs) => {
+                            let result = zs.rev_rank_with_score(member);
+                            entry.touch(now_ms);
+                            Ok(result)
+                        }
+                        _ => Err(StoreError::WrongType),
+                    }
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    Ok(None)
+                }
+            };
+        }
+
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -22566,7 +22607,7 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<(usize, f64)>, StoreError> {
-        self.zrank_withscore(key, member, true, now_ms)
+        self.zrank_withscore_impl::<false>(key, member, true, now_ms)
     }
 
     /// Collapsed LFU `ZREVRANK ... WITHSCORE` arm for a symmetric same-binary A/B harness.
@@ -22578,37 +22619,7 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<(usize, f64)>, StoreError> {
-        if !self.lfu_tracking_enabled() {
-            return self.zrank_withscore(key, member, true, now_ms);
-        }
-        if self.expires_count != 0
-            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-        {
-            self.drop_if_expired(key, now_ms);
-            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-            return Ok(None);
-        }
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                match &mut entry.value {
-                    Value::SortedSet(zs) => {
-                        let result = zs.rev_rank_with_score(member);
-                        entry.touch(now_ms);
-                        Ok(result)
-                    }
-                    _ => Err(StoreError::WrongType),
-                }
-            }
-            None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                Ok(None)
-            }
-        }
+        self.zrank_withscore_impl::<true>(key, member, true, now_ms)
     }
 
     /// Return elements sorted ascending by score, by index range.
@@ -52947,8 +52958,7 @@ mod tests {
                 let mut collapsed = build(lfu);
                 let mut prior = build(lfu);
                 for repeat in 0..repeats {
-                    let collapsed_result = collapsed
-                        .zrevrank_withscore_lfu_collapsed_bench(key, member, now);
+                    let collapsed_result = collapsed.zrank_withscore(key, member, true, now);
                     let prior_result =
                         prior.zrevrank_withscore_lfu_threeprobe_bench(key, member, now);
                     let tag =

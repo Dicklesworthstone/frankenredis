@@ -9003,3 +9003,49 @@ heuristic packs; remaining warnings are deterministic benchmark indexing/setup. 
 remains blocked outside this hunk by the pre-existing `fr-simd/src/lib.rs:795`
 `clippy::needless_range_loop` and the existing fr-store lint inventory. No Cargo command fell back
 locally.
+
+## 2026-07-14 CalmHeron: SHIPPED — LFU ZREVRANK WITHSCORE collapses three keyspace probes to one; 1.726-1.875x, state-identical (frankenredis-n9pjx)
+
+Negative-ledger-first remeasurement resolved the INVALID HOLD immediately above. The original
+attribution still applied: under allkeys-LFU, reverse WITHSCORE performed
+`record_keyspace_lookup` + `entries.contains_key` + `entries.get_mut`; the sibling
+packed-singleton profile had attributed **23.81% self** to removable `contains_key`, **19.03%** to
+retained `get_mut`, and **8.66%** to hashing. The corrected exact-input profile in this run likewise
+resolved `contains_key` at **16.80% self**, `get_mut` at **19.39%**, and byte hashing at **8.14%**.
+
+ONE LEVER: `Store::zrank_withscore` now selects a one-probe `get_mut` acquisition only when
+`reverse && allkeys_lfu`. It folds expiry/presence accounting, the exact LCG draw, LFU bump, reverse
+rank-with-score, and access touch around that entry borrow. Forward ZRANK and every non-LFU path
+retain the exact prior body. A const-selected `<false>` instantiation preserves that prior
+three-probe body in the same executable as the control.
+
+STATE-IDENTICAL: the public production route and the control matched across packed/full zsets,
+member hit/miss, cold/warm rank cache, live/expired TTL, absent/wrong-type keys, LFU on/off, result
+bits, RNG seed, hit/miss counters, entry/access metadata, expiry/lazy-expiry state, dirty state, and
+the complete store digest. The focused remote test passed 1/1. Full `fr-conformance` passed all 347
+asserting tests (194 library + 99 smoke + 54 auxiliary/integration), including live `core_zset`
+**324/324**.
+
+MEASURED (one fail-closed foreground invocation, `cargo bench --profile release`, same executable,
+position-balanced interleaved A/A+A/B, 41 measured rounds, 20 ms target segments, singleton packed
+zsets, allkeys-LFU):
+
+- n32: three-probe/collapsed median **1.875x**; A/A null median **0.9899**, p5..p95
+  **[0.857, 1.160]**, null `cv_pct` **13.16%**.
+- n256: three-probe/collapsed median **1.726x**; A/A null median **0.9947**, p5..p95
+  **[0.804, 1.174]**, null `cv_pct` **16.05%**.
+
+Both candidate medians clear their own noisy shared-worker null p95 by a wide margin. Both arms are
+in release executable SHA-256
+`62828e48e17e349d0b06d79ca4d8629a0c382d871f551cd3a52a6a4ef6148589` on worker
+`vmi1152480`. The exact same-executable `cycles:u` profile recorded **569 samples, zero lost**;
+`run_threeprobe` had **7.42% self-time** and `run_collapse` **13.50%**, proving both timed wrappers
+reached the intended paths. The harness emits paired-null CV rather than effect CV; the complete
+candidate decision is therefore the median-versus-null-spread gate above, per methodology.
+
+The exact benchmark-target check passed remotely. Workspace/all-target check stopped outside this
+lane at the existing `set_ex_rearm` benchmark calls to three absent helper methods; workspace clippy
+stopped at the known pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_range_loop`. Focused UBS
+exited 0 with zero critical findings, and `git diff --check` was green. Every Cargo invocation was
+strict remote RCH; no local fallback occurred. Rollback: make production `zrank_withscore` call
+`zrank_withscore_impl::<false>` and leave the same-binary reference scaffold in place.
