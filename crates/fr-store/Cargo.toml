@@ -661,3 +661,12 @@ harness = false
 [[bench]]
 name = "xrange_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU ZRANGEBYSCORE ... LIMIT (member-only) collapse on the ZERO-COPY production path
+# (zrangebyscore_members_limit_borrow_scan): the LIMIT offset/count twin of the members collapse — fold
+# record + contains_key rand-gate + get_mut (3 probes) into ONE get_mut via rng_seed field split, same
+# min>max guard order. Byte/RNG/stat-identical
+# (zrangebyscore_members_limit_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "zrangebyscore_members_limit_borrow_scan_lfu_collapse"
+harness = false
