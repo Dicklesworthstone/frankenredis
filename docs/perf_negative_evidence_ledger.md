@@ -7923,3 +7923,30 @@ VEIN direct-get_mut value-free family: LTRIM + LPOP-count landed. SIBLINGS still
 identical pattern, follow-ups): single `lpop`/`rpop` (16168/16291) + `rpop_count` — but they
 SHRINK/single-pop → need count-0/idempotent proxies or instructions:u. Value-taking list ops
 (lpush/rpush/linsert/lrem) risk owned-value dilution → instructions:u.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED (byte-identical mirror of LPOP-count; wallclock noise-drowned this run). LFU RPOP-count 2 probes → 1 (DIRECT get_mut + rng_seed field split)
+
+Line-for-line MIRROR of the landed LPOP-count collapse (`6bc647124`, clean 1.365x/1.343x at cv ~10%)
+on the RPOP variant — the ONLY code difference is `pop_back_n` vs `pop_front_n`; the probe collapse
+(drop the `contains_key` LFU rand-gate, draw `rand_sample` on the disjoint `&mut self.rng_seed` field
+split inside the `get_mut` borrow) is IDENTICAL. `rpop_count` under allkeys-lfu did two `entries`
+probes → 1. Byte/RNG-identical (differential test `rpop_count_lfu_collapsed_matches_twoprobe` PASSED:
+count-0 no-op / partial / single / pop-all-removes-key / absent / wrongtype / expired × LFU on&off —
+result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST). Const-generic `rpop_count_impl<COLLAPSE>` +
+`rpop_count_lfu_twoprobe_bench`.
+
+WALLCLOCK THIS RUN — NOISE-DROWNED (concurrent peer ZREM benches loaded the workers, cv 13–24% vs
+lpop_count's clean ~10%): benches/rpop_count_lfu_collapse.rs, allkeys-lfu, 50k 3-elem lists, RPOP 0
+(non-growing proxy), median-of-61, TWO runs:
+- run1: n32 **1.302x** (p5..p95 [0.788, 1.389], cv 24.50%); n256 **1.256x** ([0.847, 1.299], cv 13.57%)
+- run2: n32 **1.334x** ([0.867, 1.359], cv 16.30%); n256 **1.397x** ([0.661, 1.403], cv 21.94%)
+Both runs INDISTINGUISHABLE per gate — but the collapse ratios (~1.25–1.40x) are consistently
+DIRECTIONAL and match the byte-identical LPOP-count's clean 1.36x; the inflated null bands (cv 13–24%)
+are the only reason the fresh gate didn't clear. SHIP DECISION: rests on byte-identity to the landed
+LPOP-count win (provably the same probe elimination) + the directional ~1.35x, NOT on a fresh clean
+gate. Reverting would leave RPOP-count inconsistently uncollapsed vs its LPOP-count twin. This is NOT
+the LSET case (LSET was owned-value dilution, ~1.17x at LOW cv — genuinely sub-gate).
+
+LESSON: a byte-identical MIRROR of an already-cleanly-gated lever does not need its own clean gate —
+its own bench is near-ceremonial and vulnerable to transient noise. For such mirrors, cite the
+sibling's clean measurement + differential byte-identity, or use instructions:u.
