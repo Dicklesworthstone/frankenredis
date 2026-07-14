@@ -560,3 +560,11 @@ harness = false
 [[bench]]
 name = "hkeys_lfu_collapse"
 harness = false
+
+# A/B for the LFU HKEYS/HVALS collapse on the ZERO-COPY production path (hcollection_borrow_scan, the
+# fr-runtime borrow-scan encoder): add the LFU 3->1 fast path (get_mut-first + rng_seed field split)
+# matching the already-present non-LFU one. Byte/RNG/stat-identical
+# (hcollection_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "hcollection_borrow_scan_lfu_collapse"
+harness = false
