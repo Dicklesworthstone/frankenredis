@@ -8918,51 +8918,119 @@ impl Store {
         }
     }
 
+    /// Shared APPEND in-place mutation on an existing entry: materialize to a raw string, enforce
+    /// the proto-max-bulk-len cap (byte-identical to upstream checkStringLength, Err BEFORE any
+    /// mutation), append the bytes, and report the new length. Factored out of the closure so the
+    /// LFU keyspace-probe collapse (`append_impl::<true>`) and its baseline (`::<false>`) run
+    /// byte-identical bodies.
+    fn append_apply(
+        entry: &mut Entry,
+        value: &[u8],
+        max_len: usize,
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+    ) -> Result<usize, StoreError> {
+        let Some(v) = entry.value.materialize_string() else {
+            return Err(StoreError::WrongType);
+        };
+        if v.len().saturating_add(value.len()) > max_len {
+            return Err(StoreError::GenericError(
+                "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+            ));
+        }
+        v.extend_from_slice(value);
+        let len = v.len();
+        entry.touch_write(now_ms, lfu_tracking_enabled);
+        // (br-frankenredis-84bv)
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+        Ok(len)
+    }
+
     pub fn append(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        self.append_impl::<true>(key, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU APPEND keyspace-probe collapse. `COLLAPSE = true` (shipped) resolves
+    /// the existing entry with a single `get_mut`-first probe and draws `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split — dropping the separate `contains_key` LFU rand-gate (2
+    /// probes → 1 under allkeys-lfu). It inlines `with_mutated_entry`'s exact stale/fresh digest
+    /// bookkeeping (the `&mut Entry` closure cannot reach `self.rng_seed`); the absent-key create
+    /// branch is shared and unchanged. `false` is the prior path (`contains_key` rand-gate +
+    /// `with_mutated_entry`). Byte/RNG/digest-identical: the LFU bump is digest-neutral, so `old_hash`
+    /// is the same before or after it; the field-split draw advances `rng_seed` exactly as
+    /// `next_rand`, present-key-gated as before. Borrowed value slice (`&[u8]`, no owned alloc).
+    fn append_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
-        // (with_mutated_entry below re-probes the key). Byte-identical: with
-        // expires_count==0 no key can carry an expiry, so drop_if_expired never evicts
-        // and its (ignored) return value is unused here.
+        // (the entry access below re-probes the key). Byte-identical: with expires_count==0
+        // no key can carry an expiry, so drop_if_expired never evicts.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        // (CrimsonHawk) Enforce the proto-max-bulk-len cap INSIDE append so callers no
-        // longer need a separate `string_len_no_stats` probe before it (one keyspace
-        // lookup saved per APPEND, both the generic handler and the borrowed fast path).
-        // WRONGTYPE still takes precedence (materialize_string runs first), and the cap
-        // error is byte-identical to upstream checkStringLength. The closure returns Err
-        // BEFORE mutating the value, so a rejected append never changes the key, never
-        // bumps `dirty`, never touches LRU — only the unread digest-mutation counter ticks
-        // (same as the existing WRONGTYPE error path), and the value is unchanged so DEBUG
-        // DIGEST stays byte-identical. The cap trips only on >512 MiB strings.
+        // (CrimsonHawk) Enforce the proto-max-bulk-len cap INSIDE append so callers no longer need a
+        // separate `string_len_no_stats` probe. WRONGTYPE takes precedence (materialize_string first);
+        // a rejected append never changes the key / bumps dirty / touches LRU (Err before mutation).
         let max_len = self.proto_max_bulk_len;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the baseline
+        // draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
         };
-        if let Some(result) = self.with_mutated_entry(key, |entry| {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+
+        let result_opt: Option<Result<usize, StoreError>> = if COLLAPSE {
+            // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing on the disjoint
+            // `rng_seed` field split. Inlines the exact `with_mutated_entry` digest bookkeeping (the
+            // LFU bump is digest-neutral, so `old_hash` is identical before or after it).
+            if self.digest_stale {
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
+                        self.bump_digest_mutations();
+                        Some(r)
+                    }
+                    None => None,
+                }
+            } else {
+                let expiry = self.expiry_ms(key);
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        let old_hash = Self::entry_state_digest(key, entry, expiry);
+                        if lfu_tracking_enabled {
+                            let rs = Self::lcg_next_seed(&mut self.rng_seed);
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
+                        }
+                        let r = Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
+                        let new_hash = Self::entry_state_digest(key, entry, expiry);
+                        self.update_digest_hashes(Some(old_hash), Some(new_hash));
+                        Some(r)
+                    }
+                    None => None,
+                }
             }
-            let Some(v) = entry.value.materialize_string() else {
-                return Err(StoreError::WrongType);
-            };
-            if v.len().saturating_add(value.len()) > max_len {
-                return Err(StoreError::GenericError(
-                    "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
-                ));
-            }
-            v.extend_from_slice(value);
-            let len = v.len();
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            // (br-frankenredis-84bv)
-            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            Ok(len)
-        }) {
+        } else {
+            // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
+            self.with_mutated_entry(key, |entry| {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled)
+            })
+        };
+
+        if let Some(result) = result_opt {
             if result.is_ok() {
                 self.dirty = self.dirty.saturating_add(1);
             }
@@ -8981,6 +9049,18 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
         }
+    }
+
+    /// Prior-path (two-probe) APPEND baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// plus `with_mutated_entry`. Not on any production path (`append` uses `append_impl::<true>`).
+    #[doc(hidden)]
+    pub fn append_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.append_impl::<false>(key, value, now_ms)
     }
 
     pub fn strlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
@@ -47462,6 +47542,61 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn append_lfu_collapsed_matches_twoprobe() {
+        // The get_mut-first LFU APPEND collapse (one probe + rng_seed field-split draw + inlined
+        // with_mutated_entry digest bookkeeping) must be byte/RNG/digest-identical to the prior
+        // contains_key rand-gate + with_mutated_entry path — across non-empty append, empty append,
+        // integer-encoded string, absent (create), absent-empty (create empty), wrong-type, and
+        // expired keys, under BOTH allkeys-lfu and a non-LFU policy, and BOTH stale and forced-fresh
+        // digest state. Asserts result, RNG, OBJECT FREQ, dirty, DEBUG DIGEST.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set(b"str".to_vec(), b"hello".to_vec(), None, 1);
+            s.set(b"si".to_vec(), b"12345".to_vec(), None, 1); // integer-encoded string
+            s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap(); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, value)
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"str", b"WORLD"),  // append to existing string (grows)
+            (b"str", b""),       // empty append (no-op growth, still a write)
+            (b"si", b"99"),      // append to integer-encoded string (materialize + raw)
+            (b"absent", b"AB"),  // create new string
+            (b"absent", b""),    // create empty string
+            (b"lst", b"AB"),     // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", b"AB"),     // expired -> create
+        ];
+        for lfu in [true, false] {
+            for force_fresh in [false, true] {
+                for &(key, value) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    if force_fresh {
+                        let _ = a.state_digest();
+                        let _ = b.state_digest();
+                    }
+                    let ra = a.append(key, value, now);
+                    let rb = b.append_lfu_twoprobe_bench(key, value, now);
+                    let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} val={value:?}");
+                    assert_eq!(ra, rb, "result {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq {tag}");
+                    assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
+            }
         }
     }
 

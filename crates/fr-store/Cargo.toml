@@ -474,3 +474,11 @@ harness = false
 [[bench]]
 name = "setrange_lfu_collapse"
 harness = false
+
+# A/B for the LFU APPEND write-side keyspace-probe collapse: get_mut-first + rng_seed field-split
+# draw (1 probe) with inlined with_mutated_entry digest bookkeeping vs the prior contains_key
+# rand-gate + with_mutated_entry (2 probes). Empty-value APPEND is the non-growing repeatable timed
+# shape (borrowed &[u8], no owned alloc). Byte/RNG/digest-identical (append_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "append_lfu_collapse"
+harness = false
