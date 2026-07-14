@@ -8003,3 +8003,25 @@ on&off — asserts result, RNG, keyspace stats, OBJECT FREQ, state_digest). Full
 
 The remaining diluted-tail read is BITPOS (same skip, same small-input gate) — a clean follow-up. The
 LFU read-collapse family reopens for the previously-skipped O(n)-scan reads when benched on small inputs.
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU LPOS 3 probes → 1 (fold record+contains_key+get_mut, rng_seed field split) — **1.69-1.82x**
+
+DISTINCT lever (a LIST read, different family from the bitmap BITCOUNT + the pop writes). LPOS's
+non-LFU path was already single-probe (`lookup_live_for_read_mut`), but the LFU path did THREE
+`entries` probes: `record_keyspace_lookup` (drop_if_expired + hit/miss stat) + a `contains_key`
+rand-gate + `get_mut`. The collapse folds all three into ONE `get_mut` — peek the expiry only when a
+key can carry one, record hit/miss inline (get_mut Some ⇒ hit, absent/reaped ⇒ miss), draw
+`rand_sample` on the disjoint `&mut self.rng_seed` field split. Bigger collapse (3→1) than BITCOUNT's
+2→1. LPOS is a read (bumps LFU + touches, no value mutation → no digest). Byte/RNG/stat-identical
+(same hit/miss accounting, single present-key draw, bump+touch, WRONGTYPE). On a SMALL list the O(n)
+scan is negligible so the probes dominate and it gates (probes eliminated for any size). Const-generic
+`lpos_impl<COLLAPSE>` + `lpos_lfu_threeprobe_bench`.
+
+A/B (`benches/lpos_lfu_collapse.rs`, allkeys-lfu, 50k 3-element lists, LPOS present-element, non-mutating
+repeatable, median-of-61): n32 **1.818x** (null med 1.0024, p5..p95 [0.886, **1.181**], cv 9.86%); n256 **1.691x** (null med 0.9966, p5..p95 [0.866, **1.137**], cv 9.31%) — BOTH strong clean WINs (3-probe collapse on a light read → bigger ratio than BITCOUNT's 2-probe). Gated by `lpos_lfu_collapsed_matches_threeprobe` (present /
+missing-full-scan / absent / wrongtype / expired × LFU on&off — asserts result, RNG, keyspace stats,
+OBJECT FREQ, state_digest). Full fr-store lib suite pass.
+
+Confirms the "diluted-tail reopens on SMALL inputs" seam extends beyond bitmaps to any previously-skipped
+O(n)-scan read (BITCOUNT bitmap → LPOS list). The record_keyspace_lookup + contains_key + get_mut 3-probe
+read pattern is the SAME one collapsed for GET/EXISTS/GETBIT — LPOS was simply missed in that sweep.
