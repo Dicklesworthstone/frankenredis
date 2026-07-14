@@ -21540,6 +21540,30 @@ impl Store {
                     return Ok(());
                 }
             }
+        } else if COLLAPSE {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            }
         } else {
             if !self.record_keyspace_lookup(key, now_ms) {
                 sink(SmembersScanEvent::Len(0));
@@ -21621,30 +21645,6 @@ impl Store {
             match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => entry,
                 None => {
-                    sink(SmembersScanEvent::Len(0));
-                    return Ok(());
-                }
-            }
-        } else if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-            {
-                self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                sink(SmembersScanEvent::Len(0));
-                return Ok(());
-            }
-            let lfu_decay = self.lfu_decay_time;
-            let lfu_log_factor = self.lfu_log_factor;
-            match self.entries.get_mut(key) {
-                Some(entry) => {
-                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    entry
-                }
-                None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     sink(SmembersScanEvent::Len(0));
                     return Ok(());
                 }
