@@ -8261,3 +8261,26 @@ another fixture. Its immediate isolated strict-remote rerun passed on `vmi115248
 state leakage rather than a BITPOS regression; follow-up is `frankenredis-jxd48`. Strict RCH refused
 non-compilation `cargo fmt --check` with `RCH-E301`, so formatting proof remains the direct rustfmt +
 owned-hunk inspection above.
+
+## 2026-07-14 BlackThrush: NO-SHIP (reverted) — LFU ZRANGEBYLEX member borrow-scan 2->1 is alloc-diluted
+
+Applied the LFU keyspace-probe collapse to `zrangebylex_members_borrow_scan` (the zero-copy
+ZRANGEBYLEX production path). Unlike the byscore/index-range variants (3-probe: `record_keyspace_lookup`
++ `contains_key` rand-gate + `get_mut`), ZRANGEBYLEX records NO keyspace stat — it uses a bare
+`drop_if_expired`, so its LFU path is only a TWO-probe wall (`contains_key` rand-gate + `get_mut`). The
+`const COLLAPSE` fold (draw `rand_sample` via the `rng_seed` field split inside the single `get_mut`,
+`lfu_tracking_enabled` hoisted before the borrow) was byte/RNG/stat-identical — the differential test
+`zrangebylex_members_borrow_scan_lfu_collapsed_matches_twoprobe` passed across full/sub/empty lex range
+× rev both × present/absent/wrong-type/expired × LFU on&off.
+
+Same-binary interleaved median-of-61 A/B (allkeys-lfu, 50k 3-member equal-score zsets, full `-`..`+`
+lex range): **n32 1.101x [null p5..p95 0.942..1.109, cv 4.4%] — INDISTINGUISHABLE; n256 1.109x
+[0.904..1.148, cv 6.7%] — INDISTINGUISHABLE.** Both directional-positive but inside the A/A null band,
+consistently (not transient noise). ROOT CAUSE: eliminating ONE of two probes is a smaller relative
+saving than the 3->1 collapses (which cleared ~1.4x), and `lex_range_refs` builds a `Vec<(member,
+score)>` whose allocation dilutes the single-probe elision below the wallclock gate — the same
+sub-gate shape as LSET (owned-value dilution) and srandmember. REVERTED (fn restored, test/bench/Cargo
+entry removed). LESSON: the borrow-scan collapse gates cleanly for **3-probe** reads (drop the redundant
+`record`+`contains_key`) but a **2-probe** read that also allocates a result Vec (lex/withscores
+index-range/sscan/zscan cursor variants) dilutes to ~1.1x — negative-ledger these rather than probing
+each; ship 2-probe collapses only when the body is allocation-free (e.g. SMEMBERS sink stream, 1.25x).
