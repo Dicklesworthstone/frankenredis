@@ -8,6 +8,37 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: INVALID PROFILE — cached WAIT snapshot accessor was below the exact-frame sampling floor (`frankenredis-j8sa4`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-day packed-HASH
+  representation bead unassigned, while the preceding two stream-range symmetries were already
+  shipped.  This turn pivoted to the fresh replication WAIT path rather than mining that vein
+  again.  Static attribution found that WAIT rebuilt both ACK and FACK snapshot vectors before
+  scanning only ACK offsets.
+- **Production-path attribution first:** a strict-remote `--profile release` run on
+  `vmi1152480` drove `WAIT 1 0` through the full runtime with one registered replica.  It collected
+  483 `instructions:u` samples with zero lost and assigned **2.98% self-time** to the exact current
+  `refresh_replica_ack_snapshots_reusing_capacity` frame.  That non-zero frame justified testing
+  exactly one lever: read the snapshot already refreshed at replica membership/ACK mutation sites,
+  retaining the old per-WAIT refresh as the same-binary reference.
+- **Decisive foreground result:** **INVALID; no A/B ratio was admitted.**  The release binary
+  (`89a11e50c68ad38a17f47b8c2dfb2ff1f2f1b64d76c18c0d6354513d55d34e3a`) first proved all eight
+  REPLCONF ACK/FACK/GETACK/WAIT/WAITAOF replies identical.  Its candidate profile then collected
+  359 samples with zero lost, but the no-inline cached accessor acquired no exact self-time sample.
+  The harness therefore failed its ledger-integrity gate with `profile has no exact candidate
+  helper frame; workload INVALID` before running any timed A/A or A/B rounds.  Total remote wall
+  time was **147.8 s**, safely below the five-minute cap.
+- **Correctness and build evidence:** the focused strict-remote release WAIT tests passed **5/5**,
+  including a probe that a just-registered replica is counted at offset zero before its first ACK.
+  The owned runtime+bench Clippy gate passed with `--no-deps -D warnings`; dependency linting was
+  separately blocked before runtime by the pre-existing `fr-simd/src/lib.rs:795`
+  `needless_range_loop`.  Direct formatting and whitespace checks passed.  UBS entered its shadow
+  scan but produced no result within the short turn budget and was interrupted.
+- **Disposition:** **NO SHIP and no performance conclusion.**  Production and benchmark changes
+  were restored exactly; WAITAOF was not changed or measured.  Do not cite this as a loss.  A
+  future retry must profile a larger named frame shared by both arms (or otherwise obtain non-zero
+  exact candidate self-time) before its A/B evidence is ledger-admissible.
+
 ## 2026-07-14 CalmHeron: SHIPPED — omit the active tail for head-bounded XREVRANGE (`frankenredis-y8d44`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` again left only the explicitly multi-day
