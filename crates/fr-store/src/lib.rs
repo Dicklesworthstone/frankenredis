@@ -18144,6 +18144,36 @@ impl Store {
         destination: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.rpoplpush_impl::<false>(source, destination, now_ms, |_| {})
+    }
+
+    /// Move the source-tail element to the destination head while lending the moved bytes to
+    /// `sink` before their owned buffer is installed in a deque-backed destination. This is the
+    /// direct-reply sibling of [`Self::rpoplpush`]: callers can encode the bulk reply straight into
+    /// their output buffer, avoiding the large-list path's otherwise-required destination clone.
+    /// Returns `true` when an element moved and `false` for a missing/empty source.
+    pub fn rpoplpush_with(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        now_ms: u64,
+        sink: impl FnMut(&[u8]),
+    ) -> Result<bool, StoreError> {
+        self.rpoplpush_impl::<true>(source, destination, now_ms, sink)
+            .map(|moved| moved.is_some())
+    }
+
+    /// `DIRECT_REPLY = false` is the frame-returning API; it keeps ownership of the popped value
+    /// for the reply and copies it into the destination. `DIRECT_REPLY = true` lends the value to
+    /// the reply sink and then moves that same allocation into a deque-backed destination. The
+    /// internal empty `Vec` is only a no-allocation `Some` sentinel for the bool-returning wrapper.
+    fn rpoplpush_impl<const DIRECT_REPLY: bool>(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(&[u8]),
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the two bare drops on `expires_count != 0`: with no volatile keys
         // neither source nor destination can be expired, so both drops are no-ops; the get(source)
         // + destination lookup below re-probe. Byte-identical. (RPOPLPUSH / LMOVE — reliable queues.)
@@ -18189,6 +18219,11 @@ impl Store {
         let Some(val) = popped else {
             return Ok(None);
         };
+        let mut val = Some(val);
+
+        if DIRECT_REPLY {
+            sink(val.as_deref().expect("popped value is present"));
+        }
 
         let mut source_ttl = None;
         if source == destination {
@@ -18213,8 +18248,15 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let lp_pre = l.listpack_byte_len();
-                    l.push_front_borrowed(&val);
-                    l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
+                    let val_len = val.as_deref().expect("popped value is present").len();
+                    if DIRECT_REPLY {
+                        l.push_front(val.take().expect("popped value is present"));
+                    } else {
+                        l.push_front_borrowed(
+                            val.as_deref().expect("popped value is present"),
+                        );
+                    }
+                    l.note_command_grow(lp_pre, val_len as u64, self.list_max_listpack_size);
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
@@ -18225,10 +18267,15 @@ impl Store {
             },
             None => {
                 let mut l = ListValue::default();
-                l.push_front_borrowed(&val);
+                let val_len = val.as_deref().expect("popped value is present").len();
+                if DIRECT_REPLY {
+                    l.push_front(val.take().expect("popped value is present"));
+                } else {
+                    l.push_front_borrowed(val.as_deref().expect("popped value is present"));
+                }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
-                    val.len() as u64,
+                    val_len as u64,
                     self.list_max_listpack_size,
                 );
                 self.internal_entries_insert_with_expiry(
@@ -18239,7 +18286,11 @@ impl Store {
             }
         }
         self.dirty = self.dirty.saturating_add(1);
-        Ok(Some(val))
+        Ok(Some(if DIRECT_REPLY {
+            Vec::new()
+        } else {
+            val.expect("frame path retains the popped value")
+        }))
     }
 
     pub fn ltrim(
@@ -66261,6 +66312,65 @@ mod tests {
         assert_eq!(val, Some(b"c".to_vec()));
         assert_eq!(store.llen(b"src", 0).unwrap(), 2);
         assert_eq!(store.llen(b"dst", 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn rpoplpush_direct_reply_matches_owned_frame_for_large_lists() {
+        let seed = || {
+            let mut store = Store::new();
+            let values: Vec<Vec<u8>> = (0_u8..4)
+                .map(|tag| {
+                    let mut value = vec![tag; 512];
+                    value[0] = b'a' + tag;
+                    value
+                })
+                .collect();
+            store.rpush(b"src", &values, 1).unwrap();
+            store.rpush(b"dst", &[vec![b'z'; 512]], 1).unwrap();
+            store.expire_at_milliseconds(b"src", 50_000, 1);
+            store
+        };
+
+        let mut owned = seed();
+        let mut direct = seed();
+        let expected = owned.rpoplpush(b"src", b"dst", 2).unwrap();
+        let mut encoded_value = None;
+        let moved = direct
+            .rpoplpush_with(b"src", b"dst", 2, |value| {
+                encoded_value = Some(value.to_vec());
+            })
+            .unwrap();
+
+        assert!(moved);
+        assert_eq!(encoded_value, expected);
+        assert_eq!(
+            direct.lrange(b"src", 0, -1, 2),
+            owned.lrange(b"src", 0, -1, 2)
+        );
+        assert_eq!(
+            direct.lrange(b"dst", 0, -1, 2),
+            owned.lrange(b"dst", 0, -1, 2)
+        );
+        assert_eq!(direct.pttl(b"src", 2), owned.pttl(b"src", 2));
+        assert_eq!(direct.pttl(b"dst", 2), owned.pttl(b"dst", 2));
+        assert_eq!(
+            direct.object_encoding(b"src", 2),
+            owned.object_encoding(b"src", 2)
+        );
+        assert_eq!(
+            direct.object_encoding(b"dst", 2),
+            owned.object_encoding(b"dst", 2)
+        );
+        assert_eq!(direct.state_digest(), owned.state_digest());
+        assert_eq!(direct.dirty, owned.dirty);
+
+        let mut sink_called = false;
+        assert!(
+            !direct
+                .rpoplpush_with(b"missing", b"dst", 3, |_| sink_called = true)
+                .unwrap()
+        );
+        assert!(!sink_called);
     }
 
     // ── HyperLogLog store tests ───────────────────────────────────────────

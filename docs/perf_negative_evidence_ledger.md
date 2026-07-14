@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14: SHIPPED — RPOPLPUSH direct reply sink owns-moves deque elements (`frankenredis-5098y`)
+
+- **Negative-ledger-first routing:** the historical ZADD/SADD bead was stale against the
+  newer scorecard, and the LFU/dict probe-collapse vein was already well mined.  The open
+  `RPOPLPUSH`/`LMOVE` clone bead instead named a still-live large-list reply clone.  The
+  current runtime/server already had direct borrowed-reply sinks, so this turn took only
+  the `RPOPLPUSH` half; `LMOVE` deliberately remains open as a separate lever.
+- **Profile/attribution before the production edit:** one same-binary `--profile release`
+  harness profiled 250,000 moves of a 4 KiB element between 16-element deque-backed
+  lists (the instruction rounds used 50,000 moves).  The frame arm recorded zero lost
+  samples; `malloc` was **8.82% self**, the exact
+  benchmark operation **3.46% self**, and `Store::rpoplpush` **3.01% self**, with
+  `ListValue::push_front_borrowed` and its allocation/copy descendants visible.  The
+  direct arm's exact operation had **10.42% self** and zero lost samples, proving both
+  arms reached the timed path rather than measuring only harness overhead.
+- **One concrete lever:** `Store::rpoplpush_with` lends the popped bytes to an infallible
+  encoder and then moves that same `Vec<u8>` into a deque-backed destination.  The old
+  frame API delegates to the same implementation and retains its owned reply.  The
+  runtime/server exact borrowed parser path now emits directly into the client buffer and
+  returns `FastEncodedReply`; packed-list insertion and all fallback/error paths are
+  unchanged.
+- **Foreground A/B result:** strict remote command
+  `cargo bench --profile release -p fr-store --bench move_key_relink --features bench-reference -- --rpoplpush-reply`
+  ran once on worker `vmi1149989`; binary SHA-256
+  `1b8fcb7ba0ede9e605f22d7700b8b0cce0e5433df6e5ff86f9b80367d7a27d05`.
+  Across 12 interleaved instruction rounds, frame/direct median was
+  **1.188212324x** (about **15.84% fewer retired instructions** for direct), with
+  effect CV **0.000251%**.  The direct/direct null median was **0.999999152x**,
+  p05/p95 **0.999995645x/1.000002060x**, CV **0.000274%**.  Representative totals
+  were about 343.206M frame versus 288.842M direct instructions.  Reply bytes,
+  source/destination contents, TTLs, encodings, digest, and dirty count matched exactly.
+- **Correctness and gates:** focused remote `rpoplpush` tests passed (runtime 1/1,
+  store 2/2); full remote `fr-conformance` passed 194/194 library tests, 99/99 smoke
+  tests, all auxiliary/doc suites, and live `core_list` 206/206.  Remote package checks
+  passed.  Strict clippy remains blocked before this hunk by existing `fr-simd`
+  `needless_range_loop`; a `--no-deps` retry exposed only the existing `fr-store`
+  dead-code/style inventory.  `git diff --check` is clean.
+- **Do not overgeneralize:** this proves the deque-backed, large-element `RPOPLPUSH`
+  reply-copy removal.  It does not claim a packed-list win and does not close the sibling
+  `LMOVE` reply-borrow work.  Revert the store/runtime/server sink together if reply or
+  list-state parity ever fails.
+
 > ## ⇩ READ THIS FIRST — PER-TURN PERF STATUS (CrimsonHawk, 2026-06-28) ⇩
 > The per-turn perf surface is **EXHAUSTIVELY VERIFIED CLOSED** (by measurement, not
 > inspection). This session landed **8 measured wins** (RDB list-decode −21.5%, CRC64

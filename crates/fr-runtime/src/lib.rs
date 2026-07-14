@@ -17616,6 +17616,93 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Direct-encode RPOPLPUSH fast path. The store lends the popped element to the RESP encoder
+    /// before moving that same owned buffer into a deque-backed destination, so large-list moves do
+    /// not clone the element merely to keep an owned `RespFrame` reply alive. Missing-source and
+    /// error replies, metrics, expiry propagation, and reply suppression match the frame path.
+    pub fn execute_plain_rpoplpush_borrowed_into(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_rpoplpush_borrowed(src, dst, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("rpoplpush");
+        self.session.last_argv_len_sum = b"RPOPLPUSH".len() + src.len() + dst.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.rpoplpush_with(src, dst, now_ms, |value| {
+            if !suppress_reply {
+                encode_bulk_string_slice(Some(value), resp3, out);
+            }
+        });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(None, resp3, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_rpoplpush_borrowed_metrics(
+            src, dst, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     fn record_plain_rpoplpush_borrowed_metrics(
         &mut self,
         src: &[u8],
@@ -44774,6 +44861,67 @@ mod tests {
                 direct.server.store.stat_keyspace_misses,
                 generic.server.store.stat_keyspace_misses
             );
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+    }
+
+    #[test]
+    fn plain_rpoplpush_borrowed_into_matches_generic() {
+        for (case, resp3) in [
+            ("distinct", false),
+            ("rotate", false),
+            ("missing", true),
+            ("wrongtype", false),
+        ] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for runtime in [&mut direct, &mut generic] {
+                let large = vec![b'x'; 4096];
+                runtime.execute_frame(
+                    command_owned(vec![
+                        b"RPUSH".to_vec(),
+                        b"src".to_vec(),
+                        b"a".to_vec(),
+                        large,
+                    ]),
+                    1,
+                );
+                runtime.execute_frame(command(&[b"RPUSH", b"dst", b"z"]), 1);
+                runtime.execute_frame(command(&[b"SET", b"str", b"value"]), 1);
+            }
+
+            let (src, dst) = match case {
+                "distinct" => (b"src".as_slice(), b"dst".as_slice()),
+                "rotate" => (b"src".as_slice(), b"src".as_slice()),
+                "missing" => (b"absent".as_slice(), b"dst".as_slice()),
+                "wrongtype" => (b"src".as_slice(), b"str".as_slice()),
+                _ => unreachable!(),
+            };
+            let ts = 2;
+            let mut got = Vec::new();
+            direct
+                .execute_plain_rpoplpush_borrowed_into(src, dst, ts, resp3, &mut got)
+                .expect("rpoplpush _into fast path should engage");
+            let reply = generic.execute_frame(command(&[b"RPOPLPUSH", src, dst]), ts);
+            let mut want = Vec::new();
+            if resp3 {
+                reply.encode_into_resp3(&mut want);
+            } else {
+                reply.encode_into(&mut want);
+            }
+            assert_eq!(got, want, "encoded RPOPLPUSH reply for {case}");
+
+            for key in [b"src".as_slice(), b"dst".as_slice(), b"str".as_slice()] {
+                assert_eq!(
+                    direct.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts),
+                    generic.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts),
+                    "post-state for {case}, key={key:?}"
+                );
+            }
+            assert_eq!(direct.server.store.dirty, generic.server.store.dirty);
             assert_eq!(
                 direct.server.store.stat_total_error_replies,
                 generic.server.store.stat_total_error_replies

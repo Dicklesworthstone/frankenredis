@@ -4797,12 +4797,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_rpoplpush_borrowed(packet.key, packet.member, ts)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_rpoplpush_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -7068,12 +7075,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_rpoplpush_borrowed(packet.key, packet.member, ts)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_rpoplpush_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
