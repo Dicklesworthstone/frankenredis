@@ -2258,6 +2258,26 @@ impl SortedSet {
             .count()
     }
 
+    /// Borrow an ascending rank window. Packed zsets skip the fixed-width score bytes of records
+    /// before the window; Full zsets retain the prior ordered iterator traversal.
+    fn for_each_index_slice_asc(
+        &self,
+        start_idx: usize,
+        count: usize,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
+        match &self.inner {
+            SortedSetInner::Packed(packed) => {
+                packed.for_each_index_slice_asc(start_idx, count, f);
+            }
+            SortedSetInner::Full(full) => {
+                for (member, score) in full.iter_asc().skip(start_idx).take(count) {
+                    f(member, *score);
+                }
+            }
+        }
+    }
+
     /// `count` (member, score) pairs starting at ascending index `start_idx`,
     /// adaptively warming the rank treap on repeated deep access. The only
     /// SortedSet-level slice path (ZRANGE-by-index, ZREMRANGEBYRANK, ZSCAN all
@@ -24143,9 +24163,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         sink(ZRangeWithScoresScanEvent::Len(count));
-                        for (member, score) in zs.iter_asc().skip(s_idx).take(count) {
+                        zs.for_each_index_slice_asc(s_idx, count, |member, score| {
                             sink(ZRangeWithScoresScanEvent::Pair(member, score));
-                        }
+                        });
                         entry.touch(now_ms);
                         Ok(())
                     }

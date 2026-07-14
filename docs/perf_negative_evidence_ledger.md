@@ -8636,3 +8636,52 @@ Cargo/build categories disabled; its nonzero results are the file-wide legacy/te
 inventory plus deliberate benchmark-only fail-closed panic/assert/nonempty-index checks, with no
 actionable finding in the owned production hunk. Every Cargo invocation used strict remote RCH with
 no local fallback.
+
+## 2026-07-14 MossyTrout: WIN — KEEP. packed zero-copy ZRANGE WITHSCORES skips discarded score decodes — **2.2548x**
+
+Negative-ledger-first routing left the keyspace-RAM `KeyDict` side index (`frankenredis-uhthd`)
+blocked on its deterministic SCAN-order design sign-off: the previously measured main-table-only
+half-wire is forbidden, while a complete swap is a structural all-keyspace change rather than this
+turn's single lever. The LFU probe-collapse family was already well mined, and the packed owned-slice
+score-decode follow-up was already present on live `main`. The distinct real runtime seam was the
+zero-copy ascending `ZRANGE key start stop WITHSCORES` route. Its packed arm used
+`iter_asc().skip(start).take(count)`, which decoded the fixed-width f64 score of every discarded
+pre-window record even though the reply callback cannot observe those scores.
+
+Production now routes that borrowed rank window through `SortedSet::for_each_index_slice_asc`.
+Packed zsets advance over discarded records using only their varint member length plus the fixed
+eight score bytes, then decode and borrow exactly the requested records. Full zsets retain the exact
+prior ordered `iter_asc().skip().take()` traversal. Rank normalization, expiry, LFU/access touch,
+callback order, member bytes, raw score bits, and reply streaming are unchanged. The const-generic
+`SKIP_SCORES=false` arm retains the old packed traversal solely for the same-binary proof.
+
+The ONE foreground benchmark invocation was a one-binary, one-invocation, position-balanced
+A/A+A/B (`benches/packed_zset_borrow_slice_asc.rs`, `release`, 120 packed members, ascending ranks
+112..119, 9 balanced rounds) run fail-closed on remote worker `vmi1152480`. Both arms shared
+executable SHA-256 `fc6a2f7705c270348a2eb604923f042bb79f374581986f41f8bb82a09a1eab1d`.
+The prior iterator used **5933.398 instructions/op** and the candidate **2631.398 instructions/op**:
+baseline/candidate **2.254846x**, or **55.65% fewer instructions**. Effect CV was **0.000053%**.
+The candidate/candidate A/A null median was `0.999999515`, p5..p95
+`[0.999999039, 1.000000849]`, CV **0.000059%**; the candidate therefore clears the null-p95 gate
+decisively.
+
+Exact-input profiles ran inside that same invocation and executable with zero lost samples.
+Candidate (165 samples) resolved `for_each_index_slice_asc_impl::<true>` at **92.23% self**,
+`record_at` at **5.29%**, and the outer slice visitor at **1.27%**. Reference (167 samples) resolved
+`PackedZSetIter::next` at **75.92% self**, `for_each_index_slice_asc_impl::<false>` at **21.65%**,
+and the outer visitor at **1.59%**. Both timed arms therefore executed with non-zero self-time, and
+the removed iterator score-decode traversal is visible in the exact deep-window workload. This is a
+packed store-primitive result, not a whole-server throughput claim.
+
+`packed_zset_borrowed_asc_slice_skips_scores_bit_identically` passed fail-closed on `vmi1152480`.
+It compares candidate/reference member bytes and raw `f64::to_bits()` across empty, first, interior,
+tail, oversized, out-of-range, and `usize::MAX` windows, including signed NaNs, infinities, signed
+zeros, and score ties. The full `fr-conformance` gate passed on the same worker with 347 asserting
+tests (194 library + 54 auxiliary/integration + 99 smoke), zero failures; `core_zset` and its live
+Redis suite passed. Workspace/all-target `cargo check` passed. Workspace clippy stopped before this
+lane at the pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_range_loop`. The owned benchmark
+passes Rust 2024 rustfmt and `git diff --check`; the file-wide store formatter still exposes broad
+unrelated repository drift. UBS ran with local Cargo/build categories disabled; its nonzero output
+is the large files' legacy/test heuristic inventory plus deliberate bounded benchmark indexing, with
+no actionable finding in the owned production visitor or call-site hunks. Every Cargo invocation
+used strict remote RCH with no local fallback.
