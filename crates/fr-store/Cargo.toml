@@ -521,3 +521,11 @@ harness = false
 [[bench]]
 name = "bitcount_lfu_collapse"
 harness = false
+
+# A/B for the LFU LPOS keyspace-probe collapse: fold record_keyspace_lookup + contains_key rand-gate
+# + get_mut into one get_mut (expiry peek + rng_seed field-split draw) — 3 probes -> 1 — vs the prior
+# three-probe path. LPOS is a read; on a small list the scan is negligible so the probes gate.
+# Byte/RNG/stat-identical (lpos_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "lpos_lfu_collapse"
+harness = false
