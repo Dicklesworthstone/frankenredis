@@ -8583,3 +8583,56 @@ Cargo/build categories disabled; its nonzero results are the file-wide legacy/te
 inventory plus deliberate benchmark-only fail-closed panic/assert/index checks, with no actionable
 finding in the owned production hunk. Every Cargo invocation used strict remote RCH with no local
 fallback.
+
+## 2026-07-14 MossyTrout: WIN — KEEP. LFU zero-copy LINDEX after key_type 2 probes -> 1 — **1.1547x**
+
+Negative-ledger-first routing left the staged-but-unwired `KeyDict` prototype to the structural,
+all-keyspace `frankenredis-uhthd` swap and did not reopen ZLEXCOUNT's ledgered low-impact
+body/dispatch surface. The real zero-copy LINDEX runtime route performs an unchanged `key_type`
+precheck and then `Store::lindex_with`; under allkeys-lfu that second method still gated its random
+draw with `entries.contains_key` before resolving the same key with `entries.get_mut`. Production
+`lindex_with_impl::<true>` now uses the successful mutable lookup as the presence gate and draws the
+identical LCG sample through the disjoint `rng_seed` field. This collapses the method-local two
+probes to one, and the actual `key_type` + `lindex_with` sequence from three to two. Expiry,
+WRONGTYPE/index ordering, borrowed result bytes, LFU/access metadata, RNG evolution, and the
+non-LFU path are unchanged; the separate allocating `Store::lindex` path is untouched. The hidden
+`<false>` arm retains the exact prior two-probe method for same-binary proof.
+
+The ONE foreground benchmark invocation was a one-binary, one-invocation, position-balanced
+A/A+A/B (`benches/lindex_with_lfu_collapse.rs`, `release`, allkeys-lfu, 20k three-element lists,
+present index 1, 16 passes, 9 balanced rounds) run fail-closed on remote worker `vmi1152480`. Both
+arms retained the real `key_type` precheck and borrowed-result callback and shared executable
+SHA-256 `c5134145181d30905fa11494f755bdf830634bf77afc8b9e2313eb97ecfc002b`. After subtracting an
+identical build count, the prior sequence used **634.17 instructions/op** and the collapsed
+sequence **549.15 instructions/op**: baseline/candidate **1.1547x**, candidate-ratio CV **0.03%**.
+The A/A null median was `1.0001`, p5..p95 `[0.9996, 1.0003]`, CV `0.02%`; the candidate therefore
+clears the predeclared null-p95 gate decisively (about **13.4% fewer instructions**).
+
+The exact-input dual-arm `cycles:u` profile ran inside that same invocation and executable: 1K
+samples, zero lost. Both arms resolved at non-zero self-time: prior
+`Store::lindex_with_lfu_twoprobe_bench` **14.00%** and candidate
+`Store::lindex_with_impl::<true>` **13.02%**. The unchanged surrounding/body work remained visible:
+`Store::value_type_lfu_impl::<true>` **23.98%**, `Entry::bump_lfu_freq` **13.15%**, byte compare
+**10.67%**, `ListValue::get` **7.31%**, map `hash_one` **5.24%**, and byte hashing **4.59%**. The
+map probes were inlined rather than reported as separate symbols, so attribution is limited to the
+exact prior/candidate method delta and its retained hashing/comparison work; this still verifies
+that both timed LINDEX arms executed with non-zero self-time rather than benchmarking dead code.
+
+`lindex_with_lfu_collapsed_matches_twoprobe` passed fail-closed on `vmi1152480`. It covers present
+positive and negative indexes, out-of-range, absent, WRONGTYPE, expired, and live-TTL keys with LFU
+on/off and fresh/stale running digests; it asserts result/error, RNG, hit/miss stats, complete entry
+and access metadata, expiry/lazy-expiry effects, dirty state, digest mutation/staleness, and final
+state-digest parity. Missing and expired keys remain no-draw misses; present WRONGTYPE and
+out-of-range calls preserve the prior draw/bump/touch ordering exactly.
+
+Final fail-closed remote gates: workspace/all-target `cargo check` passed on `vmi1152480`, and
+`fr-conformance` passed there with 347 asserting tests (194 library + 54 auxiliary/integration + 99
+smoke), zero failures. Its live oracle retained only the known non-asserting diagnostics: one CONFIG
+SAVE mismatch, eight replication-state mismatches, and two transport timeouts; every enclosing test
+passed. Workspace clippy reached Cargo on the same worker and stopped before this lane at the
+pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_range_loop`. Direct Rust 2024 rustfmt of the
+owned harness and owned-hunk comparison plus `git diff --check` are green. UBS ran with local
+Cargo/build categories disabled; its nonzero results are the file-wide legacy/test heuristic
+inventory plus deliberate benchmark-only fail-closed panic/assert/nonempty-index checks, with no
+actionable finding in the owned production hunk. Every Cargo invocation used strict remote RCH with
+no local fallback.

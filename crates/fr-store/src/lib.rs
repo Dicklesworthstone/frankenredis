@@ -17430,6 +17430,20 @@ impl Store {
         now_ms: u64,
         f: impl FnOnce(Option<&[u8]>) -> R,
     ) -> Result<R, StoreError> {
+        self.lindex_with_impl::<true, R>(key, index, now_ms, f)
+    }
+
+    /// A/B toggle for the LFU acquisition in the zero-copy LINDEX path. `COLLAPSE = true`
+    /// (shipped) uses the successful `get_mut` as the presence gate for the LFU random draw,
+    /// removing the preceding `contains_key` probe. Expiry, non-LFU behavior, type/index ordering,
+    /// LFU/access metadata, and the borrowed result callback remain unchanged.
+    fn lindex_with_impl<const COLLAPSE: bool, R>(
+        &mut self,
+        key: &[u8],
+        index: i64,
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
         // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
         // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
         // the reap on expires_count; fold presence into the lookup. Byte-identical.
@@ -17439,14 +17453,20 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
         };
-        match self.entries.get_mut(key) {
+        let (entries, rng_seed) = (&mut self.entries, &mut self.rng_seed);
+        match entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let idx = match &entry.value {
@@ -17467,6 +17487,19 @@ impl Store {
             }
             None => Ok(f(None)),
         }
+    }
+
+    /// Exact prior two-probe LFU zero-copy LINDEX path for the same-binary A/B harness.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn lindex_with_lfu_twoprobe_bench<R>(
+        &mut self,
+        key: &[u8],
+        index: i64,
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        self.lindex_with_impl::<false, R>(key, index, now_ms, f)
     }
 
     pub fn lset(
@@ -50510,6 +50543,96 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn lindex_with_lfu_collapsed_matches_twoprobe() {
+        fn build(lfu: bool, fresh_digest: bool) -> Store {
+            let mut store = Store::new();
+            if lfu {
+                store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                store.lfu_decay_time = 0;
+            }
+            store
+                .rpush(
+                    b"list",
+                    &[b"a".to_vec(), b"value123".to_vec(), b"z".to_vec()],
+                    1,
+                )
+                .unwrap();
+            store.rpush(b"expired", &[b"old".to_vec()], 1).unwrap();
+            assert!(store.expire_at_milliseconds(b"expired", 5, 1));
+            store.rpush(b"live_ttl", &[b"live".to_vec()], 1).unwrap();
+            assert!(store.expire_at_milliseconds(b"live_ttl", 100, 1));
+            store.set(b"string".to_vec(), b"wrong".to_vec(), None, 1);
+            if fresh_digest {
+                let _ = store.state_digest();
+            }
+            store
+        }
+
+        let cases: &[(&[u8], i64)] = &[
+            (b"list", 1),
+            (b"list", -1),
+            (b"list", 99),
+            (b"absent", 0),
+            (b"string", 0),
+            (b"expired", 0),
+            (b"live_ttl", 0),
+        ];
+        for lfu in [false, true] {
+            for fresh_digest in [false, true] {
+                for &(key, index) in cases {
+                    let mut collapsed = build(lfu, fresh_digest);
+                    let mut prior = build(lfu, fresh_digest);
+                    let got =
+                        collapsed.lindex_with(key, index, 10, |value| value.map(<[u8]>::to_vec));
+                    let expected = prior.lindex_with_lfu_twoprobe_bench(key, index, 10, |value| {
+                        value.map(<[u8]>::to_vec)
+                    });
+                    let tag =
+                        format!("lfu={lfu} fresh_digest={fresh_digest} key={key:?} index={index}");
+                    assert_eq!(got, expected, "result {tag}");
+                    assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
+                    assert_eq!(
+                        collapsed.stat_keyspace_hits, prior.stat_keyspace_hits,
+                        "hits {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(collapsed.entries, prior.entries, "entries {tag}");
+                    assert_eq!(
+                        collapsed.expiry_ms(key),
+                        prior.expiry_ms(key),
+                        "expiry {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.lazy_expired_propagation, prior.lazy_expired_propagation,
+                        "lazy expiry {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.expires_count, prior.expires_count,
+                        "expiry count {tag}"
+                    );
+                    assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
+                    assert_eq!(
+                        collapsed.digest_mutations, prior.digest_mutations,
+                        "digest mutations {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.digest_stale, prior.digest_stale,
+                        "digest stale {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.state_digest(),
+                        prior.state_digest(),
+                        "state digest {tag}"
+                    );
+                }
+            }
         }
     }
 
