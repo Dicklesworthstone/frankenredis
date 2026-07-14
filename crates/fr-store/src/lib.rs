@@ -13589,7 +13589,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hset_impl::<true>(key, field, value, now_ms)
+        self.hset_impl::<true, true>(key, field, value, now_ms)
     }
 
     /// Bench-only baseline: owned `hset` with the O(n) re-scanning encoding refresh (`INCR=false`)
@@ -13602,10 +13602,32 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hset_impl::<false>(key, field, value, now_ms)
+        self.hset_impl::<false, true>(key, field, value, now_ms)
     }
 
-    fn hset_impl<const INCR: bool>(
+    /// Bench-only baseline: HSET with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
+    /// rand is gated behind a separate `contains_key` probe (`should_bump_lfu`) BEFORE `get_mut`,
+    /// as opposed to production's single get_mut-first that draws the rand on the disjoint `rng_seed`
+    /// field split inside the `Some` arm. `INCR = true` (same as `hset`). Byte/RNG-identical to
+    /// `hset`. Not on any production path.
+    #[doc(hidden)]
+    pub fn hset_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.hset_impl::<true, false>(key, field, value, now_ms)
+    }
+
+    /// `const COLLAPSE` — the LFU write-side keyspace-probe collapse for HSET. `true` (production)
+    /// resolves the existing-key path with a single get_mut-first: a `Some` (present key) draws the
+    /// LFU rand on the disjoint `&mut self.rng_seed` field split and bumps inline; a `None` (absent)
+    /// inserts a fresh hash (no draw, no bump). The prior path (`false`) probed `contains_key`
+    /// (`should_bump_lfu`) THEN `get_mut` — two `entries` hashes. Byte/RNG-identical: the prior path
+    /// drew only for a PRESENT key under LFU, exactly the `Some`+LFU case here.
+    fn hset_impl<const INCR: bool, const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         field: Vec<u8>,
@@ -13621,7 +13643,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let should_bump_lfu = !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
@@ -13631,11 +13653,33 @@ impl Store {
         // after the entry borrow ends and only when the field was written —
         // byte-identical to the previous in-arm placement.
         let entry = if lfu_tracking_enabled {
-            // Under LFU the `should_bump_lfu` check above already probed presence
-            // (`should_bump_lfu == contains_key` here, since `lfu` is true), and only
-            // `next_rand` ran since — so reuse it to skip `internal_entry`'s redundant
-            // `contains_key`: one `get_mut` (present) or insert + `get_mut` (absent).
-            if should_bump_lfu {
+            if COLLAPSE {
+                // (BlackThrush) Write-side probe collapse: one get_mut-first replaces the
+                // `contains_key` rand-gate + `get_mut` pair. A present key draws the LFU rand on the
+                // disjoint `rng_seed` field split and bumps INLINE (the trailing `should_bump_lfu`
+                // bump is a no-op since `should_bump_lfu == false` under COLLAPSE); an absent key
+                // inserts a fresh hash and draws nothing — matching the prior create arm.
+                match self.entries.get_mut(key) {
+                    Some(entry) => {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        entry
+                    }
+                    None => {
+                        self.internal_entries_insert(
+                            key.to_vec(),
+                            Entry::new(Value::Hash(Box::default()), now_ms),
+                        );
+                        self.entries
+                            .get_mut(key)
+                            .expect("hash entry inserted above must exist")
+                    }
+                }
+            } else if should_bump_lfu {
+                // Under LFU the `should_bump_lfu` check above already probed presence
+                // (`should_bump_lfu == contains_key` here, since `lfu` is true), and only
+                // `next_rand` ran since — so reuse it to skip `internal_entry`'s redundant
+                // `contains_key`: one `get_mut` (present) or insert + `get_mut` (absent).
                 self.entries
                     .get_mut(key)
                     .expect("hash entry present at LFU probe is still present")
@@ -50446,6 +50490,51 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.object_freq(b"s", now), b.object_freq(b"s", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn hset_lfu_collapsed_matches_twoprobe() {
+        // The LFU HSET write-side collapse (get_mut-first: a present key draws the rand inside the
+        // Some arm via rng_seed field split + bumps inline; absent inserts) must be byte/RNG/stat-
+        // identical to the prior contains_key-gated two-probe path across a new-field set, an
+        // existing-field overwrite, a new-key create, a wrong-type key, and an expired key, under
+        // BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.hset(b"h", b"f0".to_vec(), b"v0".to_vec(), 1).unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, field, value)
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"h", b"f1", b"v1"),   // new field on existing hash
+            (b"h", b"f0", b"v0new"), // overwrite existing field
+            (b"absent", b"f", b"v"), // create
+            (b"str", b"f", b"v"),    // wrong type (draws+bumps then WRONGTYPE)
+            (b"ttl", b"f", b"v"),    // expired -> create
+        ];
+        for lfu in [true, false] {
+            for &(key, field, value) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.hset(key, field.to_vec(), value.to_vec(), now);
+                let rb = b.hset_lfu_twoprobe_bench(key, field.to_vec(), value.to_vec(), now);
+                let tag = format!("lfu={lfu} key={key:?} field={field:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
                 assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");

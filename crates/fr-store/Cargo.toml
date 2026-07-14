@@ -710,3 +710,12 @@ harness = false
 [[bench]]
 name = "sadd_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU HSET WRITE-side probe collapse (get_mut-first replaces
+# the contains_key rand-gate + get_mut on the existing-key path; rand drawn via rng_seed field split in
+# the Some arm). The timed workload overwrites an already-present field (is_new=false, non-growing).
+# Counts retired user-space instructions, subtracting an identical build baseline. Byte/RNG-identical
+# (hset_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "hset_lfu_collapse"
+harness = false
