@@ -17853,6 +17853,111 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Direct-encode LMOVE fast path. The store lends the moved element to the RESP encoder before
+    /// installing that same owned buffer in a deque-backed destination, avoiding the reply-retention
+    /// clone for every LEFT/RIGHT direction pair.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed LMOVE carries src/dst/from/to slices plus reply mode and sink"
+    )]
+    pub fn execute_plain_lmove_borrowed_into(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms) {
+            return None;
+        }
+        let valid_dir =
+            |d: &[u8]| d.eq_ignore_ascii_case(b"LEFT") || d.eq_ignore_ascii_case(b"RIGHT");
+        if !valid_dir(wherefrom) || !valid_dir(whereto) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lmove");
+        self.session.last_argv_len_sum =
+            b"LMOVE".len() + src.len() + dst.len() + wherefrom.len() + whereto.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.lmove_with(
+            src,
+            dst,
+            wherefrom,
+            whereto,
+            now_ms,
+            |value| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(value), resp3, out);
+                }
+            },
+        );
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(None, resp3, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_lmove_borrowed_metrics(
+            src, dst, wherefrom, whereto, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "borrowed lmove metrics carry src/dst/from/to slices plus failed flag"
@@ -44927,6 +45032,96 @@ mod tests {
                 generic.server.store.stat_total_error_replies
             );
         }
+    }
+
+    #[test]
+    fn plain_lmove_borrowed_into_matches_generic() {
+        for (case, wherefrom, whereto, resp3) in [
+            ("distinct_ll", b"LEFT".as_slice(), b"LEFT".as_slice(), false),
+            ("distinct_lr", b"LEFT".as_slice(), b"RIGHT".as_slice(), false),
+            ("rotate_rl", b"RIGHT".as_slice(), b"LEFT".as_slice(), false),
+            ("rotate_rr", b"RIGHT".as_slice(), b"RIGHT".as_slice(), false),
+            ("missing", b"RIGHT".as_slice(), b"LEFT".as_slice(), true),
+            ("wrongtype", b"RIGHT".as_slice(), b"LEFT".as_slice(), false),
+        ] {
+            let mut direct = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for runtime in [&mut direct, &mut generic] {
+                let large = vec![b'x'; 4096];
+                runtime.execute_frame(
+                    command_owned(vec![
+                        b"RPUSH".to_vec(),
+                        b"src".to_vec(),
+                        b"a".to_vec(),
+                        large,
+                    ]),
+                    1,
+                );
+                runtime.execute_frame(command(&[b"RPUSH", b"dst", b"z"]), 1);
+                runtime.execute_frame(command(&[b"SET", b"str", b"value"]), 1);
+            }
+
+            let src = if case == "missing" {
+                b"absent".as_slice()
+            } else {
+                b"src".as_slice()
+            };
+            let dst = if case.starts_with("rotate") {
+                b"src".as_slice()
+            } else if case == "wrongtype" {
+                b"str".as_slice()
+            } else {
+                b"dst".as_slice()
+            };
+            let ts = 2;
+            let mut got = Vec::new();
+            direct
+                .execute_plain_lmove_borrowed_into(
+                    src,
+                    dst,
+                    wherefrom,
+                    whereto,
+                    ts,
+                    resp3,
+                    &mut got,
+                )
+                .expect("LMOVE _into fast path should engage");
+            let reply = generic.execute_frame(
+                command(&[b"LMOVE", src, dst, wherefrom, whereto]),
+                ts,
+            );
+            let mut want = Vec::new();
+            if resp3 {
+                reply.encode_into_resp3(&mut want);
+            } else {
+                reply.encode_into(&mut want);
+            }
+            assert_eq!(got, want, "encoded LMOVE reply for {case}");
+
+            for key in [b"src".as_slice(), b"dst".as_slice(), b"str".as_slice()] {
+                assert_eq!(
+                    direct.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts),
+                    generic.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts),
+                    "post-state for {case}, key={key:?}"
+                );
+            }
+            assert_eq!(direct.server.store.dirty, generic.server.store.dirty);
+            assert_eq!(
+                direct.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+        }
+
+        let mut runtime = Runtime::default_strict();
+        let mut out = Vec::new();
+        assert!(
+            runtime
+                .execute_plain_lmove_borrowed_into(
+                    b"src", b"dst", b"MIDDLE", b"LEFT", 1, false, &mut out,
+                )
+                .is_none()
+        );
+        assert!(out.is_empty());
     }
 
     #[test]

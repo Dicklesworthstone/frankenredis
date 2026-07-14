@@ -18606,6 +18606,37 @@ impl Store {
         whereto: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.lmove_impl::<false>(source, destination, wherefrom, whereto, now_ms, |_| {})
+    }
+
+    /// Move one list element while lending its reply bytes before installing the same owned buffer
+    /// in a deque-backed destination. Returns `true` when an element moved and `false` for a
+    /// missing or empty source.
+    pub fn lmove_with(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+        sink: impl FnMut(&[u8]),
+    ) -> Result<bool, StoreError> {
+        self.lmove_impl::<true>(source, destination, wherefrom, whereto, now_ms, sink)
+            .map(|moved| moved.is_some())
+    }
+
+    /// `DIRECT_REPLY = false` preserves the owned frame reply and copies into the destination;
+    /// `true` lends the reply and moves the allocation into a deque-backed destination. The empty
+    /// `Vec` returned by the direct specialization is a no-allocation `Some` sentinel.
+    fn lmove_impl<const DIRECT_REPLY: bool>(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(&[u8]),
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the two bare drops on `expires_count != 0`: with no volatile keys
         // neither source nor destination can be expired, so both drops are no-ops; the get(source)
         // + destination lookup below re-probe. Byte-identical. (RPOPLPUSH / LMOVE — reliable queues.)
@@ -18668,6 +18699,11 @@ impl Store {
         let Some(val) = popped else {
             return Ok(None);
         };
+        let mut val = Some(val);
+
+        if DIRECT_REPLY {
+            sink(val.as_deref().expect("popped value is present"));
+        }
 
         let mut source_ttl = None;
         if source == destination {
@@ -18700,12 +18736,23 @@ impl Store {
                 match &mut entry.value {
                     Value::List(l) => {
                         let lp_pre = l.listpack_byte_len();
+                        let val_len = val.as_deref().expect("popped value is present").len();
                         if eq_ascii_ci(whereto, b"LEFT") {
-                            l.push_front_borrowed(&val);
+                            if DIRECT_REPLY {
+                                l.push_front(val.take().expect("popped value is present"));
+                            } else {
+                                l.push_front_borrowed(
+                                    val.as_deref().expect("popped value is present"),
+                                );
+                            }
+                        } else if DIRECT_REPLY {
+                            l.push_back(val.take().expect("popped value is present"));
                         } else {
-                            l.push_back_borrowed(&val);
+                            l.push_back_borrowed(
+                                val.as_deref().expect("popped value is present"),
+                            );
                         }
-                        l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
+                        l.note_command_grow(lp_pre, val_len as u64, self.list_max_listpack_size);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -18717,14 +18764,23 @@ impl Store {
             }
             None => {
                 let mut l = ListValue::default();
+                let val_len = val.as_deref().expect("popped value is present").len();
                 if eq_ascii_ci(whereto, b"LEFT") {
-                    l.push_front_borrowed(&val);
+                    if DIRECT_REPLY {
+                        l.push_front(val.take().expect("popped value is present"));
+                    } else {
+                        l.push_front_borrowed(
+                            val.as_deref().expect("popped value is present"),
+                        );
+                    }
+                } else if DIRECT_REPLY {
+                    l.push_back(val.take().expect("popped value is present"));
                 } else {
-                    l.push_back_borrowed(&val);
+                    l.push_back_borrowed(val.as_deref().expect("popped value is present"));
                 }
                 l.note_command_grow(
                     ListValue::empty_listpack_bytes(),
-                    val.len() as u64,
+                    val_len as u64,
                     self.list_max_listpack_size,
                 );
                 self.internal_entries_insert_with_expiry(
@@ -18735,7 +18791,11 @@ impl Store {
             }
         }
         self.dirty = self.dirty.saturating_add(1);
-        Ok(Some(val))
+        Ok(Some(if DIRECT_REPLY {
+            Vec::new()
+        } else {
+            val.expect("frame path retains the popped value")
+        }))
     }
 
     // ── Set operations ──────────────────────────────────────────
@@ -54343,6 +54403,85 @@ mod tests {
             store.lrange(b"src", 0, -1, 0).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
+    }
+
+    #[test]
+    fn lmove_direct_reply_matches_owned_frame_for_all_directions() {
+        let seed = || {
+            let mut store = Store::new();
+            store.list_max_listpack_size = 1;
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.lfu_decay_time = 0;
+            let values: Vec<Vec<u8>> = (0_u8..4)
+                .map(|tag| {
+                    let mut value = vec![tag; 512];
+                    value[0] = b'a' + tag;
+                    value
+                })
+                .collect();
+            store.rpush(b"src", &values, 1).unwrap();
+            store.rpush(b"dst", &[vec![b'z'; 512]], 1).unwrap();
+            store.expire_at_milliseconds(b"src", 50_000, 1);
+            store
+        };
+
+        for same_key in [false, true] {
+            for (wherefrom, whereto) in [
+                (b"LEFT".as_slice(), b"LEFT".as_slice()),
+                (b"LEFT".as_slice(), b"RIGHT".as_slice()),
+                (b"RIGHT".as_slice(), b"LEFT".as_slice()),
+                (b"RIGHT".as_slice(), b"RIGHT".as_slice()),
+            ] {
+                let destination = if same_key { b"src".as_slice() } else { b"dst" };
+                let mut owned = seed();
+                let mut direct = seed();
+                let expected = owned
+                    .lmove(b"src", destination, wherefrom, whereto, 2)
+                    .unwrap();
+                let mut encoded_value = None;
+                let moved = direct
+                    .lmove_with(
+                        b"src",
+                        destination,
+                        wherefrom,
+                        whereto,
+                        2,
+                        |value| encoded_value = Some(value.to_vec()),
+                    )
+                    .unwrap();
+
+                assert!(moved);
+                assert_eq!(encoded_value, expected);
+                for key in [b"src".as_slice(), b"dst".as_slice()] {
+                    assert_eq!(
+                        direct.lrange(key, 0, -1, 2),
+                        owned.lrange(key, 0, -1, 2),
+                        "list parity same_key={same_key} from={wherefrom:?} to={whereto:?}"
+                    );
+                    assert_eq!(direct.pttl(key, 2), owned.pttl(key, 2));
+                    assert_eq!(direct.object_encoding(key, 2), owned.object_encoding(key, 2));
+                    assert_eq!(direct.object_freq(key, 2), owned.object_freq(key, 2));
+                }
+                assert_eq!(direct.state_digest(), owned.state_digest());
+                assert_eq!(direct.dirty, owned.dirty);
+            }
+        }
+
+        let mut direct = seed();
+        let mut sink_called = false;
+        assert!(
+            !direct
+                .lmove_with(
+                    b"missing",
+                    b"dst",
+                    b"LEFT",
+                    b"RIGHT",
+                    3,
+                    |_| sink_called = true,
+                )
+                .unwrap()
+        );
+        assert!(!sink_called);
     }
 
     #[test]

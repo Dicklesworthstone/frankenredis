@@ -7051,16 +7051,21 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_lmove_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_lmove_borrowed(
-                        packet.src,
-                        packet.dst,
-                        packet.wherefrom,
-                        packet.whereto,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_lmove_borrowed_into(
+                            packet.src,
+                            packet.dst,
+                            packet.wherefrom,
+                            packet.whereto,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

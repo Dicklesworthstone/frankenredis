@@ -389,7 +389,7 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if rpoplpush_reply::dispatch(&args) {
+    if list_move_reply::dispatch(&args) {
         return;
     }
     if args.get(1).map(String::as_str) == Some("--child") {
@@ -408,9 +408,9 @@ fn main() {
     run_instruction_ab(&executable).unwrap_or_else(|error| panic!("A/B INVALID: {error}"));
 }
 
-/// Profile-first RPOPLPUSH reply-sink mode. Kept in this already-warm clone-vs-move bench binary
-/// so the one-turn gate does not introduce a fresh release-profile LTO target.
-mod rpoplpush_reply {
+/// Profile-first RPOPLPUSH/LMOVE reply-sink modes. Kept in this already-warm clone-vs-move bench
+/// binary so one-turn gates do not introduce fresh release-profile targets.
+mod list_move_reply {
     use std::{
         env,
         hint::black_box,
@@ -422,17 +422,39 @@ mod rpoplpush_reply {
     use fr_protocol::encode_bulk_string_slice;
     use fr_store::Store;
 
-    const KEY: &[u8] = b"rpoplpush:reply";
+    const KEY: &[u8] = b"list-move:reply";
     const VALUE_BYTES: usize = 4 * 1024;
     const LIST_LEN: usize = 16;
-    const PROFILE_REPEATS: usize = 250_000;
-    const STAT_REPEATS: usize = 50_000;
-    const STAT_ROUNDS: usize = 12;
+    const PROFILE_REPEATS: usize = 100_000;
+    const STAT_REPEATS: usize = 20_000;
+    const STAT_ROUNDS: usize = 9;
 
     #[derive(Clone, Copy)]
     enum Arm {
         Direct,
         Frame,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Workload {
+        Lmove,
+        Rpoplpush,
+    }
+
+    impl Workload {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::Lmove => "lmove",
+                Self::Rpoplpush => "rpoplpush",
+            }
+        }
+
+        const fn child_flag(self) -> &'static str {
+            match self {
+                Self::Lmove => "--lmove-child",
+                Self::Rpoplpush => "--rpoplpush-child",
+            }
+        }
     }
 
     impl Arm {
@@ -447,7 +469,7 @@ mod rpoplpush_reply {
             match value {
                 "direct" => Ok(Self::Direct),
                 "frame" => Ok(Self::Frame),
-                _ => Err(format!("unknown RPOPLPUSH arm {value:?}")),
+                _ => Err(format!("unknown list-move arm {value:?}")),
             }
         }
     }
@@ -466,10 +488,10 @@ mod rpoplpush_reply {
     }
 
     #[inline(never)]
-    fn apply(store: &mut Store, arm: Arm, out: &mut Vec<u8>) {
+    fn apply(store: &mut Store, workload: Workload, arm: Arm, out: &mut Vec<u8>) {
         out.clear();
-        match arm {
-            Arm::Direct => {
+        match (workload, arm) {
+            (Workload::Rpoplpush, Arm::Direct) => {
                 let moved = store
                     .rpoplpush_with(black_box(KEY), black_box(KEY), 2, |value| {
                         encode_bulk_string_slice(Some(black_box(value)), false, out);
@@ -477,10 +499,36 @@ mod rpoplpush_reply {
                     .expect("direct RPOPLPUSH");
                 assert!(moved);
             }
-            Arm::Frame => {
+            (Workload::Rpoplpush, Arm::Frame) => {
                 let value = store
                     .rpoplpush(black_box(KEY), black_box(KEY), 2)
                     .expect("frame RPOPLPUSH");
+                encode_bulk_string_slice(value.as_deref(), false, out);
+                black_box(value);
+            }
+            (Workload::Lmove, Arm::Direct) => {
+                let moved = store
+                    .lmove_with(
+                        black_box(KEY),
+                        black_box(KEY),
+                        black_box(b"RIGHT"),
+                        black_box(b"LEFT"),
+                        2,
+                        |value| encode_bulk_string_slice(Some(black_box(value)), false, out),
+                    )
+                    .expect("direct LMOVE");
+                assert!(moved);
+            }
+            (Workload::Lmove, Arm::Frame) => {
+                let value = store
+                    .lmove(
+                        black_box(KEY),
+                        black_box(KEY),
+                        black_box(b"RIGHT"),
+                        black_box(b"LEFT"),
+                        2,
+                    )
+                    .expect("frame LMOVE");
                 encode_bulk_string_slice(value.as_deref(), false, out);
                 black_box(value);
             }
@@ -488,23 +536,23 @@ mod rpoplpush_reply {
         black_box(out.as_slice());
     }
 
-    fn run_loop(arm: Arm, repeats: usize) {
+    fn run_loop(workload: Workload, arm: Arm, repeats: usize) {
         let mut store = seed_store();
         let mut out = Vec::with_capacity(VALUE_BYTES + 32);
         let mut checksum = 0usize;
         for _ in 0..repeats {
-            apply(&mut store, arm, &mut out);
+            apply(&mut store, workload, arm, &mut out);
             checksum = checksum.wrapping_add(out.len());
         }
         black_box((store, checksum));
     }
 
-    fn correctness_gate() {
+    fn correctness_gate(workload: Workload) {
         let mut direct = seed_store();
         let mut frame = seed_store();
         let (mut direct_out, mut frame_out) = (Vec::new(), Vec::new());
-        apply(&mut direct, Arm::Direct, &mut direct_out);
-        apply(&mut frame, Arm::Frame, &mut frame_out);
+        apply(&mut direct, workload, Arm::Direct, &mut direct_out);
+        apply(&mut frame, workload, Arm::Frame, &mut frame_out);
         assert_eq!(direct_out, frame_out);
         assert_eq!(direct.lrange(KEY, 0, -1, 2), frame.lrange(KEY, 0, -1, 2));
         assert_eq!(
@@ -514,7 +562,8 @@ mod rpoplpush_reply {
         assert_eq!(direct.state_digest(), frame.state_digest());
         assert_eq!(direct.dirty, frame.dirty);
         println!(
-            "RPOPLPUSH_CORRECTNESS reply_list_encoding_digest_dirty=identical value_bytes={VALUE_BYTES} list_len={LIST_LEN}"
+            "LIST_MOVE_CORRECTNESS workload={} reply_list_encoding_digest_dirty=identical value_bytes={VALUE_BYTES} list_len={LIST_LEN}",
+            workload.name()
         );
     }
 
@@ -536,13 +585,14 @@ mod rpoplpush_reply {
             .ok_or_else(|| "sha256sum emitted no digest".to_owned())
     }
 
-    fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
+    fn profile_trial(executable: &Path, workload: Workload, arm: Arm) -> Result<f64, String> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("invalid system time: {error}"))?
             .as_nanos();
         let data = env::temp_dir().join(format!(
-            "fr_rpoplpush_reply_{}_{}_{}.data",
+            "fr_{}_reply_{}_{}_{}.data",
+            workload.name(),
             process::id(),
             arm.name(),
             stamp
@@ -566,7 +616,7 @@ mod rpoplpush_reply {
             .arg("--")
             .arg(executable)
             .args([
-                "--rpoplpush-child",
+                workload.child_flag(),
                 arm.name(),
                 &PROFILE_REPEATS.to_string(),
             ])
@@ -599,8 +649,10 @@ mod rpoplpush_reply {
         }
         let stdout = String::from_utf8_lossy(&report.stdout);
         println!(
-            "RPOPLPUSH_PROFILE_BEGIN arm={}\n{stdout}\nRPOPLPUSH_PROFILE_END arm={}",
+            "LIST_MOVE_PROFILE_BEGIN workload={} arm={}\n{stdout}\nLIST_MOVE_PROFILE_END workload={} arm={}",
+            workload.name(),
             arm.name(),
+            workload.name(),
             arm.name()
         );
         let lost = stdout
@@ -616,17 +668,25 @@ mod rpoplpush_reply {
         if lost != 0 {
             return Err(format!("profile lost {lost} samples"));
         }
+        let production_symbol = match (workload, arm) {
+            (Workload::Lmove, Arm::Direct) => "<fr_store::Store>::lmove_with",
+            (Workload::Lmove, Arm::Frame) => "<fr_store::Store>::lmove",
+            (Workload::Rpoplpush, Arm::Direct) => "<fr_store::Store>::rpoplpush_with",
+            (Workload::Rpoplpush, Arm::Frame) => "<fr_store::Store>::rpoplpush",
+        };
         let self_pct = stdout
             .lines()
             .find(|line| {
-                line.contains("rpoplpush_reply::apply")
+                line.contains(production_symbol)
                     && line
                         .trim_start()
                         .as_bytes()
                         .first()
                         .is_some_and(u8::is_ascii_digit)
             })
-            .ok_or("profile did not execute rpoplpush_reply::apply with non-zero self-time")?
+            .ok_or_else(|| {
+                format!("profile did not execute {production_symbol} with non-zero self-time")
+            })?
             .split_whitespace()
             .next()
             .ok_or("missing apply self percentage")?
@@ -639,12 +699,12 @@ mod rpoplpush_reply {
         Ok(self_pct)
     }
 
-    fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
+    fn perf_instructions(executable: &Path, workload: Workload, arm: Arm) -> Result<u64, String> {
         let output = Command::new("perf")
             .env("LC_ALL", "C")
             .args(["stat", "--no-big-num", "-x,", "-e", "instructions:u", "--"])
             .arg(executable)
-            .args(["--rpoplpush-child", arm.name(), &STAT_REPEATS.to_string()])
+            .args([workload.child_flag(), arm.name(), &STAT_REPEATS.to_string()])
             .output()
             .map_err(|error| format!("could not launch perf stat: {error}"))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -680,7 +740,7 @@ mod rpoplpush_reply {
         100.0 * variance.sqrt() / mean
     }
 
-    fn instruction_gate(executable: &Path) -> Result<(), String> {
+    fn instruction_gate(executable: &Path, workload: Workload) -> Result<(), String> {
         let (mut nulls, mut effects) = (
             Vec::with_capacity(STAT_ROUNDS),
             Vec::with_capacity(STAT_ROUNDS),
@@ -693,12 +753,13 @@ mod rpoplpush_reply {
             }
             for slot in order {
                 let arm = if slot == 2 { Arm::Frame } else { Arm::Direct };
-                counts[slot] = perf_instructions(executable, arm)?;
+                counts[slot] = perf_instructions(executable, workload, arm)?;
             }
             let null = counts[0] as f64 / counts[1] as f64;
             let effect = counts[2] as f64 / counts[0] as f64;
             println!(
-                "RPOPLPUSH_INSTRUCTIONS round={} order={order:?} direct_a={} direct_b={} frame={} null={null:.9} frame_over_direct={effect:.9}",
+                "LIST_MOVE_INSTRUCTIONS workload={} round={} order={order:?} direct_a={} direct_b={} frame={} null={null:.9} frame_over_direct={effect:.9}",
+                workload.name(),
                 round + 1,
                 counts[0],
                 counts[1],
@@ -714,7 +775,8 @@ mod rpoplpush_reply {
         let null_p05 = percentile(&nulls, 0.05);
         let null_p95 = percentile(&nulls, 0.95);
         println!(
-            "RPOPLPUSH_INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv:.6} frame_over_direct_median={effect_median:.9} effect_cv_pct={effect_cv:.6}"
+            "LIST_MOVE_INSTRUCTIONS_SUMMARY workload={} rounds={STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv:.6} frame_over_direct_median={effect_median:.9} effect_cv_pct={effect_cv:.6}",
+            workload.name()
         );
         if (null_median - 1.0).abs() >= 0.02 {
             return Err(format!(
@@ -731,19 +793,29 @@ mod rpoplpush_reply {
 
     pub fn dispatch(args: &[String]) -> bool {
         match args.get(1).map(String::as_str) {
-            Some("--rpoplpush-child") => {
-                let arm = Arm::parse(args.get(2).expect("missing RPOPLPUSH child arm"))
-                    .expect("invalid RPOPLPUSH child arm");
+            Some(flag @ ("--lmove-child" | "--rpoplpush-child")) => {
+                let workload = if flag == "--lmove-child" {
+                    Workload::Lmove
+                } else {
+                    Workload::Rpoplpush
+                };
+                let arm = Arm::parse(args.get(2).expect("missing list-move child arm"))
+                    .expect("invalid list-move child arm");
                 let repeats = args
                     .get(3)
-                    .expect("missing RPOPLPUSH repeat count")
+                    .expect("missing list-move repeat count")
                     .parse()
-                    .expect("invalid RPOPLPUSH repeat count");
-                run_loop(arm, repeats);
+                    .expect("invalid list-move repeat count");
+                run_loop(workload, arm, repeats);
                 true
             }
-            Some("--rpoplpush-reply") => {
-                correctness_gate();
+            Some(flag @ ("--lmove-reply" | "--rpoplpush-reply")) => {
+                let workload = if flag == "--lmove-reply" {
+                    Workload::Lmove
+                } else {
+                    Workload::Rpoplpush
+                };
+                correctness_gate(workload);
                 let executable = env::current_exe().expect("current bench executable path");
                 println!(
                     "WORKER_ID {}",
@@ -758,19 +830,20 @@ mod rpoplpush_reply {
                 );
                 for arm in [Arm::Frame, Arm::Direct] {
                     let warm = Command::new(&executable)
-                        .args(["--rpoplpush-child", arm.name(), "1000"])
+                        .args([workload.child_flag(), arm.name(), "1000"])
                         .status()
-                        .expect("RPOPLPUSH profile warm-up");
+                        .expect("list-move profile warm-up");
                     assert!(warm.success(), "{} warm-up failed", arm.name());
-                    let self_pct = profile_trial(&executable, arm)
-                        .unwrap_or_else(|error| panic!("RPOPLPUSH PROFILE INVALID: {error}"));
+                    let self_pct = profile_trial(&executable, workload, arm)
+                        .unwrap_or_else(|error| panic!("LIST MOVE PROFILE INVALID: {error}"));
                     println!(
-                        "RPOPLPUSH_PROFILE_SELF arm={} apply_self_pct={self_pct:.4}",
+                        "LIST_MOVE_PROFILE_SELF workload={} arm={} operation_self_pct={self_pct:.4}",
+                        workload.name(),
                         arm.name()
                     );
                 }
-                instruction_gate(&executable)
-                    .unwrap_or_else(|error| panic!("RPOPLPUSH A/B INVALID: {error}"));
+                instruction_gate(&executable, workload)
+                    .unwrap_or_else(|error| panic!("LIST MOVE A/B INVALID: {error}"));
                 true
             }
             _ => false,

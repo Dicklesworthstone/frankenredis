@@ -8,6 +8,50 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14: SHIPPED — LMOVE direct reply sink owns-moves deque elements (`frankenredis-5098y`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` surfaced RESTORE quick wins, but
+  `frankenredis-c92f6`'s bounded second-walk/presize work is already shipped and
+  `frankenredis-hm95r` is explicitly an all-or-nothing, safety-sensitive lazy-corrupt-payload
+  representation change.  The live unassigned bead was the remaining `LMOVE` half of
+  `frankenredis-5098y`.  The preceding RPOPLPUSH profile had already isolated the deque
+  reply-retention copy, and current LMOVE source still performed the identical
+  `push_front_borrowed(&val)` / `push_back_borrowed(&val)` copy before returning `val`.
+- **Control attribution:** the same-binary frame specialization preserves that old LMOVE path.
+  Its exact remote profile recorded zero lost samples and `Store::lmove` at **3.93% self**;
+  `push_front_borrowed` was **5.19% self** and `realloc` **3.94% self**, while the measured
+  operation was **9.99% self**.  The direct profile also had zero lost samples and put
+  `Store::lmove_with` at **4.02% self** (the exact operation itself was 0.69% self), proving
+  both arms reached their production specialization rather than measuring dead harness code.
+- **One concrete lever:** `Store::lmove_with` lends the popped bytes to an infallible encoder,
+  then moves that same `Vec<u8>` into either end of a deque-backed destination.  The existing
+  frame API delegates to the same const-generic implementation and retains its owned reply.
+  Runtime/server route the already-borrowed exact LMOVE packet through an `_into` encoder and
+  `FastEncodedReply`; invalid directions still fall back, and nil/error/reply-suppression,
+  metrics, expiry propagation, LFU draws, and all packed-list behavior are unchanged.
+- **Foreground A/B result:** one strict-remote invocation used
+  `cargo bench --profile release -p fr-store --bench move_key_relink --features bench-reference -- --lmove-reply`
+  on worker `vmi1149989`; binary SHA-256
+  `eb2f150141f852fe75ed7131b7b0127503b5e00d27c9a44b9d7873c1b3e8499a`.
+  Nine position-balanced instruction rounds over 20,000 same-key RIGHT-to-LEFT moves of a
+  4 KiB element measured frame/direct median **1.183495001x**, or **15.5045% fewer retired
+  instructions** for direct, with effect CV **0.000603%**.  The direct/direct null median was
+  **1.000003069x**, p05/p95 **0.999999062x/1.000014685x**, CV **0.000518%**.  Representative
+  counts were about 139.994M frame versus 118.288M direct instructions.  A harness-only
+  post-run edit tightened future profile-summary symbol matching; neither measured arm nor any
+  production source changed after this run.
+- **Behavior proof:** store coverage compares all four LEFT/RIGHT pairs for distinct keys and
+  self-rotation under LFU, including reply bytes, lists, TTL, encoding, frequency, digest, dirty
+  count, and missing-source sink behavior.  Runtime coverage compares RESP2/RESP3 bytes,
+  missing/wrong-type replies, post-state, error stats, and invalid-direction fallback against the
+  generic command path.  Remote package checks passed; focused LMOVE tests passed runtime 1/1 and
+  store 4/4.  Full remote `fr-conformance` passed 194/194 library tests, 99/99 smoke tests, all
+  auxiliary targets, and doc tests.  Strict remote clippy remains blocked before this hunk by the
+  existing `fr-simd` `needless_range_loop` finding at `crates/fr-simd/src/lib.rs:795`.
+- **Boundary:** this closes nonblocking exact-packet LMOVE for deque-backed large elements.  It
+  does not claim a packed-list win or change BLMOVE's blocked-client path.  Revert the
+  store/runtime/server sink together if reply or state parity ever fails.
+
 ## 2026-07-14: SHIPPED — RPOPLPUSH direct reply sink owns-moves deque elements (`frankenredis-5098y`)
 
 - **Negative-ledger-first routing:** the historical ZADD/SADD bead was stale against the
