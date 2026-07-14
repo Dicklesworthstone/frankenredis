@@ -8130,3 +8130,26 @@ SIBLINGS (same pattern, distinct commands — follow-ups): `hvals` (m.values()) 
 structure, and both ALSO lack the non-LFU fast path (default-config win each). A shared
 `<const VALUES: bool>` impl could fold hkeys+hvals. Collection reads dilute vs light O(1) (XLEN 2.2x)
 but gate on small; the zero-copy `*_borrow_scan` variants are lighter (need a sink-closure A/B).
+
+## 2026-07-13 SwiftWillow: WIN — LANDED. LFU HKEYS/HVALS 3→1 on the ZERO-COPY production path (hcollection_borrow_scan) — **1.46-1.62x**
+
+Hits the ACTUAL hot path: fr-runtime encodes HKEYS/HVALS straight into the reply buffer via
+`hcollection_borrow_scan` (sink of `SmembersScanEvent`, no Vec) — the owned `hkeys`/`hvals` I collapsed
+before serve the fr-command/scripting path. The borrow-scan's non-LFU path was ALREADY collapsed
+(`lookup_live_for_read_mut`); its LFU path was still 3-probe (`record_keyspace_lookup` +
+`contains_key` rand-gate + `get_mut`). Added the matching LFU fast path on the common
+`hash_field_expires.is_empty()` case: fold to ONE `get_mut` (expiry peek + inline hit/miss + rng_seed
+field-split draw); field-TTLs ⇒ exact prior path. ONE collapse covers BOTH HKEYS and HVALS (via the
+`values` flag). First SINK-CLOSURE collapse — const-generic `hcollection_borrow_scan_impl<COLLAPSE>`
+threads `impl FnMut(SmembersScanEvent<'_>)`; byte/RNG/stat-identical AND same sink sequence.
+
+A/B (`benches/hcollection_borrow_scan_lfu_collapse.rs`, allkeys-lfu, 50k 2-field hashes, HKEYS via the
+sink, median-of-61): n32 **1.624x** (null med 1.0075, p5..p95 [0.831, **1.174**], cv 11.12%); n256 **1.458x** (null med 0.9980, p5..p95 [0.827, **1.124**], cv 9.72%) — BOTH clean WINs (production hot path; lighter than owned hkeys so slightly bigger ratio). Gated by `hcollection_borrow_scan_lfu_collapsed_matches_threeprobe`
+(present keys/values / absent / wrongtype / expired × LFU on&off — asserts result, the emitted
+(Len, Member…) sequence, RNG, keyspace stats, OBJECT FREQ, state_digest). Full fr-store lib suite pass.
+
+LESSON: the OWNED read variant (hkeys/hvals/hgetall returning Vec) is fr-command/scripting; the
+zero-copy `*_borrow_scan` variant is the fr-runtime HOT path for direct clients — collapse the
+borrow-scan for real traffic. FOLLOW-UPS: `hgetall_borrow_scan` (HGETALL hot path, same LFU 3-probe),
+`lrange_borrow_scan` (LRANGE, same shape). Sink-closure A/B pattern now proven (collect Len/Member into
+owned Vecs in the differential test; accumulate member lens in the bench sink).
