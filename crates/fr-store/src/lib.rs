@@ -21638,6 +21638,25 @@ impl Store {
         start: i64,
         stop: i64,
         now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrevrange_borrow_scan_impl::<true>(key, start, stop, now_ms, sink)
+    }
+
+    /// A/B toggle for the LFU ZREVRANGE keyspace-probe collapse on the ZERO-COPY production path —
+    /// the descending twin of [`Store::zrange_borrow_scan_impl`]. `COLLAPSE = true` (shipped) folds
+    /// the LFU path's three `entries` probes (`record_keyspace_lookup` + the `contains_key` rand-gate
+    /// + `get_mut`) into ONE `get_mut` (expiry peek + inline hit/miss + `rand_sample` on the disjoint
+    /// `&mut self.rng_seed` field split). Same as ZRANGE: the LFU bump runs unconditionally after a
+    /// keyspace hit (before the type check, so a present wrong-type key bumps), while `touch` fires
+    /// only inside the `SortedSet` arm on a NON-empty range; the only difference is the member stream
+    /// is `iter_desc()`. `false` retains the exact prior three-probe LFU path. Byte/RNG/stat-identical.
+    fn zrevrange_borrow_scan_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         // (CrimsonHawk) Unified-acquire single-lookup collapse — see `zrange_borrow_scan`.
@@ -21645,6 +21664,30 @@ impl Store {
             match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => entry,
                 None => {
+                    sink(SmembersScanEvent::Len(0));
+                    return Ok(());
+                }
+            }
+        } else if COLLAPSE {
+            if self.expires_count != 0
+                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                sink(SmembersScanEvent::Len(0));
+                return Ok(());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     sink(SmembersScanEvent::Len(0));
                     return Ok(());
                 }
@@ -21693,6 +21736,20 @@ impl Store {
             }
             _ => Err(StoreError::WrongType),
         }
+    }
+
+    /// Prior-path (three-probe) ZREVRANGE borrow-scan baseline for the same-binary A/B. Not on any
+    /// production path (`zrevrange_borrow_scan` uses `::<true>`).
+    #[doc(hidden)]
+    pub fn zrevrange_borrow_scan_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrevrange_borrow_scan_impl::<false>(key, start, stop, now_ms, sink)
     }
 
     /// Return elements sorted descending by score, by index range.
@@ -42842,6 +42899,79 @@ mod tests {
                 s.zrange_borrow_scan(key, start, stop, now, &mut sink)
             } else {
                 s.zrange_borrow_scan_lfu_threeprobe_bench(key, start, stop, now, &mut sink)
+            };
+            (r, lens, members)
+        }
+        let now = 10;
+        let probes: &[(&[u8], i64, i64)] = &[
+            (b"z", 0, -1),
+            (b"z", 0, 1),
+            (b"z", 5, 10),
+            (b"absent", 0, -1),
+            (b"str", 0, -1),
+            (b"ttl", 0, -1),
+        ];
+        for lfu in [true, false] {
+            for &(key, start, stop) in probes {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let (ra, la, ma) = collect(&mut a, true, key, start, stop, now);
+                let (rb, lb, mb) = collect(&mut b, false, key, start, stop, now);
+                let tag = format!("lfu={lfu} key={key:?} {start}..{stop}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(la, lb, "lens {tag}");
+                assert_eq!(ma, mb, "members {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
+                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn zrevrange_borrow_scan_lfu_collapsed_matches_threeprobe() {
+        use crate::SmembersScanEvent;
+        // Descending twin of the ZRANGE LFU collapse check: the 3->1 get_mut fold must be
+        // byte/RNG/stat-identical to the prior three-probe path and drive the SAME (descending)
+        // SmembersScanEvent sequence across present zset (full / sub / empty-range), absent,
+        // wrong-type, and expired keys, under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.zadd(
+                b"z",
+                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                1,
+            )
+            .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1);
+            s.zadd(b"ttl", &[(1.0, b"m".to_vec())], 1).unwrap();
+            assert!(s.expire_at_milliseconds(b"ttl", 5, 1));
+            s
+        }
+        fn collect(
+            s: &mut Store,
+            collapse: bool,
+            key: &[u8],
+            start: i64,
+            stop: i64,
+            now: u64,
+        ) -> (Result<(), StoreError>, Vec<usize>, Vec<Vec<u8>>) {
+            let mut lens = Vec::new();
+            let mut members: Vec<Vec<u8>> = Vec::new();
+            let mut sink = |ev: SmembersScanEvent<'_>| match ev {
+                SmembersScanEvent::Len(n) => lens.push(n),
+                SmembersScanEvent::Member(m) => members.push(m.to_vec()),
+            };
+            let r = if collapse {
+                s.zrevrange_borrow_scan(key, start, stop, now, &mut sink)
+            } else {
+                s.zrevrange_borrow_scan_lfu_threeprobe_bench(key, start, stop, now, &mut sink)
             };
             (r, lens, members)
         }

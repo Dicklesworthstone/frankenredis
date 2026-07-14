@@ -606,3 +606,11 @@ harness = false
 [[bench]]
 name = "zrange_borrow_scan_lfu_collapse"
 harness = false
+
+# A/B for the LFU ZREVRANGE collapse on the ZERO-COPY production path (zrevrange_borrow_scan): the
+# descending twin of the ZRANGE collapse — fold record + contains_key rand-gate + get_mut (3 probes)
+# into ONE get_mut via rng_seed field split. Byte/RNG/stat-identical
+# (zrevrange_borrow_scan_lfu_collapsed_matches_threeprobe).
+[[bench]]
+name = "zrevrange_borrow_scan_lfu_collapse"
+harness = false
