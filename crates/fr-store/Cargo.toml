@@ -482,3 +482,11 @@ harness = false
 [[bench]]
 name = "append_lfu_collapse"
 harness = false
+
+# A/B for the LFU LTRIM write-side keyspace-probe collapse: direct-get_mut with the rand draw
+# relocated inside the get_mut borrow via rng_seed field split (1 probe) vs the prior contains_key
+# rand-gate (2 probes). LTRIM takes no owned value (only indices); LTRIM 0 -1 is the non-growing
+# keep-all repeatable timed shape. Byte/RNG-identical (ltrim_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "ltrim_lfu_collapse"
+harness = false

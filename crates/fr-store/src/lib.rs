@@ -17255,6 +17255,25 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.ltrim_impl::<true>(key, start, stop, now_ms)
+    }
+
+    /// A/B toggle for the LFU LTRIM keyspace-probe collapse. `COLLAPSE = true` (shipped) draws the LFU
+    /// `rand_sample` on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` borrow,
+    /// dropping the separate `contains_key` LFU rand-gate (2 probes → 1 under allkeys-lfu). LTRIM is a
+    /// DIRECT-`get_mut` write (no `with_mutated_entry` digest wrapper — it `mark_digest_stale`s), so
+    /// the collapse is a pure rand-draw relocation with no digest replica. LTRIM takes NO owned value
+    /// (only indices), so the op stays light and the probe a meaningful fraction (unlike owned-value
+    /// LSET, sub-gate). Byte/RNG-identical: the field-split draw advances `rng_seed` exactly as
+    /// `next_rand`, present-key-gated as before (a `None` get_mut draws nothing; LFU off neither
+    /// draws). `false` is the prior path.
+    fn ltrim_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: when nothing is
         // volatile no key can be expired, so drop is a pure no-op; the lookup below re-probes.
         // Byte-identical. (LTRIM — common capped-list/bounded-log pattern.)
@@ -17264,7 +17283,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -17278,7 +17299,12 @@ impl Store {
         let result = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let rs = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                 }
                 match &mut entry.value {
                     Value::List(l) => {
@@ -17334,6 +17360,19 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_LIST, "ltrim", logical_key, db);
         }
         result
+    }
+
+    /// Prior-path (two-probe) LTRIM baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// before `get_mut`. Not on any production path (`ltrim` uses `ltrim_impl::<true>`).
+    #[doc(hidden)]
+    pub fn ltrim_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.ltrim_impl::<false>(key, start, stop, now_ms)
     }
 
     pub fn lpushx(
@@ -47547,6 +47586,66 @@ mod tests {
             assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
             assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
             assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+        }
+    }
+
+    #[test]
+    fn ltrim_lfu_collapsed_matches_twoprobe() {
+        // The direct-get_mut LFU LTRIM collapse (rand drawn inside the get_mut borrow via rng_seed
+        // field split, no contains_key rand-gate) must be byte/RNG-identical to the prior
+        // contains_key-gated path — across a no-op keep-all trim (fires notify but not dirty), a
+        // front trim, keep-first, out-of-range (clears + removes key), keep-last, absent, wrong-type,
+        // and expired keys, under BOTH allkeys-lfu and a non-LFU policy. Asserts result, RNG state,
+        // OBJECT FREQ, dirty, and the full DEBUG DIGEST bookkeeping.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(
+                b"lst",
+                &[
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                    b"c".to_vec(),
+                    b"d".to_vec(),
+                    b"e".to_vec(),
+                ],
+                1,
+            )
+            .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, start, stop)
+        let cases: &[(&[u8], i64, i64)] = &[
+            (b"lst", 0, -1),  // no-op keep-all (notify fires, no dirty)
+            (b"lst", 1, 3),   // front trim (drop index 0)
+            (b"lst", 0, 0),   // keep first only
+            (b"lst", 5, 10),  // out of range -> clear + remove key
+            (b"lst", -2, -1), // keep last two
+            (b"absent", 0, -1), // absent -> Ok(())
+            (b"str", 0, -1),  // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, -1),  // expired -> Ok(())
+        ];
+        for lfu in [true, false] {
+            for &(key, start, stop) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.ltrim(key, start, stop, now);
+                let rb = b.ltrim_lfu_twoprobe_bench(key, start, stop, now);
+                let tag = format!("lfu={lfu} key={key:?} {start}..{stop}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
         }
     }
 
