@@ -8327,3 +8327,57 @@ plus two non-asserting transport timeouts; all wrapper tests passed. Workspace c
 fr-store at the pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_range_loop`, tracked as
 `frankenredis-dyaks`. Strict RCH refused non-compilation `cargo fmt --check` with `RCH-E301`; direct
 Rust 2024 rustfmt of the owned harness plus `git diff --check` are green, with no local Cargo fallback.
+
+## 2026-07-14 ChartreuseAnchor: WIN — KEEP. LFU ZREVRANK 3 probes -> 1 — **1.79-2.01x**
+
+Negative-ledger-first routing took the allocation-free reverse-rank twin of the preceding ZRANK
+keep rather than reopening the ledgered two-probe, allocating ZRANGEBYLEX family. Plain ZREVRANK
+still did THREE `entries` probes under allkeys-lfu: `record_keyspace_lookup`, a separate
+`contains_key` random-sample gate, then `entries.get_mut`. Production `zrevrank_impl::<true>` now
+peeks expiry, records hit/miss inline around one `get_mut`, and draws the identical LCG sample through
+the disjoint `rng_seed` field before the unchanged LFU bump/type check/reverse-rank lookup/touch.
+`<false>` preserves the exact prior LFU acquisition path in the same binary. The separate
+`ZREVRANK ... WITHSCORE` route remains untouched.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/zrevrank_lfu_collapse.rs`, `release`,
+allkeys-lfu, 50k singleton packed zsets, present member at reverse rank 0, median-of-61) ran
+fail-closed on remote worker `vmi1152480`. Both arms shared executable SHA-256
+`5067383025e313e709355f333f2c65ef73ed5122d037008357314e1361028024`:
+
+- n32 **2.011x**, A/A null median `1.0507`, p5..p95 `[0.673, 1.866]`, cv `48.81%` — WIN.
+- n256 **1.790x**, A/A null median `1.0170`, p5..p95 `[0.712, 1.784]`, cv `49.28%` — WIN.
+
+The worker was noisy at both sizes, and n256 clears its predefined null p95 by only `0.006x`; this
+row therefore records the gate honestly and makes no stronger precision claim. Both candidate
+medians nevertheless clear their own size's A/A p95, which is the predeclared keep rule.
+
+The exact n256 profile ran fail-closed on the same worker and executable: 2K `cycles:u` samples,
+zero lost, with both acquisition arms resolved at non-zero self-time —
+`Store::zrevrank_lfu_threeprobe_bench` **5.93%**, `Store::zrevrank_impl::<true>` **6.94%**,
+`run_threeprobe` **5.73%**, and `run_collapse` **6.17%**. The keyspace work dominated:
+`HashMap::contains_key` **23.81%**, retained `HashMap::get_mut` **19.03%**, byte compare **9.43%**,
+byte hashing **8.66%**, and `PackedZSet::rank_impl::<true>` **7.82%**. This verifies that the exact
+timed input executes both prior and collapsed ZREVRANK paths with non-zero self-time and attributes
+the delta to the removed probes rather than an unrelated zset operation.
+
+`zrevrank_lfu_collapsed_matches_threeprobe` passed fail-closed on `vmi1152480`. It compares packed
+and full zsets, member hit/miss, cold and warm full-set rank-tree paths, live TTL, absent, wrong-type,
+and expired keys with LFU on/off; it asserts result/error, RNG, hit/miss stats, full entry/cache and
+access metadata, expiry/lazy-expiry effects, dirty state, and digest parity after every call. Missing
+members remain hits that draw+bump+touch; WRONGTYPE draws+bumps without touch; absent/expired keys
+remain misses without a draw. This is a store-path keep on the real plain-ZREVRANK runtime route, not
+an end-to-end Redis throughput claim.
+
+Final fail-closed remote gates: the fr-store library suite passed on `vmi1264463` (848 passed, 13
+ignored); workspace/all-target `cargo check` passed on `vmi1293453`; and `fr-conformance` passed on
+`vmi1152480` (347 asserting tests: 194 library + 99 smoke + 54 auxiliary/integration; `core_zset`
+324/324 and `core_bitmap` 110/110). The live oracle also reported its known non-strict surface:
+3,969/3,980 counted cases, with 1 config, 2 timing, and 8 replication-state mismatches, plus two
+non-asserting transport timeouts; every wrapper test passed. Workspace clippy reached Cargo remotely
+on `vmi1149989` and stopped before fr-store at the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop`, tracked as `frankenredis-dyaks`. Direct Rust 2024 rustfmt of the owned
+harness and `git diff --check` are green, with no local Cargo fallback. UBS ran with its Cargo/build
+categories disabled; its nonzero file-wide legacy/heuristic inventory had no actionable production
+finding in the owned ZREVRANK hunks. The focused owned-harness rerun exited 0 with zero criticals;
+its warnings are benchmark-only unwraps and nonempty-vector indexing bounded by deterministic setup
+and `ROUNDS = 61`.

@@ -420,6 +420,12 @@ harness = false
 name = "zrank_lfu_collapse"
 harness = false
 
+# A/B for LFU ZREVRANK acquisition: fold record + contains_key rand-gate + get_mut (3 probes) into
+# one get_mut via rng_seed field split. Singleton packed reverse-rank keeps probe cost visible.
+[[bench]]
+name = "zrevrank_lfu_collapse"
+harness = false
+
 # A/B for LFU HGET (borrowing hget_with) probe collapse: no-field-TTL fast path skips the reap +
 # folds record+get_mut + drops contains_key via rng_seed field-split (1 probe) vs the prior 3-probe
 # form; hget_with borrows the value so probes dominate. Byte/RNG-identical.
