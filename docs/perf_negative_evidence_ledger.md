@@ -8212,3 +8212,52 @@ on `vmi1293453` and stopped before fr-store at the pre-existing `fr-simd/src/lib
 `clippy::needless_range_loop`, already tracked as `frankenredis-dyaks`. Fail-closed RCH correctly
 refused non-compilation `cargo fmt --check` with `RCH-E301`; direct Rust 2024 rustfmt check of the new
 harness plus `git diff --check` are green, with no local Cargo fallback.
+
+## 2026-07-13 BoldSwan: WIN — KEEP. LFU BITPOS 2 probes -> 1 on small bitmaps — **1.28-1.44x confirmed**
+
+Negative-ledger-first routing took the explicit remaining diluted-tail follow-up after BITCOUNT:
+BITPOS still gated its allkeys-LFU RNG draw with `entries.contains_key(key)` and then repeated the
+lookup with `entries.get_mut(key)`. Production `bitpos_impl::<true>` now draws the identical LCG
+sample through the disjoint `rng_seed` field only after the one successful `get_mut`; `<false>`
+retains the exact prior two-probe arm in the same binary. Expiry handling, missing-key bit-0/bit-1
+defaults, LFU bump/touch ordering, WRONGTYPE behavior, byte/bit range normalization, and the existing
+SIMD scan are unchanged. This is one removed keyspace probe on every no-TTL LFU hit; the measured
+claim is deliberately scoped to small two-byte bitmaps where scan work does not hide it.
+
+One-binary, one-invocation, position-balanced A/A+A/B (`benches/bitpos_lfu_collapse.rs`,
+`release-perf`, allkeys-lfu, 50k two-byte `[0x00, 0x80]` values, `BITPOS key 1`, median-of-61) ran
+fail-closed on remote worker `vmi1152480` (RCH executable artifact
+`bitpos_lfu_collapse-8889232080ab19d7`). The confirmation invocation was decisive at both sizes:
+
+- n32 **1.438x**, A/A null median `1.0270`, p5..p95 `[0.820, 1.222]`, cv `12.05%` — WIN.
+- n256 **1.282x**, A/A null median `1.0084`, p5..p95 `[0.792, 1.251]`, cv `13.82%` — WIN.
+
+The first foreground invocation on the same worker/binary was recorded rather than hidden: n32 was
+**1.489x** outside `[0.765, 1.297]` (null median `0.9917`, cv `16.26%`), while n256 was `1.318x`
+inside the unusually wide `[0.731, 1.384]` band (null median `0.9924`, cv `19.44%`). That mixed row
+triggered the confirmation above; it was not used alone to license the keep.
+
+The exact-input ORIG profile ran fail-closed on `vmi1152480`: 1K `cycles:u` samples, zero lost, with
+`Store::bitpos_lfu_twoprobe_bench` at **20.71% self**, the removable `HashMap::contains_key` at
+**24.44%**, the retained `HashMap::get_mut` at **17.38%**, `run_twoprobe` at **17.23%**, byte compare
+at **12.53%**, and byte hashing at **7.26%**. This proves the timed two-byte input executes BITPOS
+with non-zero self-time and directly attributes the delta to the redundant probe rather than the
+already-shipped SIMD scan.
+
+`bitpos_lfu_collapsed_matches_twoprobe` passed fail-closed on `vmi1149989`. It covers full/explicit/
+negative BYTE ranges, BIT subranges, out-of-range reads, implicit-end zero padding, empty existing
+strings, integer encoding, absent bit-0 and bit-1 defaults, WRONGTYPE, live TTL, expired TTL, and LFU
+on/off; it asserts result, RNG, hit/miss stats, full per-key access/LFU metadata, expiry/lazy-expiry
+effects, dirty state, and digest parity. Direct Rust 2024 rustfmt check of the owned benchmark plus
+owned-hunk rustfmt inspection and `git diff --check` are green; every Cargo invocation used strict
+remote RCH with no local fallback.
+
+Final strict-remote gates: workspace/all-target `cargo check` passed on `vmi1152480`. Workspace
+clippy stopped before fr-store at the pre-existing `fr-simd/src/lib.rs:795`
+`clippy::needless_range_loop`, already tracked as `frankenredis-dyaks`. The one-slot conformance run
+reached all 194 library tests: 193 passed, including live-oracle `core_bitmap` **110/110** and
+`core_zset` **324/324**; `conformance_core_server` alone observed leaked LATENCY HISTORY samples from
+another fixture. Its immediate isolated strict-remote rerun passed on `vmi1152480`, confirming suite
+state leakage rather than a BITPOS regression; follow-up is `frankenredis-jxd48`. Strict RCH refused
+non-compilation `cargo fmt --check` with `RCH-E301`, so formatting proof remains the direct rustfmt +
+owned-hunk inspection above.

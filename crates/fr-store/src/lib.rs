@@ -11022,6 +11022,26 @@ impl Store {
         unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.bitpos_impl::<true>(key, bit, start, end, unit, now_ms)
+    }
+
+    /// A/B toggle for the LFU BITPOS keyspace-probe collapse. `COLLAPSE = true` (shipped) draws the
+    /// LFU `rand_sample` on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` borrow,
+    /// dropping the separate `contains_key` LFU rand-gate (2 probes -> 1 under allkeys-lfu). BITPOS
+    /// is a read that bumps LFU + touches string-like values but does not mutate them, so this is a
+    /// pure rand-draw relocation. Byte/RNG-identical: the field-split draw advances `rng_seed`
+    /// exactly as `next_rand`, present-key-gated as before (an absent/reaped key draws nothing; LFU
+    /// off neither draws). On small bitmaps the probes dominate the scan; larger scans still save
+    /// the redundant probe. `false` is the prior path.
+    fn bitpos_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        bit: bool,
+        start: Option<i64>,
+        end: Option<i64>,
+        unit: BitRangeUnit,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         // (frankenredis-9s4ls sibling) NO-STAT drop_if_expired, not
         // record_keyspace_lookup: the bitposCommand handler (and the borrowed
         // fast path) already record the single keyspace hit/miss via the
@@ -11037,7 +11057,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the
+        // baseline draws it here behind the redundant `contains_key` probe.
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -11045,7 +11067,12 @@ impl Store {
         let bytes = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let rs = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                 }
                 if entry.value.is_string_like() {
                     entry.touch(now_ms);
@@ -11138,6 +11165,21 @@ impl Store {
             return Ok(((e_byte + 1) * 8) as i64);
         }
         Ok(-1)
+    }
+
+    /// Prior-path (two-probe) BITPOS baseline for the same-binary A/B: `contains_key` LFU rand-gate
+    /// before `get_mut`. Not on any production path (`bitpos` uses `bitpos_impl::<true>`).
+    #[doc(hidden)]
+    pub fn bitpos_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        bit: bool,
+        start: Option<i64>,
+        end: Option<i64>,
+        unit: BitRangeUnit,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        self.bitpos_impl::<false>(key, bit, start, end, unit, now_ms)
     }
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -49174,6 +49216,82 @@ mod tests {
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
                 assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
                 assert_eq!(a.object_freq(b"bm", now), b.object_freq(b"bm", now), "freq {tag}");
+                assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn bitpos_lfu_collapsed_matches_twoprobe() {
+        // The LFU BITPOS collapse (rand drawn inside the get_mut borrow via rng_seed field split,
+        // no contains_key rand-gate) must be byte/RNG-identical to the prior two-probe path across
+        // byte/bit ranges, empty/integer strings, absent/wrong-type/expired keys, and BOTH LFU and
+        // non-LFU policies. BITPOS is a read: present strings draw + bump + touch; WRONGTYPE draws +
+        // bumps without touching; absent/expired keys draw nothing. The full entry comparison freezes
+        // access/LFU metadata in addition to result, RNG, expiry, stats, dirty state, and digest.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.set(b"bm".to_vec(), vec![0x00, 0x80, 0xFF], None, 1);
+            s.set(b"all1".to_vec(), vec![0xFF, 0xFF], None, 1);
+            s.set(b"empty".to_vec(), Vec::new(), None, 1);
+            s.set(b"si".to_vec(), b"12345".to_vec(), None, 1);
+            s.rpush(b"lst", &[b"x".to_vec()], 1).unwrap();
+            s.set(b"live".to_vec(), b"\x00\x01".to_vec(), Some(50), 1);
+            s.set(b"ttl".to_vec(), b"\x00\x01".to_vec(), Some(5), 1);
+            s
+        }
+
+        let now = 10;
+        // (key, bit, start, end, unit)
+        let cases: &[(&[u8], bool, Option<i64>, Option<i64>, BitRangeUnit)] = &[
+            (b"bm", true, None, None, BitRangeUnit::Byte),
+            (b"bm", false, None, None, BitRangeUnit::Byte),
+            (b"bm", true, Some(1), Some(1), BitRangeUnit::Byte),
+            (b"bm", true, Some(-2), Some(-1), BitRangeUnit::Byte),
+            (b"bm", true, Some(4), Some(15), BitRangeUnit::Bit),
+            (b"bm", true, Some(4), Some(7), BitRangeUnit::Bit),
+            (b"bm", true, Some(99), None, BitRangeUnit::Byte),
+            (b"all1", false, None, None, BitRangeUnit::Byte),
+            (b"all1", false, None, Some(1), BitRangeUnit::Byte),
+            (b"empty", false, None, None, BitRangeUnit::Byte),
+            (b"empty", true, None, None, BitRangeUnit::Byte),
+            (b"si", true, None, None, BitRangeUnit::Byte),
+            (b"absent", false, None, None, BitRangeUnit::Byte),
+            (b"absent", true, None, None, BitRangeUnit::Byte),
+            (b"lst", true, None, None, BitRangeUnit::Byte),
+            (b"live", true, None, None, BitRangeUnit::Byte),
+            (b"ttl", true, None, None, BitRangeUnit::Byte),
+        ];
+        for lfu in [true, false] {
+            for &(key, bit, start, end, unit) in cases {
+                let mut a = build(lfu);
+                let mut b = build(lfu);
+                let ra = a.bitpos(key, bit, start, end, unit, now);
+                let rb = b.bitpos_lfu_twoprobe_bench(key, bit, start, end, unit, now);
+                let tag = format!("lfu={lfu} key={key:?} bit={bit} {start:?}..{end:?} {unit:?}");
+                assert_eq!(ra, rb, "result {tag}");
+                assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(a.entries.get(key), b.entries.get(key), "entry {tag}");
+                assert_eq!(a.expiry_ms(key), b.expiry_ms(key), "expiry {tag}");
+                assert_eq!(a.expires_count, b.expires_count, "expires_count {tag}");
+                assert_eq!(
+                    a.stat_expired_keys, b.stat_expired_keys,
+                    "expired stats {tag}"
+                );
+                assert_eq!(
+                    a.lazy_expired_propagation, b.lazy_expired_propagation,
+                    "lazy expiry {tag}"
+                );
+                assert_eq!(a.dirty, b.dirty, "dirty {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }

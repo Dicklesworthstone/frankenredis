@@ -543,6 +543,14 @@ harness = false
 name = "bitcount_lfu_collapse"
 harness = false
 
+# A/B for the LFU BITPOS keyspace-probe collapse: draw the LFU rand inside the get_mut borrow via
+# rng_seed field split (1 probe) vs the prior contains_key rand-gate (2 probes). BITPOS is a read
+# (bumps LFU, no digest); on small bitmaps the probes dominate the scan so the collapse gates.
+# Byte/RNG-identical (bitpos_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "bitpos_lfu_collapse"
+harness = false
+
 # A/B for the LFU LPOS keyspace-probe collapse: fold record_keyspace_lookup + contains_key rand-gate
 # + get_mut into one get_mut (expiry peek + rng_seed field-split draw) — 3 probes -> 1 — vs the prior
 # three-probe path. LPOS is a read; on a small list the scan is negligible so the probes gate.
