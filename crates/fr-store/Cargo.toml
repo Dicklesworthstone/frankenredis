@@ -758,3 +758,12 @@ harness = false
 [[bench]]
 name = "lrem_lfu_collapse"
 harness = false
+
+# (BlackThrush) instructions:u A/B for the LFU LINSERT (BEFORE) write-side probe collapse. Same 2-probe
+# -> 1 get_mut fold via rng_seed field split; the timed workload LINSERTs BEFORE an ABSENT pivot (scans
+# a small list, inserts nothing -> returns -1, non-growing) so it stays on the existing-key Some arm.
+# Counts retired user-space instructions, subtracting an identical build baseline. Byte/RNG-identical
+# (linsert_lfu_collapsed_matches_twoprobe).
+[[bench]]
+name = "linsert_lfu_collapse"
+harness = false

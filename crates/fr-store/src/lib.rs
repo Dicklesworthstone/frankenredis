@@ -17590,6 +17590,36 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.linsert_before_impl::<true>(key, pivot, value, now_ms)
+    }
+
+    /// Bench-only baseline: LINSERT BEFORE with the prior TWO-probe LFU path (`COLLAPSE = false`) —
+    /// the LFU rand is gated behind a separate `contains_key` probe BEFORE `get_mut`, vs production's
+    /// single `get_mut` drawing the rand on the disjoint `rng_seed` field split in the `Some` arm.
+    /// Byte/RNG-identical to `linsert_before`. Not on any production path.
+    #[doc(hidden)]
+    pub fn linsert_before_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        self.linsert_before_impl::<false>(key, pivot, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU LINSERT BEFORE write-side keyspace-probe collapse. `COLLAPSE = true`
+    /// (production) draws the LFU rand on the disjoint `&mut self.rng_seed` field split INSIDE the
+    /// `get_mut` `Some` arm and drops the separate `contains_key` rand-gate (2 -> 1). Byte/RNG-
+    /// identical: the prior path drew only for a PRESENT key under LFU = the `Some`+LFU case; the
+    /// `None` arm (absent / just-expired key) draws NOTHING either way.
+    fn linsert_before_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -17598,7 +17628,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -17606,6 +17636,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -17641,6 +17676,33 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.linsert_after_impl::<true>(key, pivot, value, now_ms)
+    }
+
+    /// Bench-only baseline: LINSERT AFTER with the prior TWO-probe LFU path (`COLLAPSE = false`).
+    /// Byte/RNG-identical to `linsert_after`. Not on any production path. See `linsert_before`.
+    #[doc(hidden)]
+    pub fn linsert_after_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        self.linsert_after_impl::<false>(key, pivot, value, now_ms)
+    }
+
+    /// A/B toggle for the LFU LINSERT AFTER write-side keyspace-probe collapse — the `pos + 1` twin of
+    /// [`Store::linsert_before_impl`]. `COLLAPSE = true` (production) draws the LFU rand on the
+    /// disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm, dropping the
+    /// separate `contains_key` rand-gate (2 -> 1). Byte/RNG-identical.
+    fn linsert_after_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -17649,7 +17711,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -17657,6 +17719,11 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -50901,6 +50968,63 @@ mod tests {
                 assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn linsert_lfu_collapsed_matches_twoprobe() {
+        // The LFU LINSERT (BEFORE and AFTER) write-side collapse (rand drawn inside the get_mut Some
+        // arm via rng_seed field split, no contains_key rand-gate) must be byte/RNG/stat-identical to
+        // the prior two-probe path across an insert at a present pivot, an insert at an ABSENT pivot
+        // (returns -1, non-growing, still draws+bumps), an absent key (Ok(0), no draw), a wrong-type
+        // key, and an expired key, under BOTH allkeys-lfu and a non-LFU policy.
+        fn build(lfu: bool) -> Store {
+            let mut s = Store::new();
+            if lfu {
+                s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                s.lfu_decay_time = 0;
+            }
+            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+                .unwrap();
+            s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
+            s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
+            s
+        }
+        let now = 10;
+        // (key, pivot) — includes a present pivot and an ABSENT pivot (-1, non-growing).
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"lst", b"b"),      // present pivot
+            (b"lst", b"absent"), // absent pivot -> -1
+            (b"absent", b"b"),   // absent key -> Ok(0), no draw
+            (b"str", b"b"),      // wrong type
+            (b"ttl", b"b"),      // expired -> Ok(0)
+        ];
+        for after in [false, true] {
+            for lfu in [true, false] {
+                for &(key, pivot) in cases {
+                    let mut a = build(lfu);
+                    let mut b = build(lfu);
+                    let (ra, rb) = if after {
+                        (
+                            a.linsert_after(key, pivot, b"NEW".to_vec(), now),
+                            b.linsert_after_lfu_twoprobe_bench(key, pivot, b"NEW".to_vec(), now),
+                        )
+                    } else {
+                        (
+                            a.linsert_before(key, pivot, b"NEW".to_vec(), now),
+                            b.linsert_before_lfu_twoprobe_bench(key, pivot, b"NEW".to_vec(), now),
+                        )
+                    };
+                    let tag = format!("after={after} lfu={lfu} key={key:?} pivot={pivot:?}");
+                    assert_eq!(ra, rb, "result {tag}");
+                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
+                    assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                    assert_eq!(a.dirty, b.dirty, "dirty {tag}");
+                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
+                    assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
+                }
             }
         }
     }
