@@ -8137,6 +8137,95 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    /// `SET key value KEEPTTL GET` specialization for an already-borrowed command packet. The
+    /// read and overwrite share one live-entry lookup: GET's hit/miss, WRONGTYPE, LRU/LFU, and RNG
+    /// effects are applied before the old string value is moved into the reply, then the new value
+    /// replaces it without allocating an owned key or touching the unchanged expiry deadline.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn set_keep_ttl_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let old = match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                let old = std::mem::replace(
+                    &mut entry.value,
+                    canonical_string_value_from_slice(value),
+                )
+                .into_string_owned()
+                .expect("string-like value exposes owned bytes");
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                Some(old)
+            }
+            None => {
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                None
+            }
+        };
+
+        // The prior get + set_with_abs_expiry sequence reached this cleanup only after GET
+        // succeeded. Keep WRONGTYPE side-effect-free while preserving cleanup of leaked metadata
+        // for a missing or string-like key.
+        self.drop_stream_side_metadata(key);
+        if old.is_none() {
+            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            entry.lfu_freq = if lfu_tracking_enabled {
+                LFU_INIT_VAL
+            } else {
+                0
+            };
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
+            self.internal_entries_insert(key.to_vec(), entry);
+        } else {
+            self.invalidate_write_side_caches(key);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        }
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(old)
+    }
+
     /// Bench-only reference for the pre-fusion runtime sequence. The two public calls are kept in
     /// one non-inlined symbol so a same-binary profile can prove the old path executed.
     #[cfg(feature = "bench-reference")]
@@ -8145,6 +8234,22 @@ impl Store {
     pub fn set_keep_ttl_owned_roundtrip_bench(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
         let existing_expiry = self.get_expires_at_ms(key, now_ms);
         self.set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
+    }
+
+    /// Bench-only reference for the pre-fusion `SET KEEPTTL GET` runtime sequence.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn set_keep_ttl_get_owned_roundtrip_bench(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let old = self.get(key, now_ms)?;
+        let existing_expiry = self.get_expires_at_ms(key, now_ms);
+        self.set_with_abs_expiry(key.to_vec(), value.to_vec(), existing_expiry, now_ms);
+        Ok(old)
     }
 
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
@@ -41530,6 +41635,133 @@ mod tests {
                 );
                 assert_eq!(actual.dirty, expected.dirty, "{seed:?}");
                 assert_eq!(actual.rng_seed, expected.rng_seed, "{seed:?}");
+                assert_eq!(actual.state_digest(), expected.state_digest(), "{seed:?}");
+                assert_eq!(
+                    actual.take_lazy_expired_propagation(),
+                    expected.take_lazy_expired_propagation(),
+                    "{seed:?}"
+                );
+                assert_eq!(actual.get(b"k", 401), expected.get(b"k", 401), "{seed:?}");
+                assert_eq!(
+                    actual.get_expires_at_ms(b"k", 401),
+                    expected.get_expires_at_ms(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.object_encoding(b"k", 401),
+                    expected.object_encoding(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.object_freq(b"k", 401),
+                    expected.object_freq(b"k", 401),
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.memory_usage_for_key(b"k", 401),
+                    expected.memory_usage_for_key(b"k", 401),
+                    "{seed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_keep_ttl_get_borrowed_matches_get_then_owned_roundtrip() {
+        #[derive(Clone, Copy, Debug)]
+        enum Seed {
+            Missing,
+            PersistentString,
+            VolatileString,
+            ExpiredString,
+            Integer,
+            List,
+        }
+
+        let seed_store = |seed| {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.lfu_decay_time = 0;
+            match seed {
+                Seed::Missing => {}
+                Seed::PersistentString => {
+                    store.set(b"k".to_vec(), b"old heap payload".to_vec(), None, 100);
+                }
+                Seed::VolatileString => {
+                    store.set(
+                        b"k".to_vec(),
+                        b"old heap payload".to_vec(),
+                        Some(5_000),
+                        100,
+                    );
+                }
+                Seed::ExpiredString => {
+                    store.set(
+                        b"k".to_vec(),
+                        b"old heap payload".to_vec(),
+                        Some(10),
+                        100,
+                    );
+                }
+                Seed::Integer => {
+                    store.set(b"k".to_vec(), b"42".to_vec(), Some(5_000), 100);
+                }
+                Seed::List => {
+                    store.rpush(b"k", &[b"old".to_vec()], 100).unwrap();
+                }
+            }
+            store
+        };
+
+        for seed in [
+            Seed::Missing,
+            Seed::PersistentString,
+            Seed::VolatileString,
+            Seed::ExpiredString,
+            Seed::Integer,
+            Seed::List,
+        ] {
+            for value in [b"17".as_slice(), b"replacement heap payload".as_slice()] {
+                let mut expected = seed_store(seed);
+                let mut actual = seed_store(seed);
+                let now_ms = 400;
+
+                let expected_result = match expected.get(b"k", now_ms) {
+                    Ok(old) => {
+                        let existing_expiry = expected.get_expires_at_ms(b"k", now_ms);
+                        expected.set_with_abs_expiry(
+                            b"k".to_vec(),
+                            value.to_vec(),
+                            existing_expiry,
+                            now_ms,
+                        );
+                        Ok(old)
+                    }
+                    Err(error) => Err(error),
+                };
+                let actual_result = actual.set_keep_ttl_get_borrowed(b"k", value, now_ms);
+
+                assert_eq!(actual_result, expected_result, "{seed:?} {value:?}");
+                assert_eq!(actual.expires_count, expected.expires_count, "{seed:?}");
+                assert_eq!(actual.db_key_counts, expected.db_key_counts, "{seed:?}");
+                assert_eq!(actual.db_expires_counts, expected.db_expires_counts, "{seed:?}");
+                assert_eq!(actual.expiry_deadlines, expected.expiry_deadlines, "{seed:?}");
+                assert_eq!(
+                    actual.expiry_deadline_counts, expected.expiry_deadline_counts,
+                    "{seed:?}"
+                );
+                assert_eq!(actual.stream_groups, expected.stream_groups, "{seed:?}");
+                assert_eq!(actual.stream_last_ids, expected.stream_last_ids, "{seed:?}");
+                assert_eq!(actual.dirty, expected.dirty, "{seed:?}");
+                assert_eq!(actual.rng_seed, expected.rng_seed, "{seed:?}");
+                assert_eq!(
+                    actual.stat_keyspace_hits, expected.stat_keyspace_hits,
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.stat_keyspace_misses, expected.stat_keyspace_misses,
+                    "{seed:?}"
+                );
                 assert_eq!(actual.state_digest(), expected.state_digest(), "{seed:?}");
                 assert_eq!(
                     actual.take_lazy_expired_propagation(),

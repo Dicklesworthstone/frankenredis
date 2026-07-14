@@ -8,6 +8,55 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14: SHIPPED — fuse borrowed `SET KEEPTTL GET` read plus overwrite (`frankenredis-lb17j`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` surfaced the broad, stale
+  `frankenredis-6lgnu` lane, the explicitly multi-day `frankenredis-b1o02` representation
+  project, and the already-owned keyspace-RAM side-index.  The preceding
+  `frankenredis-6tx3u` entry closed exact `SET KEEPTTL` but explicitly left
+  `SET ... KEEPTTL GET` open.  Source attribution confirmed that exact borrowed GET form still
+  ran `Store::get`, `get_expires_at_ms`, and `set_with_abs_expiry`: it cloned the old heap value,
+  probed the key/expiry repeatedly, allocated owned key/value inputs, and replaced the entry.
+- **Profile/attribution before keeping the lever:** the same-binary old-sequence profile recorded
+  zero lost samples and 507 samples.  Its exact
+  `set_keep_ttl_get_owned_roundtrip_bench` wrapper had **1.88% self**;
+  `drop_if_expired` was **13.65%**, `set_with_abs_expiry` **9.21%**,
+  `internal_entries_insert_with_expiry_impl::<true>` **8.94%**, the entries-map `get_mut`
+  **6.82%**, `get_string_bytes_lfu_impl::<true>` **4.10%**, and
+  `get_expires_at_ms` **2.47%**.  The fused profile also had zero lost samples (117 samples) and
+  put the exact production `set_keep_ttl_get_borrowed` symbol at **23.01% self**, proving both
+  measured arms reached the intended store paths with non-zero self time.
+- **One concrete lever:** `Store::set_keep_ttl_get_borrowed` peeks expiry once and uses one
+  live-entry `get_mut` for GET hit/miss, WRONGTYPE, LFU/LRU touch, moving the old string bytes into
+  the reply, and overwriting the value in place.  A live deadline remains untouched; a missing or
+  lazily expired key inserts without TTL.  The path preserves RNG timing, LFU replacement
+  metadata, modification count, stream cleanup, cache invalidation, digest/dirty accounting,
+  key/expiry counts, and lazy-expiry propagation.  Runtime routes only the already-borrowed exact
+  `KEEPTTL+GET` specialization through it; NX/XX and generic SET forms are unchanged.
+- **Foreground A/B result:** one strict-remote invocation used
+  `cargo bench --profile release -p fr-store --bench set_ex_rearm --features bench-reference -- --keepttl-get-borrowed`
+  on worker `vmi1149989`; binary SHA-256
+  `408a7054cd4858c6721773de1541bbce8e64659b52cc8611558f998f048f6688`.
+  Nine position-balanced `instructions:u` rounds over 500,000 overwrites measured old/fused
+  median **4.297622693x**, or **76.7313% fewer retired instructions** for the fused path
+  (about 1.559337B old versus 362.837M fused), with effect CV **0.000087%**.  The fused/fused
+  null median was **1.000000119x**, p05/p95 **0.999997299x/1.000000661x**, CV **0.000121%**.
+  Old reply bytes and final TTL, encoding, LFU, memory, digest, dirty, and hit/miss stats matched
+  in the harness correctness gate.
+- **Behavior and gates:** the store differential covers missing, persistent, volatile, expired,
+  integer-encoded, and wrong-type list states with integer and heap-string replacements (12
+  cases), comparing result, TTL maps/counts, DB counts, RNG, LFU, memory, digest, dirty, lazy
+  propagation, and value/encoding.  Runtime coverage compares hit, miss, live-TTL preservation,
+  WRONGTYPE, stats, dirty, and digest with generic SET.  Strict-remote workspace/all-target check,
+  focused store/runtime tests, and full `fr-conformance` passed (194/194 library tests, 99/99
+  smoke tests, all auxiliary targets and doc tests).  Workspace clippy remains blocked before the
+  changed crates by the existing `fr-simd` `needless_range_loop` at
+  `crates/fr-simd/src/lib.rs:795`; strict-remote `cargo fmt --check` is rejected fail-closed by
+  RCH as non-compilation command (`RCH-E301`), while `git diff --check` is clean.
+- **Boundary:** this closes only exact borrowed `SET key value KEEPTTL GET`.  It does not claim
+  conditional SET forms or the generic owned command path.  Revert the store/runtime
+  specialization together if reply, TTL, RNG, or state parity ever fails.
+
 ## 2026-07-14: SHIPPED — fuse the exact borrowed `SET KEEPTTL` overwrite (`frankenredis-6tx3u`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` surfaced stale RESTORE work already

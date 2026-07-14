@@ -37,6 +37,8 @@ const KEEPTTL_STAT_ROUNDS: usize = 9;
 enum KeepTtlArm {
     OwnedRoundtrip,
     BorrowedFused,
+    GetOwnedRoundtrip,
+    GetBorrowedFused,
 }
 
 impl KeepTtlArm {
@@ -44,6 +46,8 @@ impl KeepTtlArm {
         match self {
             Self::OwnedRoundtrip => "owned-roundtrip",
             Self::BorrowedFused => "borrowed-fused",
+            Self::GetOwnedRoundtrip => "get-owned-roundtrip",
+            Self::GetBorrowedFused => "get-borrowed-fused",
         }
     }
 
@@ -51,6 +55,8 @@ impl KeepTtlArm {
         match value {
             "owned-roundtrip" => Some(Self::OwnedRoundtrip),
             "borrowed-fused" => Some(Self::BorrowedFused),
+            "get-owned-roundtrip" => Some(Self::GetOwnedRoundtrip),
+            "get-borrowed-fused" => Some(Self::GetBorrowedFused),
             _ => None,
         }
     }
@@ -121,6 +127,24 @@ fn apply_keepttl(store: &mut Store, arm: KeepTtlArm) {
         KeepTtlArm::BorrowedFused => {
             store.set_keep_ttl_borrowed(black_box(KEY), black_box(VAL), black_box(2_000));
         }
+        KeepTtlArm::GetOwnedRoundtrip => {
+            black_box(
+                store
+                    .set_keep_ttl_get_owned_roundtrip_bench(
+                        black_box(KEY),
+                        black_box(VAL),
+                        black_box(2_000),
+                    )
+                    .expect("seeded string accepts SET KEEPTTL GET"),
+            );
+        }
+        KeepTtlArm::GetBorrowedFused => {
+            black_box(
+                store
+                    .set_keep_ttl_get_borrowed(black_box(KEY), black_box(VAL), black_box(2_000))
+                    .expect("seeded string accepts fused SET KEEPTTL GET"),
+            );
+        }
     }
 }
 
@@ -154,6 +178,39 @@ fn keepttl_correctness_gate() {
     assert_eq!(fused.state_digest(), control.state_digest());
     assert_eq!(fused.dirty, control.dirty);
     println!("SET_KEEPTTL_CORRECTNESS value_ttl_encoding_lfu_memory_digest_dirty=identical");
+}
+
+fn keepttl_get_correctness_gate() {
+    let mut control = build_keepttl_store();
+    let mut fused = build_keepttl_store();
+    let control_old = control
+        .set_keep_ttl_get_owned_roundtrip_bench(KEY, VAL, 2_000)
+        .expect("control SET KEEPTTL GET");
+    let fused_old = fused
+        .set_keep_ttl_get_borrowed(KEY, VAL, 2_000)
+        .expect("fused SET KEEPTTL GET");
+    assert_eq!(fused_old, control_old);
+    assert_eq!(fused.get(KEY, 2_001), control.get(KEY, 2_001));
+    assert_eq!(fused.pttl(KEY, 2_001), control.pttl(KEY, 2_001));
+    assert_eq!(
+        fused.object_encoding(KEY, 2_001),
+        control.object_encoding(KEY, 2_001)
+    );
+    assert_eq!(
+        fused.object_freq(KEY, 2_001),
+        control.object_freq(KEY, 2_001)
+    );
+    assert_eq!(
+        fused.memory_usage_for_key(KEY, 2_001),
+        control.memory_usage_for_key(KEY, 2_001)
+    );
+    assert_eq!(fused.state_digest(), control.state_digest());
+    assert_eq!(fused.dirty, control.dirty);
+    assert_eq!(fused.stat_keyspace_hits, control.stat_keyspace_hits);
+    assert_eq!(fused.stat_keyspace_misses, control.stat_keyspace_misses);
+    println!(
+        "SET_KEEPTTL_GET_CORRECTNESS old_value_ttl_encoding_lfu_memory_digest_dirty_stats=identical"
+    );
 }
 
 fn binary_sha256(executable: &Path) -> Result<String, String> {
@@ -257,6 +314,8 @@ fn keepttl_profile(executable: &Path, arm: KeepTtlArm) -> Result<f64, String> {
     let symbol = match arm {
         KeepTtlArm::OwnedRoundtrip => "set_keep_ttl_owned_roundtrip_bench",
         KeepTtlArm::BorrowedFused => "set_keep_ttl_borrowed",
+        KeepTtlArm::GetOwnedRoundtrip => "set_keep_ttl_get_owned_roundtrip_bench",
+        KeepTtlArm::GetBorrowedFused => "set_keep_ttl_get_borrowed",
     };
     let self_pct = stdout
         .lines()
@@ -307,8 +366,22 @@ fn keepttl_instructions(executable: &Path, arm: KeepTtlArm, repeats: usize) -> R
         .ok_or_else(|| format!("instructions:u missing from perf output: {stderr}"))
 }
 
-fn keepttl_gate(executable: &Path) -> Result<(), String> {
-    keepttl_correctness_gate();
+fn keepttl_gate(executable: &Path, with_get: bool) -> Result<(), String> {
+    let (reference, candidate, label) = if with_get {
+        keepttl_get_correctness_gate();
+        (
+            KeepTtlArm::GetOwnedRoundtrip,
+            KeepTtlArm::GetBorrowedFused,
+            "SET_KEEPTTL_GET",
+        )
+    } else {
+        keepttl_correctness_gate();
+        (
+            KeepTtlArm::OwnedRoundtrip,
+            KeepTtlArm::BorrowedFused,
+            "SET_KEEPTTL",
+        )
+    };
     let hostname = Command::new("hostname")
         .output()
         .ok()
@@ -319,7 +392,7 @@ fn keepttl_gate(executable: &Path) -> Result<(), String> {
     println!("WORKER_ID {hostname}");
     println!("BINARY_SHA256 same_binary={}", binary_sha256(executable)?);
 
-    for arm in [KeepTtlArm::OwnedRoundtrip, KeepTtlArm::BorrowedFused] {
+    for arm in [reference, candidate] {
         let warm = Command::new(executable)
             .args(["--keepttl-child", arm.name(), "10000"])
             .status()
@@ -329,7 +402,7 @@ fn keepttl_gate(executable: &Path) -> Result<(), String> {
         }
         let self_pct = keepttl_profile(executable, arm)?;
         println!(
-            "SET_KEEPTTL_PROFILE_SELF arm={} operation_self_pct={self_pct:.4}",
+            "{label}_PROFILE_SELF arm={} operation_self_pct={self_pct:.4}",
             arm.name()
         );
     }
@@ -343,17 +416,13 @@ fn keepttl_gate(executable: &Path) -> Result<(), String> {
             order.reverse();
         }
         for slot in order {
-            let arm = if slot == 2 {
-                KeepTtlArm::OwnedRoundtrip
-            } else {
-                KeepTtlArm::BorrowedFused
-            };
+            let arm = if slot == 2 { reference } else { candidate };
             counts[slot] = keepttl_instructions(executable, arm, KEEPTTL_STAT_REPEATS)?;
         }
         let null = counts[0] as f64 / counts[1] as f64;
         let effect = counts[2] as f64 / counts[0] as f64;
         println!(
-            "SET_KEEPTTL_INSTRUCTIONS round={} order={order:?} fused_a={} fused_b={} owned={} null={null:.9} owned_over_fused={effect:.9}",
+            "{label}_INSTRUCTIONS round={} order={order:?} fused_a={} fused_b={} owned={} null={null:.9} owned_over_fused={effect:.9}",
             round + 1,
             counts[0],
             counts[1],
@@ -369,7 +438,7 @@ fn keepttl_gate(executable: &Path) -> Result<(), String> {
     let null_p05 = pct(&nulls, 0.05);
     let null_p95 = pct(&nulls, 0.95);
     println!(
-        "SET_KEEPTTL_INSTRUCTIONS_SUMMARY rounds={KEEPTTL_STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv:.6} owned_over_fused_median={effect_median:.9} effect_cv_pct={effect_cv:.6}"
+        "{label}_INSTRUCTIONS_SUMMARY rounds={KEEPTTL_STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv:.6} owned_over_fused_median={effect_median:.9} effect_cv_pct={effect_cv:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
         return Err(format!(
@@ -399,8 +468,14 @@ fn dispatch_keepttl(args: &[String]) -> bool {
         }
         Some("--keepttl-borrowed") => {
             let executable = env::current_exe().expect("current bench executable path");
-            keepttl_gate(&executable)
+            keepttl_gate(&executable, false)
                 .unwrap_or_else(|error| panic!("SET KEEPTTL A/B INVALID: {error}"));
+            true
+        }
+        Some("--keepttl-get-borrowed") => {
+            let executable = env::current_exe().expect("current bench executable path");
+            keepttl_gate(&executable, true)
+                .unwrap_or_else(|error| panic!("SET KEEPTTL GET A/B INVALID: {error}"));
             true
         }
         _ => false,

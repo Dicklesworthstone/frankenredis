@@ -7812,23 +7812,27 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Read old value first (records hit/miss + WRONGTYPE); only write per the option.
-        let reply = match self.server.store.get(key, now_ms) {
-            Ok(old) => {
-                if is_keepttl {
-                    let existing_expiry = self.server.store.get_expires_at_ms(key, now_ms);
-                    self.server.store.set_with_abs_expiry(
-                        key.to_vec(),
-                        value.to_vec(),
-                        existing_expiry,
-                        now_ms,
-                    );
-                } else if (is_nx && old.is_none()) || (is_xx && old.is_some()) {
-                    self.server.store.set_plain_borrowed(key, value, now_ms);
-                }
-                RespFrame::BulkString(old)
+        // KEEPTTL+GET can share the read and TTL-preserving overwrite lookup, moving the old
+        // value directly into the reply. NX/XX keep their conditional read-then-maybe-write path.
+        let reply = if is_keepttl {
+            match self
+                .server
+                .store
+                .set_keep_ttl_get_borrowed(key, value, now_ms)
+            {
+                Ok(old) => RespFrame::BulkString(old),
+                Err(err) => CommandError::Store(err).to_resp(),
             }
-            Err(err) => CommandError::Store(err).to_resp(),
+        } else {
+            match self.server.store.get(key, now_ms) {
+                Ok(old) => {
+                    if (is_nx && old.is_none()) || (is_xx && old.is_some()) {
+                        self.server.store.set_plain_borrowed(key, value, now_ms);
+                    }
+                    RespFrame::BulkString(old)
+                }
+                Err(err) => CommandError::Store(err).to_resp(),
+            }
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
@@ -44079,6 +44083,92 @@ mod tests {
         assert_eq!(
             fast.execute_frame(command(&[b"GET", b"missing"]), 31),
             generic.execute_frame(command(&[b"GET", b"missing"]), 31)
+        );
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.state_digest(),
+            generic.server.store.state_digest()
+        );
+    }
+
+    #[test]
+    fn plain_set_keepttl_get_borrowed_matches_generic_hit_miss_and_wrongtype() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"SET", b"hot", b"old heap payload", b"PX", b"5000"]),
+                    10,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let fast_reply = fast
+            .execute_plain_set_opt_get_borrowed(
+                b"hot",
+                b"new heap payload",
+                b"KEEPTTL",
+                20,
+            )
+            .expect("borrowed SET KEEPTTL GET should engage");
+        let generic_reply = generic.execute_frame(
+            command(&[
+                b"SET",
+                b"hot",
+                b"new heap payload",
+                b"KEEPTTL",
+                b"GET",
+            ]),
+            20,
+        );
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(
+            fast_reply,
+            RespFrame::BulkString(Some(b"old heap payload".to_vec()))
+        );
+        assert_eq!(
+            fast.server.store.get_expires_at_ms(b"hot", 21),
+            generic.server.store.get_expires_at_ms(b"hot", 21)
+        );
+
+        let fast_reply = fast
+            .execute_plain_set_opt_get_borrowed(b"missing", b"value", b"KEEPTTL", 30)
+            .expect("borrowed SET KEEPTTL GET miss should engage");
+        let generic_reply = generic.execute_frame(
+            command(&[b"SET", b"missing", b"value", b"KEEPTTL", b"GET"]),
+            30,
+        );
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast_reply, RespFrame::BulkString(None));
+
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"LPUSH", b"list", b"old"]), 40),
+                RespFrame::Integer(1)
+            );
+        }
+        let fast_reply = fast
+            .execute_plain_set_opt_get_borrowed(b"list", b"new", b"KEEPTTL", 50)
+            .expect("borrowed SET KEEPTTL GET wrongtype should engage");
+        let generic_reply = generic.execute_frame(
+            command(&[b"SET", b"list", b"new", b"KEEPTTL", b"GET"]),
+            50,
+        );
+        assert_eq!(fast_reply, generic_reply);
+        assert!(matches!(
+            fast_reply,
+            RespFrame::Error(ref message) if message.starts_with("WRONGTYPE")
+        ));
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
         );
         assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
         assert_eq!(
