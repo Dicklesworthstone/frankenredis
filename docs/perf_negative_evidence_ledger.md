@@ -8685,3 +8685,52 @@ unrelated repository drift. UBS ran with local Cargo/build categories disabled; 
 is the large files' legacy/test heuristic inventory plus deliberate bounded benchmark indexing, with
 no actionable finding in the owned production visitor or call-site hunks. Every Cargo invocation
 used strict remote RCH with no local fallback.
+
+## 2026-07-14 MossyTrout: INVALID HOLD — NO-SHIP. packed zero-copy ZREVRANGE WITHSCORES borrowed-window candidate profiled, but A/B parser aborted
+
+Negative-ledger-first routing again left the keyspace-RAM `KeyDict` swap (`frankenredis-uhthd`)
+blocked on owner sign-off for sorted versus reverse-binary-hash SCAN order; its main-table-only
+partial remains explicitly pre-rejected. The distinct live sorted-set seam was
+`Store::zrevrange_withscores_borrow_scan`, reached directly by the server's canonical
+`ZREVRANGE key start stop WITHSCORES` fast path. Its Packed arm still calls
+`iter_desc().skip(start).take(count)`, and `PackedZSet::iter_desc` decodes every record into a full
+`Vec<(&[u8], f64)>` before applying even a narrow window. The older owned
+`PackedZSet::index_slice_desc` keep does **not** cover this borrowed runtime route, despite an older
+`docs/NEGATIVE_EVIDENCE.md` sentence saying Packed ZREVRANGE WITHSCORES shared that helper.
+
+The candidate mapped descending ranks to the ascending physical window, skipped to that window by
+encoded member length plus eight score bytes, materialized only its borrowed pairs, and visited
+those pairs in reverse. Full-zset traversal and all store bookkeeping were unchanged. The focused
+raw-score-bit parity test passed fail-closed on `vmi1152480`, covering empty/full/interior/tail,
+oversized and out-of-range windows, `usize::MAX`, signed NaNs, infinities, signed zeros, and ties.
+
+The ONE foreground benchmark invocation was the required one-binary remote-only
+`packed_zset_borrow_slice_desc` run (`release`, worker `vmi1152480`, executable SHA-256
+`406c2e43fb05b29a3023f4994ce8b7d2d322fa962d78342b3ecb0f9225b2444c`, 120 packed records,
+descending `start=96,count=8`). Its correctness gate passed. Both exact profiles completed with
+zero lost samples: candidate (40 samples) showed
+`for_each_index_slice_desc_impl::<true>` at **54.62% self**, `record_at` **16.01%**, `cfree`
+**11.90%**, and `malloc` **6.76%**; reference (266 samples) showed the removed full temporary's
+`Vec::from_iter` at **52.23% self**, while the exact false-arm wrapper appeared at **0.58% self**.
+This proves the candidate reached the intended hotspot and confirms full materialization as the
+reference's dominant frame.
+
+However, the harness's reference self-time parser selected an indented call-graph continuation
+containing the same symbol before the numeric overhead row, failed with
+`invalid self-time: invalid float literal`, and exited **before** the position-balanced
+`instructions:u` A/A+A/B rounds. Therefore there is no null control, no candidate/reference ratio,
+and no admissible keep or reject. Per the one-benchmark instruction, the invocation was not rerun.
+Production was restored to the exact prior `iter_desc().skip().take()` path. The repaired parser and
+candidate/reference visitor remain only under `cfg(test)` / `bench-reference`, so this commit changes
+no production behavior and leaves a ready scaffold for a future authorized measurement. Treat the
+profile as routing evidence and this row as an **INVALID HOLD**, not a performance verdict.
+
+The focused raw-bit parity test, repaired benchmark-target `cargo check`, workspace/all-target
+`cargo check`, and full `fr-conformance` suite all passed fail-closed on `vmi1152480`; conformance
+reported 194 library tests and 99 smoke tests with zero failures, plus all auxiliary targets and doc
+tests passing. Workspace clippy stopped before this lane at the pre-existing
+`fr-simd/src/lib.rs:795` `clippy::needless_range_loop`. The owned benchmark passes Rust 2024 rustfmt
+and `git diff --check`. UBS ran with Rust build categories disabled; its nonzero result was the
+large store file's legacy/test heuristic inventory (including false JWT matches on internal
+`*_decode` names) plus bounded test/benchmark indexing, with no actionable finding in the retained
+proof-only helper. Every Cargo invocation used strict remote RCH with no local fallback.

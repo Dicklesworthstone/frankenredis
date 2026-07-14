@@ -4973,6 +4973,56 @@ impl PackedZSet {
         }
     }
 
+    /// Borrow each `(member, score)` in the descending rank window. Packed records are encoded
+    /// ascending, so only the requested ascending-equivalent window is materialized before its
+    /// borrowed pairs are visited in reverse order.
+    #[cfg(any(test, feature = "bench-reference"))]
+    pub fn for_each_index_slice_desc(
+        &self,
+        start_idx: usize,
+        count: usize,
+        f: impl FnMut(&[u8], f64),
+    ) {
+        self.for_each_index_slice_desc_impl::<true>(start_idx, count, f);
+    }
+
+    /// Shared candidate/reference body for same-binary proof. `WINDOW=false` retains the exact
+    /// prior `iter_desc().skip().take()` traversal used by the zero-copy ZREVRANGE WITHSCORES path.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn for_each_index_slice_desc_impl<const WINDOW: bool>(
+        &self,
+        start_idx: usize,
+        count: usize,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
+        if !WINDOW {
+            for (member, score) in self.iter_desc().skip(start_idx).take(count) {
+                f(member, score);
+            }
+            return;
+        }
+        if count == 0 || start_idx >= self.len {
+            return;
+        }
+        let take = count.min(self.len - start_idx);
+        let asc_start = self.len - start_idx - take;
+        let mut pos = 0;
+        for _ in 0..asc_start {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let mut window = Vec::with_capacity(take);
+        for _ in 0..take {
+            let (member, score, end) = self.record_at(pos);
+            window.push((member, score));
+            pos = end;
+        }
+        for (member, score) in window.into_iter().rev() {
+            f(member, score);
+        }
+    }
+
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
     #[must_use]
     pub fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
@@ -6672,6 +6722,43 @@ mod tests {
             });
             let mut reference = Vec::new();
             zset.for_each_index_slice_asc_impl::<false>(start, count, |member, score| {
+                reference.push((member.to_vec(), score.to_bits()));
+            });
+            assert_eq!(candidate, reference, "slice ({start}, {count}) diverged");
+        }
+    }
+
+    #[test]
+    fn packed_zset_borrowed_desc_slice_windows_bit_identically() {
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let zset = PackedZSet::from_unique_pairs(vec![
+            (b"negative-nan".to_vec(), negative_nan),
+            (b"negative-infinity".to_vec(), f64::NEG_INFINITY),
+            (b"negative-zero".to_vec(), -0.0),
+            (b"positive-zero".to_vec(), 0.0),
+            (b"tie-a".to_vec(), 15.0),
+            (b"tie-b".to_vec(), 15.0),
+            (b"positive-infinity".to_vec(), f64::INFINITY),
+            (b"positive-nan".to_vec(), positive_nan),
+        ]);
+
+        for (start, count) in [
+            (0, 0),
+            (0, 1),
+            (0, usize::MAX),
+            (1, 3),
+            (zset.len() - 1, 2),
+            (zset.len(), 1),
+            (zset.len() + 1, 1),
+            (usize::MAX, usize::MAX),
+        ] {
+            let mut candidate = Vec::new();
+            zset.for_each_index_slice_desc(start, count, |member, score| {
+                candidate.push((member.to_vec(), score.to_bits()));
+            });
+            let mut reference = Vec::new();
+            zset.for_each_index_slice_desc_impl::<false>(start, count, |member, score| {
                 reference.push((member.to_vec(), score.to_bits()));
             });
             assert_eq!(candidate, reference, "slice ({start}, {count}) diverged");
