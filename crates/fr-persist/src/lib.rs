@@ -487,6 +487,28 @@ fn split_manifest_args(line: &str) -> Option<Vec<String>> {
         let mut arg = String::new();
         let mut quote = None;
         while cursor < bytes.len() {
+            let clean_start = cursor;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                let is_boundary = if let Some(quote_byte) = quote {
+                    byte == quote_byte || byte == b'\\' || !byte.is_ascii()
+                } else {
+                    byte.is_ascii_whitespace()
+                        || matches!(byte, b'\'' | b'"' | b'\\')
+                        || !byte.is_ascii()
+                };
+                if is_boundary {
+                    break;
+                }
+                cursor += 1;
+            }
+            if cursor != clean_start {
+                // Every byte in the run is ASCII, so both slice boundaries are exact UTF-8
+                // boundaries. Non-ASCII bytes retain the byte-to-char fallback below.
+                arg.push_str(&line[clean_start..cursor]);
+                continue;
+            }
+
             let byte = bytes[cursor];
             if let Some(quote_byte) = quote {
                 if byte == quote_byte {
@@ -556,6 +578,20 @@ pub fn bench_split_manifest_args_reference(line: &str) -> Option<Vec<String>> {
         if cursor == bytes.len() {
             break;
         }
+
+        let plain_start = cursor;
+        while cursor < bytes.len()
+            && bytes[cursor].is_ascii()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'\'' | b'"' | b'\\')
+        {
+            cursor += 1;
+        }
+        if cursor == bytes.len() || bytes[cursor].is_ascii_whitespace() {
+            args.push(line[plain_start..cursor].to_owned());
+            continue;
+        }
+        cursor = plain_start;
 
         let mut arg = String::new();
         let mut quote = None;
@@ -5024,6 +5060,27 @@ mod tests {
         assert_eq!(manifest.incremental.len(), 2);
         assert_eq!(manifest.curr_base_file_seq, 1);
         assert_eq!(manifest.curr_incr_file_seq, 4);
+    }
+
+    #[test]
+    fn aof_manifest_long_quoted_filename_decodes_sparse_escape() {
+        let mut encoded_name = String::from("append only.");
+        encoded_name.push_str(&"a".repeat(768));
+        encoded_name.push_str("\\t");
+        encoded_name.push_str(&"b".repeat(128));
+        encoded_name.push_str(".aof");
+        let input = format!("file \"{encoded_name}\" seq 42 type i\n");
+
+        let manifest = parse_aof_manifest(&input).expect("long quoted manifest entry should parse");
+        let entry = manifest
+            .incremental
+            .first()
+            .expect("incremental entry should be present");
+
+        let expected_name = encoded_name.replacen("\\t", "\t", 1);
+        assert_eq!(entry.file_name, expected_name);
+        assert_eq!(entry.file_seq, 42);
+        assert_eq!(entry.file_type, AofManifestFileType::Incremental);
     }
 
     #[test]

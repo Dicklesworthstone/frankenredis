@@ -1,23 +1,35 @@
-//! Same-binary proof for ordinary AOF manifest tokenization.
+//! Same-binary proof for clean-run copying inside quoted AOF manifest tokens.
 //!
-//! The frozen reference pushes plain-token bytes one at a time. The candidate may bulk-copy only
-//! all-ASCII tokens without quotes or escapes and retains the exact original state machine for all
-//! other input.
+//! The frozen reference includes the shipped plain-token fast path, but pushes every byte of a
+//! quoted token individually. The candidate may bulk-copy clean ASCII segments between quotes,
+//! escapes, or non-ASCII bytes while preserving the exact original state machine at each boundary.
 
 use std::{
     env,
     hint::black_box,
     path::Path,
     process::{self, Command},
+    sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use fr_persist::{bench_split_manifest_args_candidate, bench_split_manifest_args_reference};
 
-const LINE: &str = "file appendonly.aof.42.incr.aof seq 42 type i";
-const PROFILE_REPEATS: usize = 250_000;
-const STAT_REPEATS: usize = 100_000;
+const PLAIN_LINE: &str = "file appendonly.aof.42.incr.aof seq 42 type i";
+const FIRST_CLEAN_RUN: usize = 768;
+const SECOND_CLEAN_RUN: usize = 128;
+const PROFILE_REPEATS: usize = 100_000;
+const STAT_REPEATS: usize = 20_000;
 const STAT_ROUNDS: usize = 9;
+
+static LINE: LazyLock<String> = LazyLock::new(|| {
+    let mut file_name = String::from("append only.");
+    file_name.push_str(&"a".repeat(FIRST_CLEAN_RUN));
+    file_name.push_str("\\t");
+    file_name.push_str(&"b".repeat(SECOND_CLEAN_RUN));
+    file_name.push_str(".aof");
+    format!("file \"{file_name}\" seq 42 type i")
+});
 
 type ParseResult = Option<Vec<String>>;
 
@@ -66,9 +78,10 @@ fn parse(line: &str, arm: Arm) -> ParseResult {
 }
 
 fn run_loop(arm: Arm, repeats: usize) {
+    let line = black_box(LINE.as_str());
     let mut checksum = 0_u64;
     for _ in 0..repeats {
-        let parsed = parse(black_box(LINE), arm);
+        let parsed = parse(black_box(line), arm);
         match black_box(&parsed) {
             Some(tokens) => {
                 for token in tokens {
@@ -88,7 +101,7 @@ fn run_loop(arm: Arm, repeats: usize) {
 
 fn correctness_gate() {
     let cases = [
-        LINE,
+        PLAIN_LINE,
         "file appendonly.aof.1.base.rdb seq 1 type b",
         "  file appendonly.aof.2.incr.aof\tseq 2 type i  ",
         "file \"append only.aof\" seq 3 type h",
@@ -104,6 +117,7 @@ fn correctness_gate() {
         "file a.aof seq 12 type i extra value",
         "\t\r\n",
         "",
+        LINE.as_str(),
     ];
     for (index, line) in cases.iter().enumerate() {
         assert_eq!(
@@ -166,7 +180,7 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
         .map_err(|error| format!("invalid system time: {error}"))?
         .as_nanos();
     let data = env::temp_dir().join(format!(
-        "fr_persist_manifest_tokens_{}_{}_{}.data",
+        "fr_persist_manifest_quoted_runs_{}_{}_{}.data",
         process::id(),
         arm.name(),
         stamp
@@ -273,7 +287,10 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
 fn run_profile(executable: &Path, arms: &[Arm]) -> Result<(), String> {
     println!("WORKER_ID {}", worker_id());
     println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
-    println!("TRIGGER bytes={} tokens=6 quotes=none", LINE.len());
+    println!(
+        "TRIGGER bytes={} tokens=6 quotes=2 escapes=1 clean_runs={FIRST_CLEAN_RUN}+{SECOND_CLEAN_RUN}",
+        LINE.len()
+    );
     for &arm in arms {
         let status = Command::new(executable)
             .args(["--child", arm.name(), "100"])
