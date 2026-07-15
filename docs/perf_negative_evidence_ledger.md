@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — direct session lookup for `CLIENT LIST ID` (`frankenredis-65m4v`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` ranked the unassigned packed small-HASH
+  representation bead highest, but that bead explicitly requires a multi-pass representation
+  project rather than a one-turn lever. The recent LFU/dictionary and stream-range seams were
+  already well mined, so this turn pivoted to a fresh runtime command path. Static attribution
+  found that `CLIENT LIST ID` cloned every live `ClientSession` into a temporary `BTreeMap`, built
+  a default-SipHash set of requested IDs, and scanned the complete snapshot even for a handful of
+  requested clients.
+- **Profile/attribution first:** the frozen production path was profiled before the edit in a
+  strict-remote `--profile release` binary on `vmi1149989`
+  (`sha256 47e5396538d838b0958f0767cc10a0bc312fba330b383f5d3c226cba8ddc5ba1`). With 1,025 live
+  sessions and eight requested IDs, it collected `instructions:u` samples with zero lost; exact
+  `client_list_id_payload_scan_reference` self-time was **0.24%**, `ClientSession::clone` was
+  **23.44%**, and B-tree subtree cloning was **6.07%**. This selected one lever; client-info
+  formatting and the unfiltered/TYPE forms of `CLIENT LIST` were not changed.
+- **One concrete lever:** parse positive requested IDs into a vector, sort and deduplicate it, then
+  use the existing canonical ID-indexed session maps for direct lookup. Sorting preserves the old
+  snapshot's ascending client-ID output; deduplication preserves its set semantics; missing,
+  duplicate, zero, negative, and invalid IDs retain their former observable behavior. Eager session
+  snapshots now remain only in the unfiltered and TYPE-filtered branches.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms
+  (`candidate sha256 = reference sha256 = 775f92d1a131ba981423b5a6f9a40f23cb1dce08514bf86e0276d760d5343c65`).
+  Across nine position-balanced rounds of the full command handler with 1,025 sessions, eight
+  requested IDs, and five unique matches, candidate median was **28,384,229 instructions** versus
+  reference **862,712,472**, or **30.394087999x reference/candidate** (about **96.71% fewer full-path
+  instructions**). The A/A null median was **0.999977135x**, p05..p95
+  **[0.999751513, 1.000153484]**, null CV **0.012101%**, and effect CV **0.010016%**. Exact candidate
+  and reference helpers carried **4.42%** and **0.04% self** respectively, and both profiles had
+  zero lost samples.
+- **Behavior and gates:** the same binary asserted identical full RESP replies for duplicate,
+  out-of-order, missing, zero, negative, and invalid IDs. The focused strict-remote release runtime
+  test passed 1/1; strict-remote release Clippy for the changed runtime library with `--no-deps -D
+  warnings` passed; direct rustfmt and whitespace checks passed. UBS's staged shadow scan emitted
+  no finding but did not finish after 90 seconds and was interrupted, so it is not claimed as a
+  passing gate. Two earlier calibration attempts were rejected before timing when sampling missed
+  an exact helper frame; they are not A/B evidence.
+- **Boundary:** this ships only the ID-filtered session selection. Unfiltered and TYPE-filtered
+  `CLIENT LIST`, session ownership/indexing, client-info line formatting, and reply encoding remain
+  unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — drain pending pubsub outboxes in one traversal (`frankenredis-8pkmj`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` showed the two RESTORE quick wins as
