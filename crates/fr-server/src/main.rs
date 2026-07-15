@@ -22257,7 +22257,10 @@ fn handle_parse_error(
     true
 }
 
-use fr_server::{InlineParseResult, should_try_inline_parsing, try_parse_inline};
+use fr_server::{
+    InlineParseResult, consume_complete_replication_prefix, should_try_inline_parsing,
+    try_parse_inline,
+};
 
 /// (frankenredis-pkdgs) How often a Sentinel actively PINGs + INFOs each
 /// monitored master. Upstream pings every `down-after/2` (<=1s) and INFOs every
@@ -22703,37 +22706,6 @@ fn read_available_stream_bytes(
         }
     }
     Ok(disconnected)
-}
-
-fn consume_complete_replication_prefix(
-    read_buf: &mut Vec<u8>,
-    parser_config: &ParserConfig,
-) -> io::Result<Vec<u8>> {
-    let mut consumed_total = 0usize;
-    loop {
-        if consumed_total >= read_buf.len() {
-            break;
-        }
-        let unparsed = &read_buf[consumed_total..];
-        match fr_protocol::parse_frame_with_config(unparsed, parser_config) {
-            Ok(parsed) => {
-                consumed_total = consumed_total.saturating_add(parsed.consumed);
-            }
-            Err(RespParseError::Incomplete) => break,
-            Err(err) => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("invalid replication backlog from primary: {err}"),
-                ));
-            }
-        }
-    }
-    if consumed_total == 0 {
-        return Ok(Vec::new());
-    }
-    let payload = read_buf[..consumed_total].to_vec();
-    read_buf.drain(..consumed_total);
-    Ok(payload)
 }
 
 fn expect_simple_string(frame: RespFrame, expected: &str) -> io::Result<()> {

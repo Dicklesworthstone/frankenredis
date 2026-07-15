@@ -35,3 +35,10 @@ mimalloc = ["dep:mimalloc"]
 perf-ab-object-idletime-floor = []
 # Measurement-only control arm for the one-binary LPOS floor A/B.
 perf-ab-lpos-floor = []
+# Measurement-only frozen arm for replica-prefix extraction A/Bs.
+bench-reference = []
+
+[[bench]]
+name = "replication_prefix_take"
+harness = false
+required-features = ["bench-reference"]

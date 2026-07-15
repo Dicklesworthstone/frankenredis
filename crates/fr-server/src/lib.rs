@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use fr_protocol::RespFrame;
+use std::io;
+
+use fr_protocol::{ParserConfig, RespFrame, RespParseError};
 
 /// Result of inline command parsing.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +217,79 @@ fn parse_hex_escape(h1: u8, h2: u8) -> Option<u8> {
     let b1 = parse_hex(h1)?;
     let b2 = parse_hex(h2)?;
     Some((b1 << 4) | b2)
+}
+
+/// Removes and returns the largest complete RESP-frame prefix in a replica read buffer.
+///
+/// Any incomplete trailing frame remains in `read_buf` for the next socket read.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidData`] when the complete prefix contains malformed RESP.
+#[cfg_attr(feature = "bench-reference", inline(never))]
+pub fn consume_complete_replication_prefix(
+    read_buf: &mut Vec<u8>,
+    parser_config: &ParserConfig,
+) -> io::Result<Vec<u8>> {
+    let mut consumed_total = 0usize;
+    loop {
+        if consumed_total >= read_buf.len() {
+            break;
+        }
+        let unparsed = &read_buf[consumed_total..];
+        match fr_protocol::parse_frame_with_config(unparsed, parser_config) {
+            Ok(parsed) => {
+                consumed_total = consumed_total.saturating_add(parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(err) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid replication backlog from primary: {err}"),
+                ));
+            }
+        }
+    }
+    if consumed_total == 0 {
+        return Ok(Vec::new());
+    }
+    let tail = read_buf.split_off(consumed_total);
+    Ok(std::mem::replace(read_buf, tail))
+}
+
+/// Frozen pre-optimization replica-prefix extraction for same-binary benchmarks.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_consume_complete_replication_prefix_reference(
+    read_buf: &mut Vec<u8>,
+    parser_config: &ParserConfig,
+) -> io::Result<Vec<u8>> {
+    let mut consumed_total = 0usize;
+    loop {
+        if consumed_total >= read_buf.len() {
+            break;
+        }
+        let unparsed = &read_buf[consumed_total..];
+        match fr_protocol::parse_frame_with_config(unparsed, parser_config) {
+            Ok(parsed) => {
+                consumed_total = consumed_total.saturating_add(parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(err) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid replication backlog from primary: {err}"),
+                ));
+            }
+        }
+    }
+    if consumed_total == 0 {
+        return Ok(Vec::new());
+    }
+    let payload = read_buf[..consumed_total].to_vec();
+    read_buf.drain(..consumed_total);
+    Ok(payload)
 }
 
 #[cfg(test)]
