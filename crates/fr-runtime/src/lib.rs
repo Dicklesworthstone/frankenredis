@@ -3,7 +3,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -58,12 +61,20 @@ static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[cfg(feature = "bench-reference")]
 static BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "bench-reference")]
+static BENCH_CONFIG_GET_STATIC_SCAN_REFERENCE: AtomicBool = AtomicBool::new(false);
 static BENCH_CLIENT_LIST_ID_SCAN_REFERENCE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "bench-reference")]
 #[doc(hidden)]
 pub fn bench_select_replica_ack_snapshot_owned_reference(enabled: bool) {
     BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+pub fn bench_select_config_get_static_scan_reference(enabled: bool) {
+    BENCH_CONFIG_GET_STATIC_SCAN_REFERENCE.store(enabled, Ordering::Relaxed);
 }
 
 #[doc(hidden)]
@@ -1894,6 +1905,75 @@ const CONFIG_STATIC_HIDDEN_PARAMS: &[(&str, &str)] = &[
     ("cluster-ping-interval", "0"),
     ("loading-process-events-interval-bytes", "2097152"),
 ];
+
+type ConfigStaticParamIndex = HashMap<&'static str, &'static str, foldhash::quality::RandomState>;
+
+static CONFIG_STATIC_PARAM_INDEX: OnceLock<ConfigStaticParamIndex> = OnceLock::new();
+
+fn config_static_param_is_dynamic(name: &str) -> bool {
+    matches!(
+        name,
+        "masterauth"
+            | "masteruser"
+            | "maxmemory"
+            | "maxmemory-policy"
+            | "slowlog-log-slower-than"
+            | "slowlog-max-len"
+            | "hz"
+            | "hash-max-listpack-entries"
+            | "hash-max-listpack-value"
+            | "hash-max-ziplist-entries"
+            | "hash-max-ziplist-value"
+            | "set-max-intset-entries"
+            | "set-max-listpack-entries"
+            | "set-max-listpack-value"
+            | "zset-max-listpack-entries"
+            | "zset-max-listpack-value"
+            | "zset-max-ziplist-entries"
+            | "zset-max-ziplist-value"
+            | "hll-sparse-max-bytes"
+            | "list-max-listpack-size"
+            | "list-max-ziplist-size"
+            | "appendonly"
+            | "stop-writes-on-bgsave-error"
+            | "appendfilename"
+            | "appenddirname"
+            | "dbfilename"
+            | "dir"
+            | "aclfile"
+            | "maxclients"
+            | "busy-reply-threshold"
+            | "lua-time-limit"
+            | "maxmemory-samples"
+            | "repl-backlog-size"
+            | "repl-timeout"
+            | "replica-serve-stale-data"
+            | "replica-priority"
+            | "slave-priority"
+            | "repl-diskless-sync"
+            | "repl-diskless-sync-delay"
+            | "client-query-buffer-limit"
+            | "proto-max-bulk-len"
+            | "client-output-buffer-limit"
+            | "enable-debug-command"
+            | "port"
+    )
+}
+
+fn config_static_param_index() -> &'static ConfigStaticParamIndex {
+    CONFIG_STATIC_PARAM_INDEX.get_or_init(|| {
+        let mut index = HashMap::with_capacity_and_hasher(
+            CONFIG_STATIC_PARAMS.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        for &(name, default_value) in CONFIG_STATIC_PARAMS {
+            if !config_static_param_is_dynamic(name) {
+                index.insert(name, default_value);
+            }
+        }
+        index
+    })
+}
 
 fn canonical_static_config_param(parameter: &str) -> Option<&'static str> {
     if parameter.eq_ignore_ascii_case("slave-serve-stale-data") {
@@ -36480,14 +36560,24 @@ impl Runtime {
             };
             let pattern = raw_pattern.to_ascii_lowercase();
             let before = entries.len();
-            self.collect_config_entries(&pattern, &mut entries);
+            let is_literal = !raw_pattern.chars().any(|c| matches!(c, '*' | '?' | '['));
+            #[cfg(feature = "bench-reference")]
+            let force_scan_reference =
+                BENCH_CONFIG_GET_STATIC_SCAN_REFERENCE.load(Ordering::Relaxed);
+            #[cfg(not(feature = "bench-reference"))]
+            let force_scan_reference = false;
+            if force_scan_reference
+                || !is_literal
+                || !self.collect_config_static_literal_indexed(raw_pattern, &pattern, &mut entries)
+            {
+                self.collect_config_entries(&pattern, &mut entries);
+            }
             // Upstream config.c::configGetCommand echoes the
             // user-typed name verbatim for literal (non-glob)
             // matches; glob matches use the canonical (lowercase)
             // dictionary key. Mirror that by rewriting the key
             // for newly-added entries when the pattern is literal.
             // (br-frankenredis-cfggetcase)
-            let is_literal = !raw_pattern.chars().any(|c| matches!(c, '*' | '?' | '['));
             if is_literal && raw_pattern != pattern {
                 let mut idx = before;
                 while idx + 1 < entries.len() {
@@ -36538,7 +36628,31 @@ impl Runtime {
         RespFrame::Array(Some(entries))
     }
 
+    /// Resolve an exact, non-dynamic static parameter without walking the
+    /// dynamic matchers and ordered static registry used by glob requests.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn collect_config_static_literal_indexed(
+        &self,
+        raw_pattern: &str,
+        pattern: &str,
+        entries: &mut Vec<RespFrame>,
+    ) -> bool {
+        let Some(&default_value) = config_static_param_index().get(pattern) else {
+            return false;
+        };
+        entries.push(RespFrame::BulkString(Some(raw_pattern.as_bytes().to_vec())));
+        let value = self
+            .server
+            .config_overrides
+            .get(pattern)
+            .map_or_else(|| default_value.as_bytes(), String::as_bytes)
+            .to_vec();
+        entries.push(RespFrame::BulkString(Some(value)));
+        true
+    }
+
     /// Collect all config parameter entries matching a single pattern.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     fn collect_config_entries(&self, pattern: &str, entries: &mut Vec<RespFrame>) {
         if pattern == "maxmemory*" {
             entries.push(RespFrame::BulkString(Some(
@@ -59524,6 +59638,54 @@ mod tests {
             Some("appendonly")
         );
         assert_eq!(canonical_static_config_param("does-not-exist"), None);
+    }
+
+    #[cfg(feature = "bench-reference")]
+    #[test]
+    fn config_get_static_literal_index_matches_full_scan_registry() {
+        struct ResetBenchSelector;
+
+        impl Drop for ResetBenchSelector {
+            fn drop(&mut self) {
+                super::bench_select_config_get_static_scan_reference(false);
+            }
+        }
+
+        let _reset = ResetBenchSelector;
+        for resp3 in [false, true] {
+            let mut candidate = Runtime::default_strict();
+            let mut reference = Runtime::default_strict();
+            if resp3 {
+                assert!(matches!(
+                    candidate.execute_frame(command(&[b"HELLO", b"3"]), 0),
+                    RespFrame::Map(Some(_))
+                ));
+                assert!(matches!(
+                    reference.execute_frame(command(&[b"HELLO", b"3"]), 0),
+                    RespFrame::Map(Some(_))
+                ));
+            }
+            for &(name, _) in super::CONFIG_STATIC_PARAMS
+                .iter()
+                .chain(super::CONFIG_STATIC_HIDDEN_PARAMS.iter())
+            {
+                for raw_name in [name.to_owned(), name.to_ascii_uppercase()] {
+                    let request = command_owned(vec![
+                        b"CONFIG".to_vec(),
+                        b"GET".to_vec(),
+                        raw_name.into_bytes(),
+                    ]);
+                    super::bench_select_config_get_static_scan_reference(false);
+                    let candidate_reply = candidate.execute_frame(request.clone(), 1);
+                    super::bench_select_config_get_static_scan_reference(true);
+                    let reference_reply = reference.execute_frame(request, 1);
+                    assert_eq!(
+                        candidate_reply, reference_reply,
+                        "resp3={resp3} parameter={name}"
+                    );
+                }
+            }
+        }
     }
 
     /// (frankenredis-rpv1o) CONFIG GET port must return the actual

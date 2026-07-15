@@ -41,3 +41,8 @@ required-features = ["bench-reference"]
 name = "client_list_id_lookup"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "config_get_static_lookup"
+harness = false
+required-features = ["bench-reference"]
