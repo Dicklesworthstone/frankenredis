@@ -18944,6 +18944,55 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
     true
 }
 
+type CommandMetadataRow = (&'static str, i64, &'static str, i64, i64, i64);
+
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_INFO_SCAN_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen linear-scan arm for the `COMMAND INFO` A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_info_scan_reference(reference: bool) {
+    BENCH_COMMAND_INFO_SCAN_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Frozen current lookup for explicit `COMMAND INFO name [name ...]` requests.
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_info_requested_row_scan(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .chain(SUBCOMMAND_TABLE.iter())
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+/// Resolve a top-level name through the canonical command index, retaining the
+/// ordered subcommand scan for namespaced fallbacks. (frankenredis-eey3d)
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_info_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    if let Some(index) = command_table_index(cmd_name.as_bytes()) {
+        let row = COMMAND_TABLE[index];
+        if command_table_row_is_visible(row.0, store) {
+            return Some(row);
+        }
+    }
+    SUBCOMMAND_TABLE
+        .iter()
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+fn command_info_requested_row(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_INFO_SCAN_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return command_info_requested_row_scan(cmd_name, store);
+    }
+    command_info_requested_row_indexed(cmd_name, store)
+}
+
 /// Number of top-level commands visible in the current mode — the `COMMAND COUNT`
 /// reply. Shared by the generic command handler and the borrowed fast path so
 /// both report the identical count (the visibility filter only hides `sentinel`
@@ -19099,13 +19148,9 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
             // back to nil — vendored 7.2.4 returns the per-sub metadata
             // from server.c::commandInfoCommand by walking the
             // container's subcommand_dict.
-            let found = COMMAND_TABLE
-                .iter()
-                .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                .chain(SUBCOMMAND_TABLE.iter())
-                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
+            let found = command_info_requested_row(cmd_name, store);
             match found {
-                Some(&(name, arity, flags, first_key, last_key, step)) => {
+                Some((name, arity, flags, first_key, last_key, step)) => {
                     let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                     entries.push(if resp3 {
                         command_info_entry_to_resp3(entry)
@@ -29009,6 +29054,33 @@ mod tests {
         // Sanity: a known command resolves and the arity field is reachable.
         let idx = super::command_table_index(b"set").expect("SET present");
         assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
+    }
+
+    #[test]
+    fn command_info_indexed_lookup_matches_linear_scan_eey3d() {
+        for sentinel_mode in [false, true] {
+            let mut store = fr_store::Store::new();
+            store.sentinel_mode = sentinel_mode;
+            for &(name, ..) in super::COMMAND_TABLE
+                .iter()
+                .chain(super::SUBCOMMAND_TABLE.iter())
+            {
+                for variant in [name.to_string(), name.to_ascii_uppercase()] {
+                    assert_eq!(
+                        super::command_info_requested_row_indexed(&variant, &store),
+                        super::command_info_requested_row_scan(&variant, &store),
+                        "sentinel_mode={sentinel_mode} name={variant:?}"
+                    );
+                }
+            }
+            for missing in ["", "not-a-command", "GET\0", "éxiste"] {
+                assert_eq!(
+                    super::command_info_requested_row_indexed(missing, &store),
+                    super::command_info_requested_row_scan(missing, &store),
+                    "sentinel_mode={sentinel_mode} missing={missing:?}"
+                );
+            }
+        }
     }
 
     use fr_store::{
