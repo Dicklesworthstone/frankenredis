@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — bulk-copy ordinary Redis config tokens (`frankenredis-frfnt`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
+  representation bead unassigned; the keyspace-RAM side index was blocked/owned and the recent
+  store/runtime veins were well mined. Fresh inspection moved to the live `fr-config` startup
+  parser used by `fr-server`. The ledger had no prior config-line tokenizer attempt, and ordinary
+  unquoted directive tokens were still appended one byte at a time into independently growing
+  vectors.
+- **Profile/attribution first:** before the production edit, the exact frozen tokenizer ran under
+  strict remote `--profile release` on `vmi1152480` (`sha256
+  658e44dbb89cc81f85fa737e8900282b2de379c028e21c655f37d578c4461424`). The exact
+  `bench_split_config_line_args_reference` frame carried **27.17% self-time** with zero lost
+  `instructions:u` samples. `realloc`, `finish_grow`, `grow_one`, and Rust realloc wrappers
+  dominated another roughly 29% of the profile. This selected one lever; quoting, escape decoding,
+  NUL termination, directive handling, and file parsing were not changed.
+- **One concrete lever:** scan each token until the original bare-token delimiter or a quote. If no
+  quote occurs, copy the exact source slice once into its final vector; if a quote occurs anywhere
+  in the token, reset and run the frozen byte-by-byte quoted/escaped state machine. The delimiter
+  scan deliberately preserves Redis's treatment of vertical-tab and form-feed bytes inside a bare
+  token.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms (`candidate sha256 = reference sha256 =
+  aad392b15392a0cf299175bb8e06ab067d0b332b4e8672492d48d50856a469d9`). The trigger was the
+  five-token, 39-byte line `client-output-buffer-limit normal 0 0 0`. Across nine
+  position-balanced rounds of 120,000 parses, candidate median was **271,027,026 instructions**
+  versus reference **439,746,790**, or **1.622518896x reference/candidate** (**38.3675% fewer
+  instructions**). The A/A null median was **1.000000742x**, p05..p95
+  **[0.999996735, 1.000003188]**, null CV **0.000212%**, and effect CV **0.000137%**. Exact
+  candidate and reference helpers carried **12.98%** and **23.54% self-time**, respectively, with
+  zero lost samples. The remote compile-plus-profile-plus-measurement phase took about 6 seconds;
+  total RCH wall time including sync/retrieval was about 62 seconds.
+- **Behavior and gates:** the same binary asserted exact result parity across 16 plain, quoted,
+  escaped, embedded-quote, empty-quote, invalid-quote, NUL-tail, C-whitespace, backslash-literal,
+  non-UTF-8, and empty inputs. Strict-remote release tests passed all **48** config tests (35 unit
+  plus 13 golden), and strict-remote release Clippy passed all config targets with
+  `bench-reference` and `-D warnings`. The required workspace check reached unrelated pre-existing
+  missing-method errors in `crates/fr-store/benches/set_ex_rearm.rs`; it did not implicate the
+  owned config files. Direct Rust 2024 rustfmt and whitespace checks passed. Focused UBS remained
+  baseline-red on its existing `policy.mode` token-name false positive and test panic/assert
+  inventory; no finding implicated this production path. Implementation commit: `643db1006`.
+- **Boundary:** this ships only allocation behavior for ordinary unquoted config-line tokens.
+  Quoted-token validation, double/single-quote escapes, embedded quote concatenation, NUL and
+  whitespace semantics, directive normalization, TLS configuration, and server startup behavior
+  remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — stream fixed Sentinel HELLO fields without a temporary vector (`frankenredis-rm9gq`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
