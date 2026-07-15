@@ -36,3 +36,8 @@ required-features = ["bench-reference"]
 name = "pubsub_pending_clients"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "client_list_id_lookup"
+harness = false
+required-features = ["bench-reference"]

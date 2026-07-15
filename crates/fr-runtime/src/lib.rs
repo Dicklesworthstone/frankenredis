@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -46,9 +46,6 @@ use fr_store::{
 };
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "bench-reference")]
-use std::sync::atomic::AtomicBool;
-
 fn encode_nonnegative_integer_reply(value: u64, out: &mut Vec<u8>) {
     out.push(b':');
     let mut buf = [0_u8; 20];
@@ -61,11 +58,17 @@ static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[cfg(feature = "bench-reference")]
 static BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE: AtomicBool = AtomicBool::new(false);
+static BENCH_CLIENT_LIST_ID_SCAN_REFERENCE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "bench-reference")]
 #[doc(hidden)]
 pub fn bench_select_replica_ack_snapshot_owned_reference(enabled: bool) {
     BENCH_REPLICA_ACK_SNAPSHOT_OWNED_REFERENCE.store(enabled, Ordering::Relaxed);
+}
+
+#[doc(hidden)]
+pub fn bench_select_client_list_id_scan_reference(enabled: bool) {
+    BENCH_CLIENT_LIST_ID_SCAN_REFERENCE.store(enabled, Ordering::Relaxed);
 }
 
 const DEFAULT_AUTH_USER: &[u8] = b"default";
@@ -34990,6 +34993,80 @@ impl Runtime {
         )
     }
 
+    fn client_list_id_payload(
+        &self,
+        id_args: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<Vec<u8>, RespFrame> {
+        #[cfg(feature = "bench-reference")]
+        if BENCH_CLIENT_LIST_ID_SCAN_REFERENCE.load(Ordering::Relaxed) {
+            return self.client_list_id_payload_scan_reference(id_args, now_ms);
+        }
+        self.client_list_id_payload_direct(id_args, now_ms)
+    }
+
+    /// Select the requested clients directly from the canonical ID-indexed maps.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn client_list_id_payload_direct(
+        &self,
+        id_args: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<Vec<u8>, RespFrame> {
+        // (frankenredis-65m4v) `CLIENT LIST ID` used to clone every live
+        // ClientSession into a temporary BTreeMap, build a SipHash set, then
+        // scan the clone. The canonical maps are already keyed by client ID.
+        // Sorting + deduping the requested positive IDs preserves the old
+        // BTreeMap iteration order and duplicate suppression while making the
+        // work proportional to requested clients instead of all live clients.
+        let mut requested_ids = Vec::with_capacity(id_args.len());
+        for id_arg in id_args {
+            let parsed_id = parse_i64_arg(id_arg)
+                .map_err(|_| RespFrame::Error("ERR Invalid client ID".to_string()))?;
+            if parsed_id > 0 {
+                requested_ids.push(parsed_id as u64);
+            }
+        }
+        requested_ids.sort_unstable();
+        requested_ids.dedup();
+
+        let mut payload = String::new();
+        for client_id in requested_ids {
+            if let Some(session) = self.client_session_including_current(client_id) {
+                payload.push_str(&self.client_info_line_for_session(session, now_ms));
+            }
+        }
+        Ok(payload.into_bytes())
+    }
+
+    /// Frozen pre-optimization `CLIENT LIST ID` path for same-binary profiling.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn client_list_id_payload_scan_reference(
+        &self,
+        id_args: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<Vec<u8>, RespFrame> {
+        let sessions = self.client_list_sessions();
+        let mut requested_ids = HashSet::new();
+        for id_arg in id_args {
+            // Upstream networking.c::clientCommand parses the ID via
+            // getLongLongFromObjectOrReply with 'Invalid client ID' — only
+            // non-numeric input errors. Numeric values that don't match any
+            // client (incl. 0 / negative) silently filter out.
+            let parsed_id = parse_i64_arg(id_arg)
+                .map_err(|_| RespFrame::Error("ERR Invalid client ID".to_string()))?;
+            if parsed_id > 0 {
+                requested_ids.insert(parsed_id as u64);
+            }
+        }
+        Ok(sessions
+            .values()
+            .filter(|session| requested_ids.contains(&session.client_id))
+            .map(|session| self.client_info_line_for_session(session, now_ms))
+            .collect::<String>()
+            .into_bytes())
+    }
+
     fn current_acl_log_client_info(&self, now_ms: u64) -> String {
         self.client_info_line_for_session(&self.session, now_ms)
             .trim_end_matches("\r\n")
@@ -39249,14 +39326,15 @@ impl Runtime {
                 return client_wrong_subcommand_arity(sub);
             }
             if sub.eq_ignore_ascii_case("LIST") {
-                let sessions = self.client_list_sessions();
                 let payload = if argv.len() == 2 {
+                    let sessions = self.client_list_sessions();
                     sessions
                         .values()
                         .map(|session| self.client_info_line_for_session(session, now_ms))
                         .collect::<String>()
                         .into_bytes()
                 } else if argv.len() == 4 && eq_ascii_token(&argv[2], b"TYPE") {
+                    let sessions = self.client_list_sessions();
                     let kind = match std::str::from_utf8(&argv[3]) {
                         Ok(kind) => kind,
                         Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
@@ -39271,31 +39349,10 @@ impl Runtime {
                         .collect::<String>()
                         .into_bytes()
                 } else if argv.len() >= 4 && eq_ascii_token(&argv[2], b"ID") {
-                    let mut requested_ids = HashSet::new();
-                    for id_arg in &argv[3..] {
-                        // Upstream networking.c::clientCommand parses
-                        // the ID via getLongLongFromObjectOrReply with
-                        // 'Invalid client ID' — only non-numeric input
-                        // errors. Numeric values that don't match any
-                        // client (incl. 0 / negative) silently filter
-                        // out; lookupClientByID returns NULL.
-                        // (br-frankenredis-clkill follow-up)
-                        let parsed_id = match parse_i64_arg(id_arg) {
-                            Ok(id) => id,
-                            Err(_) => {
-                                return RespFrame::Error("ERR Invalid client ID".to_string());
-                            }
-                        };
-                        if parsed_id > 0 {
-                            requested_ids.insert(parsed_id as u64);
-                        }
+                    match self.client_list_id_payload(&argv[3..], now_ms) {
+                        Ok(payload) => payload,
+                        Err(error) => return error,
                     }
-                    sessions
-                        .values()
-                        .filter(|session| requested_ids.contains(&session.client_id))
-                        .map(|session| self.client_info_line_for_session(session, now_ms))
-                        .collect::<String>()
-                        .into_bytes()
                 } else {
                     return RespFrame::Error("ERR syntax error".to_string());
                 };
@@ -55579,6 +55636,36 @@ mod tests {
         // failure). Order in argv determines which token errors.
         let mixed = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"0", b"abc"]), 3);
         assert_eq!(mixed, RespFrame::Error("ERR Invalid client ID".to_string()));
+    }
+
+    #[test]
+    fn client_list_id_direct_lookup_matches_snapshot_scan_order_and_dedup_65m4v() {
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 50;
+        for client_id in [30_u64, 10, 40] {
+            let mut peer = rt.new_session();
+            peer.client_id = client_id;
+            rt.record_client_session(&peer);
+        }
+        let id_args = [
+            b"40".to_vec(),
+            b"10".to_vec(),
+            b"40".to_vec(),
+            b"0".to_vec(),
+            b"999".to_vec(),
+        ];
+
+        let direct = rt.client_list_id_payload_direct(&id_args, 1_000).unwrap();
+        let reference = rt
+            .client_list_id_payload_scan_reference(&id_args, 1_000)
+            .unwrap();
+        assert_eq!(direct, reference);
+
+        let payload = String::from_utf8(direct).unwrap();
+        let id_10 = payload.find("id=10 ").unwrap();
+        let id_40 = payload.find("id=40 ").unwrap();
+        assert!(id_10 < id_40, "CLIENT LIST ID output must remain ID-sorted");
+        assert_eq!(payload.matches("id=40 ").count(), 1, "duplicate IDs dedup");
     }
 
     #[test]
