@@ -8,6 +8,49 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: REJECT — fixed-shape canonical PSYNC2 CONTINUE reply parsing (`frankenredis-ac0uq`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
+  work in the multi-pass packed small-HASH representation bead; RESTORE and P16 were owned, and
+  the keyspace-RAM side index was blocked/owned. The ledger had no prior canonical PSYNC2
+  `CONTINUE <replid>` parsing attempt, so this turn tested the remaining sibling of the freshly
+  shipped FULLRESYNC parser fast path rather than reopening a mined store vein.
+- **Profile/attribution first:** before the production edit, the exact current parser (including
+  the existing failed FULLRESYNC shape check) ran under strict remote `--profile release` on
+  `vmi1152480` (`sha256
+  0a4e9b4d2d5788a5f949d95af306ddd53e422bb24242ed1b5fd96e6e34454234`). The exact
+  `bench_parse_psync_reply_reference` frame carried **51.19% self-time** and `malloc` carried
+  **9.29%** across 254 `instructions:u` samples with zero lost samples. This selected one
+  fixed-shape parser lever; handshake state, offsets, ordering, and noncanonical replies were not
+  changed.
+- **One concrete lever tested:** recognize only exact uppercase `CONTINUE ` followed by exactly
+  40 non-whitespace replid bytes, then allocate only the returned replid. Any different length,
+  embedded whitespace, extra token, case variant, or other PSYNC reply fell through to the exact
+  current split-based parser. A same-binary frozen reference disabled only this new CONTINUE check
+  while retaining the shipped FULLRESYNC fast path.
+- **Foreground same-binary A/A+A/B — measured reject:** one fail-closed `--profile release`
+  binary on `vmi1152480` served both arms (`candidate sha256 = reference sha256 =
+  8ccefb6bc5c5ce1ff8d05dda89088103f8e1436d657ed0be84fd9d5cd2c22911`). The trigger was the
+  **49-byte** reply `CONTINUE <40-byte replid>` with one space. Across nine position-balanced
+  rounds of 500,000 parses, candidate median was **270,809,491 instructions** versus reference
+  **258,809,487**, or **0.955688299x reference/candidate**: the candidate used **4.636617% more
+  instructions**. The A/A null median was **1.000000510x**, p05..p95
+  **[0.999997544, 1.000004021]**, null CV **0.000188%**, and effect CV **0.000128%**. Exact
+  candidate and reference helpers carried **41.47%** and **58.70% self-time**, respectively, with
+  zero lost samples. This is a stable regression far outside the null-control envelope, not a
+  timeout or cross-worker comparison.
+- **Behavior and gates:** the same binary asserted exact result/error parity across 15 canonical
+  FULLRESYNC, canonical and bare CONTINUE, whitespace-varied, bad-length, extra-token, lowercase,
+  empty, and 40-byte-Unicode cases. Both focused release unit tests passed remotely. Scoped release
+  Clippy passed all `fr-repl` targets with `bench-reference`, `--no-deps`, and `-D warnings`;
+  direct Rust 2024 rustfmt and whitespace checks passed. Focused UBS exited zero with no critical
+  issue. The candidate and the retargeted proof harness were restored byte-for-byte to `HEAD`;
+  only this evidence row and bead closeout ship.
+- **Boundary / do not retry:** do not add a separate exact-length `CONTINUE` guard ahead of the
+  split parser. For this short one-time PSYNC2 handshake line, the extra length/prefix/whitespace
+  scan costs more instructions than it saves. Revisit only with a materially different parser
+  shape or evidence that CONTINUE parsing is a meaningful end-to-end residual.
+
 ## 2026-07-15 CalmHeron: SHIPPED — fixed-shape canonical FULLRESYNC reply parsing (`frankenredis-ry0zy`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
