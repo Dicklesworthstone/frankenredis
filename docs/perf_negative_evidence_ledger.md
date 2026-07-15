@@ -8,6 +8,49 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — write stream RDB IDs without allocation (`frankenredis-79sju`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
+  blocked, or already in progress; the only unassigned explicit perf bead,
+  `frankenredis-b1o02`, remained multi-day packed-`StrMap` representation work. Recent command,
+  store, config, and AOF veins were already well mined, so this turn pivoted to the fresh
+  `fr-persist` stream-RDB encoder and took only temporary stream-ID materialization.
+- **Profile/attribution first:** before changing production logic, the untouched
+  `encode_upstream_stream_listpacks3` path ran under strict remote `--profile release` on
+  `vmi1153651` (binary sha256
+  `70e9c96de8d8ee17d12468faceec99b5971c03e2f4d71e8311581ce7437589d0`). The exact encoder
+  carried **4.44% self-time**, `encode_consumer_group` carried **11.50%**, `malloc` carried
+  **2.00%**, and `realloc` carried **1.03%**, with zero lost `instructions:u` samples. The
+  trigger's 512 entries, 256 pending IDs, and eight consumers made the short-lived 16-byte
+  allocations attributable before the edit.
+- **One concrete lever:** production now serializes macro-node IDs from a stack `[u8; 16]` and
+  extends group PEL IDs directly from the two big-endian halves. A const-generic bench-only
+  reference retains the prior `Vec::with_capacity(16)` materialization while sharing the rest of
+  stream encoding, so the A/B differs only in those ID writes.
+- **Foreground same-binary A/A+A/B:** after the untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1153651` served both arms (candidate sha256 = reference
+  sha256 = `f5c443d0d4f180b55927380a9892ba206b4c1a774e08c6a9491284578707533b`). The
+  **15,556-byte** stream fixture contained 512 entries, 256 pending IDs, and eight consumers.
+  Across nine position-balanced rounds, candidate median was **306,640,752 instructions** versus
+  reference **331,368,792**, or **1.080641757x reference/candidate** (**7.462395% fewer
+  instructions**). The A/A null median was **1.000000545x**, p05..p95
+  **[0.999998607, 1.000004432]**, null CV **0.000162%**, and effect CV **0.000149%**. Exact
+  candidate and reference implementation frames carried **16.67%** and **14.36% self-time**,
+  respectively, with zero lost samples; the reference-only ID helper carried another **0.99%**.
+  `malloc` fell from **3.21%** in the reference profile to **0.33%** in the candidate profile.
+- **Behavior and gates:** the same binary asserted byte-for-byte candidate/reference parity. All
+  **15** strict-remote release stream-RDB tests passed, covering type-21 entries and groups,
+  fixtures, max-deleted IDs, pending ownership, missing-consumer rejection, and decode paths.
+  Scoped strict-remote release Clippy was stopped before the owned crate by the pre-existing
+  `clippy::needless_range_loop` at `crates/fr-simd/src/lib.rs:795`; the requested own-files-only
+  landing therefore proceeded. Direct rustfmt and whitespace checks passed. Focused UBS remained
+  baseline-red on its broad existing library/test inventory and the benchmark CLI's intentional
+  terminal panic; its embedded format, check, and test-build checks were clean, and it reported no
+  unsafe blocks or hardcoded secrets. Implementation commit: `c3e625efd`.
+- **Boundary:** only stream RDB macro-node and PEL ID materialization changed. Encoded bytes,
+  listpack contents, key/value order, consumer-group ownership, stream metadata, error behavior,
+  and Redis type-21 wire layout are unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — pre-size decoded quoted config tokens (`frankenredis-g3vku`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the live ranked lanes owned,
