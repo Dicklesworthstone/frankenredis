@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — pre-size quoted AOF manifest token storage (`frankenredis-q11bi`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` again left the ranked live perf lanes
+  owned, blocked, or in progress; the only unassigned open perf bead, `frankenredis-b1o02`, remained
+  explicitly multi-day packed-`StrMap` representation work. The immediately preceding quoted-token
+  clean-run keep shifted its own exact profile into allocation/growth work, while this ledger had no
+  attempt to pre-size fallback token storage. That made one bounded follow-on allocation lever more
+  evidence-backed than opening another speculative subsystem.
+- **Profile/attribution first:** before the production edit, the exact current clean-run tokenizer
+  was frozen as the bench-only reference and profiled under strict remote `--profile release` on
+  `vmi1149989` (`sha256
+  001ab5ea01a32bb94558e047bbea929cff40e4ade29bc1d2510985d3547296e4`). The exact
+  `bench_split_manifest_args_reference` frame carried **80.00% self-time** across 108
+  `instructions:u` samples with zero lost samples; `malloc` carried 1.87%, `finish_grow` 0.97%,
+  `realloc` 0.86%, and raw-vector reserve 0.67%. This selected only fallback-token capacity.
+- **One concrete lever:** when the plain-token scan first stops on a quote or backslash, construct
+  the decoded token `String` with capacity equal to the bounded remaining source-line length.
+  Non-ASCII-only fallbacks retain `String::new`; historical non-ASCII expansion can still grow
+  normally past the reserve. The parser state machine, clean-run copies, and decoded bytes are
+  unchanged.
+- **Foreground same-binary A/A+A/B:** after the required untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1149989` served both arms (`candidate sha256 = reference sha256
+  = 648c48fb849c827717f6423d1a2db2971fef650c1c6179697eda6b7de7ae02d9`). The valid
+  **935-byte**, six-token trigger had two quotes, one `\\t` escape, and clean ASCII runs of 768
+  and 128 bytes. Across nine position-balanced rounds of 20,000 parses, candidate median was
+  **238,910,052 instructions** versus reference **254,709,825**, or **1.066132657x
+  reference/candidate** (**6.203048% fewer instructions**). The A/A null median was
+  **0.999999284x**, p05..p95 **[0.999997652, 1.000001971]**, null CV **0.000131%**, and effect CV
+  **0.000205%**. Exact candidate and reference helpers carried **77.06%** across 103 samples and
+  **76.38% self-time** across 116 samples, respectively, with zero lost samples. The measured
+  remote command took 35.8 seconds; total RCH wall time was 89.5 seconds because the worker rebuilt
+  dependencies again despite the completed untimed warm-up.
+- **Behavior and gates:** the same binary asserted exact candidate/reference results across 17
+  plain, quoted, escaped, mixed-quote, empty-quote, malformed, non-ASCII, and full-trigger cases.
+  The focused release test `aof_manifest_long_quoted_filename_decodes_sparse_escape` passed
+  remotely. Scoped production-library release Clippy passed with `bench-reference`, `--no-deps`,
+  and `-D warnings`; direct bench rustfmt and whitespace checks passed. Full-source rustfmt exposed
+  only pre-existing unrelated diffs outside the owned hunks. Focused UBS remained baseline-red on
+  unrelated pre-existing test/panic/security-heuristic inventory, with no finding implicating this
+  lever. Implementation commit: `57ffc9071`.
+- **Boundary:** this changes only initial allocation capacity for fallback tokens selected by an
+  ASCII quote or backslash. Plain tokens and non-ASCII-only fallbacks retain their prior allocation
+  paths; quote/escape decoding, malformed-input rejection, manifest line limits and validation,
+  load ordering, atomic replacement, and AOF replay semantics remain unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean ASCII runs in quoted AOF manifest tokens (`frankenredis-0fk4p`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
