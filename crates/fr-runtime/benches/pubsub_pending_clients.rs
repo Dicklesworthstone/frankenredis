@@ -1,8 +1,8 @@
-//! Same-binary proof for the pending pub/sub client snapshot.
+//! Same-binary proof for draining pending pub/sub client outboxes.
 //!
-//! PUBLISH already stores one outbox entry per unique client ID. The server only iterates the
-//! pending IDs before draining those entries, so this harness compares the shipped transient
-//! `HashSet<u64>` rebuild with a direct collection of those unique keys.
+//! The current server snapshots every pending client ID and then hashes every ID again to remove
+//! its outbox. This harness includes the real `PUBLISH` refill before comparing that delivery loop
+//! with a one-pass, capacity-retaining map drain.
 
 use std::{
     env,
@@ -15,8 +15,8 @@ use std::{
 use fr_runtime::Runtime;
 
 const CLIENTS: usize = 256;
-const PROFILE_REPEATS: usize = 400_000;
-const STAT_REPEATS: usize = 50_000;
+const PROFILE_REPEATS: usize = 20_000;
+const STAT_REPEATS: usize = 2_000;
 const STAT_ROUNDS: usize = 11;
 
 #[derive(Clone, Copy)]
@@ -43,13 +43,13 @@ impl Arm {
 
     const fn profile_symbol(self) -> &'static str {
         match self {
-            Self::Candidate => "pubsub_clients_with_pending",
-            Self::Reference => "pubsub_clients_with_pending_hashset_reference",
+            Self::Candidate => "drain_candidate",
+            Self::Reference => "drain_reference",
         }
     }
 }
 
-fn runtime_with_pending_clients(client_count: usize) -> Runtime {
+fn runtime_with_subscribers(client_count: usize) -> Runtime {
     let mut runtime = Runtime::default_strict();
     for _ in 0..client_count {
         let subscriber = runtime.new_session();
@@ -57,43 +57,103 @@ fn runtime_with_pending_clients(client_count: usize) -> Runtime {
         runtime.pubsub_subscribe(b"events".to_vec());
         runtime.swap_session(publisher);
     }
-    assert_eq!(runtime.pubsub_publish(b"events", b"payload"), client_count);
     runtime
 }
 
-fn pending_ids(runtime: &Runtime, arm: Arm) -> Vec<u64> {
-    match arm {
-        Arm::Candidate => runtime.pubsub_clients_with_pending().into_iter().collect(),
-        Arm::Reference => runtime
-            .pubsub_clients_with_pending_hashset_reference()
-            .into_iter()
-            .collect(),
+#[derive(Debug, PartialEq, Eq)]
+struct DrainSummary {
+    clients: usize,
+    messages: usize,
+    client_id_checksum: u64,
+}
+
+impl DrainSummary {
+    const fn new() -> Self {
+        Self {
+            clients: 0,
+            messages: 0,
+            client_id_checksum: 0,
+        }
+    }
+
+    fn record(&mut self, client_id: u64, messages: Vec<fr_store::PubSubMessage>) {
+        self.clients += 1;
+        self.messages += messages.len();
+        self.client_id_checksum = self.client_id_checksum.wrapping_add(client_id);
+        black_box(messages);
     }
 }
 
+#[inline(never)]
+fn drain_candidate(runtime: &mut Runtime) -> DrainSummary {
+    let mut summary = DrainSummary::new();
+    for (client_id, messages) in black_box(runtime).drain_pubsub_outboxes() {
+        summary.record(client_id, messages);
+    }
+    black_box(summary)
+}
+
+/// Frozen pre-optimization server loop: snapshot IDs, then hash each ID again to remove its
+/// messages. Keeping the consumer in this wrapper gives both arms exactly one result sink without
+/// adding a second output vector to the reference arm.
+#[inline(never)]
+fn drain_reference(runtime: &mut Runtime) -> DrainSummary {
+    let client_ids = black_box(runtime.pubsub_clients_with_pending());
+    let mut summary = DrainSummary::new();
+    for client_id in client_ids {
+        let messages = black_box(runtime.drain_pubsub_for_client(client_id));
+        summary.record(client_id, messages);
+    }
+    black_box(summary)
+}
+
+fn drain_summary(runtime: &mut Runtime, arm: Arm) -> DrainSummary {
+    match arm {
+        Arm::Candidate => drain_candidate(runtime),
+        Arm::Reference => drain_reference(runtime),
+    }
+}
+
+fn collect_candidate(runtime: &mut Runtime) -> Vec<(u64, Vec<fr_store::PubSubMessage>)> {
+    runtime.drain_pubsub_outboxes()
+}
+
+fn collect_reference(runtime: &mut Runtime) -> Vec<(u64, Vec<fr_store::PubSubMessage>)> {
+    runtime
+        .pubsub_clients_with_pending()
+        .into_iter()
+        .map(|client_id| (client_id, runtime.drain_pubsub_for_client(client_id)))
+        .collect()
+}
+
 fn run_loop(arm: Arm, repeats: usize, client_count: usize) {
-    let runtime = runtime_with_pending_clients(client_count);
+    let mut runtime = runtime_with_subscribers(client_count);
     let mut checksum = 0_u64;
     for _ in 0..repeats {
-        let ids = pending_ids(black_box(&runtime), arm);
-        checksum = checksum.wrapping_add(ids.len() as u64);
-        checksum = checksum.wrapping_add(ids.first().copied().unwrap_or_default());
-        black_box(ids);
+        let receivers = runtime.pubsub_publish(black_box(b"events"), black_box(b"payload"));
+        let summary = drain_summary(black_box(&mut runtime), arm);
+        checksum = checksum.wrapping_add(receivers as u64);
+        checksum = checksum.wrapping_add(summary.clients as u64);
+        checksum = checksum.wrapping_add(summary.messages as u64);
+        checksum = checksum.wrapping_add(summary.client_id_checksum);
     }
     black_box(checksum);
 }
 
 fn correctness_gate() {
     for client_count in [0, 1, 8, CLIENTS] {
-        let runtime = runtime_with_pending_clients(client_count);
-        let mut candidate = pending_ids(&runtime, Arm::Candidate);
-        let mut reference = pending_ids(&runtime, Arm::Reference);
-        candidate.sort_unstable();
-        reference.sort_unstable();
+        let mut runtime = runtime_with_subscribers(client_count);
+        assert_eq!(runtime.pubsub_publish(b"events", b"payload"), client_count);
+        let mut candidate = collect_candidate(&mut runtime);
+        assert_eq!(runtime.pubsub_publish(b"events", b"payload"), client_count);
+        let mut reference = collect_reference(&mut runtime);
+        candidate.sort_unstable_by_key(|(client_id, _)| *client_id);
+        reference.sort_unstable_by_key(|(client_id, _)| *client_id);
         assert_eq!(candidate, reference);
         assert_eq!(candidate.len(), client_count);
+        assert!(runtime.pubsub_clients_with_pending().is_empty());
     }
-    println!("CORRECTNESS_GATE pending_client_ids=identical sizes=0,1,8,{CLIENTS}");
+    println!("CORRECTNESS_GATE outboxes=identical sizes=0,1,8,{CLIENTS}");
 }
 
 fn child_args() -> Result<Option<(Arm, usize, usize)>, String> {
@@ -236,12 +296,7 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
     }
     let line = stdout
         .lines()
-        .find(|line| {
-            line.contains(arm.profile_symbol())
-                && !line.contains("closure#")
-                && (matches!(arm, Arm::Reference)
-                    || !line.contains("pubsub_clients_with_pending_hashset_reference"))
-        })
+        .find(|line| line.contains(arm.profile_symbol()) && !line.contains("closure#"))
         .ok_or_else(|| {
             format!(
                 "profile has no exact {} helper frame; workload INVALID",
@@ -271,14 +326,11 @@ fn worker_id() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn run_profile(executable: &Path, both_arms: bool) -> Result<(), String> {
+fn run_profile(executable: &Path, arms: &[Arm]) -> Result<(), String> {
     println!("WORKER_ID {}", worker_id());
     println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
-    println!("TRIGGER pending_clients={CLIENTS} nonempty_outboxes={CLIENTS}");
-    for arm in [Arm::Candidate, Arm::Reference] {
-        if !both_arms && matches!(arm, Arm::Reference) {
-            continue;
-        }
+    println!("TRIGGER subscribers={CLIENTS} publish_then_drain=true");
+    for &arm in arms {
         let status = Command::new(executable)
             .args(["--child", arm.name(), "1000", &CLIENTS.to_string()])
             .status()
@@ -388,10 +440,13 @@ fn main() -> Result<(), String> {
     let executable = env::current_exe()
         .map_err(|error| format!("could not resolve bench executable: {error}"))?;
     correctness_gate();
-    let profile_only = env::args().any(|arg| arg == "--profile-only");
-    run_profile(&executable, !profile_only).map_err(|error| format!("PROFILE INVALID: {error}"))?;
-    if profile_only {
+    let reference_profile_only = env::args().any(|arg| arg == "--profile-reference-only");
+    if reference_profile_only {
+        run_profile(&executable, &[Arm::Reference])
+            .map_err(|error| format!("PROFILE INVALID: {error}"))?;
         return Ok(());
     }
+    run_profile(&executable, &[Arm::Candidate, Arm::Reference])
+        .map_err(|error| format!("PROFILE INVALID: {error}"))?;
     run_instruction_ab(&executable).map_err(|error| format!("A/B INVALID: {error}"))
 }

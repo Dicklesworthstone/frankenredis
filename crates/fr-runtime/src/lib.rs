@@ -6458,6 +6458,22 @@ impl Runtime {
             .unwrap_or_default()
     }
 
+    /// Drain every nonempty per-client pub/sub outbox in one map traversal.
+    ///
+    /// `HashMap::drain` retains the map's allocation for the next publish while avoiding the
+    /// client-ID snapshot followed by one keyed removal per subscriber.
+    #[cfg_attr(any(test, feature = "bench-reference"), inline(never))]
+    pub fn drain_pubsub_outboxes(&mut self) -> Vec<(u64, Vec<fr_store::PubSubMessage>)> {
+        let mut outboxes = Vec::with_capacity(self.server.pubsub_outbox.len());
+        outboxes.extend(
+            self.server
+                .pubsub_outbox
+                .drain()
+                .filter(|(_, messages)| !messages.is_empty()),
+        );
+        outboxes
+    }
+
     /// Return all client IDs that have pending pub/sub messages.
     #[cfg_attr(any(test, feature = "bench-reference"), inline(never))]
     pub fn pubsub_clients_with_pending(&self) -> Vec<u64> {
@@ -51523,9 +51539,16 @@ mod tests {
         assert_eq!(pending, reference);
         assert_eq!(pending, subscriber_ids);
 
-        for client_id in subscriber_ids {
-            assert_eq!(rt.drain_pubsub_for_client(client_id).len(), 1);
-        }
+        let mut drained = rt.drain_pubsub_outboxes();
+        drained.sort_unstable_by_key(|(client_id, _)| *client_id);
+        assert_eq!(
+            drained
+                .iter()
+                .map(|(client_id, _)| *client_id)
+                .collect::<Vec<_>>(),
+            subscriber_ids
+        );
+        assert!(drained.iter().all(|(_, messages)| messages.len() == 1));
         assert!(rt.pubsub_clients_with_pending().is_empty());
     }
 

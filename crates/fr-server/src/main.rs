@@ -24155,17 +24155,12 @@ fn deliver_pubsub_messages(
     closing_tokens: &mut HashSet<Token>,
     writer_pool: Option<&WriterPool>,
 ) {
-    let pending_client_ids = runtime.pubsub_clients_with_pending();
-    if pending_client_ids.is_empty() {
+    let pending_outboxes = runtime.drain_pubsub_outboxes();
+    if pending_outboxes.is_empty() {
         return;
     }
 
-    for &client_id in &pending_client_ids {
-        let msgs = runtime.drain_pubsub_for_client(client_id);
-        if msgs.is_empty() {
-            continue;
-        }
-
+    for (client_id, msgs) in pending_outboxes {
         let Some(&token) = client_id_to_token.get(&client_id) else {
             continue;
         };
