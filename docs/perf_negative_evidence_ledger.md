@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean UTF-8 runs in parsed inline bodies (`frankenredis-54e2o`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
+  blocked, or in multi-day structural work. The packed short-command classifier family was also
+  explicitly closed in this ledger beyond its shipped 4–8-byte cases. This turn therefore pivoted
+  to the fresh `fr-protocol` parsed inline-body sanitizer; the ledger had no prior
+  `sanitize_inline_body` UTF-8 run-copy attempt. Once any CR/LF was present, that helper decoded
+  and re-encoded every character through `chars().map(...).collect()`.
+- **Profile/attribution first:** before the production edit, the exact frozen current sanitizer
+  ran under strict remote `--profile release` on `vmi1152480` (`sha256
+  09e4722ccdab11b0614e59e0715749a89a8a7776e3fd0294458f02ba663f606a`). The exact
+  `bench_sanitize_inline_body_reference` frame carried **99.22% self-time** across 938
+  `instructions:u` samples with zero lost samples. This selected one copy-shape lever; RESP
+  framing, parser errors, string encoding, and command semantics were not changed.
+- **One concrete lever:** locate the first CR/LF byte, allocate the exact output capacity, copy
+  each valid UTF-8 clean run with `push_str`, and replace only CR/LF with one ASCII space. CR/LF
+  are one-byte UTF-8 code points, so every slice boundary is exact. The no-CR/LF path retains the
+  existing single `to_owned()` allocation.
+- **Foreground same-binary A/A+A/B:** after the required untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1152480` served both arms (`candidate sha256 = reference
+  sha256 = f700c0be2acbe5f05666b8be209c19716ad66476c05ff31843441beb16f911d8`). The trigger was
+  a valid **4,096-byte** multibyte UTF-8 body with CR at byte 3,071 and LF at byte 3,584. Across
+  nine position-balanced rounds of 20,000 sanitizations, candidate median was **695,371,124
+  instructions** versus reference **2,543,911,287**, or **3.658350708x reference/candidate**
+  (**72.665276% fewer instructions**). The A/A null median was **0.999999804x**, p05..p95
+  **[0.999998700, 0.999999977]**, null CV **0.000040%**, and effect CV **0.000031%**. The
+  production candidate sanitizer carried **96.36% self-time** (its non-inlined wrapper carried
+  another 0.30%), while the exact reference helper carried **98.93% self-time**, with zero lost
+  samples. The measured remote command took 20.4 seconds; total RCH wall time was about 76 seconds
+  because synchronization repeated a release build after the untimed warm-up.
+- **Behavior and gates:** the same binary asserted exact candidate/reference/oracle strings across
+  ten empty, clean, boundary, consecutive-dirty, NUL, multibyte-Unicode, emoji, and full-trigger
+  cases. A focused release parser test covered both SimpleString and Error frames and passed
+  remotely. Scoped production-library release Clippy passed with `bench-reference`, `--no-deps`,
+  and `-D warnings`; direct Rust 2024 rustfmt for the owned harness and whitespace checks passed.
+  The all-target Clippy gate reached only pre-existing `byte_char_slices` lints in
+  `benches/push_len_header_fastpath.rs:286` and the untouched test region of `src/lib.rs`; the
+  full-source rustfmt check likewise exposed only pre-existing formatting diffs outside the owned
+  hunks. Focused UBS found no critical issue implicating this lever. Implementation commit:
+  `e8a19fa89`.
+- **Boundary:** this changes only parsed SimpleString/Error bodies containing lone CR or LF. Clean
+  bodies retain the old allocation path; replacement characters, valid UTF-8 bytes, RESP framing,
+  incomplete-frame and error behavior, command semantics, persistence, replication ordering, and
+  network scheduling remain unchanged.
+
 ## 2026-07-15 CalmHeron: REJECT — fixed-shape canonical PSYNC2 CONTINUE reply parsing (`frankenredis-ac0uq`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
