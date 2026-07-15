@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — fixed-shape canonical FULLRESYNC reply parsing (`frankenredis-ry0zy`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
+  work in the multi-pass packed small-HASH representation bead; RESTORE and P16 were owned, and
+  the keyspace-RAM side index was blocked/owned. With recent store and protocol veins well mined,
+  this turn pivoted to the fresh live `fr-repl` handshake parser. The ledger had no prior
+  `parse_psync_reply`/canonical FULLRESYNC parsing attempt. Canonical replies still paid for
+  `split_ascii_whitespace`, generic token validation, and generic `u64` parsing.
+- **Profile/attribution first:** before the production edit, the exact frozen split/parse arm ran
+  under strict remote `--profile release` on `vmi1152480` (`sha256
+  3b1f34e61ddd38bbe6bcbd4287266285100b235abb9ca518424fc8f340a92e0b`). The exact
+  `bench_parse_psync_reply_reference` frame carried **39.88% self-time**,
+  `<u64>::from_ascii_radix` carried **30.59%**, and `malloc` carried **11.38%** across 362
+  `instructions:u` samples with zero lost samples. This selected one fixed-shape parsing lever;
+  handshake state, replication offsets, and noncanonical reply handling were not changed.
+- **One concrete lever:** recognize only `FULLRESYNC ` followed by an exact 40-byte replid, one
+  ASCII-space separator, and a nonempty decimal offset. Validate the replid slice and accumulate
+  the offset with checked decimal arithmetic, then allocate only the returned replid. Any other
+  shape, whitespace, malformed/overflowing offset, `CONTINUE`, or lowercase marker falls through
+  to the frozen split/parse implementation.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1152480` served both arms (`candidate sha256 = reference sha256 =
+  56b1bfb483457018750a31bbe9698de4bc28a46a261cacedf7cacdc41f60a9ed`). The trigger was the
+  **71-byte** reply `FULLRESYNC <40-byte replid> 1844674407370955161` with single spaces. Across
+  nine position-balanced rounds of 500,000 parses, candidate median was **434,809,647
+  instructions** versus reference **476,309,433**, or **1.095443333x reference/candidate**
+  (**8.712779% fewer instructions**). The A/A null median was **1.000000883x**, p05..p95
+  **[0.999999301, 1.000002176]**, null CV **0.000082%**, and effect CV **0.000091%**. Exact
+  candidate and reference helpers carried **60.23%** and **46.15% self-time**, respectively, with
+  zero lost samples. The measured remote command took 7.4 seconds; total RCH wall time was about
+  65 seconds because of remote sync and artifact retrieval after the required untimed warm-up.
+- **Behavior and gates:** the same binary asserted exact result/error parity across 15 canonical,
+  `CONTINUE`, PSYNC2, whitespace-varied, zero/max/overflow/negative/nondigit-offset, bad-replid,
+  extra-token, lowercase, empty, and 40-byte-Unicode cases. Both focused release unit tests passed
+  remotely. Scoped release Clippy passed all `fr-repl` targets with `bench-reference`, `--no-deps`,
+  and `-D warnings`; direct Rust 2024 rustfmt and whitespace checks passed. Focused UBS exited zero
+  with no critical issue; its warnings were pre-existing test/corpus inventory or bounded benchmark
+  assertions and indexing. Implementation commit: `71d2f3ac7`.
+- **Boundary:** this ships only canonical FULLRESYNC line parsing after the server has received the
+  PSYNC reply. `CONTINUE`/PSYNC2 and all noncanonical inputs retain the old parser; handshake state,
+  replication identity and offsets, backlog decisions, persistence, and ordering remain unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean runs while sanitizing inline replies (`frankenredis-1hkit`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
