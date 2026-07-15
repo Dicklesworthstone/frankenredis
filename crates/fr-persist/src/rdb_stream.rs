@@ -98,6 +98,48 @@ where
     F: AsRef<[u8]> + Clone,
     V: AsRef<[u8]> + Clone,
 {
+    encode_upstream_stream_listpacks3_impl::<true, _, _>(
+        entries,
+        watermark,
+        groups,
+        entries_added,
+        max_deleted,
+    )
+}
+
+#[cfg(feature = "bench-reference")]
+pub(crate) fn bench_encode_upstream_stream_listpacks3<const DIRECT_IDS: bool, F, V>(
+    entries: &[EncodableStreamEntry<F, V>],
+    watermark: Option<(u64, u64)>,
+    groups: &[RdbStreamConsumerGroup],
+    entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
+    encode_upstream_stream_listpacks3_impl::<DIRECT_IDS, _, _>(
+        entries,
+        watermark,
+        groups,
+        entries_added,
+        max_deleted,
+    )
+}
+
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn encode_upstream_stream_listpacks3_impl<const DIRECT_IDS: bool, F, V>(
+    entries: &[EncodableStreamEntry<F, V>],
+    watermark: Option<(u64, u64)>,
+    groups: &[RdbStreamConsumerGroup],
+    entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
     let mut buf = Vec::new();
     // fr-store's PackedStreamLog already yields entries in id order, so the
     // common DUMP/RDB-save path is already sorted — avoid the `to_vec()` + sort.
@@ -125,7 +167,7 @@ where
 
     super::rdb_encode_length(&mut buf, nodes.len());
     for node in &nodes {
-        super::rdb_encode_string(&mut buf, &stream_id_bytes(node.master.0, node.master.1));
+        encode_stream_id_string::<DIRECT_IDS>(&mut buf, node.master.0, node.master.1);
         super::rdb_encode_string(&mut buf, &node.listpack);
     }
 
@@ -149,7 +191,7 @@ where
 
     super::rdb_encode_length(&mut buf, groups.len());
     for group in groups {
-        encode_consumer_group(&mut buf, group)?;
+        encode_consumer_group::<DIRECT_IDS>(&mut buf, group)?;
     }
 
     Some(buf)
@@ -353,7 +395,10 @@ fn pack_stream_nodes<F: AsRef<[u8]>, V: AsRef<[u8]>>(
     Some(nodes)
 }
 
-fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> Option<()> {
+fn encode_consumer_group<const DIRECT_IDS: bool>(
+    buf: &mut Vec<u8>,
+    group: &RdbStreamConsumerGroup,
+) -> Option<()> {
     super::rdb_encode_string(buf, &group.name);
     super::rdb_encode_length(buf, usize::try_from(group.last_delivered_id_ms).ok()?);
     super::rdb_encode_length(buf, usize::try_from(group.last_delivered_id_seq).ok()?);
@@ -366,7 +411,7 @@ fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> O
     }
     super::rdb_encode_length(buf, pending_by_id.len());
     for ((entry_id_ms, entry_id_seq), pending) in &pending_by_id {
-        buf.extend_from_slice(&stream_id_bytes(*entry_id_ms, *entry_id_seq));
+        append_stream_id::<DIRECT_IDS>(buf, *entry_id_ms, *entry_id_seq);
         buf.extend_from_slice(&pending.last_delivered_ms.to_le_bytes());
         super::rdb_encode_length(buf, usize::try_from(pending.deliveries).ok()?);
     }
@@ -402,17 +447,41 @@ fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> O
             .unwrap_or(&[]);
         super::rdb_encode_length(buf, pending.len());
         for entry in pending {
-            buf.extend_from_slice(&stream_id_bytes(entry.entry_id_ms, entry.entry_id_seq));
+            append_stream_id::<DIRECT_IDS>(buf, entry.entry_id_ms, entry.entry_id_seq);
         }
     }
     Some(())
 }
 
-fn stream_id_bytes(ms: u64, seq: u64) -> Vec<u8> {
+fn stream_id_bytes_reference(ms: u64, seq: u64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&ms.to_be_bytes());
     bytes.extend_from_slice(&seq.to_be_bytes());
     bytes
+}
+
+fn stream_id_bytes(ms: u64, seq: u64) -> [u8; 16] {
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&ms.to_be_bytes());
+    bytes[8..].copy_from_slice(&seq.to_be_bytes());
+    bytes
+}
+
+fn encode_stream_id_string<const DIRECT_IDS: bool>(buf: &mut Vec<u8>, ms: u64, seq: u64) {
+    if DIRECT_IDS {
+        super::rdb_encode_string(buf, &stream_id_bytes(ms, seq));
+    } else {
+        super::rdb_encode_string(buf, &stream_id_bytes_reference(ms, seq));
+    }
+}
+
+fn append_stream_id<const DIRECT_IDS: bool>(buf: &mut Vec<u8>, ms: u64, seq: u64) {
+    if DIRECT_IDS {
+        buf.extend_from_slice(&ms.to_be_bytes());
+        buf.extend_from_slice(&seq.to_be_bytes());
+    } else {
+        buf.extend_from_slice(&stream_id_bytes_reference(ms, seq));
+    }
 }
 
 /// Encode `value` as a listpack integer element, byte-for-byte matching

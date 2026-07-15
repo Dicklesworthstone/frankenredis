@@ -86,3 +86,10 @@ harness = false
 name = "aof_manifest_plain_tokens"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-79sju) Profile + same-binary instruction proof for eliminating the temporary
+# 16-byte Vec allocated for every stream RDB macro-node / pending-entry ID.
+[[bench]]
+name = "stream_rdb_id_alloc"
+harness = false
+required-features = ["bench-reference"]

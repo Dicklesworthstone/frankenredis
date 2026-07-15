@@ -1354,6 +1354,30 @@ where
     )
 }
 
+/// Bench-only selector for the stream-ID materialization strategy.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[must_use]
+pub fn bench_encode_upstream_stream_listpacks3_payload<const DIRECT_IDS: bool, F, V>(
+    entries: &[EncodableStreamEntry<F, V>],
+    watermark: Option<(u64, u64)>,
+    groups: &[RdbStreamConsumerGroup],
+    entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
+    rdb_stream::bench_encode_upstream_stream_listpacks3::<DIRECT_IDS, _, _>(
+        entries,
+        watermark,
+        groups,
+        entries_added,
+        max_deleted,
+    )
+}
+
 /// Decode an upstream stream DUMP payload starting after the type byte.
 ///
 /// Returns `(value, consumed)` so callers can verify the payload boundary.
