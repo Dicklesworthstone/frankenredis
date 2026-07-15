@@ -40,6 +40,58 @@ pub fn evaluate_expiry(now_ms: u64, expires_at_ms: Option<u64>) -> ExpiryDecisio
     }
 }
 
+/// Frozen pre-`frankenredis-u6uwo` comparator for the same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+#[must_use]
+pub fn evaluate_expiry_reference(now_ms: u64, expires_at_ms: Option<u64>) -> ExpiryDecision {
+    // Equal-cost opaque tags keep LLVM from folding the two attributable bench entry points into
+    // one symbol before their arithmetic differs. They are bench-only and intentionally symmetric.
+    std::hint::black_box(0_u8);
+    match expires_at_ms {
+        None => ExpiryDecision {
+            should_evict: false,
+            remaining_ms: -1,
+        },
+        Some(deadline) if deadline < now_ms => ExpiryDecision {
+            should_evict: true,
+            remaining_ms: -2,
+        },
+        Some(deadline) => {
+            let remaining = deadline.saturating_sub(now_ms);
+            let remaining = i64::try_from(remaining).unwrap_or(i64::MAX);
+            ExpiryDecision {
+                should_evict: false,
+                remaining_ms: remaining,
+            }
+        }
+    }
+}
+
+/// No-inline entry point that keeps the production implementation attributable in profiles.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+#[must_use]
+pub fn evaluate_expiry_candidate(now_ms: u64, expires_at_ms: Option<u64>) -> ExpiryDecision {
+    std::hint::black_box(1_u8);
+    match expires_at_ms {
+        None => ExpiryDecision {
+            should_evict: false,
+            remaining_ms: -1,
+        },
+        Some(deadline) if deadline < now_ms => ExpiryDecision {
+            should_evict: true,
+            remaining_ms: -2,
+        },
+        Some(deadline) => ExpiryDecision {
+            should_evict: false,
+            remaining_ms: (deadline - now_ms).min(i64::MAX as u64) as i64,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::evaluate_expiry;

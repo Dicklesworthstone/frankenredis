@@ -9954,3 +9954,41 @@ stopped at the known pre-existing `fr-simd/src/lib.rs:795` `clippy::needless_ran
 exited 0 with zero critical findings, and `git diff --check` was green. Every Cargo invocation was
 strict remote RCH; no local fallback occurred. Rollback: make production `zrank_withscore` call
 `zrank_withscore_impl::<false>` and leave the same-binary reference scaffold in place.
+
+## 2026-07-15 CalmHeron: REJECT — `evaluate_expiry` dominated direct-subtract + clamp is instruction-identical (frankenredis-u6uwo)
+
+Negative-ledger-first inspection found no prior measurement of the arithmetic inside the shared
+`fr-expire::evaluate_expiry` primitive. The tested live-deadline arm first proves
+`deadline >= now_ms`, yet production uses `saturating_sub` followed by
+`i64::try_from(...).unwrap_or(i64::MAX)`. The one lever replaced those operations with direct
+subtraction and `min(i64::MAX as u64) as i64`, preserving the far-future clamp exactly.
+
+PROFILE-FIRST: an untimed remote `--no-run` warmed the new release bench target. Before the source
+edit, the frozen exact reference profiled at **12.83% self-time** with **164 samples, zero lost** on
+worker `vmi1152480`, release binary SHA-256
+`e0484522e1db089fae9b847f470d447cc5beb86a08c5c1220c451193be26bf9c`. The trigger was
+`Some(now_ms + 60_000)`, which necessarily enters the ordinary live-deadline conversion arm.
+
+MEASURED in one fail-closed foreground `cargo bench --profile release` invocation: both arms were
+in release binary SHA-256
+`e4b10347852392dee9f6cbab4615a04cf7a30fb140b3649a069d93e5e51b6d7b` on worker
+`vmi1153651`. The exact candidate and reference wrappers profiled at **10.23%** and **9.04%**
+self-time respectively (**272/273 samples, zero lost**). Nine position-balanced
+`instructions:u` A/A+A/B rounds of 10,000,000 calls gave:
+
+- candidate median **400,309,425** instructions; reference median **400,309,313**;
+- reference/candidate median **0.999999623**;
+- A/A null median **1.000000395**, p5..p95 **[0.999999500, 1.000002388]**,
+  null `cv_pct` **0.000089%**;
+- effect `cv_pct` **0.000095%**.
+
+The effect is centered inside the null band: LLVM already canonicalizes the guarded saturating
+subtraction and fallible conversion to the same machine work. **NO-SHIP:** production arithmetic
+was restored exactly. The same-binary benchmark retains both source forms behind the
+`bench-reference` feature so this rejection remains reproducible.
+
+Correctness was exact across eight `None`/expired/equal/live/`i64::MAX`/`u64::MAX` cases, and all
+seven `fr-expire` unit tests passed remotely. Targeted all-target Clippy with `-D warnings` passed.
+RCH fail-closed correctly refused `cargo fmt --check` as a non-compilation command; direct
+non-compiling `rustfmt --check` over the two owned Rust files passed. Every compiling Cargo command
+used `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec --`; no local Cargo fallback occurred.
