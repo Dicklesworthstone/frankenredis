@@ -8,6 +8,47 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — index explicit top-level `COMMAND INFO` lookups (`frankenredis-eey3d`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` ranked the unassigned packed small-HASH
+  representation bead highest, but it explicitly requires a multi-pass representation project;
+  the RESTORE quick wins were already in progress and the keyspace-RAM side index was blocked and
+  owned. This turn therefore pivoted to the fresh command-introspection path. Static attribution
+  found that every explicit `COMMAND INFO name [name ...]` linearly scanned up to 241 top-level
+  metadata rows before checking subcommands, despite the existing canonical case-insensitive
+  command index.
+- **Profile/attribution first:** before the edit, a strict-remote `--profile release` run on
+  `vmi1149989` profiled full-handler `COMMAND INFO ZUNIONSTORE` in a frozen reference arm
+  (`sha256 c55ac2c0dd1e0f9fc47369ddd6730d232f0bfcf9cbd3fcbd9deda34fedf181c8`). It collected
+  114 `instructions:u` samples with zero lost and assigned **10.51% exact self-time** to
+  `command_info_requested_row_scan`. This selected one lever; metadata construction and reply
+  encoding were not changed.
+- **One concrete lever:** resolve top-level names through `command_table_index`, then retain the
+  ordered linear `SUBCOMMAND_TABLE` fallback for namespaced commands. The existing visibility gate
+  still suppresses `SENTINEL` outside sentinel mode, and the index preserves ASCII-insensitive
+  lookup semantics.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms
+  (`candidate sha256 = reference sha256 = 5fc336ee0ab126549ac9dffcf9efd97b1c3ca78850c2d4394de1f51c99a6633c`).
+  Across nine position-balanced rounds of full `dispatch_argv`, candidate median was
+  **73,382,686 instructions** versus reference **80,004,187**, or **1.090223695x
+  reference/candidate** (about **8.28% fewer full-path instructions**). The A/A null median was
+  **0.999993950x**, p05..p95 **[0.999722027, 1.000307242]**, null CV **0.020619%**, and effect CV
+  **0.012200%**. Exact candidate and reference helpers carried **0.02%** and **10.30% self**,
+  respectively, with zero lost samples. The final remote run took **107.9 s**.
+- **Behavior and gates:** the same binary asserted identical full RESP2/RESP3 replies for
+  top-level, mixed-case, subcommand, missing, sentinel-hidden, and sentinel-enabled requests. A
+  focused exhaustive test compared indexed and frozen-scan results for every top-level and
+  subcommand name plus missing/Unicode/NUL cases and passed 1/1 under strict-remote release. The
+  owned `fr-command` release Clippy gate passed with `bench-reference`, `--no-deps`, and `-D
+  warnings`; only a pre-existing untouched `fr-store` dead-code warning was emitted. Direct
+  rustfmt and whitespace checks passed. UBS remained baseline-red on the monolithic file's broad
+  panic/assert/token-name heuristics; its Cargo-backed fmt, Clippy, check, and test-build subchecks
+  were clean, and no production finding implicated this lookup change.
+- **Boundary:** this ships only explicit top-level `COMMAND INFO` selection. Namespaced subcommand
+  fallback, full `COMMAND`, `COMMAND LIST/COUNT/DOCS`, metadata generation, RESP conversion, and
+  command dispatch remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — direct session lookup for `CLIENT LIST ID` (`frankenredis-65m4v`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` ranked the unassigned packed small-HASH
