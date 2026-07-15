@@ -31,3 +31,8 @@ required-features = ["bench-reference"]
 name = "replconf_ack_snapshot"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "pubsub_pending_clients"
+harness = false
+required-features = ["bench-reference"]

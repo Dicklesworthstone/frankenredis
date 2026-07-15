@@ -6459,12 +6459,29 @@ impl Runtime {
     }
 
     /// Return all client IDs that have pending pub/sub messages.
-    pub fn pubsub_clients_with_pending(&self) -> HashSet<u64> {
+    #[cfg_attr(any(test, feature = "bench-reference"), inline(never))]
+    pub fn pubsub_clients_with_pending(&self) -> Vec<u64> {
+        let mut client_ids = Vec::with_capacity(self.server.pubsub_outbox.len());
+        client_ids.extend(
+            self.server
+                .pubsub_outbox
+                .iter()
+                .filter(|(_, messages)| !messages.is_empty())
+                .map(|(&client_id, _)| client_id),
+        );
+        client_ids
+    }
+
+    /// Frozen pre-optimization pending-client snapshot for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn pubsub_clients_with_pending_hashset_reference(&self) -> HashSet<u64> {
         self.server
             .pubsub_outbox
             .iter()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(&id, _)| id)
+            .filter(|(_, messages)| !messages.is_empty())
+            .map(|(&client_id, _)| client_id)
             .collect()
     }
 
@@ -51480,6 +51497,36 @@ mod tests {
 
         let _subscriber = rt.swap_session(publisher);
         let _ = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn pending_pubsub_client_snapshot_matches_unique_outbox_keys() {
+        let mut rt = Runtime::default_strict();
+        let mut subscriber_ids = Vec::new();
+        for _ in 0..8 {
+            let subscriber = rt.new_session();
+            subscriber_ids.push(subscriber.client_id);
+            let publisher = rt.swap_session(subscriber);
+            rt.pubsub_subscribe(b"alpha".to_vec());
+            rt.swap_session(publisher);
+        }
+
+        assert_eq!(rt.pubsub_publish(b"alpha", b"payload"), 8);
+        let mut pending = rt.pubsub_clients_with_pending();
+        let mut reference: Vec<_> = rt
+            .pubsub_clients_with_pending_hashset_reference()
+            .into_iter()
+            .collect();
+        pending.sort_unstable();
+        reference.sort_unstable();
+        subscriber_ids.sort_unstable();
+        assert_eq!(pending, reference);
+        assert_eq!(pending, subscriber_ids);
+
+        for client_id in subscriber_ids {
+            assert_eq!(rt.drain_pubsub_for_client(client_id).len(), 1);
+        }
+        assert!(rt.pubsub_clients_with_pending().is_empty());
     }
 
     #[test]
