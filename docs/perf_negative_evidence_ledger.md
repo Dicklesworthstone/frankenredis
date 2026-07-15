@@ -8,6 +8,52 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — stream fixed Sentinel HELLO fields without a temporary vector (`frankenredis-rm9gq`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
+  representation bead unassigned; RESTORE work was already in progress, P16 was owned, and the
+  keyspace-RAM side index was blocked/owned. The recent runtime/store veins were well mined. A
+  fresh `fr-eventloop` inspection found only tiny inlined live helpers, so attribution moved to the
+  live Sentinel `__sentinel__:hello` ingest path. The ledger had no prior HELLO-parser attempt, and
+  `HelloMessage::parse` heap-collected all comma fields before validating the fixed eight-field
+  protocol.
+- **Profile/attribution first:** before the production edit, the exact frozen collect arm ran under
+  strict remote `--profile release` on `vmi1227854` (`sha256
+  aca7385dacc43d44225cc92926c6e332af4002826de8884d9c5beefd1f47bd4b`). The exact
+  `bench_parse_hello_collect_reference` frame carried **6.65% self-time** with zero lost
+  `instructions:u` samples. Its profile exposed `Split::next` at **15.41%**, `memchr` at
+  **18.44%**, `Vec::from_iter` at **2.76%**, raw-vector reserve at **4.04%**, and allocator
+  realloc frames. This selected one lever; numeric-prefix parsing and owned output fields were not
+  changed.
+- **One concrete lever:** borrow exactly eight fields directly from the split iterator, reject a
+  ninth field, then run the same port/epoch parsers and allocate the same four output strings. This
+  removes the temporary `Vec<&str>` allocation, growth, and indexing while preserving empty-field,
+  too-few, extra-field, trailing-comma, and Redis numeric-prefix behavior.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1153651` served both arms (`candidate sha256 = reference sha256 =
+  c449b191a3c146ebaf3ad33db04456facbb50dc5ef877a72db0f56af3845853d`). The trigger was a
+  valid 91-byte, eight-field Sentinel HELLO. Across nine position-balanced rounds of 100,000
+  parses, candidate median was **234,509,346 instructions** versus reference **338,903,956**, or
+  **1.445161721x reference/candidate** (about **30.80% fewer instructions**). The A/A null median
+  was **1.000001727x**, p05..p95 **[0.999998427, 1.000005032]**, null CV **0.000194%**, and effect
+  CV **0.000102%**. Exact candidate and reference helpers carried **16.05%** and **9.47%
+  self-time**, respectively, with zero lost samples. The actual remote compile-plus-profile-plus-
+  measurement phase took about 25 seconds; total RCH wall time including sync/retrieval was about
+  79 seconds.
+- **Behavior and gates:** the same binary asserted exact `Option<HelloMessage>` parity across ten
+  valid, invalid, empty-field, extra-field, trailing-comma, out-of-range-port, whitespace, and
+  numeric-prefix cases. Strict-remote release tests passed all **174** Sentinel tests (166 unit plus
+  8 golden), and strict-remote release Clippy passed all Sentinel targets with `bench-reference`
+  and `-D warnings`. The required workspace check reached unrelated pre-existing missing-method
+  errors in `crates/fr-store/benches/set_ex_rearm.rs`; it did not implicate the owned Sentinel
+  files. Direct Rust 2024 rustfmt and whitespace checks passed. Focused UBS with its local Cargo
+  categories disabled exited 0 with zero critical findings. One earlier run was rejected before
+  A/B because the profile symbol matcher used Rust's alternate demangled spelling; after matching
+  the emitted exact frame, the real A/B above ran once. Implementation commit: `019cd7434`.
+- **Boundary:** this ships only fixed-field extraction for inbound Sentinel HELLO messages. HELLO
+  encoding, Redis-compatible numeric-prefix parsing, output ownership, discovery actions, master
+  configuration epochs, pub/sub transport, and Sentinel scheduling remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — Sentinel replica selection borrows one-pass minimum instead of cloning and sorting all candidates (`frankenredis-s4joi`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
