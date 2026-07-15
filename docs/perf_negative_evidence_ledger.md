@@ -8,6 +8,49 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — pre-size decoded quoted config tokens (`frankenredis-g3vku`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the live ranked lanes owned,
+  blocked, or already in progress; the only unassigned perf bead, `frankenredis-b1o02`, remained
+  multi-day packed-`StrMap` representation work. Replication, event-loop, SIMD, Lua, set-algebra,
+  and recent store command veins were either explicitly saturated here or structurally larger than
+  one turn. The earlier config-tokenizer keep named quoted-token allocation as an unchanged
+  boundary, so this turn took that one bounded live startup-parser lever.
+- **Profile/attribution first:** before the production edit, the exact current quoted-token path
+  ran under strict remote `--profile release` on `vmi1149989` (`sha256
+  24e6ebff02fc3a4edf9511c25355bf350d0f65751b36d240aae645bff670bfd8`). The exact
+  `split_config_line_args_bytes` frame carried **38.65% self-time** with zero lost
+  `instructions:u` samples. `realloc` carried another 5.20%, Rust realloc 5.03%, raw-vector
+  `grow_one` 3.89%, and `finish_grow` 2.81%, selecting only decoded-token capacity.
+- **One concrete lever:** a quoted token can decode to no more bytes than remain in its source
+  line, so its output `Vec<u8>` now reserves that bounded upper limit once. A const-generic
+  bench-only reference retains the exact prior `Vec::new()` allocation while sharing every byte,
+  quote, escape, delimiter, NUL, and error branch with production.
+- **Foreground same-binary A/A+A/B:** after the required untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1149989` served both arms (`candidate sha256 = reference
+  sha256 = 1e33a164274ef2b517259316baa4367b4080bbec7b601b1bf6f40e5fc849b680`). The
+  **129-byte**, two-token `tls-ciphers` trigger contained one long quoted value. Across nine
+  position-balanced rounds of 120,000 parses, candidate median was **388,388,987 instructions**
+  versus reference **647,462,161**, or **1.667045696x reference/candidate** (**40.013642% fewer
+  instructions**). The A/A null median was **0.999999475x**, p05..p95
+  **[0.999997716, 1.000000216]**, null CV **0.000074%**, and effect CV **0.000086%**. Exact
+  candidate and reference helpers carried **76.42%** and **47.89% self-time**, respectively, with
+  zero lost samples. The measured remote phase took 7.1 seconds; total RCH wall time was 59.0
+  seconds including sync and retrieval.
+- **Behavior and gates:** the same binary asserted exact result parity across 16 plain, quoted,
+  escaped, embedded-quote, empty-quote, invalid-quote, NUL-tail, C-whitespace, literal-backslash,
+  non-UTF-8, and empty cases. Strict-remote release tests passed all **48** config tests (35 unit
+  plus 13 golden), and scoped release Clippy passed all config targets with `bench-reference` and
+  `-D warnings`. The required remote workspace all-target check reached only pre-existing missing
+  methods in `crates/fr-store/benches/set_ex_rearm.rs`; the owned crate had already checked clean.
+  Direct Rust 2024 rustfmt and whitespace checks passed. Focused UBS remained baseline-red on its
+  existing `policy.mode` token-name false positive and test/bench panic inventory; no finding
+  implicated this allocation hunk. Implementation commit: `6ba6049d4`.
+- **Boundary:** this changes only initial capacity for tokens whose current parser path encounters
+  a quote. Plain-token bulk copies, quote and escape decoding, invalid-input rejection, NUL and
+  whitespace semantics, directive normalization, TLS validation, and server startup ordering are
+  unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — pre-size quoted AOF manifest token storage (`frankenredis-q11bi`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` again left the ranked live perf lanes
