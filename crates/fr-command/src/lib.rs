@@ -18993,6 +18993,56 @@ fn command_info_requested_row(cmd_name: &str, store: &Store) -> Option<CommandMe
     command_info_requested_row_indexed(cmd_name, store)
 }
 
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_DOCS_SCAN_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen linear-scan arm for the `COMMAND DOCS` A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_docs_scan_reference(reference: bool) {
+    BENCH_COMMAND_DOCS_SCAN_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Frozen current lookup for explicit `COMMAND DOCS name [name ...]` requests.
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+fn command_docs_requested_row_scan(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .chain(SUBCOMMAND_TABLE.iter())
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+/// Resolve a top-level docs name through the canonical index, retaining the
+/// ordered subcommand scan for namespaced fallbacks.
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_docs_requested_row_indexed(
+    cmd_name: &str,
+    store: &Store,
+) -> Option<CommandMetadataRow> {
+    if let Some(index) = command_table_index(cmd_name.as_bytes()) {
+        let row = COMMAND_TABLE[index];
+        if command_table_row_is_visible(row.0, store) {
+            return Some(row);
+        }
+    }
+    SUBCOMMAND_TABLE
+        .iter()
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+fn command_docs_requested_row(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_DOCS_SCAN_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return command_docs_requested_row_scan(cmd_name, store);
+    }
+    command_docs_requested_row_indexed(cmd_name, store)
+}
+
 /// Number of top-level commands visible in the current mode — the `COMMAND COUNT`
 /// reply. Shared by the generic command handler and the borrowed fast path so
 /// both report the identical count (the visibility filter only hides `sentinel`
@@ -19190,16 +19240,8 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                     // accepts subcommand fullnames like "module|help"
                     // and "client|kill"; fall back to SUBCOMMAND_TABLE
                     // when the top-level table doesn't carry the row.
-                    let row = COMMAND_TABLE
-                        .iter()
-                        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-                        .or_else(|| {
-                            SUBCOMMAND_TABLE
-                                .iter()
-                                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-                        })?;
-                    let &(name, arity, flags, first_key, last_key, step) = row;
+                    let (name, arity, flags, first_key, last_key, step) =
+                        command_docs_requested_row(cmd_name, store)?;
                     Some((
                         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
                         command_docs_entry(name, arity, flags, first_key, last_key, step, resp),
