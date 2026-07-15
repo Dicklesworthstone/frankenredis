@@ -257,7 +257,108 @@ pub fn split_config_line_args(line: &str) -> Result<Vec<Vec<u8>>, ConfigFilePars
     split_config_line_args_bytes(line.as_bytes())
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn split_config_line_args_bytes(
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    let mut pos = 0;
+    let mut args = Vec::new();
+
+    loop {
+        while byte_at(bytes, pos) != 0 && is_c_isspace(byte_at(bytes, pos)) {
+            pos += 1;
+        }
+
+        if byte_at(bytes, pos) == 0 {
+            return Ok(args);
+        }
+
+        let plain_start = pos;
+        while !matches!(
+            byte_at(bytes, pos),
+            b' ' | b'\n' | b'\r' | b'\t' | 0 | b'"' | b'\''
+        ) {
+            pos += 1;
+        }
+
+        if !matches!(byte_at(bytes, pos), b'"' | b'\'') {
+            args.push(bytes[plain_start..pos].to_vec());
+            continue;
+        }
+        pos = plain_start;
+
+        let mut current = Vec::new();
+        let mut in_double_quote = false;
+        let mut in_single_quote = false;
+        let mut done = false;
+
+        while !done {
+            let byte = byte_at(bytes, pos);
+            if in_double_quote {
+                if byte == b'\\'
+                    && byte_at(bytes, pos + 1) == b'x'
+                    && is_ascii_hex(byte_at(bytes, pos + 2))
+                    && is_ascii_hex(byte_at(bytes, pos + 3))
+                {
+                    let decoded = (hex_value(byte_at(bytes, pos + 2)) << 4)
+                        + hex_value(byte_at(bytes, pos + 3));
+                    current.push(decoded);
+                    pos += 3;
+                } else if byte == b'\\' && byte_at(bytes, pos + 1) != 0 {
+                    pos += 1;
+                    current.push(match byte_at(bytes, pos) {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'b' => 0x08,
+                        b'a' => 0x07,
+                        other => other,
+                    });
+                } else if byte == b'"' {
+                    if byte_at(bytes, pos + 1) != 0 && !is_c_isspace(byte_at(bytes, pos + 1)) {
+                        return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                    }
+                    done = true;
+                } else if byte == 0 {
+                    return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else {
+                    current.push(byte);
+                }
+            } else if in_single_quote {
+                if byte == b'\\' && byte_at(bytes, pos + 1) == b'\'' {
+                    pos += 1;
+                    current.push(b'\'');
+                } else if byte == b'\'' {
+                    if byte_at(bytes, pos + 1) != 0 && !is_c_isspace(byte_at(bytes, pos + 1)) {
+                        return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                    }
+                    done = true;
+                } else if byte == 0 {
+                    return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else {
+                    current.push(byte);
+                }
+            } else {
+                match byte {
+                    b' ' | b'\n' | b'\r' | b'\t' | 0 => done = true,
+                    b'"' => in_double_quote = true,
+                    b'\'' => in_single_quote = true,
+                    other => current.push(other),
+                }
+            }
+
+            if byte != 0 {
+                pos += 1;
+            }
+        }
+
+        args.push(current);
+    }
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_split_config_line_args_reference(
     bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
     let mut pos = 0;

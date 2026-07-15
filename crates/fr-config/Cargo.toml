@@ -3,4 +3,12 @@ name = "fr-config"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+bench-reference = []
+
 [dependencies]
+
+[[bench]]
+name = "config_plain_tokens"
+harness = false
+required-features = ["bench-reference"]
