@@ -275,12 +275,35 @@ pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &Parse
     }
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn record_info_response(
     instance: &mut SentinelRedisInstance,
     info: impl Into<String>,
     now: u64,
 ) {
     let info = info.into();
+    let mut parsed = parse_info_response(&info);
+    let master_host = parsed.master_host.take();
+    let run_id = parsed.run_id.take();
+    apply_info_to_instance(instance, &parsed, now);
+    if let Some(master_host) = master_host {
+        instance.slave_master_host = Some(master_host);
+    }
+    if let Some(run_id) = run_id {
+        instance.runid = Some(run_id);
+    }
+    instance.info = Some(info);
+}
+
+/// Frozen clone-based INFO apply path for the same-binary performance harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_record_info_response_clone_reference(
+    instance: &mut SentinelRedisInstance,
+    info: String,
+    now: u64,
+) {
     let parsed = parse_info_response(&info);
     apply_info_to_instance(instance, &parsed, now);
     instance.info = Some(info);

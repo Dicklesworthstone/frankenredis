@@ -21,3 +21,8 @@ required-features = ["bench-reference"]
 name = "hello_message_parse"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "info_response_apply"
+harness = false
+required-features = ["bench-reference"]
