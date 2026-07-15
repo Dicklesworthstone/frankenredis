@@ -3,4 +3,12 @@ name = "fr-repl"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+bench-reference = []
+
 [dependencies]
+
+[[bench]]
+name = "psync_reply_canonical"
+harness = false
+required-features = ["bench-reference"]

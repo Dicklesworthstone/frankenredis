@@ -201,8 +201,53 @@ pub enum PsyncReply {
 }
 
 const REDIS_RUN_ID_BYTES: usize = 40;
+const FULLRESYNC_PREFIX: &[u8] = b"FULLRESYNC ";
+
+#[inline(always)]
+fn parse_canonical_fullresync(line: &str) -> Option<PsyncReply> {
+    const REPLID_START: usize = FULLRESYNC_PREFIX.len();
+    const REPLID_END: usize = REPLID_START + REDIS_RUN_ID_BYTES;
+    const OFFSET_START: usize = REPLID_END + 1;
+
+    let bytes = line.as_bytes();
+    if bytes.len() <= OFFSET_START
+        || !bytes.starts_with(FULLRESYNC_PREFIX)
+        || bytes[REPLID_END] != b' '
+    {
+        return None;
+    }
+
+    let replid_bytes = &bytes[REPLID_START..REPLID_END];
+    if replid_bytes.iter().any(u8::is_ascii_whitespace) {
+        return None;
+    }
+
+    let mut offset = 0_u64;
+    for &byte in &bytes[OFFSET_START..] {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        offset = offset.checked_mul(10)?.checked_add(u64::from(digit))?;
+    }
+
+    let replid = std::str::from_utf8(replid_bytes).ok()?.to_owned();
+    Some(PsyncReply::FullResync {
+        replid,
+        offset: ReplOffset(offset),
+    })
+}
 
 pub fn parse_psync_reply(line: &str) -> Result<PsyncReply, ReplError> {
+    parse_psync_reply_impl::<true>(line)
+}
+
+#[inline(always)]
+fn parse_psync_reply_impl<const CANONICAL_FAST: bool>(line: &str) -> Result<PsyncReply, ReplError> {
+    if CANONICAL_FAST && let Some(reply) = parse_canonical_fullresync(line) {
+        return Ok(reply);
+    }
+
     let mut parts = line.split_ascii_whitespace();
     let Some(kind) = parts.next() else {
         return Err(ReplError::PsyncReplyStateMismatch {
@@ -245,6 +290,24 @@ pub fn parse_psync_reply(line: &str) -> Result<PsyncReply, ReplError> {
         replid: replid.to_string(),
         offset: ReplOffset(offset),
     })
+}
+
+/// Bench-only entry point for the production PSYNC reply parser.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_psync_reply_candidate(line: &str) -> Result<PsyncReply, ReplError> {
+    std::hint::black_box(0_u8);
+    parse_psync_reply_impl::<true>(line)
+}
+
+/// Frozen pre-optimization PSYNC reply parser for same-binary proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_psync_reply_reference(line: &str) -> Result<PsyncReply, ReplError> {
+    std::hint::black_box(1_u8);
+    parse_psync_reply_impl::<false>(line)
 }
 
 #[must_use]
