@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — index exact static `CONFIG GET` lookups (`frankenredis-0fedn`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
+  representation bead unassigned; the RESTORE quick wins were already in progress and the
+  keyspace-RAM side index was blocked/owned. This turn therefore pivoted to the fresh runtime
+  configuration path. Static inspection found that an exact late-registry request such as `CONFIG
+  GET tracking-table-max-keys` still walked every dynamic matcher and the roughly 200-row ordered
+  static registry.
+- **Profile/attribution first:** before the production edit, a strict-remote `--profile release`
+  reference run on `vmi1149989` profiled the full runtime handler in a frozen scan arm (`sha256
+  d088a022336d0589af54d5e897b6b1ab6b84549d5622634e615ab36c4787bc7b`). It collected 527
+  `instructions:u` samples with zero lost and assigned **25.37% exact self-time** to
+  `collect_config_entries`; `fr_store::glob_match` accounted for another **54.39%**. This selected
+  one lever; dynamic value production, glob ordering, and reply encoding were not changed.
+- **One concrete lever:** build a lazy foldhash side index over non-dynamic public static
+  parameters and use it only for exact literal requests. Dynamic names, hidden names, globs,
+  unknown names, and mixed multi-pattern tails retain the frozen scan fallback. The indexed path
+  still reads `config_overrides`, echoes the caller's literal casing, and feeds the existing
+  case-insensitive dedupe and RESP2/RESP3 assembly.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms (`candidate sha256 = reference sha256 =
+  bcd4398e1a01f7fe5da20ae87ce6544577b5be71d761d9688212fec89bb253a0`). Across nine
+  position-balanced rounds of the full runtime command path, candidate median was **50,787,398
+  instructions** versus reference **304,961,708**, or **6.004994773x reference/candidate** (about
+  **83.35% fewer full-path instructions**). The A/A null median was **1.000012745x**, p05..p95
+  **[0.999975152, 1.000784780]**, null CV **0.028001%**, and effect CV **0.029523%**. Exact
+  candidate and reference helpers carried **1.91%** and **23.31% self**, respectively, with zero
+  lost samples. The final remote invocation took **139.6 s**, including an RCH cache-miss rebuild;
+  the actual measurement loop remained short.
+- **Behavior and gates:** the same binary asserted identical full replies for RESP2/RESP3,
+  lowercase and mixed-case static names, hidden and dynamic names, globs, unknown names,
+  multi-pattern dedupe, and a live `CONFIG SET` override. A focused strict-remote release test
+  exhaustively compared both arms for every public and hidden static registry entry in original
+  and uppercase spelling and passed 1/1. Strict-remote release Clippy for the changed runtime
+  library with `bench-reference`, `--no-deps`, and `-D warnings` passed; only the pre-existing
+  untouched `fr-store` dead-code warning appeared. Direct rustfmt/whitespace checks passed. UBS
+  remained baseline-red on broad monolithic-file panic/assert/token-name heuristics; no finding
+  implicated the indexed production path.
+- **Boundary:** this ships only exact non-dynamic public static-name selection. Dynamic values,
+  hidden configuration, glob/wildcard ordering, unknown-name handling, `CONFIG SET`, multi-pattern
+  dedupe, RESP conversion, and command dispatch remain behaviorally unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — index explicit top-level `COMMAND INFO` lookups (`frankenredis-eey3d`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` ranked the unassigned packed small-HASH
