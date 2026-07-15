@@ -33,7 +33,30 @@ pub fn select_slave(master: &SentinelRedisInstance) -> Option<String> {
     select_slave_at(master, 0, PING_PERIOD_MS, INFO_PERIOD_MS)
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn select_slave_at(
+    master: &SentinelRedisInstance,
+    now_ms: u64,
+    ping_period_ms: u64,
+    info_period_ms: u64,
+) -> Option<String> {
+    let mut best = None;
+    for (key, slave) in &master.slaves {
+        if !is_slave_eligible(master, slave, now_ms, ping_period_ms, info_period_ms) {
+            continue;
+        }
+        match best {
+            Some((_, current))
+                if compare_slave_instances(slave, current) != std::cmp::Ordering::Less => {} // ubs:ignore - rank ordering comparison, not a secret
+            _ => best = Some((key, slave)),
+        }
+    }
+    best.map(|(key, _)| key.clone())
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_select_slave_sort_all_reference(
     master: &SentinelRedisInstance,
     now_ms: u64,
     ping_period_ms: u64,
@@ -102,6 +125,7 @@ fn is_slave_eligible(
     true
 }
 
+#[cfg(feature = "bench-reference")]
 fn compare_slaves(a: &SlaveScore, b: &SlaveScore) -> std::cmp::Ordering {
     if a.priority != b.priority {
         return a.priority.cmp(&b.priority);
@@ -109,6 +133,26 @@ fn compare_slaves(a: &SlaveScore, b: &SlaveScore) -> std::cmp::Ordering {
 
     if a.repl_offset != b.repl_offset {
         return b.repl_offset.cmp(&a.repl_offset);
+    }
+
+    match (&a.runid, &b.runid) {
+        (Some(ra), Some(rb)) => cmp_ascii_case_insensitive(ra, rb),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_slave_instances(
+    a: &SentinelRedisInstance,
+    b: &SentinelRedisInstance,
+) -> std::cmp::Ordering {
+    if a.slave_priority != b.slave_priority {
+        return a.slave_priority.cmp(&b.slave_priority);
+    }
+
+    if a.slave_repl_offset != b.slave_repl_offset {
+        return b.slave_repl_offset.cmp(&a.slave_repl_offset);
     }
 
     match (&a.runid, &b.runid) {
@@ -475,6 +519,18 @@ mod tests {
 
         let selected = select_slave(&master).unwrap();
         assert_eq!(selected, "10.0.0.10:6379");
+    }
+
+    #[test]
+    fn select_slave_preserves_first_iteration_winner_for_exact_score_ties() {
+        let mut master = make_master_with_slaves();
+        for slave in master.slaves.values_mut() {
+            slave.slave_repl_offset = 1_000;
+            slave.runid = Some("same-runid".to_owned());
+        }
+        let first = master.slaves.keys().next().unwrap().clone();
+
+        assert_eq!(select_slave(&master), Some(first));
     }
 
     #[test]
