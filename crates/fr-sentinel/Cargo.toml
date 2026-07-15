@@ -16,3 +16,8 @@ proptest.workspace = true
 name = "select_slave"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "hello_message_parse"
+harness = false
+required-features = ["bench-reference"]

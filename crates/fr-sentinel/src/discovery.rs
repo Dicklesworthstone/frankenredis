@@ -31,23 +31,52 @@ impl HelloMessage {
         )
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn parse(message: &str) -> Option<HelloMessage> {
-        let parts: Vec<&str> = message.split(',').collect();
-        if parts.len() != 8 {
+        let mut parts = message.split(',');
+        let sentinel_ip = parts.next()?;
+        let sentinel_port = parts.next()?;
+        let sentinel_runid = parts.next()?;
+        let current_epoch = parts.next()?;
+        let master_name = parts.next()?;
+        let master_ip = parts.next()?;
+        let master_port = parts.next()?;
+        let master_config_epoch = parts.next()?;
+        if parts.next().is_some() {
             return None;
         }
 
         Some(HelloMessage {
-            sentinel_ip: parts[0].to_string(),
-            sentinel_port: parse_redis_hello_port(parts[1])?,
-            sentinel_runid: parts[2].to_string(),
-            current_epoch: parse_redis_strtoull_prefix(parts[3]),
-            master_name: parts[4].to_string(),
-            master_ip: parts[5].to_string(),
-            master_port: parse_redis_hello_port(parts[6])?,
-            master_config_epoch: parse_redis_strtoull_prefix(parts[7]),
+            sentinel_ip: sentinel_ip.to_string(),
+            sentinel_port: parse_redis_hello_port(sentinel_port)?,
+            sentinel_runid: sentinel_runid.to_string(),
+            current_epoch: parse_redis_strtoull_prefix(current_epoch),
+            master_name: master_name.to_string(),
+            master_ip: master_ip.to_string(),
+            master_port: parse_redis_hello_port(master_port)?,
+            master_config_epoch: parse_redis_strtoull_prefix(master_config_epoch),
         })
     }
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_parse_hello_collect_reference(message: &str) -> Option<HelloMessage> {
+    let parts: Vec<&str> = message.split(',').collect();
+    if parts.len() != 8 {
+        return None;
+    }
+
+    Some(HelloMessage {
+        sentinel_ip: parts[0].to_string(),
+        sentinel_port: parse_redis_hello_port(parts[1])?,
+        sentinel_runid: parts[2].to_string(),
+        current_epoch: parse_redis_strtoull_prefix(parts[3]),
+        master_name: parts[4].to_string(),
+        master_ip: parts[5].to_string(),
+        master_port: parse_redis_hello_port(parts[6])?,
+        master_config_epoch: parse_redis_strtoull_prefix(parts[7]),
+    })
 }
 
 fn parse_redis_hello_port(value: &str) -> Option<u16> {
@@ -486,6 +515,7 @@ mod tests {
         assert!(HelloMessage::parse("not,enough,parts").is_none());
         assert!(HelloMessage::parse("").is_none());
         assert!(HelloMessage::parse("ip,-1,runid,1,mymaster,host,6379,1").is_none());
+        assert!(HelloMessage::parse("ip,26379,runid,1,mymaster,host,6379,1,extra").is_none());
     }
 
     #[test]
