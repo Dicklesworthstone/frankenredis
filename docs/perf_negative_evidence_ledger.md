@@ -8,6 +8,52 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — bulk-copy plain AOF manifest tokens (`frankenredis-2lfnl`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
+  work in the multi-pass packed small-HASH representation bead; the keyspace-RAM side index was
+  blocked/owned and the recent store/runtime veins were well mined. Fresh inspection moved to the
+  live `fr-persist` AOF startup/recovery path. The ledger had no prior manifest-tokenizer attempt,
+  and `split_manifest_args` still appended every byte of ordinary six-token manifest lines into
+  independently growing `String`s.
+- **Profile/attribution first:** before the production edit, the exact frozen tokenizer ran under
+  strict remote `--profile release` on `vmi1152480` (`sha256
+  36791a8271495bcb155f2f7e670439028ab6afdb5d90e34d0d621aab1e5b8d43`). The exact
+  `bench_split_manifest_args_reference` frame carried **17.89% self-time** with zero lost
+  `instructions:u` samples; raw-vector reserve, `malloc`, `realloc`, Rust realloc, and `memmove`
+  frames dominated the remaining attributed work. This selected one lever; manifest validation,
+  entry ordering, file loading, and replay were not changed.
+- **One concrete lever:** scan an ASCII token until whitespace or the original quote/backslash
+  syntax. A fully plain token copies its exact source slice once; encountering a quote,
+  backslash, or non-ASCII byte resets to the frozen byte-by-byte state machine. That fallback
+  deliberately preserves the parser's existing quoted, escaped, malformed, and byte-to-character
+  behavior.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms (`candidate sha256 = reference sha256 =
+  a4c4cdd1521c939d997ffc6ddf0e0909306e29a349799f92d5fe48c229b09b31`). The trigger was the
+  45-byte, six-token line `file appendonly.aof.42.incr.aof seq 42 type i`. Across nine
+  position-balanced rounds of 100,000 parses, candidate median was **264,706,795 instructions**
+  versus reference **379,863,783**, or **1.435036339x reference/candidate** (**30.3153% fewer
+  instructions**). The A/A null median was **1.000000476x**, p05..p95
+  **[0.999997118, 1.000002852]**, null CV **0.000151%**, and effect CV **0.000144%**. Exact
+  candidate and reference helpers carried **21.63%** and **21.30% self-time**, respectively, with
+  zero lost samples. The profile and nine-round measurement stayed short once built; total RCH
+  wall time was about 120 seconds because the remote invocation repeated a release rebuild after
+  its untimed warm-up.
+- **Behavior and gates:** the same binary asserted exact result parity across 16 plain, tabbed,
+  quoted, escaped, mixed-quote, empty-quote, malformed, extra-field, non-ASCII, whitespace-only,
+  and empty inputs. Strict-remote release tests passed all **23** focused manifest tests (13 unit,
+  2 fuzz-smoke, and 8 golden), and strict-remote release Clippy passed every `fr-persist` target
+  with `bench-reference`, `--no-deps`, and `-D warnings`. The required workspace check reached
+  unrelated pre-existing missing-method errors in `crates/fr-store/benches/set_ex_rearm.rs`; it
+  did not implicate the owned persistence files. The owned bench passed direct Rust 2024 rustfmt
+  and whitespace checks. Focused UBS remained baseline-red on the persistence module's existing
+  panic/assert/indexing inventory; no finding implicated the new tokenizer branch. Implementation
+  commit: `57bcf5346`.
+- **Boundary:** this ships only allocation behavior for ordinary ASCII AOF-manifest tokens.
+  Quoted/escaped and non-ASCII token semantics, invalid-line rejection, manifest validation,
+  atomic file replacement, AOF loading, and replay ordering remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — bulk-copy ordinary Redis config tokens (`frankenredis-frfnt`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
