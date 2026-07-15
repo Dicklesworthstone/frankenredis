@@ -1,7 +1,7 @@
-//! Same-binary proof for ordinary Redis configuration-line tokenization.
+//! Same-binary proof for Redis configuration-line tokenization.
 //!
-//! The frozen reference pushes plain-token bytes one at a time. The candidate bulk-copies tokens
-//! that contain no quote and retains the original state machine for quoted or escaped input.
+//! The current experiment freezes the unreserved quoted-token state machine and compares it with
+//! pre-sizing the decoded token from the remaining source-line length.
 
 use std::{
     env,
@@ -12,11 +12,11 @@ use std::{
 };
 
 use fr_config::{
-    ConfigFileParseErrorReason, bench_split_config_line_args_reference,
+    ConfigFileParseErrorReason, bench_split_config_line_args_unreserved_reference,
     split_config_line_args_bytes,
 };
 
-const LINE: &[u8] = b"client-output-buffer-limit normal 0 0 0";
+const LINE: &[u8] = b"tls-ciphers \"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305\"";
 const PROFILE_REPEATS: usize = 300_000;
 const STAT_REPEATS: usize = 120_000;
 const STAT_ROUNDS: usize = 9;
@@ -48,13 +48,13 @@ impl Arm {
     const fn profile_symbol(self) -> &'static str {
         match self {
             Self::Candidate => "fr_config::split_config_line_args_bytes",
-            Self::Reference => "bench_split_config_line_args_reference",
+            Self::Reference => "bench_split_config_line_args_unreserved_reference",
         }
     }
 
     const fn wrong_profile_symbol(self) -> &'static str {
         match self {
-            Self::Candidate => "bench_split_config_line_args_reference",
+            Self::Candidate => "bench_split_config_line_args_unreserved_reference",
             Self::Reference => "fr_config::split_config_line_args_bytes",
         }
     }
@@ -63,7 +63,7 @@ impl Arm {
 fn parse(line: &[u8], arm: Arm) -> ParseResult {
     match arm {
         Arm::Candidate => split_config_line_args_bytes(black_box(line)),
-        Arm::Reference => bench_split_config_line_args_reference(black_box(line)),
+        Arm::Reference => bench_split_config_line_args_unreserved_reference(black_box(line)),
     }
 }
 
@@ -274,7 +274,7 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
 fn run_profile(executable: &Path, arms: &[Arm]) -> Result<(), String> {
     println!("WORKER_ID {}", worker_id());
     println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
-    println!("TRIGGER bytes={} tokens=5 quotes=none", LINE.len());
+    println!("TRIGGER bytes={} tokens=2 quotes=1", LINE.len());
     for &arm in arms {
         let status = Command::new(executable)
             .args(["--child", arm.name(), "100"])
@@ -399,6 +399,11 @@ fn main() -> Result<(), String> {
     let executable = env::current_exe()
         .map_err(|error| format!("could not resolve bench executable: {error}"))?;
     correctness_gate();
+    let candidate_profile_only = env::args().any(|arg| arg == "--profile-candidate-only");
+    if candidate_profile_only {
+        return run_profile(&executable, &[Arm::Candidate])
+            .map_err(|error| format!("PROFILE INVALID: {error}"));
+    }
     let reference_profile_only = env::args().any(|arg| arg == "--profile-reference-only");
     if reference_profile_only {
         return run_profile(&executable, &[Arm::Reference])

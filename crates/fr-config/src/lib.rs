@@ -261,6 +261,13 @@ pub fn split_config_line_args(line: &str) -> Result<Vec<Vec<u8>>, ConfigFilePars
 pub fn split_config_line_args_bytes(
     bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    split_config_line_args_bytes_impl::<true>(bytes)
+}
+
+#[inline(always)]
+fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
     let mut pos = 0;
     let mut args = Vec::new();
 
@@ -287,7 +294,15 @@ pub fn split_config_line_args_bytes(
         }
         pos = plain_start;
 
-        let mut current = Vec::new();
+        // A quoted token can decode to no more bytes than remain in its source line. Reserving
+        // that upper bound removes the repeated 8 -> 16 -> ... growth for long passwords,
+        // cipher lists, paths, and rename-command aliases. The reference arm retains the exact
+        // prior unreserved allocation while sharing every parsing branch below.
+        let mut current = if PRESIZE_QUOTED {
+            Vec::with_capacity(bytes.len().saturating_sub(plain_start))
+        } else {
+            Vec::new()
+        };
         let mut in_double_quote = false;
         let mut in_single_quote = false;
         let mut done = false;
@@ -354,6 +369,14 @@ pub fn split_config_line_args_bytes(
 
         args.push(current);
     }
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_split_config_line_args_unreserved_reference(
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    split_config_line_args_bytes_impl::<false>(bytes)
 }
 
 #[cfg(feature = "bench-reference")]
