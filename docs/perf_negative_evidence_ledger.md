@@ -8,6 +8,52 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — index explicit `COMMAND DOCS` lookups (`frankenredis-pgeew`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
+  blocked, or already in progress; the only unassigned explicit perf bead,
+  `frankenredis-b1o02`, remained multi-day packed-`StrMap` representation work. A proposed fresh
+  Sentinel reconfiguration seam was rejected at the caller-attribution gate because it had no
+  production callers. The earlier indexed `COMMAND INFO` keep explicitly left `COMMAND DOCS`
+  unchanged, selecting this bounded sibling command path instead.
+- **Profile/attribution first:** before changing production lookup, the untouched explicit-name
+  scan ran under strict remote `--profile release` on `vmi1149989` (binary sha256
+  `1a10d1f0ffa62fd24af6274af641e89ccf89af7de7834f108d3ff36f96dcd4c7`). For the late
+  top-level `COMMAND DOCS ZCARD` trigger, exact `command_docs_requested_row_scan` carried
+  **11.57% self-time**, `command_docs_entry` carried **12.62%**, `json_arg_to_resp` carried
+  **7.52%**, and allocator/free frames carried **11.24%** combined, across 122
+  `instructions:u` samples with zero lost samples. This selected only explicit-name lookup.
+- **One concrete lever:** top-level exact names now resolve through the canonical
+  case-insensitive `command_table_index`; the ordered `SUBCOMMAND_TABLE` fallback and visibility
+  filter remain unchanged. A bench-only frozen reference retains the prior visible-command scan,
+  and both arms continue through the full `COMMAND DOCS` handler.
+- **Foreground same-binary A/A+A/B:** after the required untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1149989` served both arms (candidate sha256 = reference
+  sha256 = `f1e92d4783b4baa3cf3229e2eb84396fe66f4c8e1ef5ff334fe672c26538e516`). Across nine
+  position-balanced rounds of 2,500 full-handler calls, candidate median was **27,696,346
+  instructions** versus reference **37,093,715**, or **1.339289821x reference/candidate**
+  (**25.333562% fewer instructions**). The A/A null median was **1.000005199x**, p05..p95
+  **[0.999985846, 1.000708765]**, null CV **0.022185%**, and effect CV **0.021718%**. Exact
+  `command_table_index` and frozen scan frames carried **1.29%** and **9.33% self-time** across
+  356 and 152 samples, respectively, with zero lost samples.
+- **Ledger integrity:** two earlier attribution-only binaries
+  (`37a0838f498fb04e0fe8f0c5478f4607715719ce8463f8b1eda688c7e359fe6f` and
+  `762d1f2e199c373271922488be408c05bcd384c431b04437fd1df2b9e7066dcc`) aborted before the
+  reference profile and before A/B because the optimizer tail-merged the candidate wrapper. They
+  are explicitly **INVALID**, not timing evidence; the final run gates the optimizer-visible
+  indexed primitive itself.
+- **Behavior and gates:** the same binary asserted exact full-handler parity for RESP2 and RESP3,
+  top-level and mixed-case names, subcommands, missing names, and both hidden and enabled Sentinel
+  modes. Strict-remote release testing passed all **54** selected `command_docs` tests, including
+  byte-layout, schema, deprecation, subcommand, and RESP metamorphic coverage. Scoped strict-remote
+  release Clippy passed the owned library with `bench-reference`, `--no-deps`, and `-D warnings`;
+  it surfaced only the pre-existing `fr-store` digest-method warning outside this change. Direct
+  bench rustfmt and commit whitespace checks passed; full-source rustfmt remained blocked only by
+  pre-existing unrelated drift. Implementation commit: `cde319e65`.
+- **Boundary:** only explicit `COMMAND DOCS name [name ...]` row selection changed. Unfiltered
+  `COMMAND DOCS`, subcommand precedence, Sentinel visibility, metadata contents, RESP2/RESP3
+  shapes, error behavior, command dispatch, and store state are unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — write stream RDB IDs without allocation (`frankenredis-79sju`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
