@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean runs while sanitizing inline replies (`frankenredis-1hkit`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
+  work in the multi-pass packed small-HASH representation bead; RESTORE and P16 were owned, and
+  the keyspace-RAM side index was blocked/owned. With the recent store veins well mined, this turn
+  pivoted to the fresh live `fr-protocol` reply serializer. The ledger had no prior dirty-body
+  `push_inline_sanitized` run-copy attempt. Once any CR/LF was present, that helper scanned for the
+  first delimiter and then appended every byte individually.
+- **Profile/attribution first:** before the production edit, the exact frozen detect-then-byte-push
+  arm ran under strict remote `--profile release` on `vmi1152480` (`sha256
+  970cff87cb89776ffa038ac3dee5e751b4385a09dbf91deeeed6969b2a92ef04`). The exact
+  `bench_push_inline_sanitized_reference` frame carried **99.99% self-time** across 1K
+  `instructions:u` samples with zero lost samples. This selected one copy-shape lever; RESP frame
+  selection, length hints, prefixes, terminators, and sanitization semantics were not changed.
+- **One concrete lever:** retain the existing no-CR/LF fast path, but after locating the first
+  dirty byte, copy each clean source run with `extend_from_slice` and replace only CR/LF bytes with
+  spaces. The dirty path preserves the old `reserve(body.len())` call and exact output capacity
+  behavior while replacing thousands of checked single-byte pushes with three bulk copies on the
+  selected sparse-dirty trigger.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1152480` served both arms (`candidate sha256 = reference sha256 =
+  bce8d44a19b4d28c6ad9bb787861d1e85c60b4efe6cfb45db400a131228e52a8`). The trigger was a
+  **4,096-byte** inline reply body with CR at byte 3,071 and LF at byte 3,583. Across nine
+  position-balanced rounds of 20,000 encodes, candidate median was **790,707,346 instructions**
+  versus reference **1,722,167,690**, or **2.178009147x reference/candidate** (**54.0865% fewer
+  instructions**). The A/A null median was **0.999999541x**, p05..p95
+  **[0.999999382, 1.000002797]**, null CV **0.000107%**, and effect CV **0.000102%**. Exact
+  candidate and reference helpers carried **97.96%** and **99.89% self-time**, respectively, with
+  zero lost samples. The measured remote command took 25.5 seconds; total RCH wall time was about
+  84 seconds because remote sync repeated a release build after the required untimed warm-up.
+- **Behavior and gates:** the same binary asserted byte-identical candidate/reference/oracle output
+  across ten empty, clean, CR/LF-at-boundary, multiple-dirty, NUL/binary, all-byte, and full-trigger
+  cases. The focused CRLF-injection unit test passed under strict-remote release, scoped production
+  Clippy passed with `bench-reference`, `--no-deps`, and `-D warnings`, and whitespace checks
+  passed. The all-target Clippy gate reached unrelated pre-existing `byte_char_slices` lints in
+  `benches/push_len_header_fastpath.rs:286` and the untouched test region at `src/lib.rs:2669`;
+  neither implicated this lever. Focused UBS exited zero with no critical issue; its warnings were
+  existing test inventory or bounded benchmark indexing. Implementation commit: `85844b673`.
+- **Boundary:** this ships only the copy shape for SimpleString/Error bodies that contain CR or LF.
+  Clean-body behavior, replacement bytes, encoded lengths, RESP parsing, command semantics,
+  persistence, replication ordering, and network scheduling remain unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — move complete replica prefixes; retain only the partial tail (`frankenredis-ie3cq`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
