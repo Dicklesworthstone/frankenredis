@@ -8,6 +8,44 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — collect pending pubsub clients without rebuilding a HashSet (`frankenredis-ywrnp`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-day packed-HASH
+  representation bead unassigned, while the SIMD, stream-range, LFU, protocol, and persistence
+  micro-paths were explicitly closed. This turn therefore pivoted to a fresh pubsub fan-out seam:
+  after `PUBLISH`, `pubsub_clients_with_pending` rebuilt a default-SipHash `HashSet<u64>` from the
+  already-unique keys of `pubsub_outbox`, only for the server to iterate those IDs once.
+- **Profile/attribution first:** the strict-remote pre-change release profile on `vmi1152480`
+  (`sha256 4bf7199fddfb003431b40fc4e9ac63457f8703c4df501cee760f7f26e0b93251`) exercised
+  256 nonempty client outboxes, collected more than 4,000 `instructions:u` samples with zero lost,
+  and gave the exact current method **0.14% self**. Its inlined work dominated the process:
+  `RandomState::hash_one` **33.23%**, `reserve_rehash` **21.19%**, HashMap insert **17.88%**, and
+  Sip13 write **17.31%**. This selected exactly one lever; message construction and delivery were
+  not changed.
+- **One concrete lever:** return a pre-sized `Vec<u64>` populated directly from nonempty outbox
+  entries. The map keys are unique by construction, so rebuilding uniqueness was redundant. The
+  server already treated the result only as an iterable set; cross-client iteration order was
+  unspecified and randomized by the former fresh `HashSet`. A bench-only frozen reference keeps
+  the literal former filter/map/HashSet collect.
+- **Foreground A/A+A/B result:** one fail-closed `--profile release` binary on `vmi1149989`
+  (`sha256 8de8d9edac1837d81a47ef521f0c712f18de85d6f22c459e71ce7a0575f8cd0e`) ran both arms over
+  256 nonempty outboxes. Candidate median was **318,143,440 instructions** versus reference
+  **7,385,298,224**, or **23.213732488x fewer instructions**. The position-balanced A/A null median
+  was **1.000003577x**, p05..p95 **[0.999995694, 1.000040304]**, null CV **0.002551%**, and effect
+  CV **0.002242%** across 11 rounds. The final candidate exact frame carried **89.87% self**
+  (232 samples, zero lost); the exact reference wrapper carried **0.17% self**, with its hashing,
+  rehashing, SipHash, and insertion frames accounting for the work. Total final RCH wall time was
+  **176.8 s**, below the five-minute cap despite RCH routing the warmed target to another worker.
+- **Behavior and gates:** the same binary asserted identical sorted client IDs at 0, 1, 8, and
+  256 subscribers; the focused runtime test also drains one message per unique subscriber and
+  proves the snapshot becomes empty. Strict-remote release Clippy for `fr-runtime` all targets with
+  `bench-reference` and `--no-deps -D warnings` passed; direct whitespace validation passed. UBS's
+  broad scan exited nonzero on its existing whole-file test/panic/security heuristics, with no
+  finding in the changed production collection logic.
+- **Boundary:** this ships only the transient pending-client snapshot change. Per-subscriber
+  message cloning, subscription maps, pattern matching, per-client message order, and output
+  encoding are unchanged.
+
 ## 2026-07-14 CalmHeron: INVALID PROFILE — cached WAIT snapshot accessor was below the exact-frame sampling floor (`frankenredis-j8sa4`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-day packed-HASH
