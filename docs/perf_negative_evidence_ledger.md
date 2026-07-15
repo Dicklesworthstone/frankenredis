@@ -8,6 +8,44 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — drain pending pubsub outboxes in one traversal (`frankenredis-8pkmj`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` showed the two RESTORE quick wins as
+  already in-progress structural work, the keyspace-RAM bead as blocked/owned, and only the
+  multi-turn packed-HASH representation bead unassigned. The preceding pubsub row explicitly left
+  delivery draining unchanged, so this turn took that adjacent residual: the server first
+  snapshotted every nonempty outbox key, then hashed every client ID again to remove its messages.
+- **Profile/attribution first:** the pre-change full `PUBLISH`-then-drain profile on
+  `vmi1149989` (`sha256 8bfb0626cb57f6bd1cae744e5d5732ef437f06c35a370e9b1c29b024b47f810a`)
+  exercised 256 subscribers and collected 715 `instructions:u` samples with zero lost. The exact
+  reference drain closure carried **3.06% self**, keyed `RawTable::remove_entry` **0.94%**, and the
+  pending-ID snapshot **1.25%**. This selected one lever; publish-time message cloning and wire
+  encoding were not changed.
+- **One concrete lever:** `Runtime::drain_pubsub_outboxes` now drains the foldhash map once into a
+  pre-sized vector of `(client_id, messages)` pairs. `HashMap::drain` retains the bucket allocation
+  for the next publish while eliminating the second keyed lookup per subscriber. The server
+  consumes those pairs directly. Per-client message order is preserved; cross-client order was
+  already the map's unspecified iteration order.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1149989` served both arms
+  (`candidate sha256 = reference sha256 = 4df101f61ecb50e6199c40d1dfcb6976650bc004b49184879556d2ab13e86b1e`).
+  Across 11 position-balanced rounds of a 256-subscriber `PUBLISH` plus complete drain, candidate
+  median was **745,135,964 instructions** versus reference **783,951,906**, or
+  **1.052626680x reference/candidate** (about **4.95% fewer full-path instructions**). The A/A null
+  median was **1.000756504x**, p05..p95 **[0.998807898, 1.005391065]**, null CV **0.330828%**, and
+  effect CV **0.285409%**. Exact candidate and reference helpers carried **2.19%** and **9.10% self**
+  respectively, and both profiles passed the zero-lost-sample gate. Total final RCH wall time was
+  **146.7 s**.
+- **Behavior and gates:** the same binary asserted identical client IDs and `PubSubMessage` vectors
+  at 0, 1, 8, and 256 subscribers and verified an empty pending snapshot afterward. The focused
+  strict-remote release runtime test passed 1/1; strict-remote release Clippy for `fr-runtime` and
+  `fr-server` all targets with `bench-reference`, `--no-deps`, and `-D warnings` passed; direct
+  rustfmt and whitespace checks passed. UBS's staged shadow scan emitted no finding but did not
+  finish after 90 seconds and was interrupted, so it is not claimed as a passing gate.
+- **Boundary:** this ships only the delivery traversal. Subscription maps, PUBLISH fan-out,
+  per-subscriber channel/data cloning, message encoding, output limits, and socket driving are
+  unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — collect pending pubsub clients without rebuilding a HashSet (`frankenredis-ywrnp`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-day packed-HASH
