@@ -8,6 +8,45 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — move parsed Sentinel INFO strings into state (`frankenredis-otamp`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf
+  bead, `frankenredis-b1o02`, as multi-day packed-`StrMap` representation work; the ranked live
+  lanes were otherwise owned, blocked, or already in progress. Recent command, store, config,
+  persistence, and replication veins were heavily mined, while this ledger had no Sentinel INFO
+  health-poll attempt. The live caller at `fr-store/src/lib.rs` selected this fresh subsystem.
+- **Profile/attribution first:** before changing production, the exact current clone-bearing
+  `apply_info_to_instance` path ran under fail-closed remote `--profile release` on `vmi1264463`
+  (binary sha256 `37dfd5feffb298c0c5bd47bfc9d93480f4245af506e0a7688b0b2a5904ef53e6`). It carried
+  **1.12% self-time**, `String::clone` carried **0.72%**, and `malloc` carried **3.27%** across
+  1,000+ `instructions:u` samples with zero lost samples. The canonical 300-byte replica INFO
+  trigger supplied both `master_host` and a 40-byte `run_id` while retaining the raw INFO cache.
+- **One concrete lever:** `record_info_response` now takes the two already-owned strings out of
+  `ParsedInfo`, applies all remaining fields through the existing helper, and moves the strings
+  into `SentinelRedisInstance`. Missing fields still preserve prior instance values. A bench-only
+  frozen reference retains both clones and the same INFO allocation.
+- **Foreground same-binary A/A+A/B:** after the untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1264463` served both arms (candidate sha256 = reference
+  sha256 = `6686c795bc4248966900a3c0a0fa2dbe755b039b4ea8fe535e3625893c676258`). Across nine
+  position-balanced rounds of 5,000 applications, candidate median was **37,279,843
+  instructions** versus reference **38,565,134**, or **1.034475531x reference/candidate**
+  (**3.332780% fewer instructions**). The A/A null median was **0.999998069x**, p05..p95
+  **[0.999984254, 1.000010193]**, null CV **0.000854%**, and effect CV **0.001249%**. Exact
+  candidate/reference apply frames carried **1.21%/1.10% self-time** with zero lost samples;
+  `String::clone` remained **1.07%** in the reference profile and disappeared from the candidate
+  table.
+- **Ledger integrity:** earlier attribution attempts that linker-folded the identical helpers or
+  produced too few samples aborted before A/B and are **INVALID**, not negative evidence. The
+  final denser capped profiles contained 13,000 candidate and 10,000 reference samples. The same
+  binary asserted complete instance-state identity across five slave, master, missing-field,
+  malformed-field, and comment-only payloads. Strict-remote release testing passed all **166 unit
+  tests and eight golden tests**; scoped strict-remote release Clippy passed the owned library with
+  `bench-reference`, `--no-deps`, and `-D warnings`. Direct Rust 2024 formatting, whitespace
+  checks, and focused UBS found no critical issue. Implementation commit: `bd057b556`.
+- **Boundary:** only ownership transfer for present `master_host` and `run_id` fields changed.
+  INFO parsing, role/link/offset/priority semantics, absent-field behavior, raw INFO retention,
+  Sentinel scheduling, persistence, replication, and command replies are unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — index explicit `COMMAND DOCS` lookups (`frankenredis-pgeew`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
