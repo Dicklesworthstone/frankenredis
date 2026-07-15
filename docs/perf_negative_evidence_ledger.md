@@ -8,6 +8,50 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-14 CalmHeron: SHIPPED — Sentinel replica selection borrows one-pass minimum instead of cloning and sorting all candidates (`frankenredis-s4joi`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
+  representation bead unassigned; the RESTORE tasks were already in progress, the P16 lane was
+  owned, and the keyspace-RAM side index was blocked/owned. The recent runtime/store veins were
+  well mined, so this turn pivoted to the fresh `fr-sentinel` failover path. The ledger had no
+  prior Sentinel selection attempt. `select_slave_at` owned a `SlaveScore` (key plus optional
+  runid) for every eligible replica, stably sorted the complete vector, then cloned the first key.
+- **Profile/attribution first:** before the production edit, a frozen sort-all arm ran under strict
+  remote `--profile release` on `vmi1149989` (`sha256
+  1d08fcea2c1e0a449cb227f7f5e34528d4f36acb991226bfd5ad23a3191ab177`). The exact
+  `bench_select_slave_sort_all_reference` frame carried **0.26% self-time** with zero lost
+  `instructions:u` samples; its stable small-sort and quicksort children carried **50.23%** and
+  **12.49%**, while `SlaveScore::from_instance` carried **11.32%**. This selected one lever;
+  eligibility, priority/offset/runid ranking, and failover state transitions were not changed.
+- **One concrete lever:** scan eligible replicas once while borrowing their ranking fields,
+  replace the current winner only on strict `Ordering::Less`, and clone only the final key. The
+  strict replacement preserves the old stable sort's first-iteration winner for exact score ties.
+  Complexity drops from O(n log n) comparisons plus O(n) key/runid clones to O(n) borrowed
+  comparisons plus one key clone.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1152480` served both arms (`candidate sha256 = reference sha256 =
+  da24d1d8cfc3a68f77aa7c345e6a62f02ce13d8a7635416363cf694f66dc194d`). The trigger was
+  128 eligible replicas with equal priority, eight replication-offset buckets, and present
+  runids. Across nine position-balanced rounds of 5,000 selections, candidate median was
+  **69,901,123 instructions** versus reference **1,193,432,610**, or **16.669094798x
+  reference/candidate** (about **94.00% fewer instructions**). The A/A null median was
+  **1.001697815x**, p05..p95 **[0.949695668, 1.147009331]**, null CV **4.931074%**, and effect CV
+  **4.117698%**; the effect clears the noisy null spread by orders of magnitude. Exact candidate
+  and reference helpers carried **99.45%** and **0.49% self-time**, respectively, with zero lost
+  samples. The final remote invocation took about **73 s**, including RCH sync/rebuild; its remote
+  compile-plus-measure phase took about 18 s.
+- **Behavior and gates:** the same binary asserted identical selections at 0, 1, 2, 8, and 128
+  replicas, across disconnected/zero-priority/S_DOWN/stale-info filters, and for exact ranking
+  ties. A dedicated unit test locks the stable first-iteration tie result. Strict-remote release
+  tests passed all **174** Sentinel tests (166 unit plus 8 golden); strict-remote release Clippy for
+  all Sentinel targets with `bench-reference` and `-D warnings` passed. Direct Rust 2024 rustfmt
+  and whitespace checks passed. Focused UBS with its local build categories disabled exited 0
+  with zero critical findings; remaining findings were the file's existing test panic/assert
+  inventory. Implementation commit: `2efa98f8c`.
+- **Boundary:** this ships only replica winner selection during Sentinel failover. Candidate
+  eligibility windows, ranking order, HashMap iteration order, failover state progression,
+  promotion, reconfiguration, command handling, and reply encoding remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — index exact static `CONFIG GET` lookups (`frankenredis-0fedn`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left only the multi-pass packed small-HASH
