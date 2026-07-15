@@ -3,6 +3,9 @@ name = "fr-protocol"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+bench-reference = []
+
 [dev-dependencies]
 proptest.workspace = true
 
@@ -60,3 +63,10 @@ harness = false
 [[bench]]
 name = "parse_frame_len_line_fastpath"
 harness = false
+
+# Same-binary proof for inline SimpleString/Error sanitization: frozen detect-then-byte-push
+# reference versus copying the clean runs around embedded CR/LF in bulk.
+[[bench]]
+name = "inline_sanitize_runs"
+harness = false
+required-features = ["bench-reference"]

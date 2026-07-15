@@ -562,7 +562,38 @@ fn decimal_i64_len(n: i64) -> usize {
     }
 }
 
+#[inline]
 fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
+    push_inline_sanitized_impl::<true>(out, body);
+}
+
+#[inline(always)]
+fn push_inline_sanitized_impl<const BULK_RUNS: bool>(out: &mut Vec<u8>, body: &[u8]) {
+    if BULK_RUNS {
+        let Some(first_dirty) = body.iter().position(|&byte| byte == b'\r' || byte == b'\n')
+        else {
+            out.extend_from_slice(body);
+            return;
+        };
+
+        out.reserve(body.len());
+        out.extend_from_slice(&body[..first_dirty]);
+        out.push(b' ');
+
+        let scan_start = first_dirty + 1;
+        let mut clean_start = scan_start;
+        for (relative, &byte) in body[scan_start..].iter().enumerate() {
+            if byte == b'\r' || byte == b'\n' {
+                let dirty = scan_start + relative;
+                out.extend_from_slice(&body[clean_start..dirty]);
+                out.push(b' ');
+                clean_start = dirty + 1;
+            }
+        }
+        out.extend_from_slice(&body[clean_start..]);
+        return;
+    }
+
     let needs_sanitize = body.iter().any(|&b| b == b'\r' || b == b'\n');
     if !needs_sanitize {
         out.extend_from_slice(body);
@@ -576,6 +607,24 @@ fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
             out.push(b);
         }
     }
+}
+
+/// Bench-only entry point for the production inline-body sanitizer.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_push_inline_sanitized_candidate(out: &mut Vec<u8>, body: &[u8]) {
+    std::hint::black_box(0_u8);
+    push_inline_sanitized_impl::<true>(out, body);
+}
+
+/// Frozen pre-optimization inline-body sanitizer for same-binary proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_push_inline_sanitized_reference(out: &mut Vec<u8>, body: &[u8]) {
+    std::hint::black_box(1_u8);
+    push_inline_sanitized_impl::<false>(out, body);
 }
 
 impl RespFrame {
