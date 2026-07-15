@@ -8,6 +8,53 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — move complete replica prefixes; retain only the partial tail (`frankenredis-ie3cq`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
+  work in the multi-day packed small-HASH representation bead; RESTORE and P16 were owned, and the
+  keyspace-RAM side index was blocked/owned. The recent store veins were well mined, so this turn
+  pivoted to the fresh live `fr-server` replica-apply path. The ledger had no prior
+  `consume_complete_replication_prefix`/partial-tail extraction attempt. That helper copied the
+  whole complete RESP prefix and then drained it, shifting the much smaller incomplete tail.
+- **Profile/attribution first:** before the production edit, the exact frozen copy-plus-drain arm
+  ran under strict remote `--profile release` on `vmi1152480` (`sha256
+  fcf754059c26cebbbbc4fd92a8a80b1eb03812f41a5ee13d228cb2cd6a3ea03b`). The exact
+  `bench_consume_complete_replication_prefix_reference` frame carried **5.90% self-time**, while
+  `__memmove_avx_unaligned_erms` carried **49.76%**, with zero lost `instructions:u` samples. This
+  selected one ownership-transfer lever; RESP parsing and replica replay were not changed.
+- **One concrete lever:** split the tiny incomplete tail from the complete prefix, then move the
+  original prefix allocation directly into the returned payload and install the tail allocation as
+  the next read buffer. The proof loop deliberately refilled that smaller tail-backed buffer on
+  every iteration, so the candidate was charged for losing the old read-buffer capacity instead of
+  hiding that downstream cost.
+- **Foreground same-binary A/A+A/B:** one fail-closed `--profile release` binary on
+  `vmi1152480` served both arms (`candidate sha256 = reference sha256 =
+  282c847793c91a1ebf3bebfa85aa7cb59901dd283fa6b6afac7c76877378c499`). The trigger was 16
+  complete RESP `SET` frames with 4,096-byte values (**66,112 complete bytes**) followed by a
+  **30-byte partial frame** (66,142 bytes total). Across nine position-balanced rounds of 2,000
+  consume-and-refill iterations, candidate median was **80,001,574 instructions** versus reference
+  **91,929,967**, or **1.149102154x reference/candidate** (**12.9755% fewer instructions**). The
+  A/A null median was **1.000004737x**, p05..p95 **[0.999993625, 1.000008225]**, null CV
+  **0.000601%**, and effect CV **0.000324%**. Exact candidate and reference helpers carried
+  **0.45%** and **0.24% self-time**, respectively, with zero lost samples. A first 72-sample
+  profile was refused before the A/B because it missed the small candidate frame; increasing only
+  the sampling duration yielded 4K/5K samples and the valid attribution above. The final measured
+  phase itself stayed about 15 seconds; total RCH wall time was about 140 seconds because remote
+  sync repeated a release rebuild after the untimed warm-up.
+- **Behavior and gates:** the same binary asserted exact result, error, and retained-tail parity
+  across nine empty, complete, multi-frame, complete-plus-partial, partial-only, malformed, null,
+  binary, and full-trigger cases. The existing focused replica-prefix test passed under strict
+  remote release, and strict-remote release Clippy passed every `fr-server` target with
+  `bench-reference`, `--no-deps`, and `-D warnings`. The required workspace check reached unrelated
+  pre-existing missing-method errors in `crates/fr-store/benches/set_ex_rearm.rs`; it did not
+  implicate the owned server files. Direct Rust 2024 rustfmt and whitespace checks passed. Focused
+  UBS remained baseline-red on the server module's existing test panic/assert, constant-time-match,
+  and socket-shutdown inventory; no finding implicated the ownership transfer. Implementation
+  commit: `6b263c240`.
+- **Boundary:** this ships only buffer ownership after the largest complete RESP prefix has already
+  been identified. Frame parsing, malformed/incomplete distinctions, retained-tail bytes, command
+  application, replication offsets, AOF behavior, and replay ordering remain unchanged.
+
 ## 2026-07-14 CalmHeron: SHIPPED — bulk-copy plain AOF manifest tokens (`frankenredis-2lfnl`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the highest-ranked unclaimed perf
