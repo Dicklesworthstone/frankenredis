@@ -1,8 +1,8 @@
-//! Same-binary proof for clean-run copying inside quoted AOF manifest tokens.
+//! Same-binary proof for pre-sizing quoted AOF manifest token storage.
 //!
-//! The frozen reference includes the shipped plain-token fast path, but pushes every byte of a
-//! quoted token individually. The candidate may bulk-copy clean ASCII segments between quotes,
-//! escapes, or non-ASCII bytes while preserving the exact original state machine at each boundary.
+//! Both arms include the shipped plain-token and clean-run fast paths. The candidate may reserve
+//! bounded storage for a fallback quoted/escaped token before decoding it while preserving the
+//! exact original state machine and decoded bytes.
 
 use std::{
     env,

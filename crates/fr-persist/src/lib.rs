@@ -484,7 +484,13 @@ fn split_manifest_args(line: &str) -> Option<Vec<String>> {
         }
         cursor = plain_start;
 
-        let mut arg = String::new();
+        let mut arg = if matches!(bytes[cursor], b'\'' | b'"' | b'\\') {
+            // The manifest reader caps each source line, so reserving its remaining bytes is
+            // bounded. Historical non-ASCII expansion can still grow normally past this reserve.
+            String::with_capacity(bytes.len() - plain_start)
+        } else {
+            String::new()
+        };
         let mut quote = None;
         while cursor < bytes.len() {
             let clean_start = cursor;
@@ -596,6 +602,26 @@ pub fn bench_split_manifest_args_reference(line: &str) -> Option<Vec<String>> {
         let mut arg = String::new();
         let mut quote = None;
         while cursor < bytes.len() {
+            let clean_start = cursor;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                let is_boundary = if let Some(quote_byte) = quote {
+                    byte == quote_byte || byte == b'\\' || !byte.is_ascii()
+                } else {
+                    byte.is_ascii_whitespace()
+                        || matches!(byte, b'\'' | b'"' | b'\\')
+                        || !byte.is_ascii()
+                };
+                if is_boundary {
+                    break;
+                }
+                cursor += 1;
+            }
+            if cursor != clean_start {
+                arg.push_str(&line[clean_start..cursor]);
+                continue;
+            }
+
             let byte = bytes[cursor];
             if let Some(quote_byte) = quote {
                 if byte == quote_byte {
