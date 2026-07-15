@@ -48,11 +48,59 @@ pub enum RespFrame {
 /// Used both for encoding (output) and parsing (input) to ensure
 /// roundtrip consistency: `parse(encode(frame)) == frame`.
 fn sanitize_inline_body(s: &str) -> String {
-    if !s.bytes().any(|b| b == b'\r' || b == b'\n') {
+    let bytes = s.as_bytes();
+    let Some(first_dirty) = bytes
+        .iter()
+        .position(|&byte| byte == b'\r' || byte == b'\n')
+    else {
         return s.to_owned();
+    };
+
+    let mut sanitized = String::with_capacity(s.len());
+    sanitized.push_str(&s[..first_dirty]);
+    sanitized.push(' ');
+
+    let scan_start = first_dirty + 1;
+    let mut clean_start = scan_start;
+    for (relative, &byte) in bytes[scan_start..].iter().enumerate() {
+        if byte == b'\r' || byte == b'\n' {
+            let dirty = scan_start + relative;
+            // CR/LF are one-byte UTF-8 code points, so both slice boundaries are exact.
+            sanitized.push_str(&s[clean_start..dirty]);
+            sanitized.push(' ');
+            clean_start = dirty + 1;
+        }
     }
-    s.chars()
-        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+    sanitized.push_str(&s[clean_start..]);
+    sanitized
+}
+
+/// Bench-only entry point for the production parsed inline-body sanitizer.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_sanitize_inline_body_candidate(body: &str) -> String {
+    std::hint::black_box(0_u8);
+    sanitize_inline_body(body)
+}
+
+/// Frozen pre-optimization parsed inline-body sanitizer for same-binary proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_sanitize_inline_body_reference(body: &str) -> String {
+    std::hint::black_box(1_u8);
+    if !body.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
+        return body.to_owned();
+    }
+    body.chars()
+        .map(|character| {
+            if character == '\r' || character == '\n' {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
@@ -3727,6 +3775,23 @@ mod tests {
             "parity_ok",
         );
         event.assert_schema_contract();
+    }
+
+    #[test]
+    fn resp_inline_parser_sanitizes_lone_cr_lf_and_preserves_utf8() {
+        let simple = parse_frame("+é\ra\n東京\r\n".as_bytes())
+            .expect("simple string with lone CR/LF should parse");
+        assert_eq!(
+            simple.frame,
+            RespFrame::SimpleString("é a 東京".to_string())
+        );
+
+        let error = parse_frame("-ERR é\r東京\n🙂\r\n".as_bytes())
+            .expect("error with lone CR/LF should parse");
+        assert_eq!(
+            error.frame,
+            RespFrame::Error("ERR é 東京 🙂".to_string())
+        );
     }
 
     #[test]

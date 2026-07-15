@@ -1,7 +1,7 @@
-//! Same-binary proof for copying clean runs around CR/LF in inline RESP reply bodies.
+//! Same-binary proof for copying clean UTF-8 runs around CR/LF while parsing inline RESP bodies.
 //!
-//! The frozen reference first detects any CR/LF, then pushes every body byte individually. The
-//! candidate may bulk-copy clean runs only if it emits exactly the same sanitized bytes.
+//! The frozen reference first detects any CR/LF, then decodes and re-encodes every character. The
+//! candidate may bulk-copy clean runs only if it returns exactly the same sanitized `String`.
 
 use std::{
     env,
@@ -11,12 +11,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fr_protocol::{bench_push_inline_sanitized_candidate, bench_push_inline_sanitized_reference};
+use fr_protocol::{bench_sanitize_inline_body_candidate, bench_sanitize_inline_body_reference};
 
 const BODY_LEN: usize = 4_096;
 const FIRST_CR: usize = 3_071;
-const SECOND_LF: usize = 3_583;
-const PROFILE_REPEATS: usize = 250_000;
+const SECOND_LF: usize = 3_584;
+const PROFILE_REPEATS: usize = 100_000;
 const STAT_REPEATS: usize = 20_000;
 const STAT_ROUNDS: usize = 9;
 
@@ -44,95 +44,82 @@ impl Arm {
 
     const fn profile_symbol(self) -> &'static str {
         match self {
-            Self::Candidate => "fr_protocol::bench_push_inline_sanitized_candidate",
-            Self::Reference => "fr_protocol::bench_push_inline_sanitized_reference",
+            Self::Candidate => "fr_protocol::bench_sanitize_inline_body_candidate",
+            Self::Reference => "fr_protocol::bench_sanitize_inline_body_reference",
         }
     }
 
     const fn wrong_profile_symbol(self) -> &'static str {
         match self {
-            Self::Candidate => "bench_push_inline_sanitized_reference",
-            Self::Reference => "bench_push_inline_sanitized_candidate",
+            Self::Candidate => "bench_sanitize_inline_body_reference",
+            Self::Reference => "bench_sanitize_inline_body_candidate",
         }
     }
 }
 
-fn build_trigger() -> Vec<u8> {
-    let mut body = vec![b'a'; BODY_LEN];
-    for (index, byte) in body.iter_mut().enumerate() {
-        *byte = b'a' + (index % 26) as u8;
+fn build_trigger() -> String {
+    let mut bytes = Vec::with_capacity(BODY_LEN);
+    for _ in 0..1_365 {
+        bytes.extend_from_slice("éa".as_bytes());
     }
-    body[FIRST_CR] = b'\r';
-    body[SECOND_LF] = b'\n';
-    body
+    bytes.push(b'a');
+    bytes[FIRST_CR] = b'\r';
+    bytes[SECOND_LF] = b'\n';
+    String::from_utf8(bytes).expect("trigger remains valid UTF-8")
 }
 
-fn sanitize(out: &mut Vec<u8>, body: &[u8], arm: Arm) {
+fn sanitize(body: &str, arm: Arm) -> String {
     match arm {
-        Arm::Candidate => bench_push_inline_sanitized_candidate(out, body),
-        Arm::Reference => bench_push_inline_sanitized_reference(out, body),
+        Arm::Candidate => bench_sanitize_inline_body_candidate(body),
+        Arm::Reference => bench_sanitize_inline_body_reference(body),
     }
 }
 
-fn encode_body(body: &[u8], arm: Arm) -> Vec<u8> {
-    let mut out = Vec::with_capacity(body.len() + 3);
-    out.push(b'-');
-    sanitize(&mut out, body, arm);
-    out.extend_from_slice(b"\r\n");
-    out
-}
-
-fn expected_body(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(body.len() + 3);
-    out.push(b'-');
-    out.extend(body.iter().map(|byte| match byte {
-        b'\r' | b'\n' => b' ',
-        other => *other,
-    }));
-    out.extend_from_slice(b"\r\n");
-    out
+fn expected_body(body: &str) -> String {
+    body.chars()
+        .map(|character| match character {
+            '\r' | '\n' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 fn correctness_gate() {
     let trigger = build_trigger();
-    let all_bytes: Vec<u8> = (0_u8..=u8::MAX).collect();
-    let cases: [&[u8]; 10] = [
-        b"",
-        b"plain inline reply",
-        b"\rfirst",
-        b"first\n",
-        b"middle\rbreak",
-        b"two\rbreaks\nhere",
-        b"\r\n\r\n",
-        b"no-newline-but-\0-binary",
-        &all_bytes,
+    let cases: [&str; 10] = [
+        "",
+        "plain inline reply",
+        "\rfirst",
+        "first\n",
+        "middle\rbreak",
+        "two\rbreaks\nhere",
+        "\r\n\r\n",
+        "no-newline-but-\0-binary",
+        "éclair\r東京\n🙂",
         &trigger,
     ];
     for body in cases {
-        let candidate = encode_body(body, Arm::Candidate);
-        let reference = encode_body(body, Arm::Reference);
+        let candidate = sanitize(body, Arm::Candidate);
+        let reference = sanitize(body, Arm::Reference);
         let expected = expected_body(body);
         assert_eq!(candidate, reference, "arm mismatch for {body:?}");
         assert_eq!(candidate, expected, "oracle mismatch for {body:?}");
     }
-    println!("CORRECTNESS_GATE bytes=identical cases=10 clean_and_dirty=covered binary=covered");
+    println!("CORRECTNESS_GATE strings=identical cases=10 clean_dirty_nul_unicode=covered");
 }
 
 fn run_loop(arm: Arm, repeats: usize) {
     let body = build_trigger();
-    let mut out = Vec::with_capacity(body.len() + 3);
     let mut checksum = 0_u64;
     for _ in 0..repeats {
-        out.clear();
-        out.push(b'-');
-        sanitize(black_box(&mut out), black_box(&body), arm);
-        out.extend_from_slice(b"\r\n");
+        let out = sanitize(black_box(&body), arm);
+        let bytes = out.as_bytes();
         checksum = checksum
             .wrapping_add(out.len() as u64)
-            .wrapping_add(u64::from(out[0]))
-            .wrapping_add(u64::from(out[FIRST_CR + 1]))
-            .wrapping_add(u64::from(out[SECOND_LF + 1]))
-            .wrapping_add(u64::from(out[out.len() - 1]));
+            .wrapping_add(u64::from(bytes[0]))
+            .wrapping_add(u64::from(bytes[FIRST_CR]))
+            .wrapping_add(u64::from(bytes[SECOND_LF]))
+            .wrapping_add(u64::from(bytes[bytes.len() - 1]));
         black_box(&out);
     }
     black_box(checksum);
@@ -186,7 +173,7 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
         .map_err(|error| format!("invalid system time: {error}"))?
         .as_nanos();
     let data = env::temp_dir().join(format!(
-        "fr_protocol_inline_sanitize_{}_{}_{}.data",
+        "fr_protocol_parse_inline_sanitize_{}_{}_{}.data",
         process::id(),
         arm.name(),
         stamp
