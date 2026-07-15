@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean ASCII runs in quoted AOF manifest tokens (`frankenredis-0fk4p`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
+  blocked, or already in progress; the only unassigned open perf bead, `frankenredis-b1o02`, was
+  explicitly multi-day packed-`StrMap` representation work. Recent parser, Sentinel, config, and
+  store seams were also well mined in this ledger, so this bounded turn pivoted to the fresh
+  `fr-persist` AOF-manifest tokenizer. The ledger recorded the shipped plain-token bulk copy but no
+  quoted/escaped clean-run attempt: encountering either quote still reset parsing to a
+  byte-at-a-time state machine.
+- **Profile/attribution first:** before the production edit, the exact frozen current tokenizer
+  ran under strict remote `--profile release` on `vmi1152480` (`sha256
+  2f87b4aa662e239e1555129b3c2c1eab2ce5ae29c421de2084f5a42e6805f058`). The exact
+  `bench_split_manifest_args_reference` frame carried **85.24% self-time** across 272
+  `instructions:u` samples with zero lost samples; `_int_realloc` alone carried another 6.18%.
+  This selected one copy-shape lever inside quoted/escaped token parsing.
+- **One concrete lever:** when the fallback state machine is on a clean ASCII byte, scan to the
+  next quote closer, backslash, out-of-quote whitespace or quote opener, or non-ASCII byte, then
+  append that exact source segment with one `push_str`. Quote transitions, escapes, whitespace,
+  malformed-input rejection, and non-ASCII bytes retain the old branches. Every bulk-copy boundary
+  is therefore an exact UTF-8 boundary.
+- **Foreground same-binary A/A+A/B:** after the required untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1152480` served both arms (`candidate sha256 = reference
+  sha256 = 490794e24693cda99360ac31cf70723a4688ec69d7bab19aa458829c279b4340`). The valid
+  **935-byte**, six-token trigger had two quotes, one `\\t` escape, and clean ASCII runs of 768
+  and 128 bytes. Across nine position-balanced rounds of 20,000 parses, candidate median was
+  **254,789,664 instructions** versus reference **598,946,016**, or **2.350746516x
+  reference/candidate** (**57.460329% fewer instructions**). The A/A null median was
+  **1.000000220x**, p05..p95 **[0.999996707, 1.000002284]**, null CV **0.000172%**, and effect CV
+  **0.000072%**. Exact candidate and reference helpers carried **74.89%** across 101 samples and
+  **85.79% self-time** across 257 samples, respectively, with zero lost samples. The measured
+  remote command took 62.5 seconds; total RCH wall time was 117.1 seconds after the worker pool
+  cache rotated and rebuilt despite the completed warm-up.
+- **Behavior and gates:** the same binary asserted exact candidate/reference results across 17
+  plain, quoted, escaped, mixed-quote, empty-quote, malformed, non-ASCII, and full-trigger cases.
+  The focused release test `aof_manifest_long_quoted_filename_decodes_sparse_escape` passed
+  remotely. Scoped production-library release Clippy passed with `bench-reference`, `--no-deps`,
+  and `-D warnings`; whitespace checks passed. Full-source rustfmt exposed only pre-existing
+  unrelated diffs outside the owned hunks. Focused UBS remained baseline-red on unrelated
+  pre-existing test/panic/security-heuristic inventory, with no finding implicating this lever.
+  Implementation commit: `b7a8be54d`.
+- **Boundary:** this changes only allocation/copy shape for clean ASCII segments after quoted or
+  escaped AOF-manifest syntax selects the fallback tokenizer. The plain-token fast path,
+  quote/escape decoding, malformed-input rejection, historical non-ASCII byte-to-char behavior,
+  manifest line-length limits, validation, load order, and AOF replay semantics remain unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — bulk-copy clean UTF-8 runs in parsed inline bodies (`frankenredis-54e2o`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the ranked live perf lanes owned,
