@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 default = ["upstream-stream-rdb"]
+bench-reference = []
 # (frankenredis-wt4eo) Redis-compatible RDB stream encoding (type 21,
 # STREAM_LISTPACKS_3) for SAVE, so fr's RDB files are loadable by upstream Redis.
 # fr can decode both type 15 (legacy fr-private) and type 21.
@@ -80,3 +81,8 @@ harness = false
 [[bench]]
 name = "value_spans_presize"
 harness = false
+
+[[bench]]
+name = "aof_manifest_plain_tokens"
+harness = false
+required-features = ["bench-reference"]

@@ -456,7 +456,95 @@ fn parse_manifest_sequence(value: &str, line: usize) -> Result<u64, PersistError
     Ok(seq)
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn split_manifest_args(line: &str) -> Option<Vec<String>> {
+    let bytes = line.as_bytes();
+    let mut args = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+
+        let plain_start = cursor;
+        while cursor < bytes.len()
+            && bytes[cursor].is_ascii()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'\'' | b'"' | b'\\')
+        {
+            cursor += 1;
+        }
+        if cursor == bytes.len() || bytes[cursor].is_ascii_whitespace() {
+            args.push(line[plain_start..cursor].to_owned());
+            continue;
+        }
+        cursor = plain_start;
+
+        let mut arg = String::new();
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if let Some(quote_byte) = quote {
+                if byte == quote_byte {
+                    quote = None;
+                    cursor += 1;
+                    continue;
+                }
+                if byte == b'\\' {
+                    cursor += 1;
+                    let escaped = *bytes.get(cursor)?;
+                    arg.push(unescape_manifest_byte(escaped));
+                    cursor += 1;
+                    continue;
+                }
+                arg.push(char::from(byte));
+                cursor += 1;
+                continue;
+            }
+
+            if byte.is_ascii_whitespace() {
+                break;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                cursor += 1;
+                continue;
+            }
+            if byte == b'\\' {
+                cursor += 1;
+                let escaped = *bytes.get(cursor)?;
+                arg.push(unescape_manifest_byte(escaped));
+                cursor += 1;
+                continue;
+            }
+            arg.push(char::from(byte));
+            cursor += 1;
+        }
+
+        if quote.is_some() {
+            return None;
+        }
+        args.push(arg);
+    }
+
+    Some(args)
+}
+
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_split_manifest_args_candidate(line: &str) -> Option<Vec<String>> {
+    split_manifest_args(line)
+}
+
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_split_manifest_args_reference(line: &str) -> Option<Vec<String>> {
     let bytes = line.as_bytes();
     let mut args = Vec::new();
     let mut cursor = 0usize;
