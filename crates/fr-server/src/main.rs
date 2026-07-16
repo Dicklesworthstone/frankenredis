@@ -2924,16 +2924,21 @@ fn process_buffered_frames(
                 } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_absexpire_borrowed(
-                        is_seconds,
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // `SET key value EXAT|PXAT <ts>` unconditionally replies +OK; route the
+                    // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")` reply
+                    // frame is allocated on this absolute-expiry SET write path.
+                    if runtime
+                        .execute_plain_set_absexpire_borrowed_ok(
+                            is_seconds,
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -3023,28 +3028,37 @@ fn process_buffered_frames(
                     let is_get = packet.b.eq_ignore_ascii_case(b"GET");
                     let default_write_allowed = (is_keepttl || is_get)
                         && cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    let fast = if is_keepttl {
-                        runtime.execute_plain_set_keepttl_borrowed(
-                            packet.key,
-                            packet.a,
-                            ts,
-                            default_write_allowed,
-                        )
+                    // KEEPTTL unconditionally replies +OK → route the non-allocating `_ok` twin to
+                    // FastOkReply (no reply-frame alloc). GET replies the old value → FastReply
+                    // (needs the frame). Other *4 options yield None and fall through to generic.
+                    let action = if is_keepttl {
+                        runtime
+                            .execute_plain_set_keepttl_borrowed_ok(
+                                packet.key,
+                                packet.a,
+                                ts,
+                                default_write_allowed,
+                            )
+                            .map(|()| BorrowedMultibulkAction::FastOkReply {
+                                consumed: packet.consumed,
+                            })
                     } else if is_get {
-                        runtime.execute_plain_set_get_borrowed(
-                            packet.key,
-                            packet.a,
-                            ts,
-                            default_write_allowed,
-                        )
+                        runtime
+                            .execute_plain_set_get_borrowed(
+                                packet.key,
+                                packet.a,
+                                ts,
+                                default_write_allowed,
+                            )
+                            .map(|response| BorrowedMultibulkAction::FastReply {
+                                consumed: packet.consumed,
+                                response,
+                            })
                     } else {
                         None
                     };
-                    if let Some(response) = fast {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
+                    if let Some(action) = action {
+                        Ok(action)
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
