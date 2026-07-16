@@ -491,7 +491,22 @@ pub fn discover_replicas_from_info(
     }
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn prune_stale_sentinels(master: &mut SentinelRedisInstance, now: u64, max_age_ms: u64) {
+    master
+        .sentinels
+        .retain(|_, sentinel| now.saturating_sub(sentinel.last_hello_time) <= max_age_ms);
+}
+
+/// Frozen pre-`frankenredis-29i8k` comparator for the same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_prune_stale_sentinels_collect_reference(
+    master: &mut SentinelRedisInstance,
+    now: u64,
+    max_age_ms: u64,
+) {
     let stale_keys: Vec<String> = master
         .sentinels
         .iter()
@@ -973,17 +988,26 @@ slave0:10.0.0.10,6379,online
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
 
-        let sentinel_addr = SentinelAddr::new("192.168.1.2", 26379);
-        let mut sentinel = SentinelRedisInstance::new_master("192.168.1.2:26379", sentinel_addr, 0);
-        sentinel.flags = InstanceFlags::SENTINEL;
-        sentinel.last_hello_time = 0;
-        master
-            .sentinels
-            .insert("192.168.1.2:26379".to_string(), sentinel);
+        for (key, last_hello_time) in [
+            ("stale", 39_999),
+            ("boundary", 40_000),
+            ("live", 99_999),
+            ("future", 100_001),
+        ] {
+            let sentinel_addr = SentinelAddr::new(key, 26_379);
+            let mut sentinel = SentinelRedisInstance::new_master(key, sentinel_addr, 0);
+            sentinel.flags = InstanceFlags::SENTINEL;
+            sentinel.last_hello_time = last_hello_time;
+            master.sentinels.insert(key.to_string(), sentinel);
+        }
 
-        assert_eq!(master.sentinels.len(), 1);
+        assert_eq!(master.sentinels.len(), 4);
         prune_stale_sentinels(&mut master, 100000, 60000);
-        assert_eq!(master.sentinels.len(), 0);
+        assert_eq!(master.sentinels.len(), 3);
+        assert!(!master.sentinels.contains_key("stale"));
+        assert!(master.sentinels.contains_key("boundary"));
+        assert!(master.sentinels.contains_key("live"));
+        assert!(master.sentinels.contains_key("future"));
     }
 
     #[test]

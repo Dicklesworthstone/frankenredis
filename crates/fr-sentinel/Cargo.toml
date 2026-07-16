@@ -26,3 +26,8 @@ required-features = ["bench-reference"]
 name = "info_response_apply"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "stale_sentinel_prune"
+harness = false
+required-features = ["bench-reference"]

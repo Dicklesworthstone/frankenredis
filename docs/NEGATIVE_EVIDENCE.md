@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — retain live Sentinel peers in one table pass; 64.863% fewer instructions (frankenredis-29i8k)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was
+already claimed, while the recent store/runtime/config paths and Sentinel INFO-state handoff had
+been mined. `fr-sentinel::discovery::prune_stale_sentinels` had no performance bead, ledger row,
+reservation, or optimization history. The live path cloned every stale peer name into a temporary
+vector, then hashed each clone again to remove the same entries from the table.
+
+PROFILE-FIRST on the literal unchanged helper, using 256 masters with 512 Sentinel peers apiece
+and half stale, release profile with LTO disabled: worker `vmi1152480`, binary sha256
+`e50af39f413ef3291a7df5f61d80ee957cb27d95d69f971b2bef61eecdd88c2c`, 52 samples, zero
+lost. The exact `fr_sentinel::discovery::prune_stale_sentinels` frame had **0.81% self-time**;
+the removable work included String clone (**13.01%**), Sip13 write (**12.73%**), `hash_one`
+(**7.81%**), the collect closure (**5.23%**), and `remove_entry` (**2.63%**), plus allocator
+traffic. This proved the unchanged trigger reached the proposed collect-and-rehash seam before the
+production edit.
+
+ONE LEVER: replace the stale-name collection and second hash-table pass with `HashMap::retain`,
+keeping a peer exactly when `now.saturating_sub(last_hello_time) <= max_age_ms`. This is the exact
+inverse of the old stale predicate `age > max_age_ms`; table values are read-only, the future-time
+saturating behavior is unchanged, and the exact-age boundary remains live. The feature-gated
+frozen reference retains the literal pre-change collect-and-remove implementation.
+
+FOREGROUND SAME-BINARY A/A+A/B: the PMU was unavailable on `ovh-b`, and `vmi1149989` became
+fully occupied after its warm-up, so neither produced or contributed a timed result. After an
+untimed cold warm-up, the decisive strict-remote invocation ran both arms on worker `vmi1156319`
+in binary sha256 `8b98b621355b77ccd2eeb3dac8a81d968b534cbbddccccf4c833f5b3d2bca268`.
+Nine position-balanced instruction rounds measured candidate median **7,698,438** versus
+reference median **21,909,723**, or **64.862915% fewer instructions**. The paired
+reference/candidate median was **2.845950876x**; the candidate/candidate A/A null median was
+**1.000062352**, p05..p95 **[0.999931679, 1.000157848]**, null CV **0.006389%**, and
+effect CV **0.449350%**. Candidate `retain` and reference collect frame families had **39.18% /
+14.82% self-time**, respectively, with 42/53 samples and zero lost; fixture construction was
+excluded from both profiles and counters by the PMU delay.
+
+The same-binary correctness gate matched exact survivor values and HashMap iteration order across
+**6** cases covering empty, all-live, all-stale, mixed, exact-age boundary, future timestamps,
+zero max age, and saturating arithmetic. The focused unit proof independently covers stale,
+boundary, live, and future peers. Rollback: restore the frozen collect-and-remove body; no Sentinel
+wire message, quorum state, peer value, or staleness policy changed.
+
+GATES: the focused release-profile unit test passed; scoped release-profile Clippy for the library
+and benchmark passed with `-D warnings`; direct rustfmt and `git diff --check` passed; UBS reported
+zero critical findings (its remaining warnings are contextual inventory in tests and the benchmark).
+
 ## 2026-07-16: SHIPPED — copy validated RESP3 Big Numbers without a second UTF-8 scan; 7.6735% fewer instructions (frankenredis-szkj1)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was
