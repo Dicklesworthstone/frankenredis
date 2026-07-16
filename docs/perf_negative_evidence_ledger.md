@@ -47,6 +47,16 @@ turns). Keep claims honest — mark which.
   stored value, and bit-identical retained frames across six ordinary, binary, 64 KiB,
   `REPLCONF GETACK`, read, and invalid-frame cases. This is an instruction-count result for replay
   dispatch, not a whole-server throughput claim.
+- **Gates:** strict-remote release testing passed all five focused `replica_stream_*` server tests
+  and all **347** asserting conformance tests (194 library, 54 auxiliary/integration, 99 smoke).
+  Scoped all-target release Clippy for `fr-runtime` and `fr-server`, including the
+  `bench-reference` target, passed with `-D warnings`; its dependency build emitted only the known
+  pre-existing `fr-store` dead-code warning. The owned benchmark passes Rust 2024 rustfmt and
+  `git diff --check`; full-file runtime rustfmt remains blocked by unrelated pre-existing drift.
+  Focused UBS remained baseline-red on the two large source files' broad test/security heuristic
+  inventory plus expected proof-benchmark panic/indexing constructs, with no actionable finding
+  in the production ownership change. Implementation commit: `d7a8c1047`; bead close:
+  `0d721817f`. Every Cargo invocation was strict remote RCH with no local fallback.
 - **Boundary:** only ownership at online replica command dispatch changed. RESP parsing, partial
   tail retention, replication offsets and ordering, monitor/AOF propagation, command semantics,
   error logging, GETACK replies, and client-command dispatch are unchanged.
