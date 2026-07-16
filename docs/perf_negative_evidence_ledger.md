@@ -8,6 +8,46 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 BlackThrush: SHIPPED — bulk-copy clean runs in quoted config tokens (`frankenredis-y0o1s`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf
+  bead, `frankenredis-b1o02`, as multi-day packed-`StrMap` representation work; the ranked live
+  lanes were otherwise owned, blocked, or already in progress. The earlier quoted-token capacity
+  keep (`frankenredis-g3vku`) explicitly retained bytewise quote/escape decoding, selecting this
+  bounded follow-on rather than reopening an exhausted subsystem.
+- **Profile/attribution first:** before changing production, the untouched pre-sized tokenizer ran
+  under fail-closed remote `--profile release` on `vmi1149989` (binary sha256
+  `1e33a164274ef2b517259316baa4367b4080bbec7b601b1bf6f40e5fc849b680`). Exact
+  `split_config_line_args_bytes` carried **82.33% self-time** across 77 `instructions:u` samples
+  with zero lost samples. The 129-byte, two-token, one-quote trigger contained **115 clean quoted-
+  run bytes**.
+- **One concrete lever:** quoted-token parsing now scans ordinary byte runs to the exact quote,
+  escape, delimiter, or NUL boundary and appends each run with `extend_from_slice`. The frozen
+  reference retains the already-shipped capacity reservation while copying those same bytes one
+  at a time; all quote, escape, delimiter, and error branches remain shared.
+- **Foreground same-binary A/A+A/B:** after the untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1153651` served both arms (candidate sha256 = reference
+  sha256 = `f4e37f4ad4ad6564cd2e7d80500b5b19e1b41f8170c36f467883502e5ef0e3f0`). Across nine
+  position-balanced rounds of 120,000 parses, candidate median was **257,109,612 instructions**
+  versus reference **388,509,824**, with a **1.511066420x reference/candidate** effect median
+  (**33.821593% fewer instructions** by the arm medians). The A/A null median was
+  **1.000000117x**, p05..p95 **[0.999999063, 1.000002536]**, null CV **0.000106%**, and effect
+  CV **0.000125%**. Exact candidate/reference frames carried **75.66%/88.06% self-time** across
+  93/237 samples, respectively, with zero lost samples.
+- **Behavior and gates:** the same binary asserted exact candidate/reference results across 16
+  plain, quoted, escaped, NUL, non-UTF-8, invalid, and C-whitespace cases; a focused regression
+  also covers 512-byte runs spanning both double- and single-quoted escapes. Strict-remote release
+  testing passed all **36 unit tests and 13 golden tests**. Scoped strict-remote all-target check
+  and Clippy with `bench-reference` and `-D warnings` passed; the workspace-wide check reached only
+  unrelated `fr-store/benches/set_ex_rearm.rs` calls to three missing peer-owned helpers. Direct
+  Rust 2024 formatting and whitespace checks passed. UBS's whole-file scan remained baseline-red
+  on an unchanged `Mode` equality false positive and unchanged test/bench warnings, with no new
+  changed-line critical finding. Implementation commit: `f56544804`.
+- **Boundary:** only the copy shape for ordinary bytes inside already quote-selected tokens
+  changed. The plain-token fast path, capacity reservation, quote/escape decoding, closing-quote
+  validation, malformed/NUL/C-whitespace/non-UTF-8 behavior, directive application, TLS setup,
+  persistence, replication, and startup ordering are unchanged.
+
 ## 2026-07-15 CalmHeron: SHIPPED — move parsed Sentinel INFO strings into state (`frankenredis-otamp`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf
