@@ -56,6 +56,12 @@ harness = false
 name = "write_cache_invalidation"
 harness = false
 
+# (BlackThrush) Same-binary null-gated A/B for the redundant per-WRITE mem_estimate_cache remove:
+# delete-path invalidation (removes mem) vs write-path (skips the mod-count-versioned mem remove).
+[[bench]]
+name = "write_cache_mem_estimate_skip"
+harness = false
+
 # (cc_fr) Same-binary null-gated A/B for a no-TTL SET overwrite: always-clone owned key
 # (GATE=false) vs clone elided without a TTL (GATE=true).
 [[bench]]

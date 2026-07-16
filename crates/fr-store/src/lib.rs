@@ -6568,6 +6568,24 @@ impl Store {
         }
     }
 
+    /// (BlackThrush) Variant of [`Self::invalidate_write_side_caches`] that SKIPS the
+    /// `mem_estimate_cache` remove. Only sound when the written value can never be cached there —
+    /// `mem_estimate_cache` holds ONLY expensive collection estimates (`value_estimate_is_expensive`),
+    /// so a key whose value is a scalar (integer/short string) is NEVER a member, making the remove
+    /// an unconditional miss that just burns a foldhash of the key. Used by INCR/INCRBY, whose write
+    /// always yields `Value::Integer` — provably absent from the cache, so skipping the remove is
+    /// byte-identical (nothing to remove) while eliminating the per-write hash (~11% of INCR in a
+    /// live perf-record when a restored collection keeps the cache non-empty).
+    #[inline]
+    fn invalidate_write_side_caches_scalar(&mut self, key: &[u8]) {
+        if !self.hll_register_cache.is_empty() {
+            self.hll_register_cache.remove(key);
+        }
+        if !self.dump_payload_cache.is_empty() {
+            self.remove_dump_payload_cache_entry(key);
+        }
+    }
+
     /// Bench-only baseline: the pre-guard three-cache invalidation (unconditional
     /// `remove`, hashing the key against each map even when empty). Byte-identical effect
     /// to `invalidate_write_side_caches`; exists only so a same-binary A/B can isolate the
@@ -6583,6 +6601,31 @@ impl Store {
     #[doc(hidden)]
     pub fn invalidate_write_side_caches_new(&mut self, key: &[u8]) {
         self.invalidate_write_side_caches(key);
+    }
+
+    /// Bench-only shim exposing the scalar-write invalidation (hll + dump only; skips the
+    /// mem_estimate_cache remove) for the `write_cache_mem_estimate_skip` A/B.
+    #[doc(hidden)]
+    pub fn invalidate_write_side_caches_scalar_shim(&mut self, key: &[u8]) {
+        self.invalidate_write_side_caches_scalar(key);
+    }
+
+    /// Bench-only helper: seed the mem_estimate_cache with `n` decoy entries so `!is_empty()` passes
+    /// and remove-misses hash the key — reproducing the live workload where a restored collection
+    /// keeps the cache non-empty. Bench-only; not on any production path.
+    #[doc(hidden)]
+    pub fn bench_seed_mem_estimate_cache(&mut self, n: usize) {
+        let mut mem = self.mem_estimate_cache.borrow_mut();
+        for i in 0..n {
+            mem.insert(format!("mem-estimate-decoy:{i:08}").into_bytes(), (1, 64));
+        }
+    }
+
+    /// Bench-only accessor for the mem_estimate_cache entry count.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_mem_estimate_cache_len(&self) -> usize {
+        self.mem_estimate_cache.borrow().len()
     }
 
     fn insert_dump_payload_cache(&mut self, key: &[u8], cache: DumpPayloadCache) {
@@ -8865,7 +8908,12 @@ impl Store {
         // whole block — byte-identical to clients (membership + every key's deadline unchanged; the
         // deadline is read fresh at sample time). Mirrors `internal_entries_insert_with_expiry`'s
         // `!is_ttl_rearm` gate, so the incr==whole-entry-replacement equivalence still holds.
-        self.invalidate_write_side_caches(key);
+        // (BlackThrush) INCR always writes a `Value::Integer`, which `value_estimate_is_expensive`
+        // rejects, so this key is NEVER a member of the `mem_estimate_cache` — skip the always-miss
+        // remove and its per-write foldhash of the key; hll/dump are still invalidated. Byte-
+        // identical (there is nothing to remove); eliminates ~11% of INCR self-time under a
+        // non-empty cache (a restored/large collection makes `!is_empty()` pass).
+        self.invalidate_write_side_caches_scalar(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -47824,6 +47872,40 @@ mod tests {
             so.mem_estimate_cache.borrow().get(b"other".as_slice()).copied()
         );
         assert!(sn.mem_estimate_cache.borrow().get(b"other".as_slice()).is_some());
+    }
+
+    /// (BlackThrush) The scalar-write invalidation skips the mem_estimate_cache remove; that is
+    /// byte-identical BECAUSE a scalar (integer) key is never a member of that cache. INCR always
+    /// yields a `Value::Integer`, which `value_estimate_is_expensive` rejects, so no INCR ever
+    /// populates the cache — and the cache of a co-resident collection is left untouched by INCR.
+    #[test]
+    fn incr_never_populates_mem_estimate_cache_and_scalar_skip_is_byte_identical() {
+        // INCR many keys; none may ever appear in the mem_estimate_cache.
+        let mut s = Store::new();
+        for i in 0..300u32 {
+            let key = format!("counter:{i}");
+            let _ = s.incr(key.as_bytes(), 0);
+        }
+        assert!(
+            s.mem_estimate_cache.borrow().is_empty(),
+            "integer values are never cached, so INCR must not populate mem_estimate_cache"
+        );
+
+        // With a co-resident collection's estimate cached, INCR of a different key leaves that
+        // entry untouched; the scalar-skip invalidation matches the full one on such a key (miss).
+        let mut a = Store::new();
+        let mut b = Store::new();
+        a.mem_estimate_cache.borrow_mut().insert(b"big:hash".to_vec(), (7, 4096));
+        b.mem_estimate_cache.borrow_mut().insert(b"big:hash".to_vec(), (7, 4096));
+        let counter: &[u8] = b"counter:42";
+        a.invalidate_write_side_caches_scalar(counter);
+        b.invalidate_write_side_caches(counter);
+        assert_eq!(
+            a.mem_estimate_cache.borrow().get(b"big:hash".as_slice()).copied(),
+            b.mem_estimate_cache.borrow().get(b"big:hash".as_slice()).copied(),
+            "scalar-skip and full invalidation agree on a key absent from the cache"
+        );
+        assert_eq!(a.mem_estimate_cache.borrow().len(), 1);
     }
 
     #[test]
