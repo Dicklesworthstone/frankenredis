@@ -93,3 +93,8 @@ required-features = ["bench-reference"]
 name = "stream_rdb_id_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "legacy_hash_ziplist_move"
+harness = false
+required-features = ["bench-reference"]

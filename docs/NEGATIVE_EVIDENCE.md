@@ -4,6 +4,46 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — move legacy HASH_ZIPLIST fields instead of cloning; 43.660% fewer instructions (frankenredis-5gria)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance quick wins were
+already claimed, while recent command, runtime, replication, store, conformance, and server veins
+were actively mined. The Redis <=6.2 `fr-persist::decode_rdb_prefix` type-13
+`RDB_TYPE_HASH_ZIPLIST` handoff had no performance bead, ledger row, reservation, or optimization
+history. After `decode_ziplist` returned owned field/value byte vectors, the decoder cloned every
+vector solely to regroup adjacent entries into hash pairs. This is a cold legacy-RDB import result,
+not a claim for current listpack persistence or steady-state command throughput.
+
+PROFILE-FIRST on the unchanged live decoder, using a valid synthetic 512-pair/1,024-entry legacy
+hash ziplist (31,791-byte RDB), release profile with LTO disabled: worker `vmi1152480`, binary
+sha256 `ce03c144896329c3276b91e685e3dcebdb2e46bc3496326c87bdedfeb4a9228c`, 365 samples,
+zero lost. The exact old clone closure in `decode_rdb_prefix_impl::<false>` had **1.05% self-time**;
+`decode_ziplist` had **6.08%**, while allocator/free/copy work dominated the profile, proving that
+the measured decoder reached the proposed ownership handoff before the production edit.
+
+ONE LEVER: pre-size the output pair vector and consume the already-owned ziplist entries two at a
+time, moving each field and value into the hash. The frozen reference retains the literal
+`as_chunks::<2>()` plus two-clone map. Odd entry counts remain rejected before either handoff, and
+all other RDB types and decode stages are unchanged.
+
+FOREGROUND SAME-BINARY A/A+A/B: after the required untimed cold warm-up, repeated release-cache
+eviction caused a worker switch; the decisive invocation pinned both `RCH_WORKER` and `RCH_WORKERS`
+to `vmi1264463` and remained strict remote-only. Both arms used binary sha256
+`c339062744d4a683c1f3bcbf9d82b5007f3cfbf2bf7643bca1a9e92cec058253`. Nine
+position-balanced instruction rounds measured candidate median **494,655,099** versus reference
+median **877,988,630**; paired reference/candidate effect median **1.774950640x**, equivalent to
+**43.660% fewer instructions** by the arm medians. The A/A null median was **0.999999608**,
+p05..p95 **[0.999998648, 1.000001150]**, null CV **0.000084%**, and effect CV
+**0.000067%**. Exact candidate implementation/reference clone-fold profiles were **5.07% / 3.23%
+self-time**, 321/535 samples, both with zero lost.
+
+The same-binary correctness gate matched exact candidate/reference `RdbDecodeResult` values for
+**8** cases covering a real Redis legacy fixture, the timing fixture, small and binary hashes,
+saturated and mismatched ziplist counts, odd entries, and a bad checksum. Rollback: restore the
+live selector to the frozen cloning arm; wire format, validation, checksum, key metadata, and
+decoded hash ordering are unchanged. The focused legacy ziplist/zipmap/quicklist fixture test,
+scoped release-profile Clippy with `-D warnings`, rustfmt, and diff checks passed.
+
 ## 2026-07-16: SHIPPED — bulk-copy ordinary inline-command tokens; 34.128% fewer instructions (frankenredis-07f28)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance quick wins were

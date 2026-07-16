@@ -3547,7 +3547,23 @@ fn rdb_load_legacy_double(data: &[u8]) -> Option<(f64, usize)> {
 ///
 /// Redis AOF replay can begin with an RDB preamble followed by RESP AOF records.
 /// This API decodes only the RDB prefix and leaves any tail bytes to the caller.
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
+    decode_rdb_prefix_impl::<true>(data)
+}
+
+/// Frozen pre-optimization decoder for same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_decode_rdb_prefix_reference(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
+    decode_rdb_prefix_impl::<false>(data)
+}
+
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
+    data: &[u8],
+) -> Result<RdbDecodeResult, PersistError> {
     if data.len() < 9 + RDB_CHECKSUM_LEN || &data[..5] != b"REDIS" {
         return Err(PersistError::InvalidFrame);
     }
@@ -4221,12 +4237,25 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         if !entries.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
-                        let fields = entries
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|pair| (pair[0].clone(), pair[1].clone()))
-                            .collect();
+                        let fields = if MOVE_LEGACY_HASH_ZIPLIST_FIELDS {
+                            let mut fields = Vec::with_capacity(entries.len() / 2);
+                            let mut entries = entries.into_iter();
+                            loop {
+                                match (entries.next(), entries.next()) {
+                                    (Some(field), Some(value)) => fields.push((field, value)),
+                                    (None, None) => break,
+                                    _ => return Err(PersistError::InvalidFrame),
+                                }
+                            }
+                            fields
+                        } else {
+                            entries
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|pair| (pair[0].clone(), pair[1].clone()))
+                                .collect()
+                        };
                         RdbValue::Hash(fields)
                     }
                     RDB_TYPE_HASH_ZIPMAP => {
