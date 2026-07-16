@@ -86,3 +86,8 @@ required-features = ["bench-reference"]
 name = "rename_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "set_nx_ok_reply_alloc"
+harness = false
+required-features = ["bench-reference"]

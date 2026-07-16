@@ -8217,12 +8217,18 @@ impl Runtime {
         }
     }
 
+    /// (BlackThrush) Borrowed `SET key value NX` fast path (the distributed-lock pattern). Returns
+    /// `Some(None)` when the key was absent and written — the dispatcher emits the constant `+OK\r\n`
+    /// straight into the connection buffer via `BorrowedMultibulkAction::FastOkReply`, with no
+    /// `SimpleString("OK")` reply-frame allocation; `Some(Some(nil))` when the key already existed
+    /// (NX declines) — the `$-1` reply is routed through the ordinary `FastReply` path (the nil
+    /// frame itself allocates nothing); and `None` when the borrowed fast path declined entirely.
     pub fn execute_plain_set_nx_borrowed(
         &mut self,
         key: &[u8],
         value: &[u8],
         now_ms: u64,
-    ) -> Option<RespFrame> {
+    ) -> Option<Option<RespFrame>> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -8251,10 +8257,13 @@ impl Runtime {
         let start = self.chained_command_start();
         let set = self.server.store.setnx(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
-        let reply = if set {
-            RespFrame::SimpleString("OK".to_string())
+        // `set` (key absent → written) replies a constant +OK the caller emits directly via
+        // FastOkReply (no frame alloc); otherwise the key existed → nil (`$-1`), routed through the
+        // ordinary FastReply path (the nil frame itself allocates nothing).
+        let outcome = if set {
+            None
         } else {
-            RespFrame::BulkString(None)
+            Some(RespFrame::BulkString(None))
         };
 
         self.record_plain_set_nx_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id);
@@ -8262,7 +8271,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(reply)
+        Some(outcome)
     }
 
     fn record_plain_set_nx_borrowed_metrics(
