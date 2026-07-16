@@ -2,6 +2,7 @@
 name = "fr-config"
 version = "0.1.0"
 edition = "2024"
+autobenches = false
 
 [features]
 bench-reference = []
@@ -10,5 +11,10 @@ bench-reference = []
 
 [[bench]]
 name = "config_plain_tokens"
+harness = false
+required-features = ["bench-reference"]
+
+[[bench]]
+name = "config_directives"
 harness = false
 required-features = ["bench-reference"]

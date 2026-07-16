@@ -18317,3 +18317,30 @@ median **1.000000060**, null p05/p95 **0.999999733/1.000000320**, null CV **0.00
 The pre-measurement byte-parity gate matched **23 cases** covering every scalar variant, dirty inline strings, all
 null kinds, nested containers, attributes, pushes, sequences, and the CONFIG-like map. Rollback: change production
 `encode_into_resp3_impl::<true>` back to `<false>`.
+
+### 2026-07-16 REJECTED AND REVERTED (`parse_redis_config_bytes` outer directive pre-size — frankenredis-e5r3k)
+Negative-ledger-first pivot into the cold-start `fr-config` file parser. The outer
+`Vec<ParsedConfigDirective>` grew from zero even though the parser already scans for the first NUL. The one lever
+counted newlines during that scan and reserved the resulting logical-line upper bound before parsing. Trigger: a
+1,440-byte config containing 96 `appendonly yes` directives (two tokens per line, no NUL), parsed 20,000 times per
+instruction sample.
+
+PROFILE-FIRST: before the production lever, the exact unchanged `fr_config::parse_redis_config_bytes` symbol had
+**19.31% self-time**, `<RawVec>::grow_one` had **4.23%**, and `__memmove_avx_unaligned_erms` had **10.11%**, with zero
+lost samples on `vmi1152480` in release/no-LTO binary
+`2518aba9783ffe4aab624364ea9d2c471a936ef36f49e44c6df577b6942a8918`. The final one-binary profile retained nonzero
+self-time for both implementations (candidate **18.50%**, frozen reference **33.71%**, zero lost samples) in binary
+`1c7b31b05d2c03137d197dd23592a83e97cb1d567c57aa47d34c2ac5ae11071f` on the same worker; the distinct candidate and
+reference implementation symbols were both present and executed.
+
+The foreground, position-balanced `instructions:u` A/A+A/B used 9 rounds. Candidate median was
+**3,414,696,372** instructions versus reference **2,276,470,220**: candidate/reference = **1.499996065x**, a decisive
+**50.00% regression** (equivalently reference/candidate **0.666668465x**). The candidate/candidate null median was
+**0.999999975**, null p05/p95 **0.999999684/1.000000271**, null CV **0.000016%**, and effect CV **0.000009%**. The
+extra scalar byte classification needed to count lines costs much more than the avoided outer-vector growth. The
+pre-measurement equality gate matched **9 cases** covering the 96-line trigger, empty/comment-only input, whitespace,
+mixed case, non-UTF-8 bytes, first-NUL truncation, empty directive names, and invalid quotes.
+
+VERDICT: REJECT. The production source was restored before commit; only the feature-gated candidate/reference
+reproduction harness remains. Do not repeat an eager full-input line count for this vector. A future attempt would
+need a capacity hint that does not add a scalar pass/classification to every input byte.

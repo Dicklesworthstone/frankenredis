@@ -253,6 +253,124 @@ pub fn parse_redis_config_bytes(input: &[u8]) -> Result<ParsedConfigFile, Config
     Ok(ParsedConfigFile { directives })
 }
 
+/// Attributable production arm for the config-file parser benchmark.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_redis_config_bytes_candidate(
+    input: &[u8],
+) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    std::hint::black_box(1_u8);
+    bench_parse_redis_config_bytes_candidate_impl(input)
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+fn bench_parse_redis_config_bytes_candidate_impl(
+    input: &[u8],
+) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    let mut nul_pos = input.len();
+    let mut line_breaks = 0_usize;
+    for (pos, &byte) in input.iter().enumerate() {
+        if byte == 0 {
+            nul_pos = pos;
+            break;
+        }
+        line_breaks += usize::from(byte == b'\n');
+    }
+    let input = &input[..nul_pos];
+    let line_count =
+        line_breaks + usize::from(!input.is_empty() && input.last().copied() != Some(b'\n'));
+    let mut directives = Vec::with_capacity(line_count);
+
+    for (line_idx, raw_line) in input.split(|byte| *byte == b'\n').enumerate() {
+        let line_number = line_idx + 1;
+        let line = trim_redis_config_line(raw_line);
+        if line.is_empty() || line.first() == Some(&b'#') {
+            continue;
+        }
+
+        let mut tokens =
+            split_config_line_args_bytes(line).map_err(|reason| ConfigFileParseError {
+                line_number,
+                reason,
+                line: String::from_utf8_lossy(line).into_owned(),
+            })?;
+
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let mut name = tokens.remove(0);
+        if name.is_empty() {
+            continue;
+        }
+        name.make_ascii_lowercase();
+        directives.push(ParsedConfigDirective {
+            line_number,
+            name,
+            args: tokens,
+        });
+    }
+
+    Ok(ParsedConfigFile { directives })
+}
+
+/// Frozen pre-`frankenredis-e5r3k` comparator for the same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_redis_config_bytes_reference(
+    input: &[u8],
+) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    std::hint::black_box(0_u8);
+    bench_parse_redis_config_bytes_reference_impl(input)
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+fn bench_parse_redis_config_bytes_reference_impl(
+    input: &[u8],
+) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    let input = input
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(input, |nul_pos| &input[..nul_pos]);
+    let mut directives = Vec::new();
+
+    for (line_idx, raw_line) in input.split(|byte| *byte == b'\n').enumerate() {
+        let line_number = line_idx + 1;
+        let line = trim_redis_config_line(raw_line);
+        if line.is_empty() || line.first() == Some(&b'#') {
+            continue;
+        }
+
+        let mut tokens =
+            split_config_line_args_bytes(line).map_err(|reason| ConfigFileParseError {
+                line_number,
+                reason,
+                line: String::from_utf8_lossy(line).into_owned(),
+            })?;
+
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let mut name = tokens.remove(0);
+        if name.is_empty() {
+            continue;
+        }
+        name.make_ascii_lowercase();
+        directives.push(ParsedConfigDirective {
+            line_number,
+            name,
+            args: tokens,
+        });
+    }
+
+    Ok(ParsedConfigFile { directives })
+}
+
 pub fn split_config_line_args(line: &str) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
     split_config_line_args_bytes(line.as_bytes())
 }
