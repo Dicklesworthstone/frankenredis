@@ -13548,11 +13548,27 @@ impl Drop for LuaState<'_> {
             table: &LuaTable,
             visited: &mut HashSet<usize, foldhash::quality::RandomState>,
         ) {
-            let ptr = Rc::as_ptr(&table.inner) as usize;
-            if !visited.insert(ptr) {
+            // `try_borrow` fails ONLY when this exact table is already `borrow_mut`'d higher in our
+            // own recursion — a self-reference (`t.self = t`, or `_G._G = _G`) reached mid-clear.
+            // That table is already being cleared, so stop. (This is why the borrow cannot precede
+            // the cycle guard: a plain `borrow()` here panics on such self-refs — it did, on the
+            // _G / getfenv tests.) For every OTHER table the borrow succeeds, INCLUDING all shared
+            // templates, which are never `borrow_mut`'d.
+            let Ok(borrowed) = table.inner.try_borrow() else {
+                return;
+            };
+            // Shared-template tables (redis/string/table/math/cjson/cmsgpack/struct/bit — see
+            // new_shared_template) are never cleared or recursed, so they can never be a cycle node.
+            // Skip them WITHOUT a visited insert: the sandbox globals are dominated by these ~8
+            // templates, and the prior code inserted each one's pointer only to early-return, which
+            // was the bulk of the visited-set inserts + rehashes. Byte-identical set of cleared
+            // tables (a template is never drained either way). (BlackThrush)
+            if borrowed.shared_template {
                 return;
             }
-            if table.inner.borrow().shared_template {
+            drop(borrowed);
+            let ptr = Rc::as_ptr(&table.inner) as usize;
+            if !visited.insert(ptr) {
                 return;
             }
             let inner = &mut *table.inner.borrow_mut();
@@ -13586,7 +13602,12 @@ impl Drop for LuaState<'_> {
         // self-time in `hash_one::<&usize>` + `sip::Hasher::write` for these pointer inserts. The
         // keys are internal pointers (never attacker-controlled), so foldhash is safe and much
         // cheaper. Byte-identical cycle detection.
-        let mut visited: HashSet<usize, foldhash::quality::RandomState> = HashSet::default();
+        // Pre-size so the walk does not grow+rehash the set from capacity 0. With the
+        // template-skip above, only the handful of per-eval non-template tables (KEYS/ARGV/
+        // coroutine + any user tables) enter the set, so a small fixed hint covers the common case.
+        // A hint only — over/under-sizing stays byte-identical. (BlackThrush)
+        let mut visited: HashSet<usize, foldhash::quality::RandomState> =
+            HashSet::with_capacity_and_hasher(16, foldhash::quality::RandomState::default());
         for value in self.globals.values() {
             if let LuaValue::Table(t) = value {
                 clear_table_recursive(t, &mut visited);
