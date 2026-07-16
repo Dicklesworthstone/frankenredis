@@ -4,6 +4,55 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — copy validated RESP3 Big Numbers without a second UTF-8 scan; 7.6735% fewer instructions (frankenredis-szkj1)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was
+already claimed, while the just-landed event-loop read-path seam was complete and the SIMD ledger
+explicitly marked that subsystem exhausted. The RESP3 Big Number `b'('` arm in
+`fr-protocol::parse_frame_internal` had no performance bead, ledger row, reservation, or
+optimization history. This is a cold RESP3 reply-parser path, not a claim for ordinary RESP2
+command dispatch.
+
+PROFILE-FIRST on the literal unchanged live parser, canonical unsigned 257-digit trigger, release
+profile with LTO disabled: worker `vmi1152480`, binary sha256
+`a86750175139f9ad9827f28ffa73abe5800bbba00bc76691e42d14ce1f5e7fd1`, 409 samples, zero
+lost. The exact `fr_protocol::parse_frame_internal` frame had **83.14% self-time**, and the
+redundant exact `core::str::converts::from_utf8` scan had **11.42% self-time**, proving that the
+unchanged workload reached the proposed copy handoff before the production edit.
+
+ONE LEVER: after the existing validator accepts a non-empty optional-sign-plus-decimal-digits
+body, copy its bytes directly with `to_vec()` instead of validating the already-proven ASCII as
+UTF-8, converting it to `String`, then recovering the same bytes. Accepted bytes and allocation
+size are identical. Empty/sign-only, punctuation, embedded whitespace, trailing junk, and
+non-ASCII bodies still return `InvalidInteger`; therefore the removed `InvalidUtf8` result was
+unreachable after the digit validator.
+
+FOREGROUND SAME-BINARY A/A+A/B: the initial worker repeatedly evicted its release cache, so the
+required untimed warm-up and decisive invocation moved to `vmi1264463`; all builds remained
+strict remote-only. Both final arms used binary sha256
+`e9d0971b1627ff88673535a14d720218a04a5867aed984d297b534e2638e2f64`. Nine
+position-balanced instruction rounds on the validated 257-digit body measured candidate median
+**2,009,310,360** versus frozen-reference median **2,176,310,502**, or **7.673544% fewer
+instructions**. The paired reference/candidate median was **1.083113122x**; the candidate/candidate
+A/A null median was **0.999999878**, p05..p95 **[0.999999743, 1.000000454]**, null CV
+**0.000021%**, and effect CV **0.000023%**. Exact candidate/reference wrapper profiles were
+**73.90% / 82.69% self-time**, respectively, both with zero lost samples; only the reference
+profile retained `core::str::converts::from_utf8` (**4.68% self-time**).
+
+The same-binary correctness gate matched **13** accepted/rejected cases covering unsigned,
+signed, 37-digit, 257-digit, 64-KiB, empty, sign-only, decimal point, trailing junk, whitespace,
+and invalid UTF-8 bodies, then verified the production parser's full frame and consumed length.
+The focused unit proof repeats the direct/reference equality at those boundaries. Rollback: restore
+the validated body's `from_utf8(...).to_string().into_bytes()` copy; no wire bytes, parser limit,
+error kind, recursion rule, or downstream frame shape changed.
+
+GATES: focused release-profile Big Number tests passed **3/3**; scoped release-profile Clippy for
+the library and this bench passed with `-D warnings`; direct rustfmt plus `git diff --check` passed;
+UBS reported zero critical findings after removing the bench profiler's panic path. Workspace
+all-target Clippy remains blocked by pre-existing `clippy::byte_char_slices` findings in
+`push_len_header_fastpath.rs` and an older `lib.rs` test; strict RCH rejected Cargo's non-compiling
+`fmt` subcommand with `RCH-E301`, so no local Cargo fallback was used.
+
 ## 2026-07-16: SHIPPED — inline successful socket-read validation; 24.993% fewer instructions (frankenredis-uoib0)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was already

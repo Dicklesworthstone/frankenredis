@@ -1566,6 +1566,39 @@ pub fn parse_frame_with_config(
     Ok(ParseResult { frame, consumed })
 }
 
+/// Bench-only entry point for profiling the unchanged live RESP3 Big Number parser before the
+/// candidate exists. Keeping this wrapper behind `bench-reference` leaves production codegen
+/// untouched while giving `perf` a stable call boundary.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_big_number_current(input: &[u8]) -> Result<ParseResult, RespParseError> {
+    std::hint::black_box(0_u8);
+    let config = ParserConfig {
+        allow_resp3: true,
+        ..ParserConfig::default()
+    };
+    parse_frame_with_config(input, &config)
+}
+
+/// Bench-only entry point for the production validated-body copy.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_big_number_candidate(line: &[u8]) -> Result<Vec<u8>, RespParseError> {
+    std::hint::black_box(0_u8);
+    parse_resp3_big_number_body::<true>(line)
+}
+
+/// Frozen pre-optimization validated-body copy, including its redundant UTF-8 scan.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_big_number_reference(line: &[u8]) -> Result<Vec<u8>, RespParseError> {
+    std::hint::black_box(1_u8);
+    parse_resp3_big_number_body::<false>(line)
+}
+
 /// Parse a CLIENT → SERVER **command** frame. Unlike [`parse_frame_with_config`]
 /// (which accepts any RESP type for array elements — correct for parsing
 /// *replies*), every element of a command multibulk must be a non-null bulk
@@ -1804,6 +1837,34 @@ fn parse_command_args_borrowed_into_inner<'a>(
 /// depth budget. (frankenredis-oafun)
 const RESP3_ATTRIBUTE_CHAIN_LIMIT: usize = 8;
 
+#[inline(always)]
+fn parse_resp3_big_number_body<const DIRECT_COPY: bool>(
+    line: &[u8],
+) -> Result<Vec<u8>, RespParseError> {
+    if line.is_empty() {
+        return Err(RespParseError::InvalidInteger);
+    }
+    let digits_start = match line[0] {
+        b'+' | b'-' => 1,
+        _ => 0,
+    };
+    if digits_start == line.len()
+        || line[digits_start..]
+            .iter()
+            .any(|byte| !byte.is_ascii_digit())
+    {
+        return Err(RespParseError::InvalidInteger);
+    }
+    if DIRECT_COPY {
+        // The validator above proves that every accepted byte is ASCII, hence valid UTF-8.
+        return Ok(line.to_vec());
+    }
+    let text = std::str::from_utf8(line)
+        .map_err(|_| RespParseError::InvalidUtf8)?
+        .to_string();
+    Ok(text.into_bytes())
+}
+
 fn parse_frame_internal(
     input: &[u8],
     start: usize,
@@ -1871,22 +1932,8 @@ fn parse_frame_internal(
             // Empty / non-numeric payloads are malformed.
             // (frankenredis-u1xg5)
             let (line, consumed) = read_line(input, next)?;
-            if line.is_empty() {
-                return Err(RespParseError::InvalidInteger);
-            }
-            let digits_start = match line[0] {
-                b'+' | b'-' => 1,
-                _ => 0,
-            };
-            if digits_start == line.len()
-                || line[digits_start..].iter().any(|b| !b.is_ascii_digit())
-            {
-                return Err(RespParseError::InvalidInteger);
-            }
-            let s = std::str::from_utf8(line)
-                .map_err(|_| RespParseError::InvalidUtf8)?
-                .to_string();
-            Ok((RespFrame::BulkString(Some(s.into_bytes())), consumed))
+            let bytes = parse_resp3_big_number_body::<true>(line)?;
+            Ok((RespFrame::BulkString(Some(bytes)), consumed))
         }
         b'_' => {
             let (line, consumed) = read_line(input, next)?;
@@ -2597,8 +2644,8 @@ mod tests {
         bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
         encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
         format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
-        parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64,
-        push_redis_double_ascii, push_usize,
+        parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
+        parse_resp3_big_number_body, push_i64, push_redis_double_ascii, push_usize,
     };
 
     // The fused owned-frame count/length line fast path (parse_bulk / parse_array / parse_resp3_map)
@@ -4655,6 +4702,43 @@ mod tests {
                 "canonical big number {ok:?} should parse"
             );
         }
+    }
+
+    #[test]
+    fn resp3_big_number_direct_copy_matches_utf8_reference() {
+        let mut long = vec![b'7'; 65_536];
+        let mut signed_long = Vec::with_capacity(258);
+        signed_long.push(b'-');
+        signed_long.extend(std::iter::repeat_n(b'9', 257));
+        let invalid_utf8 = [b'1', 0xff];
+        let cases: Vec<&[u8]> = vec![
+            b"0",
+            b"+1",
+            b"-42",
+            b"9999999999999999999999999999999999999",
+            &signed_long,
+            &long,
+            b"",
+            b"+",
+            b"-",
+            b"12.5",
+            b"123abc",
+            b"1 2",
+            &invalid_utf8,
+        ];
+        for body in cases {
+            assert_eq!(
+                parse_resp3_big_number_body::<true>(body),
+                parse_resp3_big_number_body::<false>(body),
+                "direct copy differs for body length {}",
+                body.len()
+            );
+        }
+        long[32_768] = 0xff;
+        assert_eq!(
+            parse_resp3_big_number_body::<true>(&long),
+            parse_resp3_big_number_body::<false>(&long)
+        );
     }
 
     #[test]
