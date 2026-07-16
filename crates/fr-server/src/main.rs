@@ -5558,15 +5558,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_setex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_setex_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // SETEX replies a constant +OK; route the non-allocating `_ok` twin to
+                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per SETEX.
+                    if runtime
+                        .execute_plain_setex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -5581,15 +5580,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_psetex_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // PSETEX replies a constant +OK; route the non-allocating `_ok` twin to
+                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per PSETEX.
+                    if runtime
+                        .execute_plain_psetex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -6944,15 +6942,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_psetex_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // PSETEX replies a constant +OK; route the non-allocating `_ok` twin to
+                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per PSETEX.
+                    if runtime
+                        .execute_plain_psetex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -6967,15 +6964,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_setex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_setex_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // SETEX replies a constant +OK; route the non-allocating `_ok` twin to
+                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per SETEX.
+                    if runtime
+                        .execute_plain_setex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(

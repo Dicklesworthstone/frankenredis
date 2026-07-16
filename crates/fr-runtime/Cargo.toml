@@ -76,3 +76,8 @@ required-features = ["bench-reference"]
 name = "hmset_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "setex_ok_reply_alloc"
+harness = false
+required-features = ["bench-reference"]

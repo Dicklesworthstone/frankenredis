@@ -18396,6 +18396,22 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_setex_borrowed_ok(key, seconds_arg, value, now_ms)
+            .map(|()| RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Non-allocating twin of [`Self::execute_plain_setex_borrowed`]: runs the
+    /// identical borrowed SETEX write but reports success as `Some(())` so the dispatcher can emit
+    /// the constant `+OK\r\n` straight into the connection buffer via
+    /// `BorrowedMultibulkAction::FastOkReply` instead of heap-allocating a `SimpleString("OK")`
+    /// reply frame. `None` means the borrowed fast path declined and the caller must fall back.
+    pub fn execute_plain_setex_borrowed_ok(
+        &mut self,
+        key: &[u8],
+        seconds_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<()> {
         self.execute_plain_setex_kind_borrowed(
             true,
             b"SETEX",
@@ -18417,6 +18433,20 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_psetex_borrowed_ok(key, ms_arg, value, now_ms)
+            .map(|()| RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Non-allocating twin of [`Self::execute_plain_psetex_borrowed`] — the PSETEX
+    /// (millisecond) sibling of [`Self::execute_plain_setex_borrowed_ok`]; reports `Some(())` on
+    /// success so the dispatcher emits `+OK\r\n` via `FastOkReply` with no reply-frame allocation.
+    pub fn execute_plain_psetex_borrowed_ok(
+        &mut self,
+        key: &[u8],
+        ms_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<()> {
         self.execute_plain_setex_kind_borrowed(
             false, b"PSETEX", "psetex", key, ms_arg, value, now_ms,
         )
@@ -18441,7 +18471,7 @@ impl Runtime {
         time_arg: &[u8],
         value: &[u8],
         now_ms: u64,
-    ) -> Option<RespFrame> {
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < name_upper.len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -18491,7 +18521,6 @@ impl Runtime {
             .store
             .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
         let elapsed_us = self.finish_chained_command(start);
-        let reply = RespFrame::SimpleString("OK".to_string());
 
         self.record_plain_setex_borrowed_metrics(
             name_upper, name_lower, key, time_arg, value, elapsed_us, now_ms, packet_id,
@@ -18500,7 +18529,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(reply)
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
