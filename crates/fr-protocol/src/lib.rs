@@ -855,7 +855,13 @@ impl RespFrame {
     /// [`encode_into`], so this only diverges on the null leaves.
     ///
     /// [`encode_into`]: Self::encode_into
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn encode_into_resp3(&self, out: &mut Vec<u8>) {
+        self.encode_into_resp3_impl::<true>(out);
+    }
+
+    #[inline(always)]
+    fn encode_into_resp3_impl<const DIRECT_SCALARS: bool>(&self, out: &mut Vec<u8>) {
         match self {
             Self::BulkString(None) | Self::Array(None) | Self::Map(None) | Self::Set(None) => {
                 out.extend_from_slice(b"_\r\n");
@@ -865,7 +871,7 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Map(Some(entries)) => {
@@ -873,8 +879,8 @@ impl RespFrame {
                 push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
-                    key.encode_into_resp3(out);
-                    value.encode_into_resp3(out);
+                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Attribute(entries) => {
@@ -882,8 +888,8 @@ impl RespFrame {
                 push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
-                    key.encode_into_resp3(out);
-                    value.encode_into_resp3(out);
+                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Set(Some(frames)) => {
@@ -891,7 +897,7 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Push(frames) => {
@@ -899,13 +905,51 @@ impl RespFrame {
                 push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
-                    frame.encode_into_resp3(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Sequence(frames) => {
                 for frame in frames {
-                    frame.encode_into_resp3(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
+            }
+            Self::SimpleString(s) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"+");
+                push_inline_sanitized(out, s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Error(s) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"-");
+                push_inline_sanitized(out, s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Integer(n) if DIRECT_SCALARS => encode_integer_reply::<true>(*n, out),
+            Self::BulkString(Some(bytes)) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"$");
+                push_usize(out, bytes.len());
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Double(s) if DIRECT_SCALARS => {
+                out.extend_from_slice(b",");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::BigNumber(s) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"(");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Bool(value) if DIRECT_SCALARS => {
+                out.extend_from_slice(if *value { b"#t\r\n" } else { b"#f\r\n" });
+            }
+            Self::Verbatim(s) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"=");
+                push_usize(out, s.len() + 4);
+                out.extend_from_slice(b"\r\ntxt:");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
             }
             // Scalars (SimpleString/Error/Integer/Double/Verbatim/populated
             // BulkString) carry no nulls and encode identically.
@@ -920,6 +964,14 @@ impl RespFrame {
     pub fn double_from_f64(v: f64) -> Self {
         Self::Double(format_redis_double(v))
     }
+}
+
+/// Frozen pre-optimization RESP3 encoder for same-binary proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_into_resp3_reference(frame: &RespFrame, out: &mut Vec<u8>) {
+    frame.encode_into_resp3_impl::<false>(out);
 }
 
 /// Format an f64 exactly as vendored Redis 7.2.4 util.c::d2string does,

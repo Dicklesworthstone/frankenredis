@@ -70,3 +70,10 @@ harness = false
 name = "inline_sanitize_runs"
 harness = false
 required-features = ["bench-reference"]
+
+# Same-binary proof for direct RESP3 scalar-leaf encoding: direct scalar arms versus the frozen
+# second-dispatch fallback through RespFrame::encode_into, on a CONFIG-like RESP3 map.
+[[bench]]
+name = "resp3_scalar_dispatch"
+harness = false
+required-features = ["bench-reference"]

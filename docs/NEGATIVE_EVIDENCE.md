@@ -18222,3 +18222,26 @@ reference **2,800,312,204**, reference/candidate = **1.771999407x** (candidate *
 median **0.999999915**, null p05/p95 **0.999998875/1.000000182**, null CV **0.000036%**, effect CV **0.000026%**.
 The pre-measurement correctness gate matched both arms for exact, case-folded, mismatch, question-mark, backlog-boundary,
 out-of-range, and non-ASCII cases. Rollback: change production `decide_psync_impl::<true>` back to `<false>`.
+
+### 2026-07-16 SHIPPED (`encode_into_resp3` direct scalar leaves — frankenredis-xpfln)
+Negative-ledger-first pivot from the completed eventloop/repl veins into the previously unmeasured `fr-protocol`
+RESP3 encoder. Populated scalar leaves are wire-identical under RESP2 and RESP3, but `encode_into_resp3` routed each
+one through `encode_into`, paying a second full `RespFrame` enum match. The one lever emits SimpleString, Error,
+Integer, populated BulkString, Double, BigNumber, Bool, and Verbatim bytes directly while retaining the original
+recursive RESP3 null promotion for Array/Map/Attribute/Set/Push/Sequence and every null variant.
+
+PROFILE-FIRST: before the lever, the exact unchanged
+`<fr_protocol::RespFrame>::encode_into_resp3_impl::<false>` symbol had **27.46% self-time** and the redundant exact
+`<fr_protocol::RespFrame>::encode_into` fallback had **55.26%**, with zero lost samples on `vmi1227854` in the
+release/no-LTO binary `fc6e31c14eb003ca07736071c7960f871dc38df8244271851b67dc589ead3a7c`. The final same-binary profile had
+the direct candidate implementation at **53.26%** self-time with no fallback frame, while the frozen indirect
+reference retained **26.01%** implementation plus **53.90%** fallback self-time; both profiles had zero lost
+samples in binary `cb9728f109dedf1780e5dc3a4db704b3a1fb45df280bac0271050b57d2209943` on the same worker.
+
+The foreground, position-balanced `instructions:u` A/A+A/B used 12 rounds x 75,000 encodes of a CONFIG-like RESP3
+Map with 128 pairs / 256 populated BulkString leaves in that one binary: candidate median **2,477,917,680** vs
+reference **2,900,092,923**, reference/candidate = **1.170374929x** (candidate **14.56% fewer instructions**); null
+median **1.000000060**, null p05/p95 **0.999999733/1.000000320**, null CV **0.000025%**, effect CV **0.000021%**.
+The pre-measurement byte-parity gate matched **23 cases** covering every scalar variant, dirty inline strings, all
+null kinds, nested containers, attributes, pushes, sequences, and the CONFIG-like map. Rollback: change production
+`encode_into_resp3_impl::<true>` back to `<false>`.
