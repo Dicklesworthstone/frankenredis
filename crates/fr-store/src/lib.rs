@@ -8142,7 +8142,11 @@ impl Store {
             return;
         }
 
-        self.invalidate_write_side_caches(key);
+        // (BlackThrush) SET KEEPTTL overwrite writes a scalar (String/Integer), which is never a
+        // mem_estimate_cache member, so skip its always-miss remove (rationale in
+        // invalidate_write_side_caches). If this overwrites a cached collection with a scalar, the
+        // stale estimate is never read (the scalar returns early, not via the cache) — byte-identical.
+        self.invalidate_write_side_caches_scalar(key);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let old_was_stream = {
@@ -8262,7 +8266,9 @@ impl Store {
             }
             self.internal_entries_insert(key.to_vec(), entry);
         } else {
-            self.invalidate_write_side_caches(key);
+            // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
+            // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
+            self.invalidate_write_side_caches_scalar(key);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         }
         self.dirty = self.dirty.saturating_add(1);
@@ -47939,6 +47945,23 @@ mod tests {
         // actually stored.
         assert!(s.mem_estimate_cache.borrow().get(b"scalar".as_slice()).is_none());
         assert!(s.entries.contains_key(b"scalar".as_slice()));
+    }
+
+    /// (BlackThrush) SET KEEPTTL overwrite (`set_keep_ttl_borrowed`) writes a scalar and must skip
+    /// the mem_estimate_cache remove, leaving a co-resident collection's cached estimate untouched.
+    #[test]
+    fn set_keepttl_overwrite_skips_mem_estimate_cache() {
+        let mut s = Store::new();
+        // Seed the key so SET KEEPTTL takes the OVERWRITE branch (which invalidates).
+        s.set_plain_borrowed(b"scalar", b"old", 0);
+        s.mem_estimate_cache.borrow_mut().insert(b"big:coll".to_vec(), (3, 9999));
+        s.set_keep_ttl_borrowed(b"scalar", b"a-new-longer-value", 1);
+        assert_eq!(
+            s.mem_estimate_cache.borrow().get(b"big:coll".as_slice()).copied(),
+            Some((3, 9999)),
+            "SET KEEPTTL overwrite must not disturb a co-resident collection's cached estimate"
+        );
+        assert!(s.mem_estimate_cache.borrow().get(b"scalar".as_slice()).is_none());
     }
 
     #[test]
