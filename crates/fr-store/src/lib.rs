@@ -12963,7 +12963,19 @@ impl Store {
             // with new_expiry=None). Gate on `old_expiry.is_some()`. Byte-identical.
             self.forget_volatile_key(&key);
         }
-        self.invalidate_write_side_caches(&key);
+        // (BlackThrush) The `mem_estimate_cache` holds ONLY expensive collection estimates, so a
+        // scalar (string/integer) insert can never be a member — skip its always-miss remove and
+        // its per-write foldhash, extending the per-INCR scalar-skip to this shared owned-insert
+        // path (SET-with-TTL / SETEX / GETSET / COPY / RENAME of a scalar). Byte-identical: a
+        // scalar's estimate is never cached (nothing to remove); if this overwrites a cached
+        // collection with a scalar, the stale entry is never read (the scalar's estimate returns
+        // early, not via the cache) and is purged on the key's eventual delete. A collection insert
+        // (RESTORE/COPY of a large value) keeps the full three-cache invalidation.
+        if value_estimate_is_expensive(&entry.value) {
+            self.invalidate_write_side_caches(&key);
+        } else {
+            self.invalidate_write_side_caches_scalar(&key);
+        }
         let old_entry = match canonical_key {
             // New key: insert the boxed bytes as the canonical key.
             Some(canonical_key) => self.entries.insert(canonical_key, entry),
@@ -47906,6 +47918,27 @@ mod tests {
             "scalar-skip and full invalidation agree on a key absent from the cache"
         );
         assert_eq!(a.mem_estimate_cache.borrow().len(), 1);
+    }
+
+    /// (BlackThrush) A scalar insert through the shared `internal_entries_insert_with_expiry` path
+    /// (SET-with-TTL/SETEX/GETSET/…) must skip the mem_estimate_cache remove and leave a co-resident
+    /// collection's cached estimate untouched — the scalar key is never a cache member.
+    #[test]
+    fn scalar_insert_via_shared_path_skips_mem_estimate_cache() {
+        let mut s = Store::new();
+        // A co-resident collection's cached estimate.
+        s.mem_estimate_cache.borrow_mut().insert(b"big:coll".to_vec(), (3, 9999));
+        // SET a scalar with a TTL (routes through internal_entries_insert_with_expiry).
+        s.set(b"scalar".to_vec(), b"hello".to_vec(), Some(60_000), 0);
+        assert_eq!(
+            s.mem_estimate_cache.borrow().get(b"big:coll".as_slice()).copied(),
+            Some((3, 9999)),
+            "scalar insert must not disturb a co-resident collection's cached estimate"
+        );
+        // The scalar itself is never cached (String is not an expensive estimate), and it was
+        // actually stored.
+        assert!(s.mem_estimate_cache.borrow().get(b"scalar".as_slice()).is_none());
+        assert!(s.entries.contains_key(b"scalar".as_slice()));
     }
 
     #[test]
