@@ -1599,6 +1599,44 @@ pub fn bench_parse_resp3_big_number_reference(line: &[u8]) -> Result<Vec<u8>, Re
     parse_resp3_big_number_body::<false>(line)
 }
 
+/// Bench-only entry point for profiling the unchanged live RESP3 Boolean parser before the
+/// candidate exists.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_bool_current(input: &[u8]) -> Result<ParseResult, RespParseError> {
+    std::hint::black_box(0_u8);
+    let config = ParserConfig {
+        allow_resp3: true,
+        ..ParserConfig::default()
+    };
+    parse_frame_with_config(input, &config)
+}
+
+/// Bench-only entry point for the production RESP3 Boolean body parser.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_bool_candidate(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), RespParseError> {
+    std::hint::black_box(0_u8);
+    parse_resp3_bool_impl::<true>(input, start)
+}
+
+/// Frozen pre-optimization RESP3 Boolean body parser.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_resp3_bool_reference(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), RespParseError> {
+    std::hint::black_box(1_u8);
+    parse_resp3_bool_impl::<false>(input, start)
+}
+
 /// Parse a CLIENT → SERVER **command** frame. Unlike [`parse_frame_with_config`]
 /// (which accepts any RESP type for array elements — correct for parsing
 /// *replies*), every element of a command multibulk must be a non-null bulk
@@ -1993,7 +2031,24 @@ fn parse_resp3_map(
     Ok((RespFrame::Array(Some(items)), cursor))
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn parse_resp3_bool(input: &[u8], start: usize) -> Result<(RespFrame, usize), RespParseError> {
+    parse_resp3_bool_impl::<true>(input, start)
+}
+
+#[inline(always)]
+fn parse_resp3_bool_impl<const FIXED_WIDTH: bool>(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), RespParseError> {
+    if FIXED_WIDTH {
+        if input.get(start..).is_some_and(|tail| tail.starts_with(b"t\r\n")) {
+            return Ok((RespFrame::Integer(1), start + 3));
+        }
+        if input.get(start..).is_some_and(|tail| tail.starts_with(b"f\r\n")) {
+            return Ok((RespFrame::Integer(0), start + 3));
+        }
+    }
     let (line, consumed) = read_line(input, start)?;
     let flag = match line {
         b"t" => 1,

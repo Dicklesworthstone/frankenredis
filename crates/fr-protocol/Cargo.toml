@@ -82,3 +82,8 @@ required-features = ["bench-reference"]
 name = "resp3_big_number_parse"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "resp3_bool_fixed"
+harness = false
+required-features = ["bench-reference"]

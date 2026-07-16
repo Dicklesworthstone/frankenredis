@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — recognize fixed-width RESP3 Booleans before the line scan; 17.341443% fewer instructions (frankenredis-9oids)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage exposed no unclaimed one-turn
+performance recommendation, and the recent replication, config, Sentinel, store, runtime, and SIMD
+veins were already mined. The cold RESP3 reply-parser Boolean `b'#'` arm had no performance bead,
+ledger row, reservation, or optimization history. The neighboring Big Number row removed a
+post-validation UTF-8 scan; it did not cover Boolean line termination.
+
+PROFILE-FIRST on the literal unchanged live parser, canonical `#t\r\n` / `#f\r\n` trigger,
+release profile with LTO disabled: worker `vmi1153651`, binary sha256
+`330e983daa7074046959da4f8048e60892bcf535b78f06fe3739ce61532a8d1a`, zero lost samples.
+The exact `fr_protocol::parse_resp3_bool` frame carried **3.54% self-time**, proving that the
+unchanged full-frame workload reached the proposed Boolean body seam. The same-binary pre-change
+A/A control was instruction-identical: candidate median 980,310,230, frozen-reference median
+980,310,308, paired reference/candidate `0.999999750x`; null median `1.000000014`, spread
+`0.999999274..1.000000511`, null CV `0.000040%`, effect CV `0.000027%`.
+
+ONE LEVER: recognize the only two valid fixed-width bodies, `t\r\n` and `f\r\n`, before calling
+the generic CRLF line scanner. Each canonical body returns the same integer and consumed offset
+immediately. Every incomplete, malformed, overlong, offset, or otherwise noncanonical body falls
+through verbatim to the old `read_line` plus one-byte match. The frozen bench-only reference
+retains that complete pre-change implementation.
+
+FOREGROUND SAME-BINARY A/B: `vmi1153651` repeatedly evicted its release target after untimed
+warm-ups, so the decisive strict-remote invocation moved to `vmi1152480`; its Cargo compilation
+was also untimed and only the in-harness PMU work was capped. Both final arms used binary sha256
+`b8c4e83bd5fd63094663c99f1be4aa7550cd54b45376c1275d5660e805f3a063`. Nine
+position-balanced instruction rounds measured candidate median **810,310,184** versus reference
+median **980,310,104**, or **17.341443% fewer instructions**. The paired
+reference/candidate median was **1.209796228x**; the candidate/candidate A/A null median was
+**1.000000017**, p05..p95 **[0.999998414, 1.000002850]**, null CV **0.000118%**, and
+effect CV **0.000041%**. Candidate/reference exact wrapper frames carried **6.04% / 5.44%
+self-time**, respectively, with 334/347 samples and zero lost.
+
+The same-binary correctness gate matched **9,345** candidate/reference cases: canonical true and
+false with trailing frames, nonzero start offset, incomplete terminators, empty/multibyte/invalid
+Boolean bodies, invalid UTF-8, a 65,537-byte overlong line, and the exhaustive six-byte alphabet
+through body length five. The live parser additionally returned exact integer values and consumed
+lengths for both canonical frames. Rollback: remove the two fixed-width prefix checks; wire values,
+cursor semantics, limits, and error kinds are unchanged.
+
+GATES: strict-remote release/no-LTO protocol validation passed 98 unit tests, 2 fuzz-corpus tests,
+41 golden tests, and 2 live-oracle tests; scoped library-plus-benchmark Clippy passed with
+`-D warnings`; direct rustfmt and `git diff --check` passed.
+
 ## 2026-07-16: SHIPPED — mask duplicate TLS protocol scans; 1.692930% fewer instructions (frankenredis-y2ahh)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: `fr-repl` bead `bf1ow` was already closed and
