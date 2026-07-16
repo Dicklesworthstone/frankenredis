@@ -7129,22 +7129,24 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_rename_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_rename_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // RENAME replies a constant +OK on success → FastOkReply (no reply-frame alloc);
+                    // a "no such key" error frame still routes through FastReply.
+                    match runtime.execute_plain_rename_borrowed(packet.key, packet.member, ts) {
+                        Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                            consumed: packet.consumed,
+                        }),
+                        Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
+                        }),
+                        None => parse_borrowed_multibulk_action(
                             unparsed,
                             parser_config,
                             runtime,
                             ts,
                             &mut conn.write_buf,
                             &mut argv_scratch,
-                        )
+                        ),
                     }
                 } else if let Some(packet) =
                     parse_borrowed_plain_getset_packet(unparsed, &parser_config)

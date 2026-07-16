@@ -18271,12 +18271,17 @@ impl Runtime {
     /// and tracking are provably inactive. WATCH is pull-based (fingerprint+dirty
     /// snapshot checked at EXEC), and store.rename bumps dirty + changes both keys'
     /// state, so watchers abort correctly.
+    /// (BlackThrush) Borrowed RENAME fast path. Returns `Some(None)` on success so the dispatcher
+    /// emits the constant `+OK\r\n` straight into the connection buffer via
+    /// `BorrowedMultibulkAction::FastOkReply` (no `SimpleString("OK")` reply-frame allocation);
+    /// `Some(Some(err))` when the rename failed (source key absent → "no such key"), routed through
+    /// the ordinary `FastReply` path; and `None` when the borrowed fast path declined.
     pub fn execute_plain_rename_borrowed(
         &mut self,
         key: &[u8],
         newkey: &[u8],
         now_ms: u64,
-    ) -> Option<RespFrame> {
+    ) -> Option<Option<RespFrame>> {
         if !self.can_execute_plain_rename_borrowed(key, newkey, now_ms) {
             return None;
         }
@@ -18298,11 +18303,13 @@ impl Runtime {
         let start = self.chained_command_start();
         let result = self.server.store.rename(key, newkey, now_ms);
         let elapsed_us = self.finish_chained_command(start);
-        let reply = match result {
-            Ok(()) => RespFrame::SimpleString("OK".to_string()),
-            Err(err) => CommandError::Store(err).to_resp(),
+        // `Ok(())` → success (constant +OK emitted directly by the caller via FastOkReply, no frame
+        // allocated); `Err` → the error frame, routed through the ordinary FastReply path.
+        let outcome = match result {
+            Ok(()) => None,
+            Err(err) => Some(CommandError::Store(err).to_resp()),
         };
-        let failed = matches!(reply, RespFrame::Error(_));
+        let failed = outcome.is_some();
 
         self.record_plain_rename_borrowed_metrics(
             key, newkey, elapsed_us, now_ms, packet_id, failed,
@@ -18311,7 +18318,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        if let RespFrame::Error(msg) = &reply {
+        if let Some(RespFrame::Error(msg)) = &outcome {
             self.server.store.stat_total_error_replies += 1;
             if self.execution_source.counts_as_unexpected_error_reply() {
                 self.server.store.stat_unexpected_error_replies += 1;
@@ -18328,7 +18335,7 @@ impl Runtime {
             }
         }
 
-        Some(reply)
+        Some(outcome)
     }
 
     fn record_plain_rename_borrowed_metrics(

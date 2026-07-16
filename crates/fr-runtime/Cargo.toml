@@ -81,3 +81,8 @@ required-features = ["bench-reference"]
 name = "setex_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "rename_ok_reply_alloc"
+harness = false
+required-features = ["bench-reference"]
