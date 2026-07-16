@@ -261,11 +261,14 @@ pub fn split_config_line_args(line: &str) -> Result<Vec<Vec<u8>>, ConfigFilePars
 pub fn split_config_line_args_bytes(
     bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
-    split_config_line_args_bytes_impl::<true>(bytes)
+    split_config_line_args_bytes_impl::<true, true>(bytes)
 }
 
 #[inline(always)]
-fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
+fn split_config_line_args_bytes_impl<
+    const PRESIZE_QUOTED: bool,
+    const BULK_COPY_CLEAN_RUNS: bool,
+>(
     bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
     let mut pos = 0;
@@ -336,6 +339,14 @@ fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
                     done = true;
                 } else if byte == 0 {
                     return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else if BULK_COPY_CLEAN_RUNS {
+                    let run_start = pos;
+                    pos += 1;
+                    while !matches!(byte_at(bytes, pos), b'\\' | b'"' | 0) {
+                        pos += 1;
+                    }
+                    current.extend_from_slice(&bytes[run_start..pos]);
+                    continue;
                 } else {
                     current.push(byte);
                 }
@@ -350,6 +361,14 @@ fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
                     done = true;
                 } else if byte == 0 {
                     return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else if BULK_COPY_CLEAN_RUNS {
+                    let run_start = pos;
+                    pos += 1;
+                    while !matches!(byte_at(bytes, pos), b'\\' | b'\'' | 0) {
+                        pos += 1;
+                    }
+                    current.extend_from_slice(&bytes[run_start..pos]);
+                    continue;
                 } else {
                     current.push(byte);
                 }
@@ -358,6 +377,18 @@ fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
                     b' ' | b'\n' | b'\r' | b'\t' | 0 => done = true,
                     b'"' => in_double_quote = true,
                     b'\'' => in_single_quote = true,
+                    _ if BULK_COPY_CLEAN_RUNS => {
+                        let run_start = pos;
+                        pos += 1;
+                        while !matches!(
+                            byte_at(bytes, pos),
+                            b' ' | b'\n' | b'\r' | b'\t' | 0 | b'"' | b'\''
+                        ) {
+                            pos += 1;
+                        }
+                        current.extend_from_slice(&bytes[run_start..pos]);
+                        continue;
+                    }
                     other => current.push(other),
                 }
             }
@@ -376,7 +407,18 @@ fn split_config_line_args_bytes_impl<const PRESIZE_QUOTED: bool>(
 pub fn bench_split_config_line_args_unreserved_reference(
     bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
-    split_config_line_args_bytes_impl::<false>(bytes)
+    split_config_line_args_bytes_impl::<false, false>(bytes)
+}
+
+/// Frozen pre-run-copy implementation for the quoted-token A/B harness. It retains the shipped
+/// quoted-token capacity reservation and differs from production only in copying ordinary bytes
+/// one at a time.
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_split_config_line_args_bytewise_quoted_reference(
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    split_config_line_args_bytes_impl::<true, false>(bytes)
 }
 
 #[cfg(feature = "bench-reference")]
@@ -1649,6 +1691,32 @@ mod tests {
         let args = split_config_line_args(r#"dir 'it\'s\nliteral'"#)
             .expect("single quoted line should parse");
         assert_eq!(args, vec![b"dir".to_vec(), br"it's\nliteral".to_vec()]);
+    }
+
+    #[test]
+    fn redis_config_line_split_preserves_long_runs_across_quote_escapes() {
+        let left = "a".repeat(512);
+        let right = "b".repeat(512);
+
+        let double_quoted = format!(r#"set prefix"{left}\n{right}" tail"#);
+        let mut double_expected = b"prefix".to_vec();
+        double_expected.extend_from_slice(left.as_bytes());
+        double_expected.push(b'\n');
+        double_expected.extend_from_slice(right.as_bytes());
+        assert_eq!(
+            split_config_line_args(&double_quoted).expect("long double-quoted runs should parse"),
+            vec![b"set".to_vec(), double_expected, b"tail".to_vec()]
+        );
+
+        let single_quoted = format!(r#"dir prefix'{left}\'{right}' tail"#);
+        let mut single_expected = b"prefix".to_vec();
+        single_expected.extend_from_slice(left.as_bytes());
+        single_expected.push(b'\'');
+        single_expected.extend_from_slice(right.as_bytes());
+        assert_eq!(
+            split_config_line_args(&single_quoted).expect("long single-quoted runs should parse"),
+            vec![b"dir".to_vec(), single_expected, b"tail".to_vec()]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Same-binary proof for Redis configuration-line tokenization.
 //!
-//! The current experiment freezes the unreserved quoted-token state machine and compares it with
-//! pre-sizing the decoded token from the remaining source-line length.
+//! The current experiment freezes the pre-sized bytewise quoted-token state machine and compares
+//! it with bulk-copying ordinary runs between quote, escape, delimiter, and NUL boundaries.
 
 use std::{
     env,
@@ -12,7 +12,7 @@ use std::{
 };
 
 use fr_config::{
-    ConfigFileParseErrorReason, bench_split_config_line_args_unreserved_reference,
+    ConfigFileParseErrorReason, bench_split_config_line_args_bytewise_quoted_reference,
     split_config_line_args_bytes,
 };
 
@@ -48,13 +48,13 @@ impl Arm {
     const fn profile_symbol(self) -> &'static str {
         match self {
             Self::Candidate => "fr_config::split_config_line_args_bytes",
-            Self::Reference => "bench_split_config_line_args_unreserved_reference",
+            Self::Reference => "bench_split_config_line_args_bytewise_quoted_reference",
         }
     }
 
     const fn wrong_profile_symbol(self) -> &'static str {
         match self {
-            Self::Candidate => "bench_split_config_line_args_unreserved_reference",
+            Self::Candidate => "bench_split_config_line_args_bytewise_quoted_reference",
             Self::Reference => "fr_config::split_config_line_args_bytes",
         }
     }
@@ -63,7 +63,7 @@ impl Arm {
 fn parse(line: &[u8], arm: Arm) -> ParseResult {
     match arm {
         Arm::Candidate => split_config_line_args_bytes(black_box(line)),
-        Arm::Reference => bench_split_config_line_args_unreserved_reference(black_box(line)),
+        Arm::Reference => bench_split_config_line_args_bytewise_quoted_reference(black_box(line)),
     }
 }
 
@@ -274,7 +274,11 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
 fn run_profile(executable: &Path, arms: &[Arm]) -> Result<(), String> {
     println!("WORKER_ID {}", worker_id());
     println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
-    println!("TRIGGER bytes={} tokens=2 quotes=1", LINE.len());
+    println!(
+        "TRIGGER bytes={} tokens=2 quotes=1 clean_quoted_run_bytes={}",
+        LINE.len(),
+        LINE.len().saturating_sub(b"tls-ciphers \"\"".len())
+    );
     for &arm in arms {
         let status = Command::new(executable)
             .args(["--child", arm.name(), "100"])
