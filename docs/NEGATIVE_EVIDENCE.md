@@ -4,6 +4,58 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — index live-oracle fixture case names; 7.920713% fewer instructions (frankenredis-9e1kp)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage exposed no unclaimed one-turn
+performance recommendation, while the recent protocol, replication, persistence, Sentinel,
+store, runtime, config, event-loop, and SIMD veins were already mined. The conformance fixture
+selector had no performance bead, ledger row, reservation, or optimization history. The adjacent
+conformance keep optimized expected-frame matching; it did not cover selecting requested cases
+from a live-oracle fixture. The real `core_zset` trigger contains 324 cases, requests all 324 in
+fixture order, and makes the literal first-match scan perform 49,747 name comparisons.
+
+PROFILE-FIRST on the unchanged selector, release profile with LTO disabled on remote worker
+`vmi1156319`: both literal-scan arms used binary sha256
+`438b0bad2374fd433ada89a752747e901bc9baec5610b902ade5c5dd538cfa75`, with 352/348
+samples and zero lost. The exact candidate/reference selector frames carried **22.09% / 16.25%
+self-time**. Nine position-balanced A/A rounds measured candidate median 149,911,112 versus
+reference median 149,911,363 instructions, paired reference/candidate `1.000002228x`; the
+candidate/candidate null median was `0.999999186`, p05..p95
+`[0.999994470, 1.000000634]`, null CV `0.000190%`, and effect CV `0.000242%`.
+
+ONE LEVER: for requests of at least 32 names, build one borrowed `HashMap<&str,
+&ConformanceCase>` over the fixture and look up each requested name through it. `entry(...)
+.or_insert(case)` deliberately retains the first case for duplicate fixture names, matching the
+old `.find`; requested order, duplicate requests, ordered missing-name text, and the exact error
+remain unchanged. Smaller requests retain the literal scan so one-off live-oracle filters do not
+pay the index setup cost. The feature-gated frozen reference retains the complete old scan.
+
+FOREGROUND SAME-BINARY A/B: PMU access was unavailable on `ovh-b`, and the PMU workers repeatedly
+discarded their release targets between untimed warm-ups and the next invocation. Builds remained
+strict remote-only and uncapped; only in-harness PMU measurements were capped. The decisive run
+used worker `vmi1156319` and one binary, sha256
+`5b81b6f206e562bad5ee276d07d0e0107490d9f55f482fdeacd802d84cead858`. Nine
+position-balanced rounds measured candidate median **138,038,165** versus reference median
+**149,912,287** instructions, or **7.920713% fewer instructions**. Paired
+reference/candidate was **1.086020620x**; the A/A null median was `0.999992292`, p05..p95
+`[0.999963496, 1.000008230]`, null CV `0.001238%`, and effect CV `0.001067%`.
+Candidate/reference exact frames carried **4.23% / 19.60% self-time**, respectively, with
+242/285 samples and zero lost.
+
+The same-binary correctness gate matched **10** case groups: empty and single-name requests, the
+real 324-case order (including duplicate fixture names), reversed and partial orders, duplicate
+requests, ordered missing names and exact error text, explicit first-match selection, and empty
+fixtures. This is a direct helper improvement; no whole-suite or server throughput claim is made.
+Rollback: restore the literal `.find` loop and remove the borrowed index; fixture values and
+observable selection semantics are unchanged.
+
+GATES: the strict-remote release/no-LTO benchmark compiled and its correctness gate passed;
+scoped library-plus-benchmark Clippy with `--no-deps -D warnings` passed; direct rustfmt and
+`git diff --check` passed. Dependency-inclusive Clippy stopped on the pre-existing peer-owned
+`fr-simd` `needless_range_loop` at `src/lib.rs:795`. UBS's file-wide conformance scan remained
+nonzero on longstanding test panic/security heuristics plus intentional benchmark indexing and
+case-name equality; it found no unsafe code, and no peer-owned finding was changed.
+
 ## 2026-07-16: SHIPPED — recognize fixed-width RESP3 Booleans before the line scan; 17.341443% fewer instructions (frankenredis-9oids)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage exposed no unclaimed one-turn

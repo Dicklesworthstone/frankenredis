@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -374,16 +374,39 @@ pub fn run_fixture(
     ))
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn select_conformance_fixture_cases(
+    fixture: &ConformanceFixture,
+    case_names: &[&str],
+) -> Result<ConformanceFixture, String> {
+    select_conformance_fixture_cases_impl::<true>(fixture, case_names)
+}
+
+#[inline(always)]
+fn select_conformance_fixture_cases_impl<const INDEXED: bool>(
     fixture: &ConformanceFixture,
     case_names: &[&str],
 ) -> Result<ConformanceFixture, String> {
     let mut selected = Vec::with_capacity(case_names.len());
     let mut missing = Vec::new();
-    for case_name in case_names {
-        match fixture.cases.iter().find(|case| case.name == *case_name) {
-            Some(case) => selected.push(case.clone()),
-            None => missing.push((*case_name).to_string()),
+
+    if INDEXED && case_names.len() >= 32 {
+        let mut by_name = HashMap::with_capacity(fixture.cases.len());
+        for case in &fixture.cases {
+            by_name.entry(case.name.as_str()).or_insert(case);
+        }
+        for case_name in case_names {
+            match by_name.get(*case_name) {
+                Some(case) => selected.push((*case).clone()),
+                None => missing.push((*case_name).to_string()),
+            }
+        }
+    } else {
+        for case_name in case_names {
+            match fixture.cases.iter().find(|case| case.name == *case_name) {
+                Some(case) => selected.push(case.clone()),
+                None => missing.push((*case_name).to_string()),
+            }
         }
     }
     if !missing.is_empty() {
@@ -397,6 +420,42 @@ fn select_conformance_fixture_cases(
         suite: fixture.suite.clone(),
         cases: selected,
     })
+}
+
+/// Bench-only entry point for profiling the unchanged production fixture selector.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_select_conformance_fixture_cases_current(
+    fixture: &ConformanceFixture,
+    case_names: &[&str],
+) -> Result<ConformanceFixture, String> {
+    std::hint::black_box(0_u8);
+    select_conformance_fixture_cases(fixture, case_names)
+}
+
+/// Bench-only entry point for the candidate fixture selector.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_select_conformance_fixture_cases_candidate(
+    fixture: &ConformanceFixture,
+    case_names: &[&str],
+) -> Result<ConformanceFixture, String> {
+    std::hint::black_box(1_u8);
+    select_conformance_fixture_cases_impl::<true>(fixture, case_names)
+}
+
+/// Frozen pre-optimization fixture selector.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_select_conformance_fixture_cases_reference(
+    fixture: &ConformanceFixture,
+    case_names: &[&str],
+) -> Result<ConformanceFixture, String> {
+    std::hint::black_box(2_u8);
+    select_conformance_fixture_cases_impl::<false>(fixture, case_names)
 }
 
 fn run_live_redis_diff_with_fixture(

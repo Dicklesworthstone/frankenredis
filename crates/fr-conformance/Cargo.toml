@@ -22,3 +22,8 @@ sha2.workspace = true
 name = "frame_match_exact"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "fixture_case_select"
+harness = false
+required-features = ["bench-reference"]
