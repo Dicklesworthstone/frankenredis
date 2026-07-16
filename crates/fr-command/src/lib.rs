@@ -857,7 +857,9 @@ enum CommandKeyLookupError {
     InvalidArguments,
 }
 
-fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn bench_command_uses_custom_key_specs_reference(cmd_name: &str) -> bool {
     cmd_name.eq_ignore_ascii_case("APPEND")
         || cmd_name.eq_ignore_ascii_case("EXPIRE")
         || cmd_name.eq_ignore_ascii_case("EXPIREAT")
@@ -959,7 +961,115 @@ fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
         || cmd_name.eq_ignore_ascii_case("MIGRATE")
 }
 
-fn command_has_keys(cmd_name: &str) -> bool {
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
+    matches!(
+        cmd_name,
+        "append"
+            | "expire"
+            | "expireat"
+            | "hset"
+            | "hsetnx"
+            | "hmset"
+            | "persist"
+            | "pexpire"
+            | "pexpireat"
+            | "psetex"
+            | "setex"
+            | "setnx"
+            | "lpush"
+            | "lpushx"
+            | "rpush"
+            | "rpushx"
+            | "sadd"
+            | "zadd"
+            | "xadd"
+            | "xdel"
+            | "xtrim"
+            | "xlen"
+            | "llen"
+            | "hlen"
+            | "scard"
+            | "zcard"
+            | "strlen"
+            | "type"
+            | "blpop"
+            | "brpop"
+            | "bzpopmin"
+            | "bzpopmax"
+            | "hdel"
+            | "lpop"
+            | "lrem"
+            | "rpop"
+            | "spop"
+            | "srem"
+            | "zpopmax"
+            | "zpopmin"
+            | "zrem"
+            | "zremrangebyrank"
+            | "zremrangebyscore"
+            | "zremrangebylex"
+            | "eval"
+            | "evalsha"
+            | "eval_ro"
+            | "evalsha_ro"
+            | "fcall"
+            | "fcall_ro"
+            | "xread"
+            | "xreadgroup"
+            | "xsetid"
+            | "restore"
+            | "restore-asking"
+            | "zunionstore"
+            | "zinterstore"
+            | "zdiffstore"
+            | "zunion"
+            | "zinter"
+            | "zdiff"
+            | "zintercard"
+            | "sintercard"
+            | "sinterstore"
+            | "sunionstore"
+            | "sdiffstore"
+            | "mset"
+            | "msetnx"
+            | "bitop"
+            | "sinter"
+            | "sunion"
+            | "sdiff"
+            | "sort"
+            | "sort_ro"
+            | "georadius"
+            | "georadiusbymember"
+            | "geosearch"
+            | "geosearchstore"
+            | "xinfo"
+            | "xgroup"
+            | "xack"
+            | "xclaim"
+            | "xautoclaim"
+            | "xpending"
+            | "object"
+            | "memory"
+            | "lmpop"
+            | "zmpop"
+            | "blmpop"
+            | "bzmpop"
+            | "smove"
+            | "rename"
+            | "renamenx"
+            | "copy"
+            | "lmove"
+            | "blmove"
+            | "rpoplpush"
+            | "brpoplpush"
+            | "migrate"
+    )
+}
+
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn bench_command_has_keys_reference(cmd_name: &str) -> bool {
     // SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH (shard pub/sub) declare a positional
     // key_spec in commands.def but tag it with the NOT_KEY flag — the arg is
     // a shard channel, not a keyspace key. Upstream's commandHasKeys() walks
@@ -975,8 +1085,49 @@ fn command_has_keys(cmd_name: &str) -> bool {
     {
         return false;
     }
-    command_uses_custom_key_specs(cmd_name)
+    bench_command_uses_custom_key_specs_reference(cmd_name)
         || command_table_index(cmd_name.as_bytes()).is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
+}
+
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_HAS_KEYS_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen case-insensitive classifier for the `COMMAND GETKEYS`
+/// same-binary A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_has_keys_reference(reference: bool) {
+    BENCH_COMMAND_HAS_KEYS_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_has_keys(command_table_idx: usize) -> bool {
+    let (cmd_name, _, _, first_key, _, _) = COMMAND_TABLE[command_table_idx];
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_HAS_KEYS_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return bench_command_has_keys_reference(cmd_name);
+    }
+    if matches!(cmd_name, "ssubscribe" | "sunsubscribe" | "spublish") {
+        return false;
+    }
+    command_uses_custom_key_specs(cmd_name) || first_key != 0
+}
+
+/// Exhaustively compare the frozen and indexed classifiers over every
+/// top-level command name resolved through the production table index.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_command_has_keys_parity_count() -> usize {
+    for &(name, ..) in COMMAND_TABLE {
+        let idx = command_table_index(name.as_bytes()).expect("COMMAND_TABLE row must resolve");
+        assert_eq!(
+            command_has_keys(idx),
+            bench_command_has_keys_reference(name),
+            "has-keys classification differs for {name}"
+        );
+    }
+    COMMAND_TABLE.len()
 }
 
 /// (frankenredis-z53ld) Validate the `numkeys` argument for the
@@ -1116,11 +1267,10 @@ fn command_key_references(
     };
     let cmd_name =
         std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
-    let Some((table_name, _arity, flags, _, _, _)) =
-        command_table_index(cmd_name.as_bytes()).map(|idx| COMMAND_TABLE[idx])
-    else {
+    let Some(command_table_idx) = command_table_index(cmd_name.as_bytes()) else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
+    let (table_name, _arity, flags, _, _, _) = COMMAND_TABLE[command_table_idx];
 
     // Upstream COMMAND GETKEYS surfaces "no key arguments" before any arity
     // error: getKeysFromCommandWithSpecs() in commands.def first inspects the
@@ -1128,7 +1278,7 @@ fn command_key_references(
     // the arity branch. Mirror that ordering so no-key commands (PUBLISH,
     // SUBSCRIBE, WAIT, ...) report "no key arguments" regardless of how many
     // args followed. (br-frankenredis-getkeysorder)
-    if !command_has_keys(table_name) {
+    if !command_has_keys(command_table_idx) {
         return Err(CommandKeyLookupError::NoKeyArguments);
     }
     // Subcommand-style parents (OBJECT) need their lookupCommand match
@@ -29096,6 +29246,24 @@ mod tests {
         // Sanity: a known command resolves and the arity field is reachable.
         let idx = super::command_table_index(b"set").expect("SET present");
         assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
+    }
+
+    #[test]
+    fn command_has_keys_indexed_matches_reference_r16uz() {
+        for &(name, ..) in super::COMMAND_TABLE {
+            let idx = super::command_table_index(name.as_bytes()).expect("table row must resolve");
+            let candidate = super::command_has_keys(idx);
+            assert_eq!(
+                candidate,
+                super::bench_command_has_keys_reference(name),
+                "canonical classification differs for {name}"
+            );
+            assert_eq!(
+                candidate,
+                super::bench_command_has_keys_reference(&name.to_ascii_uppercase()),
+                "case-folded reference classification differs for {name}"
+            );
+        }
     }
 
     #[test]

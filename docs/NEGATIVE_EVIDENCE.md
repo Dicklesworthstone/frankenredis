@@ -4,6 +4,43 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — reuse the resolved COMMAND_TABLE row for GETKEYS has-key classification; 1.011356x fewer instructions (frankenredis-r16uz)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: after the RESP3 scalar lane landed, the exact
+`COMMAND GETKEYS` metadata path had no measured keep/reject. The correctness ledger already pinned
+35/35 Redis-compatible GETKEYS cases, but `command_key_references` discarded its resolved
+`COMMAND_TABLE` index, then `command_has_keys` ran an approximately 100-name
+`eq_ignore_ascii_case` custom-key-spec chain and performed another table lookup. This is a cold
+admin/proxy-introspection path; no claim is made for normal command dispatch.
+
+PROFILE-FIRST on the unchanged implementation, full handler trigger
+`COMMAND GETKEYS MIGRATE host 6379 "" 0 5000 KEYS k1 k2 k3`, release profile with LTO disabled:
+worker `vmi1153651`, binary sha256
+`1811a595327941483702362d23066dada2f2a2dc34afd48075297809af8d3f12`, 282 samples, zero lost.
+The exact `command_uses_custom_key_specs` lever helper had **1.64% self-time** and aggregate
+`command_table_index` work had **13.81% self-time**, proving the full handler reached the targeted
+classifier and repeated metadata lookup.
+
+ONE LEVER: retain the already-resolved table index, read `first_key` from that row, and classify its
+canonical lowercase name with an exact `matches!`. The three upstream NOT_KEY exceptions
+(`SSUBSCRIBE`, `SUNSUBSCRIBE`, `SPUBLISH`) remain explicit. The frozen reference preserves the old
+case-insensitive chain and second lookup. Exhaustive old/new classification matched for all **242**
+top-level table rows; six full-handler cases also matched (mixed-case MIGRATE, GET, no-key PING,
+NOT_KEY SPUBLISH, and GETKEYSANDFLAGS), with MIGRATE returning exactly `k1,k2,k3`.
+
+FOREGROUND SAME-BINARY A/A+A/B: an untimed fail-closed RCH warm-up built `--profile release` with
+LTO disabled. Because RCH then ignored the requested worker switch and repeatedly evicted the
+release cache, the capped measurement ran the just-built executable directly in place on the same
+RCH worker (never locally). Both arms used binary sha256
+`ef899fde91ef7542005db53afe4f9aeea3bdbcdf256842786c475d1e1d63b87f`; candidate/reference exact
+helper profiles were **0.98% / 2.39% self-time**, 541/289 samples, zero lost. Nine position-balanced
+instruction rounds measured candidate median **15,037,526** vs reference **15,207,595**;
+paired reference/candidate effect median **1.011356366x** (**1.118% fewer instructions** by the
+arm medians). The A/A null median was **0.999998138**, p05..p95
+**[0.999968744, 1.002605698]**, null CV **0.082033%**, effect CV **0.205554%**. The effect clears the
+null band and the repo's 1% keep gate. Rollback: pass the canonical table name back to the frozen
+case-insensitive classifier and discard the retained index after lookup.
+
 ## 2026-07-13: SHIPPED — three more DoS-safe fr-internal Store side-maps → foldhash; script_cache lookups 1.66x fewer instructions, byte-identical (frankenredis-nt3a5)
 
 NEGATIVE-LEDGER-FIRST: follow-up to the stream-maps→foldhash swap (tudak). Three more Store side-maps
