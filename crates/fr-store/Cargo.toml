@@ -834,3 +834,12 @@ harness = false
 [[bench]]
 name = "getset_lfu_collapse"
 harness = false
+
+# (BlackThrush) Same-binary null-gated A/B for the CommandHistogramTracker hset/zadd/incr direct-field
+# extension: record_canonical_with_kind's warm direct field vs the warm HashMap<String> get_mut foldhash
+# probe (bench_record_hashmap_only). Isolates the eliminated per-record hash+probe on those commands'
+# commandstats update. Byte-identical histogram state
+# (command_histogram_new_direct_fields_report_consistently_with_hashmap_reference).
+[[bench]]
+name = "command_histogram_fastpath"
+harness = false

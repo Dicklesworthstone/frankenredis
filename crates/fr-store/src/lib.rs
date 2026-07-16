@@ -5230,6 +5230,12 @@ pub struct CommandHistogramTracker {
     lpush: Option<CommandHistogram>,
     rpush: Option<CommandHistogram>,
     sadd: Option<CommandHistogram>,
+    // (BlackThrush) The next-hottest borrowed-write commands after get/set/lpush/rpush/sadd — a
+    // live perf-record showed record_canonical_with_kind's HashMap<String> foldhash probe at ~1%
+    // self-time on their hot paths. Direct fields skip that probe (mirroring the fields above).
+    hset: Option<CommandHistogram>,
+    zadd: Option<CommandHistogram>,
+    incr: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
@@ -5320,6 +5326,24 @@ impl CommandHistogramTracker {
                 .record_with_kind(latency_us, kind);
             return;
         }
+        if command == "hset" {
+            self.hset
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
+        if command == "zadd" {
+            self.zadd
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
+        if command == "incr" {
+            self.incr
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
         // (frankenredis-igx7w follow-up) This runs on EVERY non-get/set command,
         // so avoid the per-command `command.to_string()` heap allocation that the
         // owned-key `entry` API forces. Probe with a borrowed key first (the
@@ -5336,6 +5360,38 @@ impl CommandHistogramTracker {
                 .or_default()
                 .record_with_kind(latency_us, kind);
         }
+    }
+
+    /// Bench-only reference arm: record a canonical command straight through the
+    /// `HashMap<String>` path (the pre-direct-field behaviour), bypassing the
+    /// `get`/`set`/…/`hset`/`zadd`/`incr` direct fields. Mirrors the fallback in
+    /// `record_canonical_with_kind` exactly so an A/B isolates only the foldhash+probe
+    /// that the direct field eliminates. Not used in production.
+    #[doc(hidden)]
+    pub fn bench_record_hashmap_only(
+        &mut self,
+        command: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        if let Some(histogram) = self.histograms.get_mut(command) {
+            histogram.record_with_kind(latency_us, kind);
+        } else {
+            self.histograms
+                .entry(command.to_string())
+                .or_default()
+                .record_with_kind(latency_us, kind);
+        }
+    }
+
+    /// Bench-only reader for the reference arm above: reads straight from the `HashMap`,
+    /// bypassing the direct-field short-circuit in `get()`. In production a fast-path command
+    /// (get/set/…/hset/zadd/incr) is NEVER a `HashMap` member, so `get()` correctly never checks
+    /// the map for it — this exists only so the A/B can confirm the HashMap arm's recorded count.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bench_hashmap_get(&self, command: &str) -> Option<&CommandHistogram> {
+        self.histograms.get(command)
     }
 
     /// Get histogram for a specific command.
@@ -5356,6 +5412,15 @@ impl CommandHistogramTracker {
         }
         if key == "sadd" {
             return self.sadd.as_ref();
+        }
+        if key == "hset" {
+            return self.hset.as_ref();
+        }
+        if key == "zadd" {
+            return self.zadd.as_ref();
+        }
+        if key == "incr" {
+            return self.incr.as_ref();
         }
         self.histograms.get(&key)
     }
@@ -5383,6 +5448,15 @@ impl CommandHistogramTracker {
         if let Some(hist) = &self.sadd {
             result.push(("sadd", hist));
         }
+        if let Some(hist) = &self.hset {
+            result.push(("hset", hist));
+        }
+        if let Some(hist) = &self.zadd {
+            result.push(("zadd", hist));
+        }
+        if let Some(hist) = &self.incr {
+            result.push(("incr", hist));
+        }
         result.sort_by(|a, b| a.0.cmp(b.0));
         result
     }
@@ -5395,12 +5469,18 @@ impl CommandHistogramTracker {
                 + usize::from(self.set.is_some())
                 + usize::from(self.lpush.is_some())
                 + usize::from(self.rpush.is_some())
-                + usize::from(self.sadd.is_some());
+                + usize::from(self.sadd.is_some())
+                + usize::from(self.hset.is_some())
+                + usize::from(self.zadd.is_some())
+                + usize::from(self.incr.is_some());
             self.get = None;
             self.set = None;
             self.lpush = None;
             self.rpush = None;
             self.sadd = None;
+            self.hset = None;
+            self.zadd = None;
+            self.incr = None;
             self.histograms.clear();
             return count;
         }
@@ -5436,6 +5516,24 @@ impl CommandHistogramTracker {
                 }
                 if key == "sadd" {
                     return self.sadd.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "hset" {
+                    return self.hset.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "zadd" {
+                    return self.zadd.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "incr" {
+                    return self.incr.as_mut().map(|h| {
                         h.reset();
                         1
                     });
@@ -49226,6 +49324,79 @@ mod tests {
             "lpush commandstats record A/B (x{reps}): old(lowercase+utf8+hashmap)={old_ns}ns new(direct field)={new_ns}ns ratio={:.2}x",
             old_ns as f64 / new_ns as f64
         );
+    }
+
+    // (BlackThrush) The hset/zadd/incr direct fields must stay consistent across ALL FOUR
+    // reporting methods — record_canonical_with_kind / get / all / reset. Because the
+    // canonicalizing record_with_kind now ALSO routes these commands to the direct fields, a
+    // "written to the field but not surfaced by get()/all()" bug would be invisible in a
+    // record-vs-record comparison (both sides would share it). Compare instead against the
+    // HashMap-only reference (`bench_record_hashmap_only`), which physically cannot miss a field.
+    // This guards INFO Commandstats / Latencystats + LATENCY HISTOGRAM reporting parity for the
+    // three new fast-path commands.
+    #[test]
+    fn command_histogram_new_direct_fields_report_consistently_with_hashmap_reference() {
+        use super::{CommandHistogramTracker, CommandRecordKind};
+        let samples: &[(&str, u64, CommandRecordKind)] = &[
+            ("hset", 3, CommandRecordKind::Success),
+            ("hset", 7, CommandRecordKind::Failed),
+            ("zadd", 11, CommandRecordKind::Success),
+            ("zadd", 2, CommandRecordKind::Rejected),
+            ("incr", 5, CommandRecordKind::Success),
+            ("incr", 9, CommandRecordKind::Success),
+        ];
+        for cmd in ["hset", "zadd", "incr"] {
+            let mut field = CommandHistogramTracker::default();
+            let mut hashmap = CommandHistogramTracker::default();
+            for &(name, lat, kind) in samples.iter().filter(|s| s.0 == cmd) {
+                field.record_canonical_with_kind(name, lat, kind); // direct-field path
+                hashmap.bench_record_hashmap_only(name, lat, kind); // HashMap reference
+            }
+            // get() must surface the field identically to the HashMap reference. The reference
+            // arm is read via the raw HashMap accessor, since get(cmd) now correctly
+            // short-circuits to the (empty) direct field for these fast-path commands.
+            let fg = field.get(cmd).expect("field get");
+            let hg = hashmap.bench_hashmap_get(cmd).expect("hashmap get");
+            // The field arm must agree with the HashMap reference on EVERY counter (calls counts
+            // success+failed; rejected lands in rejected_calls) — this is the reporting-parity gate.
+            assert_eq!(
+                (fg.calls, fg.rejected_calls, fg.failed_calls),
+                (hg.calls, hg.rejected_calls, hg.failed_calls),
+                "{cmd}: field-vs-hashmap counters must match"
+            );
+            assert_eq!(
+                fg.calls + fg.rejected_calls,
+                2,
+                "{cmd}: two records land in the field"
+            );
+            // Case-insensitive lookup hits the field too (LATENCY HISTOGRAM sends uppercase).
+            assert!(
+                field.get(&cmd.to_uppercase()).is_some(),
+                "{cmd}: case-insensitive get hits the field"
+            );
+            // all() must include the command (else INFO/LATENCY HISTOGRAM silently drops it).
+            assert!(
+                field
+                    .all()
+                    .iter()
+                    .any(|(k, h)| *k == cmd && h.calls + h.rejected_calls == 2),
+                "{cmd}: all() must report the direct field"
+            );
+            // reset(&[cmd]) must find the field (returns 1) and zero it in place (stays Some).
+            assert_eq!(field.reset(&[cmd]), 1, "{cmd}: reset targets the field");
+            assert_eq!(
+                field.get(cmd).map(|h| h.calls),
+                Some(0),
+                "{cmd}: reset zeroes the field in place"
+            );
+        }
+        // reset(&[]) (clear-all) must COUNT + drop all three direct fields.
+        let mut t = CommandHistogramTracker::default();
+        t.record_canonical_with_kind("hset", 1, CommandRecordKind::Success);
+        t.record_canonical_with_kind("zadd", 1, CommandRecordKind::Success);
+        t.record_canonical_with_kind("incr", 1, CommandRecordKind::Success);
+        assert_eq!(t.reset(&[]), 3, "clear-all counts all three direct fields");
+        assert!(t.all().is_empty(), "clear-all empties the tracker");
     }
 
     #[test]
