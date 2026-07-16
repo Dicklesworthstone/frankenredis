@@ -3108,6 +3108,7 @@ fn find_crlf(input: &[u8]) -> Option<usize> {
     input.windows(2).position(|window| window == b"\r\n")
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
     match expected {
         ExpectedFrame::Simple { value } => RespFrame::SimpleString(value.clone()),
@@ -3135,6 +3136,7 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
     }
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool {
     match expected {
         ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
@@ -3199,6 +3201,102 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
                         .iter()
                         .zip(value.iter())
                         .all(|(a, e)| frame_matches_expected(a, e))
+            }
+            _ => false,
+        },
+        ExpectedFrame::Simple { value } => {
+            matches!(actual, RespFrame::SimpleString(actual) if actual == value)
+        }
+        ExpectedFrame::Error { value } => {
+            matches!(actual, RespFrame::Error(actual) if actual == value)
+        }
+        ExpectedFrame::Integer { value } => {
+            matches!(actual, RespFrame::Integer(actual) if actual == value)
+        }
+        ExpectedFrame::Bulk { value } => matches!(
+            actual,
+            RespFrame::BulkString(actual)
+                if actual.as_deref() == value.as_deref().map(str::as_bytes)
+        ),
+        ExpectedFrame::NullArray => matches!(actual, RespFrame::Array(None)),
+    }
+}
+
+/// Bench-only entry point for the live fixture matcher.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_frame_matches_expected_candidate(
+    actual: &RespFrame,
+    expected: &ExpectedFrame,
+) -> bool {
+    frame_matches_expected(actual, expected)
+}
+
+/// Frozen pre-`frankenredis-tafng` fixture matcher for same-binary comparison.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_frame_matches_expected_reference(
+    actual: &RespFrame,
+    expected: &ExpectedFrame,
+) -> bool {
+    bench_frame_matches_expected_reference_impl(actual, expected)
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+fn bench_frame_matches_expected_reference_impl(
+    actual: &RespFrame,
+    expected: &ExpectedFrame,
+) -> bool {
+    match expected {
+        ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
+        ExpectedFrame::AnyBulk => matches!(actual, RespFrame::BulkString(Some(_))),
+        ExpectedFrame::AnySimple => matches!(actual, RespFrame::SimpleString(_)),
+        ExpectedFrame::AnyArray => {
+            matches!(
+                actual,
+                RespFrame::Array(Some(_)) | RespFrame::Push(_) | RespFrame::Sequence(_)
+            )
+        }
+        ExpectedFrame::BulkContainsAll { value } => match actual {
+            RespFrame::BulkString(Some(bytes)) => {
+                let text = String::from_utf8_lossy(bytes);
+                value.iter().all(|needle| text.contains(needle))
+            }
+            _ => false,
+        },
+        ExpectedFrame::BulkNotContainsAll { value } => match actual {
+            RespFrame::BulkString(Some(bytes)) => {
+                let text = String::from_utf8_lossy(bytes);
+                value.iter().all(|needle| !text.contains(needle))
+            }
+            _ => false,
+        },
+        ExpectedFrame::SimpleContainsAll { value } => match actual {
+            RespFrame::SimpleString(text) => value.iter().all(|needle| text.contains(needle)),
+            _ => false,
+        },
+        ExpectedFrame::SimplePattern { value } => match actual {
+            RespFrame::SimpleString(text) => simple_pattern_matches(value, text),
+            _ => false,
+        },
+        ExpectedFrame::Array { value } => match actual {
+            RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Sequence(items) => {
+                items.len() == value.len()
+                    && items
+                        .iter()
+                        .zip(value.iter())
+                        .all(|(a, e)| bench_frame_matches_expected_reference_impl(a, e))
+            }
+            RespFrame::Map(Some(entries)) => {
+                entries.len() * 2 == value.len()
+                    && entries
+                        .iter()
+                        .flat_map(|(key, value)| [key, value])
+                        .zip(value.iter())
+                        .all(|(a, e)| bench_frame_matches_expected_reference_impl(a, e))
             }
             _ => false,
         },

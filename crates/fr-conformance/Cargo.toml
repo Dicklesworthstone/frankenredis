@@ -2,6 +2,10 @@
 name = "fr-conformance"
 version = "0.1.0"
 edition = "2024"
+autobenches = false
+
+[features]
+bench-reference = []
 
 [dependencies]
 fr-config = { version = "0.1.0", path = "../fr-config" }
@@ -13,3 +17,8 @@ fr-store = { version = "0.1.0", path = "../fr-store" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[[bench]]
+name = "frame_match_exact"
+harness = false
+required-features = ["bench-reference"]

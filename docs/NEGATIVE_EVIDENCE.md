@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — compare exact conformance frames without materialization; 69.537% fewer instructions (frankenredis-tafng)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible RESTORE performance beads
+were already claimed and structural, while the recent command, runtime, replication, and store
+veins were actively mined. `fr-conformance::frame_matches_expected` had no performance ledger row,
+bead, or reservation. A fixture census found **7,136/8,562 (83.35%)** recursive expected-frame
+nodes used exact fallback variants, including **5,389/8,562 (62.94%)** allocation-bearing
+Simple/Error/Bulk nodes. One full fixture traversal therefore copied 102,926 payload bytes across
+5,194 allocations solely to compare expected and actual frames.
+
+PROFILE-FIRST on the unchanged exact fallback, using the fixture-weighted 61-case corpus and 109
+recursive matcher calls per loop, release profile with LTO disabled: worker `vmi1293453`, binary
+sha256 `3ae5e6ca98a904f59656081b9bb16543c37f53f8c049925f6fa298443fc5ef7a`, 179 samples, zero
+lost. The exact unchanged `fr_conformance::frame_matches_expected` helper had **13.37% self-time**,
+`fr_conformance::expected_to_frame` had **13.13%**, and allocator `malloc` had **18.23%**,
+proving the benchmark executed the proposed materialization seam with non-zero helper self-time.
+
+ONE LEVER: replace only the exact Simple, Error, Integer, Bulk, and NullArray catch-all cases with
+borrowed comparisons against the matching `RespFrame` payload. Wildcard, substring, pattern,
+recursive Array/Map/Push/Sequence, and failure-report materialization behavior is unchanged. In
+particular, Bulk preserves the distinction between `None` and `Some(empty)`. The frozen reference
+retains the literal pre-change `actual == expected_to_frame(expected)` fallback.
+
+FOREGROUND SAME-BINARY A/A+A/B: both arms ran in one position-balanced measured routine on worker
+`vmi1152480`, binary sha256
+`b4392a131db99281119676f6ceb96152673897c1e1ca7ef2f0f04ed175984a61`. Nine instruction rounds
+measured candidate median **133,316,722** versus reference median **437,637,690**; the paired
+reference/candidate effect median was **3.282690941x**, or **69.537% fewer instructions** for the
+candidate. The A/A null median was **0.999999400**, p05..p95
+**[0.999960974, 1.000001943]**, null CV **0.001219%**, and effect CV **0.000375%**. The exact
+candidate/reference helper profiles were **46.34% / 17.82% self-time**, 65/200 samples, zero lost;
+materialization was absent from the candidate profile while the reference showed
+`expected_to_frame` (**7.93%**), `malloc` (**13.24%**), `free` (**6.17%**), and `String::clone`
+(**5.36%**).
+
+The same-binary correctness gate matched candidate/reference for all **252** combinations of 14
+expected variants and 18 representative actual variants, plus **8** semantic boundary cases.
+Existing expected-frame tests passed 5/5. This is an isolated fixture-matcher result, not an
+end-to-end conformance-suite speedup claim. Rollback: restore the exact variants to the frozen
+materializing catch-all; the benchmark retains that reference beside the live matcher.
+
 ## 2026-07-16: SHIPPED — zero WAIT/WAITAOF offsets return the replica count without scanning; 20.950667x fewer instructions (frankenredis-gkjk7)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible RESTORE performance beads
