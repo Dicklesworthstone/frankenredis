@@ -63,6 +63,13 @@ harness = false
 name = "classify4_dispatch"
 harness = false
 
+# (BlackThrush) Same-binary A/B for the GEOSEARCH center-cos hoist: sum the per-candidate haversine
+# recomputing the center latitude cosine each call vs precomputing it once. Byte-identical
+# (geo_distance_m_center_cos_is_bit_identical_to_geo_distance_m).
+[[bench]]
+name = "geo_center_cos_hoist"
+harness = false
+
 # A/B for the 5-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
 [[bench]]
 name = "classify5_dispatch"

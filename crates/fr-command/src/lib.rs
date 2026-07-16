@@ -6076,6 +6076,62 @@ pub fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
 }
 
+/// (BlackThrush) NEGATIVE-EVIDENCE reproduction harness — NOT used in production. Center-precomputed
+/// variant of [`geo_distance_m`]: `cos_lat1r` is the GEOSEARCH center's `lat1.to_radians().cos()`,
+/// which is CONSTANT across candidates, so this reads it instead of recomputing the libm `cos()` per
+/// point. Bit-identical to `geo_distance_m(lon1, lat1, lon2, lat2)` (verified by
+/// `geo_distance_m_center_cos_is_bit_identical_to_geo_distance_m`) — the only change is the center's
+/// `lat1r.cos()` term is read from `cos_lat1r` (same input bits → same output bits; pure `cos`, no
+/// fast-math reassociation). Kept ONLY to document why the "hoist the constant center cosine out of
+/// `geo_collect_candidate`" lever is a NO-OP: the `geo_center_cos_hoist` bench measures 0 instruction
+/// difference (914.15M both arms) because the closure is monomorphised into `zset_for_each_asc`
+/// in-crate, geo_distance_m inlines into the loop, and LLVM's LICM already lifts the invariant cos.
+/// Do not re-attempt the manual hoist.
+#[inline]
+fn geo_distance_m_center_cos(lon1: f64, lat1: f64, cos_lat1r: f64, lon2: f64, lat2: f64) -> f64 {
+    let lon1r = lon1.to_radians();
+    let lon2r = lon2.to_radians();
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    if v == 0.0 {
+        return geo_lat_distance_m(lat1, lat2);
+    }
+    let lat1r = lat1.to_radians();
+    let lat2r = lat2.to_radians();
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = (u * u + cos_lat1r * lat2r.cos() * v * v).clamp(0.0, 1.0);
+    2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+/// (BlackThrush) Bench-only driver for the GEOSEARCH center-cos hoist A/B, keeping the internal
+/// haversine functions private. Sums the great-circle distance from a fixed center over
+/// `candidates`, either recomputing the center latitude cosine per candidate (`hoist = false`, the
+/// pre-change `geo_collect_candidate` path) or precomputing it once (`hoist = true`, shipped). The
+/// two arms are bit-identical (see `geo_distance_m_center_cos`); the sum is returned so the loop
+/// cannot be optimized away. Not used in production.
+#[doc(hidden)]
+#[must_use]
+pub fn bench_geo_center_cos_distance_sum(
+    center_lon: f64,
+    center_lat: f64,
+    candidates: &[(f64, f64)],
+    hoist: bool,
+) -> f64 {
+    if hoist {
+        let cos_clat_r = center_lat.to_radians().cos();
+        candidates
+            .iter()
+            .map(|&(lon, lat)| {
+                geo_distance_m_center_cos(center_lon, center_lat, cos_clat_r, lon, lat)
+            })
+            .sum()
+    } else {
+        candidates
+            .iter()
+            .map(|&(lon, lat)| geo_distance_m(center_lon, center_lat, lon, lat))
+            .sum()
+    }
+}
+
 /// Conservative lat/lon bounding box fully containing the great-circle disk of
 /// `radius_m` around (`clon`, `clat`), returned as
 /// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. When `lon_wrap` is true the
@@ -6274,6 +6330,11 @@ fn geo_collect_candidate(
     if !bb.4 && (lon < bb.2 || lon > bb.3) {
         return;
     }
+    // NOTE: the search center (clon, clat) is loop-invariant across candidates, so the center's
+    // `cos(lat)` inside this haversine LOOKS hoistable. It is NOT worth doing manually: this closure
+    // is monomorphised into `zset_for_each_asc` in-crate, geo_distance_m inlines into the iteration
+    // loop, and LLVM's LICM already lifts the constant center cosine — a precomputed-cos variant
+    // measured 0 instruction difference (see the `geo_center_cos_hoist` bench / negative evidence).
     let dist = geo_distance_m(clon, clat, lon, lat);
     if dist <= radius_m {
         results.push((member.to_vec(), score, dist, lon, lat));
@@ -36346,6 +36407,43 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("zadd odd tail");
             assert_eq!(err, CommandError::SyntaxError);
         }
+    }
+
+    #[test]
+    fn geo_distance_m_center_cos_is_bit_identical_to_geo_distance_m() {
+        // The center-cos hoist must be bit-for-bit identical to the per-call haversine for EVERY
+        // (center, candidate) pair — GEO distances are byte-exact vs upstream, so any FP drift is a
+        // parity break. Sweep a dense grid (including the v==0 lon-equal fast path and near-pole /
+        // antimeridian extremes) and require exact f64 bit equality.
+        use super::{geo_distance_m, geo_distance_m_center_cos};
+        let lons: [f64; 12] = [
+            -180.0, -179.999, -90.0, -45.0, -0.0001, 0.0, 0.0001, 12.3456, 45.0, 90.0, 179.999,
+            180.0,
+        ];
+        let lats: [f64; 8] = [-85.05, -60.0, -1.0, 0.0, 1.0, 37.5, 60.0, 85.05];
+        let mut checked = 0u64;
+        for &clon in &lons {
+            for &clat in &lats {
+                let cos_clat_r = clat.to_radians().cos();
+                for &plon in &lons {
+                    for &plat in &lats {
+                        let a = geo_distance_m(clon, clat, plon, plat);
+                        let b = geo_distance_m_center_cos(clon, clat, cos_clat_r, plon, plat);
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "mismatch center=({clon},{clat}) cand=({plon},{plat}): {a} vs {b}"
+                        );
+                        // Force the lon-equal (v == 0.0) lat-only fast path too.
+                        let a0 = geo_distance_m(clon, clat, clon, plat);
+                        let b0 = geo_distance_m_center_cos(clon, clat, cos_clat_r, clon, plat);
+                        assert_eq!(a0.to_bits(), b0.to_bits(), "v==0 mismatch at lat {plat}");
+                        checked += 2;
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "grid should be dense (was {checked} pairs)");
     }
 
     #[test]
