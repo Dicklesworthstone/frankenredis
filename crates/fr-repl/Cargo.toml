@@ -12,3 +12,8 @@ bench-reference = []
 name = "psync_reply_canonical"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "psync_decision_exact_replid"
+harness = false
+required-features = ["bench-reference"]

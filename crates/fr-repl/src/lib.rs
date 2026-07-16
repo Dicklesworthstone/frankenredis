@@ -310,13 +310,15 @@ pub fn bench_parse_psync_reply_reference(line: &str) -> Result<PsyncReply, ReplE
     parse_psync_reply_impl::<false>(line)
 }
 
-#[must_use]
-pub fn decide_psync(
+#[inline(always)]
+fn decide_psync_impl<const EXACT_FIRST: bool>(
     backlog: &BacklogWindow,
     requested_replid: &str,
     requested_offset: ReplOffset,
 ) -> PsyncDecision {
-    if !requested_replid.eq_ignore_ascii_case(&backlog.replid) {
+    let replid_matches = (EXACT_FIRST && requested_replid == backlog.replid.as_str())
+        || requested_replid.eq_ignore_ascii_case(&backlog.replid);
+    if !replid_matches {
         return PsyncDecision::FullResync {
             rejection: PsyncRejection::ReplidMismatch,
         };
@@ -327,6 +329,31 @@ pub fn decide_psync(
         };
     }
     PsyncDecision::Continue { requested_offset }
+}
+
+#[must_use]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+pub fn decide_psync(
+    backlog: &BacklogWindow,
+    requested_replid: &str,
+    requested_offset: ReplOffset,
+) -> PsyncDecision {
+    #[cfg(feature = "bench-reference")]
+    std::hint::black_box(0_u8);
+    decide_psync_impl::<true>(backlog, requested_replid, requested_offset)
+}
+
+/// Frozen pre-optimization PSYNC decision helper for same-binary proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_decide_psync_reference(
+    backlog: &BacklogWindow,
+    requested_replid: &str,
+    requested_offset: ReplOffset,
+) -> PsyncDecision {
+    std::hint::black_box(1_u8);
+    decide_psync_impl::<false>(backlog, requested_replid, requested_offset)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

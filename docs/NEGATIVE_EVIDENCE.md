@@ -18204,3 +18204,21 @@ reference **1,905,309,660**, reference/candidate = **1.133903591x** (candidate *
 median **1.000000009**, null p05/p95 **0.999999690/1.000000522**, null CV **0.000025%**, effect CV **0.000018%**.
 The pre-measurement correctness gate matched the complete plan for **504 cases** spanning Slow/Fast, pending limits,
 cursor boundaries, and `db_count` 0/1/2/3/16/257. Rollback: restore the two unconditional modulo expressions.
+
+### 2026-07-15 SHIPPED (`decide_psync` exact-replid fast path with case-insensitive fallback — frankenredis-6m3ww)
+Negative-ledger-first pivot from the completed `fr-eventloop` planner vein into the previously unmeasured `fr-repl`
+PSYNC decision path. A canonical partial reconnect sends the primary's 40-byte replication ID back byte-for-byte, but
+`decide_psync` always paid for `eq_ignore_ascii_case`. The one lever tries exact equality first and retains the old
+ASCII-case-insensitive comparison as the fallback, preserving the compatibility contract for mixed-case IDs and every
+mismatch/offset outcome.
+
+PROFILE-FIRST: before the lever, the exact unchanged `fr_repl::decide_psync` symbol had **18.29% self-time**, while
+`eq_ignore_ascii_case_chunks::<16>` had another **36.60%**, with zero lost samples on `vmi1153651` in release/no-LTO
+binary `17b0ff64b531d1cdbbbdd2da29ae95c324fec93fa86d3373b9a1c30186ed4eb4`. The final same-binary profile retained
+non-zero self-time (candidate **11.80%**, frozen reference **21.33%**, zero lost samples), binary
+`ac3875f8eb3818a2a9f77401bdc4767b910b5aa0afb8408bad7d811b12fb96e3`. The foreground, position-balanced
+`instructions:u` A/A+A/B used 9 rounds x 20M calls in that one binary/worker: candidate median **1,580,312,254** vs
+reference **2,800,312,204**, reference/candidate = **1.771999407x** (candidate **43.57% fewer instructions**); null
+median **0.999999915**, null p05/p95 **0.999998875/1.000000182**, null CV **0.000036%**, effect CV **0.000026%**.
+The pre-measurement correctness gate matched both arms for exact, case-folded, mismatch, question-mark, backlog-boundary,
+out-of-range, and non-ASCII cases. Rollback: change production `decide_psync_impl::<true>` back to `<false>`.
