@@ -8,6 +8,45 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 BlackThrush: SHIPPED — borrow Sentinel HELLO self-ID comparison (`frankenredis-d3h3t`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` again left the only unassigned explicit
+  perf bead, `frankenredis-b1o02`, as multi-day packed-`StrMap` representation work; ranked live
+  lanes were otherwise owned, blocked, or already in progress. With the quoted-config vein just
+  mined, this turn pivoted to the fresh Sentinel HELLO discovery path, which had no matching
+  ledger attempt.
+- **Profile/attribution first:** before changing production, the untouched self-echo path called
+  `state.myid_hex()` under fail-closed remote `--profile release` on `vmi1152480` (binary sha256
+  `9d28e6461d472586e127f87f17dee1e3cfe30a446c9375bc26a6e77443e7dbfe`). Exact
+  `process_hello_message` carried **9.56% self-time** across 43 `instructions:u` samples with zero
+  lost samples; `malloc` carried **15.02%**, `memmove` **24.64%**, and `String::from_utf8_lossy`
+  **11.56%** for the valid 40-byte self run ID.
+- **One concrete lever:** the self-ID guard now compares the incoming `String` with the borrowed
+  `Cow<str>` view from `String::from_utf8_lossy(&state.myid)` instead of forcing that view through
+  `into_owned`. A bench-only frozen reference retains `state.myid_hex()`; both arms share the
+  complete non-self discovery body, including add/update action construction.
+- **Foreground same-binary A/A+A/B:** after the untimed warm-up, one fail-closed
+  `--profile release` binary on `vmi1152480` served both arms (candidate sha256 = reference
+  sha256 = `1983014d3e4503ff0348a22a07b3bf6a1770941fbcc6f0db4cfce6cabb1941b9`). Across nine
+  position-balanced rounds of 100,000 self-echo calls, candidate median was **47,017,026
+  instructions** versus reference **58,417,369**, with a **1.242471971x reference/candidate**
+  effect median (**19.515331% fewer instructions** by the arm medians). The A/A null median was
+  **0.999996448x**, p05..p95 **[0.999990004, 1.000004871]**, null CV **0.000492%**, and effect
+  CV **0.000576%**. Exact candidate/reference frames carried **6.62%/15.07% self-time** across
+  206/269 samples with zero lost samples; `malloc` was **7.51%** in the reference table and absent
+  from the candidate table.
+- **Behavior and gates:** the same binary asserted exact action parity for valid self, non-self
+  add, missing-master, and invalid-UTF-8 `myid` cases, preserving the old lossy replacement
+  semantics. Strict-remote release testing passed all **167 unit tests and eight golden tests**;
+  scoped strict-remote all-target Clippy with `bench-reference` and `-D warnings` passed. The
+  workspace-wide check reached only three pre-existing missing peer-owned helpers in
+  `crates/fr-store/benches/set_ex_rearm.rs`. Direct Rust 2024 formatting and whitespace checks
+  passed, and focused UBS exited zero with no critical finding. Implementation commit:
+  `d77f1d4b4`.
+- **Boundary:** only the self-run-ID comparison ownership changed. Invalid UTF-8 replacement,
+  non-self master lookup, Sentinel key/address construction, add/update actions, epoch data,
+  command replies, persistence, replication, and scheduling are unchanged.
+
 ## 2026-07-15 BlackThrush: SHIPPED — bulk-copy clean runs in quoted config tokens (`frankenredis-y0o1s`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf
