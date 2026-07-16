@@ -4846,24 +4846,28 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hmset_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_hmset_borrowed(
+                    // HMSET replies a constant +OK on success → FastOkReply (no reply-frame alloc);
+                    // an error frame (WRONGTYPE etc.) still routes through FastReply.
+                    match runtime.execute_plain_hmset_borrowed_ok(
                         packet.key,
                         &packet.pairs[..packet.len],
                         ts,
                     ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                            consumed: packet.consumed,
+                        }),
+                        Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
+                        }),
+                        None => parse_borrowed_multibulk_action(
                             unparsed,
                             parser_config,
                             runtime,
                             ts,
                             &mut conn.write_buf,
                             &mut argv_scratch,
-                        )
+                        ),
                     }
                 } else if let Some(packet) =
                     parse_borrowed_plain_substr_packet(unparsed, &parser_config)
@@ -11565,14 +11569,23 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((key, pairs)) = borrowed_plain_hmset_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hmset_borrowed(key, pairs, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, pairs)) = borrowed_plain_hmset_args(&borrowed_args) {
+                            // HMSET success → FastOkReply (no reply-frame alloc); error → FastReply;
+                            // a declined fast path (None) falls through to the next command check.
+                            match runtime.execute_plain_hmset_borrowed_ok(key, pairs, ts) {
+                                Some(None) => {
+                                    return Ok(BorrowedMultibulkAction::FastOkReply {
+                                        consumed: parsed.consumed,
+                                    });
+                                }
+                                Some(Some(response)) => {
+                                    return Ok(BorrowedMultibulkAction::FastReply {
+                                        consumed: parsed.consumed,
+                                        response,
+                                    });
+                                }
+                                None => {}
+                            }
                         }
                         if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
                             && let Some(response) =

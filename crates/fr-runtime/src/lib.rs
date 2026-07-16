@@ -10387,6 +10387,23 @@ impl Runtime {
         pairs: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_hmset_borrowed_ok(key, pairs, now_ms)
+            .map(|outcome| outcome.unwrap_or_else(|| RespFrame::SimpleString("OK".to_string())))
+    }
+
+    /// (BlackThrush) Non-allocating twin of [`Self::execute_plain_hmset_borrowed`]: runs the
+    /// identical borrowed HMSET write but factors the reply so the dispatcher can skip the
+    /// per-HMSET `SimpleString("OK")` allocation on the (dominant) success path. Returns
+    /// `Some(None)` on success — the caller emits the constant `+OK\r\n` straight into the
+    /// connection buffer via `BorrowedMultibulkAction::FastOkReply`; `Some(Some(err))` when the
+    /// write produced an error frame (e.g. WRONGTYPE), routed through the ordinary `FastReply`
+    /// path exactly as before; and `None` when the borrowed fast path declined.
+    pub fn execute_plain_hmset_borrowed_ok(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
         self.execute_plain_hmset_borrowed_with_default_write_gate(
             key,
@@ -10402,7 +10419,7 @@ impl Runtime {
         pairs: &[&[u8]],
         now_ms: u64,
         default_write_allowed: bool,
-    ) -> Option<RespFrame> {
+    ) -> Option<Option<RespFrame>> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HMSET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -10455,15 +10472,16 @@ impl Runtime {
             }
         }
         let elapsed_us = self.finish_chained_command(start);
-        let reply = error.unwrap_or_else(|| RespFrame::SimpleString("OK".to_string()));
-        let failed = matches!(reply, RespFrame::Error(_));
+        // `error` is `Some(Error(..))` only on failure; the success reply is a constant +OK that
+        // the caller emits directly (FastOkReply) without allocating a `SimpleString` frame.
+        let failed = error.is_some();
 
         self.record_plain_hmset_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        if let RespFrame::Error(msg) = &reply {
+        if let Some(RespFrame::Error(msg)) = &error {
             self.server.store.stat_total_error_replies += 1;
             if self.execution_source.counts_as_unexpected_error_reply() {
                 self.server.store.stat_unexpected_error_replies += 1;
@@ -10480,7 +10498,7 @@ impl Runtime {
             }
         }
 
-        Some(reply)
+        Some(error)
     }
 
     fn record_plain_hmset_borrowed_metrics(
