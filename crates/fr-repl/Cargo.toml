@@ -22,3 +22,8 @@ required-features = ["bench-reference"]
 name = "wait_zero_offset"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "handshake_replconf"
+harness = false
+required-features = ["bench-reference"]

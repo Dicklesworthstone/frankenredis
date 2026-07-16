@@ -113,7 +113,45 @@ impl HandshakeFsm {
         self.state
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn on_step(&mut self, step: HandshakeStep) -> Result<(), ReplError> {
+        #[cfg(feature = "bench-reference")]
+        std::hint::black_box(0_u8);
+        let transition = match (self.state, step, self.auth_required) {
+            (HandshakeState::Init, HandshakeStep::Ping, _) => Some(HandshakeState::PingSeen),
+            (HandshakeState::PingSeen, HandshakeStep::Auth, true) => Some(HandshakeState::AuthSeen),
+            (HandshakeState::PingSeen, HandshakeStep::Replconf, false) => {
+                Some(HandshakeState::ReplconfSeen)
+            }
+            (HandshakeState::AuthSeen, HandshakeStep::Replconf, _) => {
+                Some(HandshakeState::ReplconfSeen)
+            }
+            (HandshakeState::ReplconfSeen, HandshakeStep::Replconf, _) => {
+                Some(HandshakeState::ReplconfSeen)
+            }
+            (HandshakeState::ReplconfSeen, HandshakeStep::Psync, _) => {
+                Some(HandshakeState::PsyncSent)
+            }
+            _ => None,
+        };
+
+        if let Some(state) = transition {
+            self.state = state;
+            Ok(())
+        } else {
+            Err(ReplError::HandshakeStateMachineMismatch {
+                state: self.state,
+                step,
+            })
+        }
+    }
+
+    /// Frozen pre-`frankenredis-bf1ow` transition dispatcher for the same-binary proof.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_on_step_reference(&mut self, step: HandshakeStep) -> Result<(), ReplError> {
+        std::hint::black_box(1_u8);
         let transition = match (self.state, step, self.auth_required) {
             (HandshakeState::Init, HandshakeStep::Ping, _) => Some(HandshakeState::PingSeen),
             (HandshakeState::PingSeen, HandshakeStep::Auth, true) => Some(HandshakeState::AuthSeen),

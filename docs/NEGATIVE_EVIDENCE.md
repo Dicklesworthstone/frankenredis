@@ -4,6 +4,17 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: REJECTED — repeated REPLCONF handshake fast path (frankenredis-bf1ow)
+
+Negative-ledger-first fresh `fr-repl::HandshakeFsm::on_step` seam. Baseline foreground
+profile on remote worker `vmi1156319` (release, LTO disabled) passed correctness (18 cases,
+two auth modes) and PMU validity (zero lost samples). Same-binary interleaved A/B measured
+candidate median 30,002,218 instructions versus frozen reference median 30,002,216;
+reference/candidate ratio `1.000000000`, null-control median `0.999999833`, effect CV
+`0.000059%`: no measurable win. The one attempted exact repeated-`REPLCONF` early return
+optimized out of the profiled frame, making the candidate profile invalid (no self-time),
+so it is rejected and not shipped. Baseline evidence is retained as the real A/B ratio.
+
 ## 2026-07-16: SHIPPED — retain live Sentinel peers in one table pass; 64.863% fewer instructions (frankenredis-29i8k)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was
