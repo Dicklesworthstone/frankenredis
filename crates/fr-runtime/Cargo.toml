@@ -46,3 +46,8 @@ required-features = ["bench-reference"]
 name = "config_get_static_lookup"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "replica_frame_borrow"
+harness = false
+required-features = ["bench-reference"]

@@ -7651,9 +7651,18 @@ impl Runtime {
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         // Owned-frame callers (conformance, internal) keep passing the frame so
         // its exact wire structure feeds the threat-evidence digests verbatim.
-        let argv_result = frame_to_argv(&frame);
+        self.execute_frame_ref(&frame, now_ms)
+    }
+
+    /// Execute a retained frame without cloning its nested RESP payload.
+    ///
+    /// Online replica replay keeps the parsed frame for diagnostics and `REPLCONF GETACK`
+    /// classification after dispatch, so borrowing avoids an otherwise redundant deep clone.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    pub fn execute_frame_ref(&mut self, frame: &RespFrame, now_ms: u64) -> RespFrame {
+        let argv_result = frame_to_argv(frame);
         self.execute_dispatch(
-            Some(&frame),
+            Some(frame),
             argv_result
                 .as_deref()
                 .map_err(|_| CommandError::InvalidCommandFrame),

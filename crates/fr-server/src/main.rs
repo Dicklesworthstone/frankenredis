@@ -22968,7 +22968,7 @@ fn drain_replica_stream(
                 // an early return can never leave the flag stuck on.
                 runtime.server.applying_master_stream = true;
                 let response =
-                    runtime.execute_frame(frame.clone(), now_ms.saturating_add(frame_index));
+                    runtime.execute_frame_ref(&frame, now_ms.saturating_add(frame_index));
                 runtime.server.applying_master_stream = false;
                 if let RespFrame::Error(message) = &response {
                     eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");

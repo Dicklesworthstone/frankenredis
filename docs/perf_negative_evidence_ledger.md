@@ -8,6 +8,49 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-15 BlackThrush: SHIPPED — borrow retained frames during online replica replay (`frankenredis-njvhv`)
+
+- **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf
+  bead, `frankenredis-b1o02`, as multi-day packed-`StrMap` representation work; the ranked live
+  lanes were otherwise owned, blocked, or already in progress. The earlier broad client-frame
+  clone probe (`frankenredis-uiwy5`) was superseded by the landed borrowed client-dispatch work
+  (`frankenredis-ctsdd`), while the replica-prefix ownership keep (`frankenredis-ie3cq`) explicitly
+  left replay unchanged. That made the still-live clone in online replica replay a distinct,
+  bounded `fr-server`/`fr-runtime` seam rather than another pass over the mined store or Sentinel
+  families.
+- **Profile/attribution first:** before changing production, the untouched replay operation ran
+  under fail-closed remote `--profile release` on `vmi1264463` (binary sha256
+  `4cb1d67bfd408f2bcd36ac8d8ee7e126d9ae898db74ca7b1aff4e94a9e9a8afe`). Across 168
+  `instructions:u` samples with zero lost samples, the exact
+  `<fr_protocol::RespFrame as Clone>::clone` frame carried **0.56% self-time** for a retained
+  64 KiB binary `SET` frame. This proved that the live clone-bearing operation executed before
+  selecting the ownership lever; the attribution-only harness stopped after its later wrapper
+  lookup and made no timing claim.
+- **One concrete lever:** `Runtime::execute_frame_ref` accepts the already-retained parsed frame by
+  reference, and `drain_replica_stream` now dispatches through it instead of deep-cloning the RESP
+  tree into the owned entry point. The owned `execute_frame` API delegates to the same body.
+  Diagnostics, post-dispatch `REPLCONF GETACK` classification, timestamp progression, the
+  `applying_master_stream` guard, response handling, and the original parsed frame remain intact.
+- **Foreground same-binary A/A+A/B:** one fail-closed foreground invocation compiled without an
+  outer timeout and capped only the launched measurement binary. It used `--profile release` with
+  release LTO disabled on `vmi1167313`; candidate and frozen clone-bearing reference shared
+  executable sha256 `e12cb8cf647984f833c7f6c589350fbe11ffd4479c4e3a11941a57428da30126`.
+  Across nine position-balanced rounds of 2,000 64 KiB overwrite replays, candidate median was
+  **38,223,571 instructions** versus reference **52,655,258**, with a paired
+  **1.377571289x reference/candidate** effect median (**27.408475% fewer instructions**). The A/A
+  null median was **1.000000183x**, p05..p95 **[0.999951236, 1.000014886]**, null CV
+  **0.002119%**, and effect CV **0.013377%**.
+- **Ledger integrity and behavior:** exact same-executable profiles recorded 1,000 samples per arm
+  with zero lost samples. The frozen reference's exact RESP clone frame carried **0.40% self-time**
+  and the candidate's exact `Runtime::execute_frame_ref` frame carried **2.21% self-time**, proving
+  both measured arms reached the intended operation. The same binary asserted identical replies,
+  stored value, and bit-identical retained frames across six ordinary, binary, 64 KiB,
+  `REPLCONF GETACK`, read, and invalid-frame cases. This is an instruction-count result for replay
+  dispatch, not a whole-server throughput claim.
+- **Boundary:** only ownership at online replica command dispatch changed. RESP parsing, partial
+  tail retention, replication offsets and ordering, monitor/AOF propagation, command semantics,
+  error logging, GETACK replies, and client-command dispatch are unchanged.
+
 ## 2026-07-15 BlackThrush: SHIPPED — borrow Sentinel HELLO self-ID comparison (`frankenredis-d3h3t`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` again left the only unassigned explicit
