@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-16 BlackThrush: SHIPPED — drop the per-SET `SimpleString("OK")` reply allocation on the borrowed plain-SET fast path (`frankenredis-4jhv4`)
+
+- **Fresh-subsystem pivot (last vein thinning):** the LFU probe-collapse and borrow-scan seams are
+  exhausted and the recent control-plane borrow tail (sentinel/config) is thinning, so this turn
+  scouted the borrowed fast-path reply construction. Plain SET's borrowed fast path returned
+  `Some(RespFrame::SimpleString("OK".to_string()))`, heap-allocating a 2-byte reply frame on the
+  hottest write command — while the sibling WATCH and SMEMBERS borrowed fast paths already write
+  their reply straight into the connection buffer (`out.extend_from_slice(b"+OK\r\n")` /
+  `execute_plain_smembers_borrowed_into`). No prior ledger entry covered this allocation.
+- **Profile/attribution first:** an untouched-reference same-binary release profile
+  (`instructions:u`, zero lost samples, worker `vmi1152480`) attributed **1.89–3.25% self-time** to
+  the frozen `set_reply_owned_reference` wrapper that allocates and encodes the `SimpleString("OK")`
+  reply, on top of the shared `Store::set_plain_borrowed` write (~1.45%) present in both arms. The
+  candidate wrapper's own `+OK` write is below perf's 0.01% sampling floor — that near-zero cost is
+  the win — so candidate provenance pins the shared SET write instead.
+- **One concrete lever:** `execute_plain_set_borrowed_with_default_write_gate` now returns
+  `Option<()>`; a new `Runtime::execute_plain_set_borrowed_ok` twin reports success as `Some(())`,
+  and both borrowed SET dispatch sites (the cached-gate packet path and the multibulk 'S' path) emit
+  `BorrowedMultibulkAction::FastOkReply`, whose consumer writes `+OK\r\n` directly (a
+  `SimpleString("OK")` encodes to those exact bytes under RESP2 and RESP3). The `FastOkReply`
+  consumer is identical to `FastReply` — same read-gate-cache invalidation, pubsub drain,
+  output-hard-limit check, and reply-suppression guard — so behavior is unchanged. The owned
+  `execute_plain_set_borrowed` wrapper keeps returning the `SimpleString("OK")` frame for its
+  conformance/test callers via `.map`.
+- **Foreground same-binary A/A+A/B:** one fail-closed foreground invocation compiled without an
+  outer timeout and capped only the launched measurement; `--profile release`, release LTO disabled,
+  worker `vmi1152480`, both arms in executable sha256
+  `78b15113099843b249fcc9249dbddbe61bdc76997ef6cac4ce8a0bcd18109738`. Across nine
+  position-balanced rounds of 6,000 SETs each: candidate median **9,211,208 instructions** vs
+  reference **10,573,231**, a paired **1.147873334x reference/candidate** effect median
+  (**12.884% fewer instructions**, ~227 instr/op = one `"OK"` malloc + `String` + `encode_into` +
+  free). A/A null median **0.999972099**, p05..p95 **[0.999869518, 1.000046684]**, null CV
+  **0.004662%**, effect CV **0.004402%** — every round landed 1.14784–1.14797.
+- **Behavior:** the same binary asserted byte-identical `+OK\r\n` replies and identical stored values
+  across ordinary/overwrite/binary/empty-value SETs (correctness gate, 5 cases). This is an
+  instruction-count result for the borrowed SET reply path, not a whole-server throughput claim.
+- **Boundary:** only the plain-SET borrowed reply changed. SET-with-options (NX/XX/KEEPTTL/GET),
+  SETEX/SETNX, the generic argv SET path, command semantics, replication/AOF propagation, monitor
+  feed, and reply suppression are unchanged. SIBLINGS (same shape, follow-ups): the other borrowed
+  fast paths that still return `SimpleString("OK")` via `FastReply` (KEEPTTL SET, MSET) can reuse
+  `FastOkReply`.
+
 ## 2026-07-15 BlackThrush: SHIPPED — borrow retained frames during online replica replay (`frankenredis-njvhv`)
 
 - **Negative-ledger-first routing:** `bv --robot-triage` left the only unassigned explicit perf

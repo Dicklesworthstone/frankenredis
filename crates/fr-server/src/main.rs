@@ -3055,17 +3055,17 @@ fn process_buffered_frames(
                 {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
+                    if runtime
                         .execute_plain_set_borrowed_with_default_write_gate(
                             packet.key,
                             packet.value,
                             ts,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11135,6 +11135,27 @@ fn process_buffered_frames(
                     }
                     continue;
                 }
+                Ok(BorrowedMultibulkAction::FastOkReply { consumed }) => {
+                    // Identical to FastReply, but the reply is the constant `+OK\r\n`
+                    // (a `SimpleString("OK")` encodes to the same bytes under RESP2 and
+                    // RESP3), written directly rather than through an allocated frame.
+                    processed_frames = processed_frames.saturating_add(1);
+                    plain_get_read_gate_cache = None;
+                    if !runtime.suppress_current_network_reply() {
+                        conn.write_buf.extend_from_slice(b"+OK\r\n");
+                    }
+                    drain_pending_pubsub_to_connection(runtime, conn);
+                    consumed_total += consumed;
+                    if disconnect_if_output_limit_exceeded(
+                        conn,
+                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        closing_tokens,
+                        token,
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
                 Ok(BorrowedMultibulkAction::Parsed {
                     kind,
                     consumed,
@@ -11828,12 +11849,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_set_borrowed(key, value, ts)
+                            && runtime
+                                .execute_plain_set_borrowed_ok(key, value, ts)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastOkReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((key, offset, value)) =
@@ -12151,6 +12172,12 @@ enum BorrowedMultibulkAction {
         response: RespFrame,
     },
     FastEncodedReply {
+        consumed: usize,
+    },
+    /// Borrowed plain-SET succeeded; the reply is the constant `+OK\r\n`, written
+    /// straight into the connection buffer by the consumer, so no `SimpleString`
+    /// reply frame is allocated on the hot write path.
+    FastOkReply {
         consumed: usize,
     },
 }
