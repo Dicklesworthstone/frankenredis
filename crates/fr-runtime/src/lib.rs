@@ -8554,6 +8554,24 @@ impl Runtime {
         time_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_set_relexpire_borrowed_ok(is_seconds, key, value, time_arg, now_ms)
+            .map(|()| RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Non-allocating twin of [`Self::execute_plain_set_relexpire_borrowed`]:
+    /// runs the identical borrowed `SET key value EX|PX <n>` write but reports success as
+    /// `Some(())` so the dispatcher can emit the constant `+OK\r\n` straight into the
+    /// connection buffer (via `BorrowedMultibulkAction::FastOkReply`) instead of heap-
+    /// allocating a `SimpleString("OK")` reply frame on every expiring SET. `None` means the
+    /// borrowed fast path declined and the caller must fall back to the generic argv path.
+    pub fn execute_plain_set_relexpire_borrowed_ok(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -8611,7 +8629,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(RespFrame::SimpleString("OK".to_string()))
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]

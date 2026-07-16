@@ -56,3 +56,8 @@ required-features = ["bench-reference"]
 name = "set_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "set_relexpire_ok_reply_alloc"
+harness = false
+required-features = ["bench-reference"]

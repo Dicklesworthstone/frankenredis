@@ -2848,16 +2848,21 @@ fn process_buffered_frames(
                 } else if let Some((is_seconds, packet)) =
                     parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_relexpire_borrowed(
-                        is_seconds,
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    // `SET key value EX|PX <n>` unconditionally replies +OK; route the
+                    // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")`
+                    // reply frame is allocated on this expiring-SET write path.
+                    if runtime
+                        .execute_plain_set_relexpire_borrowed_ok(
+                            is_seconds,
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
