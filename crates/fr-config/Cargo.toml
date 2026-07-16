@@ -18,3 +18,8 @@ required-features = ["bench-reference"]
 name = "config_directives"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "tls_protocol_mask"
+harness = false
+required-features = ["bench-reference"]

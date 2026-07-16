@@ -1028,7 +1028,48 @@ pub fn validate_tls_directive_value(
     }
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn parse_tls_protocols(raw: &str) -> Result<Vec<TlsProtocol>, TlsCfgError> {
+    #[cfg(feature = "bench-reference")]
+    std::hint::black_box(1_u8);
+    if raw.is_empty() {
+        return Ok(default_tls_protocols());
+    }
+
+    let mut out = Vec::new();
+    let mut seen = 0_u8;
+    let raw = raw.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    for token in raw.split(' ').filter(|token| !token.is_empty()) {
+        let protocol = TlsProtocol::parse(token).ok_or_else(|| {
+            TlsCfgError::ProtocolsParseContractViolation(format!("unsupported protocol '{token}'"))
+        })?;
+        let protocol_bit = match protocol {
+            TlsProtocol::TlsV1 => 1 << 0,
+            TlsProtocol::TlsV1_1 => 1 << 1,
+            TlsProtocol::TlsV1_2 => 1 << 2,
+            TlsProtocol::TlsV1_3 => 1 << 3,
+        };
+        if seen & protocol_bit == 0 {
+            seen |= protocol_bit;
+            out.push(protocol);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(TlsCfgError::ProtocolsParseContractViolation(
+            "empty tls-protocols list".to_string(),
+        ));
+    }
+
+    Ok(out)
+}
+
+/// Frozen pre-`frankenredis-y2ahh` comparator for the same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_tls_protocols_reference(raw: &str) -> Result<Vec<TlsProtocol>, TlsCfgError> {
+    std::hint::black_box(0_u8);
     if raw.is_empty() {
         return Ok(default_tls_protocols());
     }

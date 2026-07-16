@@ -4,6 +4,42 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — mask duplicate TLS protocol scans; 1.692930% fewer instructions (frankenredis-y2ahh)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: `fr-repl` bead `bf1ow` was already closed and
+the store/runtime/SIMD/expiry veins were mined, so this pass moved to the distinct `fr-config`
+TLS-policy parser. Existing config performance rows covered whole-file directive allocation and
+quoted-token decoding, not `parse_tls_protocols` duplicate suppression. Trigger: a 121-byte,
+16-token `tls-protocols` value containing all four supported protocols and twelve mixed-case
+duplicates.
+
+PROFILE-FIRST before the production lever, release profile with LTO disabled on remote worker
+`vmi1156319`: binary sha256
+`628861fb33f5f69546a67dcacd6e2d1ed50771c682903a93453731553315eb0e`, 331 candidate
+samples and 284 frozen-reference samples, zero lost. The unchanged exact
+`fr_config::parse_tls_protocols` frame carried **9.91% self-time** (`TlsProtocol::parse` was
+23.78%). The same-binary baseline was instruction-identical: candidate median 1,026,609,952,
+reference 1,026,610,004, reference/candidate `1.000000047`; A/A null median `0.999999973`,
+spread `0.999998962..1.000000836`, null CV `0.000061%`, effect CV `0.000019%`.
+
+ONE LEVER: replace each `Vec::contains` duplicate scan with one bit per closed
+`TlsProtocol` variant. The first occurrence still appends to the output vector, so first-seen
+ordering is unchanged; duplicate, case-folding, whitespace, empty-default, and invalid-token error
+semantics are unchanged. The frozen bench-only reference retains the prior linear scan.
+
+FOREGROUND A/B on the same worker and one binary, sha256
+`e6d11863c50920393aea673fd00ed631301da0dacb1f5b9367f9fbbc45ad15e2`: candidate
+median **1,009,230,016** versus reference **1,026,609,800** instructions,
+reference/candidate **1.017220888x** (**1.692930% fewer**). A/A null median
+`0.999999964`, spread `0.999999435..1.000003655`, null CV `0.000120%`, effect CV
+`0.000119%`. Candidate/reference exact frames carried **10.48% / 10.05% self-time**, with
+362/317 samples and zero lost. Correctness gate: nine candidate/reference cases covering empty,
+unique, duplicate, mixed-case, whitespace-only, invalid comma/version, and the measured trigger.
+Rollback: revert the `seen` bitmask in `parse_tls_protocols`; the retained benchmark reproduces the
+ratio.
+Focused remote gates passed: 36 unit tests, 13 golden tests, and `fr-config --all-targets`
+Clippy with `-D warnings` under the same release/no-LTO configuration.
+
 ## 2026-07-16: REJECTED — repeated REPLCONF handshake fast path (frankenredis-bf1ow)
 
 Negative-ledger-first fresh `fr-repl::HandshakeFsm::on_step` seam. Baseline foreground
