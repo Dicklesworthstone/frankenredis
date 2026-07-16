@@ -4,6 +4,41 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — zero WAIT/WAITAOF offsets return the replica count without scanning; 20.950667x fewer instructions (frankenredis-gkjk7)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible RESTORE performance beads
+were already claimed and structural, while the preceding `fr-command` metadata lane had just
+landed. The `fr-repl` helper `count_offsets_at_or_above` was untouched since February and had no
+ledger row, bead, or reservation. A master can reach it with connected replicas before any
+replicated write bytes, when `WAIT N 0` or `WAITAOF 0 N 0` supplies required offset zero.
+
+PROFILE-FIRST on the unchanged scan, 128 unordered black-boxed replica offsets and required offset
+zero, release profile with LTO disabled: worker `vmi1152480`, binary sha256
+`27fe6de8c68aa6810bc2e1450c9243afd2a6973152917732c23bfb67196ec985`, 203 samples, zero lost.
+The exact unchanged `fr_repl::count_offsets_at_or_above` helper had **90.68% self-time**, proving
+the benchmark executed the proposed lever rather than a wrapper or dead path.
+
+ONE LEVER: when `required.0 == 0`, return `offsets.len()`. `ReplOffset` wraps `u64`, so every
+possible replica offset is at least zero; empty slices, duplicates, ordering, and threshold equality
+are unchanged. Every nonzero threshold retains the original iterator/filter/count implementation.
+The frozen reference is that literal pre-change scan.
+
+FOREGROUND SAME-BINARY A/A+A/B: after the required untimed fail-closed RCH warm-up, RCH ignored a
+requested worker switch and repeatedly missed its release cache. The capped measurement therefore
+ran the just-built executable directly in place on the effective RCH worker (never locally, no
+`force_local`). Both arms used worker `vmi1152480` and binary sha256
+`c95bf4a76d88d77d42ae66bced010e7e2df26d13ca937d93ca992c6c224235dd`; exact candidate/reference
+helper profiles were **10.45% / 83.35% self-time**, 16/170 samples, zero lost. Nine
+position-balanced instruction rounds measured candidate median **36,289,545** vs reference median
+**760,289,940**; paired reference/candidate effect median **20.950666893x** (**95.227% fewer
+instructions** by the arm medians). The A/A null median was **0.999999945**, p05..p95
+**[0.999983356, 1.000055225]**, null CV **0.002076%**, effect CV **0.000641%**.
+
+The correctness gate matched candidate/reference for **45** empty, unordered, duplicate,
+below/equal/above, and `u64::MAX` cases across lengths 0..257; existing WAIT and WAITAOF evaluator
+tests cover nonzero replica/local thresholds. Rollback: remove the zero-threshold early return; the
+frozen iterator scan is already preserved beside it.
+
 ## 2026-07-16: SHIPPED — reuse the resolved COMMAND_TABLE row for GETKEYS has-key classification; 1.011356x fewer instructions (frankenredis-r16uz)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: after the RESP3 scalar lane landed, the exact

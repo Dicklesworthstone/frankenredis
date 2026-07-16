@@ -17,3 +17,8 @@ required-features = ["bench-reference"]
 name = "psync_decision_exact_replid"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "wait_zero_offset"
+harness = false
+required-features = ["bench-reference"]

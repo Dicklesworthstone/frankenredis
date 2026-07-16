@@ -383,7 +383,25 @@ pub struct WaitAofOutcome {
 }
 
 #[must_use]
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn count_offsets_at_or_above(offsets: &[ReplOffset], required: ReplOffset) -> usize {
+    #[cfg(feature = "bench-reference")]
+    std::hint::black_box(0_u8);
+    if required.0 == 0 {
+        return offsets.len();
+    }
+    offsets.iter().filter(|offset| **offset >= required).count()
+}
+
+/// Frozen pre-optimization offset counter for same-binary WAIT/WAITAOF benchmarks.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_count_offsets_at_or_above_reference(
+    offsets: &[ReplOffset],
+    required: ReplOffset,
+) -> usize {
+    std::hint::black_box(1_u8);
     offsets.iter().filter(|offset| **offset >= required).count()
 }
 
@@ -417,7 +435,8 @@ mod tests {
     use super::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
         PsyncReply, ReplError, ReplOffset, ReplProgress, ReplState, WaitAofThreshold,
-        WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof, parse_psync_reply,
+        WaitThreshold, count_offsets_at_or_above, decide_psync, evaluate_wait, evaluate_waitaof,
+        parse_psync_reply,
     };
 
     #[test]
@@ -814,6 +833,24 @@ mod tests {
         );
         assert_eq!(outcome.acked_replicas, 2);
         assert!(outcome.satisfied);
+    }
+
+    #[test]
+    fn zero_wait_threshold_counts_every_unsigned_offset() {
+        for len in [0_usize, 1, 2, 3, 31, 128, 257] {
+            let offsets = (0..len)
+                .map(|index| {
+                    ReplOffset(
+                        u64::try_from(index.wrapping_mul(37) % (len.max(1) + 11))
+                            .expect("fixture offset fits u64"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                count_offsets_at_or_above(&offsets, ReplOffset(0)),
+                offsets.len()
+            );
+        }
     }
 
     #[test]
