@@ -13544,7 +13544,10 @@ impl Drop for LuaState<'_> {
         // form Rc cycles that won't be reclaimed without manual clearing.
         // We recursively clear all tables reachable from globals to break
         // these cycles on LuaState destruction.
-        fn clear_table_recursive(table: &LuaTable, visited: &mut HashSet<usize>) {
+        fn clear_table_recursive(
+            table: &LuaTable,
+            visited: &mut HashSet<usize, foldhash::quality::RandomState>,
+        ) {
             let ptr = Rc::as_ptr(&table.inner) as usize;
             if !visited.insert(ptr) {
                 return;
@@ -13577,7 +13580,13 @@ impl Drop for LuaState<'_> {
             }
         }
 
-        let mut visited = HashSet::new();
+        // (BlackThrush) The visited set holds Rc pointers (usize) purely for cycle detection on
+        // LuaState teardown, which runs on EVERY EVAL and walks the per-eval table tree. std's
+        // default HashSet hasher is SipHash — a live perf-record put ~20% of the return-1 eval
+        // self-time in `hash_one::<&usize>` + `sip::Hasher::write` for these pointer inserts. The
+        // keys are internal pointers (never attacker-controlled), so foldhash is safe and much
+        // cheaper. Byte-identical cycle detection.
+        let mut visited: HashSet<usize, foldhash::quality::RandomState> = HashSet::default();
         for value in self.globals.values() {
             if let LuaValue::Table(t) = value {
                 clear_table_recursive(t, &mut visited);
