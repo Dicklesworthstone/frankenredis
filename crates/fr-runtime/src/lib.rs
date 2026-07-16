@@ -8101,12 +8101,18 @@ impl Runtime {
     /// KEEPTTL) clears any TTL → `+OK`, otherwise nil (BulkString None). The parser
     /// only matches *4 with a literal XX token; NX/GET/KEEPTTL/EX/PX and every other
     /// shape fall through to the generic. SET never type-checks. Recorded as `set`.
+    /// (BlackThrush) Borrowed `SET key value XX` fast path (update-if-exists). Returns `Some(None)`
+    /// when the key existed and was overwritten — the dispatcher emits the constant `+OK\r\n`
+    /// straight into the connection buffer via `BorrowedMultibulkAction::FastOkReply`, with no
+    /// `SimpleString("OK")` reply-frame allocation; `Some(Some(nil))` when the key was absent (XX
+    /// declines) — the `$-1` reply is routed through the ordinary `FastReply` path (the nil frame
+    /// itself allocates nothing); and `None` when the borrowed fast path declined entirely.
     pub fn execute_plain_set_xx_borrowed(
         &mut self,
         key: &[u8],
         value: &[u8],
         now_ms: u64,
-    ) -> Option<RespFrame> {
+    ) -> Option<Option<RespFrame>> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -8134,13 +8140,15 @@ impl Runtime {
 
         let start = self.chained_command_start();
         // XX: set only when the key exists (non-counting peek, matching redis 0/0).
-        let reply = if self.server.store.peek_value_type(key, now_ms).is_some() {
+        let outcome = if self.server.store.peek_value_type(key, now_ms).is_some() {
             self.server
                 .store
                 .set(key.to_vec(), value.to_vec(), None, now_ms);
-            RespFrame::SimpleString("OK".to_string())
+            // key present → overwritten → constant +OK emitted directly via FastOkReply (no alloc).
+            None
         } else {
-            RespFrame::BulkString(None)
+            // key absent → nil (`$-1`), routed through FastReply (the nil frame allocates nothing).
+            Some(RespFrame::BulkString(None))
         };
         let elapsed_us = self.finish_chained_command(start);
 
@@ -8151,7 +8159,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(reply)
+        Some(outcome)
     }
 
     fn record_plain_set_cond_borrowed_metrics(
