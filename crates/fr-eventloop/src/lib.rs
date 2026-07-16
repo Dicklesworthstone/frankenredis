@@ -524,6 +524,7 @@ pub struct ActiveExpireCyclePlan {
 }
 
 #[must_use]
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn plan_active_expire_cycle(
     kind: ActiveExpireCycleKind,
     pending_expirable_keys: usize,
@@ -531,6 +532,43 @@ pub fn plan_active_expire_cycle(
     db_count: usize,
     budget: ActiveExpireCycleBudget,
 ) -> ActiveExpireCyclePlan {
+    #[cfg(feature = "bench-reference")]
+    std::hint::black_box(1_u8);
+    let normalized_db_count = db_count.max(1);
+    let (start_db_index, next_db_index) = if normalized_db_count == 1 {
+        (0, 0)
+    } else {
+        let start_db_index = current_db_index % normalized_db_count;
+        let next_db_index = (start_db_index + 1) % normalized_db_count;
+        (start_db_index, next_db_index)
+    };
+    let configured_limit = match kind {
+        ActiveExpireCycleKind::Slow => budget.slow_cycle_sample_limit,
+        ActiveExpireCycleKind::Fast => budget.fast_cycle_sample_limit,
+    };
+    let sample_limit = pending_expirable_keys.min(configured_limit);
+
+    ActiveExpireCyclePlan {
+        kind,
+        sample_limit,
+        start_db_index,
+        next_db_index,
+    }
+}
+
+/// Frozen comparator for the singleton-database active-expire planner benchmark.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+#[must_use]
+pub fn plan_active_expire_cycle_reference(
+    kind: ActiveExpireCycleKind,
+    pending_expirable_keys: usize,
+    current_db_index: usize,
+    db_count: usize,
+    budget: ActiveExpireCycleBudget,
+) -> ActiveExpireCyclePlan {
+    std::hint::black_box(0_u8);
     let normalized_db_count = db_count.max(1);
     let start_db_index = current_db_index % normalized_db_count;
     let next_db_index = (start_db_index + 1) % normalized_db_count;

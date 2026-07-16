@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[features]
+bench-reference = []
+
+[[bench]]
+name = "active_expire_single_db"
+harness = false
+required-features = ["bench-reference"]

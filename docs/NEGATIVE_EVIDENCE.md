@@ -18185,3 +18185,22 @@ absent key mix) + full suite **801 pass, 0 fail**. Isolated instructions:u A/B `
 (16-key TOUCH of present no-TTL keys): reference(2 probes) / candidate(1 probe) = **1.451x** fewer instructions
 (null 1.0000000, cv 0.3%) — this measures the FULL per-key loop, so 1.45x is the real end-to-end TOUCH win, not just
 the isolated probe. Rollback: restore the single unconditional `record_keyspace_lookup + get_mut` loop.
+
+### 2026-07-15 SHIPPED (`plan_active_expire_cycle` singleton-DB specialization — frankenredis-c8gtg)
+Negative-ledger-first pivot into the previously unmined `fr-eventloop` planner. The earlier `frankenredis-ohsk5`
+experiment tried to skip the whole no-TTL active-expire call and was correctly rejected at ~1.01x/noise; it did not
+measure the arithmetic inside the still-required plan. Every production `Runtime::run_active_expire_cycle` caller
+passes `db_count = 1`, but `plan_active_expire_cycle` still performed two variable-width modulo operations. The one
+lever returns `(start_db_index, next_db_index) = (0, 0)` when the normalized count is one; zero-count normalization
+and every multi-DB formula remain byte-for-byte equivalent.
+
+PROFILE-FIRST: before the lever, the exact unchanged `fr_eventloop::plan_active_expire_cycle` symbol had **12.65%
+self-time**, zero lost samples, on `vmi1264463` in release/no-LTO binary
+`ef0b0aab152f29391fc3f1e9a15ed030835ef76ae28d0ea2ecf5a01ec41fa3de`. FINAL same-binary profile retained non-zero
+self-time (candidate **11.54%**, frozen reference **14.14%**, zero lost samples), binary
+`c8e1aaf1e57731755728a3c3cf453dffa98636c3f4ce39569d84f4b28cdb4541`. The foreground, position-balanced
+`instructions:u` A/A+A/B used 9 rounds x 30M calls in that one binary/worker: candidate median **1,680,310,110** vs
+reference **1,905,309,660**, reference/candidate = **1.133903591x** (candidate **11.81% fewer instructions**); null
+median **1.000000009**, null p05/p95 **0.999999690/1.000000522**, null CV **0.000025%**, effect CV **0.000018%**.
+The pre-measurement correctness gate matched the complete plan for **504 cases** spanning Slow/Fast, pending limits,
+cursor boundaries, and `db_count` 0/1/2/3/16/257. Rollback: restore the two unconditional modulo expressions.
