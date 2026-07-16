@@ -843,3 +843,12 @@ harness = false
 [[bench]]
 name = "command_histogram_fastpath"
 harness = false
+
+# (BlackThrush) Measures the strcmp-chain tax the record_canonical_with_kind direct-field fast-path
+# imposes on commands NOT in the chain (expire/ttl/hget/… fall through all N comparisons before the
+# HashMap). Same non-fast-path command through the full chain vs straight to the HashMap
+# (bench_record_hashmap_only). Quantifies the optimal-chain-length ceiling: negative-evidence for
+# whether extending the chain (e.g. to the pop family) would net-regress fall-through commands.
+[[bench]]
+name = "command_histogram_chain_tax"
+harness = false

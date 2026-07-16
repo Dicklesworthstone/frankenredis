@@ -5296,6 +5296,19 @@ impl CommandHistogramTracker {
         latency_us: u64,
         kind: CommandRecordKind,
     ) {
+        // (BlackThrush) This direct-field chain is a linear scan of `if command == "…"` before the
+        // HashMap fallback. One might fear each added command taxes every fall-through command
+        // (expire/ttl/hget/del/… — many of them hot) with an extra comparison. It does NOT: the
+        // `command_histogram_chain_tax` bench measures the full 8-command chain vs going straight to
+        // the HashMap for a fall-through command at chain/direct = 0.96–1.01x (inside the null band)
+        // — the scan is effectively FREE (short-string length / first-byte mismatches predict
+        // perfectly, and are dwarfed by the foldhash probe that follows anyway). So the ceiling on
+        // adding fields is NOT a fall-through tax; it is per-command VALUE. The borrowed-fast-path
+        // commands here (get/set/lpush/rpush/sadd/hset/zadd/incr) are cheap enough that the record
+        // step is ~1% of the command (worth a direct field). The pop family (lpop/rpop/spop/zpopmin)
+        // and other GENERICALLY-dispatched commands see <1% — record is a tiny fraction of the full
+        // argv-parse + dispatch + reply-build — so a direct field for them is measurable-noise, not
+        // worth the line. Extend only for a command whose record is a real fraction of its hot path.
         if command == "get" {
             self.get
                 .get_or_insert_with(CommandHistogram::default)
