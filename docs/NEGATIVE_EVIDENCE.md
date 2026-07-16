@@ -4,6 +4,45 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — bulk-copy ordinary inline-command tokens; 34.128% fewer instructions (frankenredis-07f28)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance quick wins were
+already claimed, and the recent command, runtime, replication, store, and conformance veins were
+actively mined. `fr-server::split_inline_args` had no performance bead, ledger row, reservation, or
+perf-oriented history. The live Redis-compatible tokenizer appended every byte of every ordinary
+token individually even though unquoted inline commands are the common trigger for this helper.
+This is a cold inline-protocol result, not a normal RESP command-dispatch throughput claim.
+
+PROFILE-FIRST on the literal unchanged live helper, using eight representative quote-free inline
+commands (782 bytes total), release profile with LTO disabled: worker `vmi1152480`, binary sha256
+`55d907453e3ace75fe0f3020a01a5d4a25ee358ae216bbcef9a9a95b787bd9d0`, 1K samples, zero lost.
+The exact `fr_server::split_inline_args` helper had **45.96% self-time**, proving that the workload
+executed the proposed byte-at-a-time token-copy seam before the production edit.
+
+ONE LEVER: scan only the initial maximal ordinary run of each token and copy that slice once. If a
+quote begins, seed the existing argument buffer with the preceding run and continue through the
+unchanged double-quote, single-quote, escape, closing-quote, separator, NUL-termination, and error
+state machine. The frozen reference retains the literal pre-change byte-at-a-time loop.
+
+FOREGROUND SAME-BINARY A/A+A/B: both arms ran in one position-balanced measured routine on worker
+`vmi1153651`, binary sha256
+`fc33b2e0cee322309cbe6c0c76f52ece59b531532c77612853977d2fb448a1fd`. Nine instruction rounds
+measured candidate median **654,435,115** versus reference median **993,494,236**; the paired
+reference/candidate effect median was **1.518093977x**, equivalent to **34.128% fewer
+instructions** for the candidate. The A/A null median was **1.000000050**, p05..p95
+**[0.999998574, 1.000000625]**, null CV **0.000065%**, and effect CV **0.000068%**. Exact
+candidate/reference helper profiles were **36.63% / 49.64% self-time**, both with zero lost
+samples.
+
+The same-binary correctness gate matched exact candidate/reference `Result<Vec<Vec<u8>>, _>`
+values for **36** cases covering empty input, all four separators, short/long/many ordinary tokens,
+mid-token quotes, both quote modes, escapes, valid and invalid closures, NUL termination, and
+non-UTF-8 bytes. Focused inline unit tests passed 12/12; rustfmt and scoped Clippy with `-D
+warnings` passed. The workspace all-target check is independently blocked by the peer-owned
+`fr-store/benches/set_ex_rearm.rs` calling three absent `set_keep_ttl_*_owned_roundtrip_bench`
+helpers. Rollback: remove the initial ordinary-run scan and restore the frozen per-byte append
+loop; no caller, reply, or protocol state changed.
+
 ## 2026-07-16: SHIPPED — compare exact conformance frames without materialization; 69.537% fewer instructions (frankenredis-tafng)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible RESTORE performance beads

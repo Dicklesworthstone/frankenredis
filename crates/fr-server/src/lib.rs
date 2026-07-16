@@ -86,6 +86,7 @@ pub fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::Re
 
 /// Split inline command arguments, supporting quoted strings.
 /// Returns Err if quotes are unbalanced (matching Redis behavior).
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     // (frankenredis-5qqv1) Faithful port of sds.c::sdssplitargs: a token is
     // built char-by-char with double/single-quote state that can flip MID
@@ -126,7 +127,19 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
             break;
         }
 
-        let mut arg = Vec::new();
+        // Inline commands overwhelmingly consist of unquoted tokens. Copy the
+        // initial ordinary run in one pass, falling back to the exact quote and
+        // escape state machine only when a quote actually begins.
+        let plain_start = i;
+        while i < n && !is_sep(line[i]) && line[i] != b'"' && line[i] != b'\'' {
+            i += 1;
+        }
+        if i >= n || is_sep(line[i]) {
+            args.push(line[plain_start..i].to_vec());
+            continue;
+        }
+
+        let mut arg = line[plain_start..i].to_vec();
         let mut inq = false; // inside double quotes
         let mut insq = false; // inside single quotes
         let mut done = false;
@@ -159,6 +172,102 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
                     i += 1;
                 } else if line[i] == b'"' {
                     // Closing quote must be followed by whitespace or end.
+                    if i + 1 < n && !is_sep(line[i + 1]) {
+                        return Err(UNBALANCED);
+                    }
+                    i += 1;
+                    done = true;
+                } else {
+                    arg.push(line[i]);
+                    i += 1;
+                }
+            } else if insq {
+                if line[i] == b'\\' && i + 1 < n && line[i + 1] == b'\'' {
+                    arg.push(b'\'');
+                    i += 2;
+                } else if line[i] == b'\'' {
+                    if i + 1 < n && !is_sep(line[i + 1]) {
+                        return Err(UNBALANCED);
+                    }
+                    i += 1;
+                    done = true;
+                } else {
+                    arg.push(line[i]);
+                    i += 1;
+                }
+            } else {
+                match line[i] {
+                    b' ' | b'\t' | b'\r' | b'\n' => done = true,
+                    b'"' => {
+                        inq = true;
+                        i += 1;
+                    }
+                    b'\'' => {
+                        insq = true;
+                        i += 1;
+                    }
+                    c => {
+                        arg.push(c);
+                        i += 1;
+                    }
+                }
+            }
+        }
+        args.push(arg);
+    }
+    Ok(args)
+}
+
+/// Frozen byte-at-a-time inline tokenizer for same-binary benchmarks.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_split_inline_args_reference(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    const UNBALANCED: &str = "ERR Protocol error: unbalanced quotes in request";
+    let n = line.iter().position(|&b| b == b'\0').unwrap_or(line.len());
+    let is_sep = |b: u8| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
+
+    let mut args = Vec::new();
+    let mut i = 0;
+    loop {
+        while i < n && is_sep(line[i]) {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+
+        let mut arg = Vec::new();
+        let mut inq = false;
+        let mut insq = false;
+        let mut done = false;
+        while !done {
+            if i >= n {
+                if inq || insq {
+                    return Err(UNBALANCED);
+                }
+                break;
+            }
+            if inq {
+                if line[i] == b'\\'
+                    && i + 3 < n
+                    && line[i + 1] == b'x'
+                    && let Some(byte) = parse_hex_escape(line[i + 2], line[i + 3])
+                {
+                    arg.push(byte);
+                    i += 4;
+                } else if line[i] == b'\\' && i + 1 < n {
+                    i += 1;
+                    arg.push(match line[i] {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'b' => b'\x08',
+                        b'a' => b'\x07',
+                        other => other,
+                    });
+                    i += 1;
+                } else if line[i] == b'"' {
                     if i + 1 < n && !is_sep(line[i + 1]) {
                         return Err(UNBALANCED);
                     }

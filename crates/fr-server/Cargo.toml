@@ -42,3 +42,8 @@ bench-reference = []
 name = "replication_prefix_take"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "inline_args"
+harness = false
+required-features = ["bench-reference"]
