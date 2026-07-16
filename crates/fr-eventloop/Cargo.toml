@@ -7,8 +7,14 @@ edition = "2024"
 
 [features]
 bench-reference = []
+bench-live-profile = []
 
 [[bench]]
 name = "active_expire_single_db"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "read_path_inline"
+harness = false
+required-features = ["bench-live-profile"]

@@ -384,7 +384,36 @@ impl ReadPathError {
     }
 }
 
+#[inline]
 pub fn validate_read_path(
+    current_query_buffer_len: usize,
+    newly_read_bytes: usize,
+    query_buffer_limit: usize,
+    fatal_read_error: bool,
+) -> Result<usize, ReadPathError> {
+    if fatal_read_error {
+        return Err(ReadPathError::FatalErrorDisconnect);
+    }
+    let Some(next_query_buffer_len) = current_query_buffer_len.checked_add(newly_read_bytes) else {
+        return Err(ReadPathError::QueryBufferLimitExceeded {
+            observed: usize::MAX,
+            limit: query_buffer_limit,
+        });
+    };
+    if next_query_buffer_len > query_buffer_limit {
+        return Err(ReadPathError::QueryBufferLimitExceeded {
+            observed: next_query_buffer_len,
+            limit: query_buffer_limit,
+        });
+    }
+    Ok(next_query_buffer_len)
+}
+
+/// Frozen pre-inline read-path validator for same-binary performance proof.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_validate_read_path_reference(
     current_query_buffer_len: usize,
     newly_read_bytes: usize,
     query_buffer_limit: usize,

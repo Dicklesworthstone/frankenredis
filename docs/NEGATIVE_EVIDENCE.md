@@ -4,6 +4,52 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-16: SHIPPED — inline successful socket-read validation; 24.993% fewer instructions (frankenredis-uoib0)
+
+NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance work was already
+claimed, while the recent store, command, runtime, replication, persistence, and sentinel veins
+were actively mined. `fr-eventloop::validate_read_path` had no performance bead, ledger row,
+reservation, or optimization history. `fr-server` calls it after every successful normal, direct
+large-value, and replication socket read with the fatal-error argument fixed to `false`; fatal read
+errors use the same helper with `true` only on the cold disconnect path.
+
+PROFILE-FIRST on the literal unchanged live helper, successful 64-KiB-buffer plus 8-KiB-read
+trigger, release profile with LTO disabled: worker `vmi1264463`, binary sha256
+`c438454d63447291e9213fd60af5d247d6efe22f5a16f474b5b0dc185bd927a5`, approximately 1K
+samples, zero lost. The exact `fr_eventloop::validate_read_path` frame had **3.32% self-time**,
+proving that the workload reached the proposed cross-crate call boundary before the production
+edit.
+
+ONE LEVER: add `#[inline]` to `validate_read_path`; its body and every caller are unchanged. With
+release LTO disabled, this exposes the successful read sites' literal `fatal_read_error = false`
+and removes the helper call/`Result` handoff while leaving checked length addition, exact-limit
+acceptance, over-limit rejection, overflow saturation, fatal precedence, and reason codes intact.
+The feature-gated frozen reference retains the literal pre-inline body.
+
+SUBSTRATE AUDIT: an initial probe was discarded before ledgering because the candidate wrapper
+black-boxed its three inputs twice while the reference arm did so once; its 90,000,033-instruction
+gap was exactly the resulting three extra instructions across 30,000,000 iterations. The corrected
+definitive harness black-boxes each input and result once per arm, keeps one call boundary in each
+arm, and runs both arms in one binary and one measured invocation.
+
+FOREGROUND SAME-BINARY A/A+A/B: both arms ran on worker `vmi1264463`, binary sha256
+`7e38c0cc7b4f281a6d02d38c07024d16da7d1ea769c22ad58b9c545cc8c72ef5`. Nine
+position-balanced instruction rounds measured candidate median **810,309,430** versus reference
+median **1,080,309,975**; paired reference/candidate effect median **1.333206779x**, equivalent to
+**24.993% fewer instructions** by the arm medians. The A/A null median was **0.999999957**,
+p05..p95 **[0.999999380, 1.000000469]**, null CV **0.000042%**, and effect CV **0.000038%**.
+Exact candidate-wrapper/reference-helper profiles were **11.39% / 11.75% self-time**, 351/470
+samples, both with zero lost.
+
+The same-binary correctness gate matched exact `Result<usize, ReadPathError>` values for **12**
+cases covering success, exact limit, over limit, checked-add overflow, `usize` boundaries, and
+fatal-error precedence. Focused read-path tests passed 3/3 and scoped release-profile Clippy with
+`-D warnings`, rustfmt, and diff checks passed. The workspace all-target check is independently
+blocked by peer-owned `fr-store/benches/set_ex_rearm.rs` calling three absent
+`set_keep_ttl_*_owned_roundtrip_bench` helpers. Rollback: remove only `#[inline]`; the frozen
+pre-inline helper remains in the benchmark and no observable reply, disconnect, or limit policy
+changed.
+
 ## 2026-07-16: SHIPPED — move legacy HASH_ZIPLIST fields instead of cloning; 43.660% fewer instructions (frankenredis-5gria)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage's visible performance quick wins were
