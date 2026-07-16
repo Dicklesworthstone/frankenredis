@@ -213,15 +213,39 @@ pub enum DiscoveryAction {
     None,
 }
 
+#[cfg_attr(feature = "bench-reference", inline(never))]
 pub fn process_hello_message(
     state: &SentinelState,
     hello: &HelloMessage,
-    _now: u64,
+    now: u64,
+) -> DiscoveryAction {
+    if hello.sentinel_runid.as_str() == String::from_utf8_lossy(&state.myid).as_ref() {
+        return DiscoveryAction::None;
+    }
+
+    process_hello_message_non_self(state, hello, now)
+}
+
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+pub fn bench_process_hello_owned_self_id_reference(
+    state: &SentinelState,
+    hello: &HelloMessage,
+    now: u64,
 ) -> DiscoveryAction {
     if hello.sentinel_runid == state.myid_hex() {
         return DiscoveryAction::None;
     }
 
+    process_hello_message_non_self(state, hello, now)
+}
+
+#[inline]
+fn process_hello_message_non_self(
+    state: &SentinelState,
+    hello: &HelloMessage,
+    _now: u64,
+) -> DiscoveryAction {
     let master = match state.get_master(&hello.master_name) {
         Some(m) => m,
         None => return DiscoveryAction::None,
@@ -624,6 +648,30 @@ mod tests {
 
         let action = process_hello_message(&state, &hello, 1000);
         assert_eq!(action, DiscoveryAction::None);
+    }
+
+    #[test]
+    fn process_hello_self_id_comparison_preserves_lossy_invalid_utf8() {
+        let mut state = SentinelState::new();
+        state.myid = [0xff; 40];
+        let hello = HelloMessage {
+            sentinel_ip: "127.0.0.1".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: String::from_utf8_lossy(&state.myid).into_owned(),
+            current_epoch: 1,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.1".to_string(),
+            master_port: 6379,
+            master_config_epoch: 0,
+        };
+
+        let action = process_hello_message(&state, &hello, 1000);
+        assert_eq!(action, DiscoveryAction::None);
+        #[cfg(feature = "bench-reference")]
+        assert_eq!(
+            action,
+            bench_process_hello_owned_self_id_reference(&state, &hello, 1000)
+        );
     }
 
     #[test]
