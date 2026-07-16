@@ -3891,11 +3891,22 @@ impl<'a> LuaState<'a> {
 
         // Coroutine table registration. Redis 7.2 keeps the Lua
         // coroutine library available inside the script sandbox.
+        // (BlackThrush) Static full names. The previous `format!("coroutine.{name}")` allocated a
+        // fresh String and ran the Display formatting machinery for all six CONSTANT names on EVERY
+        // eval (set_keys_argv runs once per EVAL). Byte-identical RustFunction dispatch names.
+        const COROUTINE_FNS: [(&str, &str); 6] = [
+            ("create", "coroutine.create"),
+            ("resume", "coroutine.resume"),
+            ("yield", "coroutine.yield"),
+            ("status", "coroutine.status"),
+            ("wrap", "coroutine.wrap"),
+            ("running", "coroutine.running"),
+        ];
         let coroutine_table = LuaTable::new();
-        for name in &["create", "resume", "yield", "status", "wrap", "running"] {
+        for (key, full) in COROUTINE_FNS {
             coroutine_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(std::rc::Rc::from(format!("coroutine.{name}"))),
+                LuaValue::Str(key.as_bytes().to_vec()),
+                LuaValue::RustFunction(std::rc::Rc::from(full)),
             );
         }
         self.globals

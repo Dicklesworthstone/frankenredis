@@ -70,6 +70,13 @@ harness = false
 name = "geo_center_cos_hoist"
 harness = false
 
+# (BlackThrush) perf-stat instructions:u bench for the per-EVAL coroutine-table format! elimination
+# in LuaState::set_keys_argv (6 String allocs/eval -> static literals). Evals `return 1` in a loop
+# with a reused store; compare instruction count before/after the fix.
+[[bench]]
+name = "lua_setkeysargv_coroutine"
+harness = false
+
 # A/B for the 5-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
 [[bench]]
 name = "classify5_dispatch"

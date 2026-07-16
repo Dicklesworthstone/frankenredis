@@ -35,8 +35,11 @@ fn bench_lua_eval(c: &mut Criterion) {
         })
     });
     group.bench_function("numeric_for_sum_1000", |b| {
+        // Store is created ONCE (matching the return_one benches above); the prior code did
+        // `Store::new()` per iteration, so this benchmark measured Store::default's two
+        // generate_run_id() calls (getpid + SystemTime + hex format!) instead of the interpreter.
+        let mut store = Store::new();
         b.iter(|| {
-            let mut store = Store::new();
             std::hint::black_box(eval_script(
                 std::hint::black_box(NUMERIC_FOR_SUM),
                 &[],
@@ -48,8 +51,8 @@ fn bench_lua_eval(c: &mut Criterion) {
         })
     });
     group.bench_function("numeric_for_sum_squares_1000", |b| {
+        let mut store = Store::new();
         b.iter(|| {
-            let mut store = Store::new();
             std::hint::black_box(eval_script(
                 std::hint::black_box(NUMERIC_FOR_SUM_SQUARES),
                 &[],
