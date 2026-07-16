@@ -66,3 +66,8 @@ required-features = ["bench-reference"]
 name = "set_absexpire_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+[[bench]]
+name = "mset_ok_reply_alloc"
+harness = false
+required-features = ["bench-reference"]

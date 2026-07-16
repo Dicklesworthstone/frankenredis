@@ -8965,6 +8965,21 @@ impl Runtime {
         pairs: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_mset_borrowed_ok(pairs, now_ms)
+            .map(|()| RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (BlackThrush) Non-allocating twin of [`Self::execute_plain_mset_borrowed`]: runs the
+    /// identical borrowed multi-key MSET write but reports success as `Some(())` so the dispatcher
+    /// can emit the constant `+OK\r\n` straight into the connection buffer (via
+    /// `BorrowedMultibulkAction::FastOkReply`) instead of heap-allocating a `SimpleString("OK")`
+    /// reply frame per MSET. `None` means the borrowed fast path declined and the caller must fall
+    /// back to the generic argv path.
+    pub fn execute_plain_mset_borrowed_ok(
+        &mut self,
+        pairs: &[(&[u8], &[u8])],
+        now_ms: u64,
+    ) -> Option<()> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
         self.execute_plain_mset_borrowed_with_default_write_gate(
             pairs,
@@ -8978,7 +8993,7 @@ impl Runtime {
         pairs: &[(&[u8], &[u8])],
         now_ms: u64,
         default_write_allowed: bool,
-    ) -> Option<RespFrame> {
+    ) -> Option<()> {
         if !self
             .can_execute_plain_mset_borrowed_with_default_write_gate(pairs, default_write_allowed)
         {
@@ -9011,7 +9026,7 @@ impl Runtime {
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(RespFrame::SimpleString("OK".to_string()))
+        Some(())
     }
 
     fn can_execute_plain_mset_borrowed_with_default_write_gate(

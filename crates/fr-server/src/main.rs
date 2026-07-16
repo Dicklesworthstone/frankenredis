@@ -3185,14 +3185,17 @@ fn process_buffered_frames(
                     let consumed = packet.consumed();
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
+                    // MSET unconditionally replies +OK; route the non-allocating `_ok` twin to
+                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per MSET.
+                    if runtime
                         .execute_plain_mset_borrowed_with_default_write_gate(
                             packet.pairs(),
                             ts,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                        Ok(BorrowedMultibulkAction::FastOkReply { consumed })
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
@@ -11731,11 +11734,11 @@ fn parse_borrowed_multibulk_action(
                     }
                     b'M' => {
                         if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_mset_borrowed(&pairs, ts)
+                            && runtime.execute_plain_mset_borrowed_ok(&pairs, ts).is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            // MSET unconditionally replies +OK → FastOkReply (no reply-frame alloc).
+                            return Ok(BorrowedMultibulkAction::FastOkReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some(keys) = borrowed_plain_mget_args(&borrowed_args) {
