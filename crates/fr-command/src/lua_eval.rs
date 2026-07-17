@@ -3935,11 +3935,24 @@ impl<'a> LuaState<'a> {
         // math/string/table/struct/bit/cjson/cmsgpack/redis tables are read-only
         // for the duration of the script. KEYS/ARGV stay mutable (redis leaves
         // them writable), so they are deliberately excluded.
-        for name in [
-            "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
-        ] {
-            if let Some(LuaValue::Table(t)) = self.globals.get(name) {
-                t.mark_readonly_recursive();
+        //
+        // (BlackThrush) The shared base globals template already marks these read-only ONCE at build
+        // time (build_lua_base_globals_template) and is reused across evals, so on the normal
+        // shared-base path this loop just re-walks already-immutable tables (8 gets + 8 no-op mark
+        // calls per eval). Skip it when they are verified read-only; only the bench cloned-globals
+        // path produces a fresh mutable copy that still needs marking. Provably byte-identical — the
+        // loop is skipped SOLELY when the tables are already protected.
+        let already_protected = matches!(
+            self.globals.get("math"),
+            Some(LuaValue::Table(t)) if t.is_readonly()
+        );
+        if !already_protected {
+            for name in [
+                "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
+            ] {
+                if let Some(LuaValue::Table(t)) = self.globals.get(name) {
+                    t.mark_readonly_recursive();
+                }
             }
         }
         // (frankenredis-vr8rg) Every script starts in RESP2 for redis.call,
