@@ -83,6 +83,12 @@ harness = false
 name = "lua_rediscall_loop"
 harness = false
 
+# (BlackThrush) perf-stat bench for cjson.encode: encodes a ~46-entry mixed table 200x/eval. Compare
+# instruction count before/after buffer-refactoring lua_value_to_json (concat-Strings -> one &mut String).
+[[bench]]
+name = "cjson_encode"
+harness = false
+
 # A/B for the 5-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
 [[bench]]
 name = "classify5_dispatch"

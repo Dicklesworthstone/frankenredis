@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::rc::{Rc, Weak};
 
 /// (CrimsonHawk) Fast, DoS-resistant hasher for the Lua interpreter's HOT maps —
@@ -13196,14 +13197,20 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                         by_idx.insert(*n as i64, v.clone());
                     }
                 }
-                let mut items = Vec::with_capacity(max_int_key as usize);
+                // (BlackThrush) Render straight into one buffer instead of a Vec<String> + join +
+                // format!("[{}]", …). Byte-identical: `[v1,v2,…]`.
+                let mut out = String::from('[');
                 for i in 1..=max_int_key {
+                    if i > 1 {
+                        out.push(',');
+                    }
                     match by_idx.get(&i) {
-                        Some(v) => items.push(lua_value_to_json(v)?),
-                        None => items.push("null".to_string()),
+                        Some(v) => out.push_str(&lua_value_to_json(v)?),
+                        None => out.push_str("null"),
                     }
                 }
-                return Ok(format!("[{}]", items.join(",")));
+                out.push(']');
+                return Ok(out);
             }
 
             // Object form: every key (array indices + hash) becomes a
@@ -13211,17 +13218,32 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
             if array_len == 0 && hash_pairs.is_empty() {
                 return Ok("{}".to_string());
             }
-            let mut pairs: Vec<String> = Vec::new();
+            // (BlackThrush) Render straight into one buffer instead of a Vec<String> with a
+            // format!() per pair + join. Byte-identical: `{"1":v,…,"key":v}` (array-index keys first,
+            // then hash keys, comma-separated — the same order the join produced).
+            let mut out = String::from('{');
+            let mut first = true;
             let inner = t.inner.borrow();
             for (i, v) in inner.array.iter().enumerate() {
-                pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)?));
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                let _ = write!(out, "\"{}\":", i + 1);
+                out.push_str(&lua_value_to_json(v)?);
             }
             drop(inner);
             for (k, v) in &hash_pairs {
-                let key_json = json_escape_bytes(&k.to_display_string());
-                pairs.push(format!("{key_json}:{}", lua_value_to_json(v)?));
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&json_escape_bytes(&k.to_display_string()));
+                out.push(':');
+                out.push_str(&lua_value_to_json(v)?);
             }
-            Ok(format!("{{{}}}", pairs.join(",")))
+            out.push('}');
+            Ok(out)
         }
         LuaValue::Function(_) | LuaValue::RustFunction(_) => {
             Err("Cannot serialise function: type not supported".to_string())
