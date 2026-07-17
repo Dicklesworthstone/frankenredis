@@ -10977,8 +10977,15 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Option<LuaPatMatch> {
         return None;
     }
 
+    // (BlackThrush) Reuse ONE captures buffer across start positions instead of allocating a fresh
+    // Vec per position. For a pattern that opens a capture immediately (e.g. `(%w+)...`), every start
+    // position pushed into — and so allocated — a new Vec; clearing keeps the capacity and reuses the
+    // buffer (finish_grow/malloc churn was ~12% of the pattern-matcher self-time). Byte-identical:
+    // the match logic always sees an empty captures Vec at each start, and on a hit the buffer is
+    // moved out into the LuaPatMatch (the loop returns, so it is never cleared after the move).
+    let mut captures = Vec::new();
     for start in init..=s.len() {
-        let mut captures = Vec::new();
+        captures.clear();
         if let Some(end) = lua_pat_match(s, start, pat, pat_start, &mut captures, 0) {
             return Some(LuaPatMatch {
                 start,

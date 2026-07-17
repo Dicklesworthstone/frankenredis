@@ -94,6 +94,12 @@ harness = false
 name = "cjson_decode"
 harness = false
 
+# (BlackThrush) perf-stat bench for the Lua string pattern matcher: gsub/match/find 100x/eval over a
+# moderate string with a non-anchored capturing pattern (exercises the start-position search loop).
+[[bench]]
+name = "lua_string_pattern"
+harness = false
+
 # A/B for the 5-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
 [[bench]]
 name = "classify5_dispatch"
