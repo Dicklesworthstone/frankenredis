@@ -13550,84 +13550,19 @@ impl<'a> JsonParser<'a> {
     }
 }
 
-impl Drop for LuaState<'_> {
-    fn drop(&mut self) {
-        // Break Rc<RefCell<LuaTableInner>> cycles to prevent memory leaks.
-        // User scripts can create cyclic tables (e.g., `t.self = t`) which
-        // form Rc cycles that won't be reclaimed without manual clearing.
-        // We recursively clear all tables reachable from globals to break
-        // these cycles on LuaState destruction.
-        fn clear_table_recursive(
-            table: &LuaTable,
-            visited: &mut HashSet<usize, foldhash::quality::RandomState>,
-        ) {
-            // `try_borrow` fails ONLY when this exact table is already `borrow_mut`'d higher in our
-            // own recursion — a self-reference (`t.self = t`, or `_G._G = _G`) reached mid-clear.
-            // That table is already being cleared, so stop. (This is why the borrow cannot precede
-            // the cycle guard: a plain `borrow()` here panics on such self-refs — it did, on the
-            // _G / getfenv tests.) For every OTHER table the borrow succeeds, INCLUDING all shared
-            // templates, which are never `borrow_mut`'d.
-            let Ok(borrowed) = table.inner.try_borrow() else {
-                return;
-            };
-            // Shared-template tables (redis/string/table/math/cjson/cmsgpack/struct/bit — see
-            // new_shared_template) are never cleared or recursed, so they can never be a cycle node.
-            // Skip them WITHOUT a visited insert: the sandbox globals are dominated by these ~8
-            // templates, and the prior code inserted each one's pointer only to early-return, which
-            // was the bulk of the visited-set inserts + rehashes. Byte-identical set of cleared
-            // tables (a template is never drained either way). (BlackThrush)
-            if borrowed.shared_template {
-                return;
-            }
-            drop(borrowed);
-            let ptr = Rc::as_ptr(&table.inner) as usize;
-            if !visited.insert(ptr) {
-                return;
-            }
-            let inner = &mut *table.inner.borrow_mut();
-            for value in inner.array.drain(..) {
-                if let LuaValue::Table(t) = value {
-                    clear_table_recursive(&t, visited);
-                }
-            }
-            for (_, value) in inner.string_hash.drain() {
-                if let LuaValue::Table(t) = value {
-                    clear_table_recursive(&t, visited);
-                }
-            }
-            for (k, v) in inner.other_hash.drain(..) {
-                if let LuaValue::Table(t) = k {
-                    clear_table_recursive(&t, visited);
-                }
-                if let LuaValue::Table(t) = v {
-                    clear_table_recursive(&t, visited);
-                }
-            }
-            inner.other_keys.clear();
-            if let Some(mt) = inner.metatable.take() {
-                clear_table_recursive(&mt, visited);
-            }
-        }
-
-        // (BlackThrush) The visited set holds Rc pointers (usize) purely for cycle detection on
-        // LuaState teardown, which runs on EVERY EVAL and walks the per-eval table tree. std's
-        // default HashSet hasher is SipHash — a live perf-record put ~20% of the return-1 eval
-        // self-time in `hash_one::<&usize>` + `sip::Hasher::write` for these pointer inserts. The
-        // keys are internal pointers (never attacker-controlled), so foldhash is safe and much
-        // cheaper. Byte-identical cycle detection.
-        // Pre-size so the walk does not grow+rehash the set from capacity 0. With the
-        // template-skip above, only the handful of per-eval non-template tables (KEYS/ARGV/
-        // coroutine + any user tables) enter the set, so a small fixed hint covers the common case.
-        // A hint only — over/under-sizing stays byte-identical. (BlackThrush)
-        let mut visited: HashSet<usize, foldhash::quality::RandomState> =
-            HashSet::with_capacity_and_hasher(16, foldhash::quality::RandomState::default());
-        for value in self.globals.values() {
-            if let LuaValue::Table(t) = value {
-                clear_table_recursive(t, &mut visited);
-            }
-        }
-    }
-}
+// (BlackThrush) LuaState deliberately has NO `Drop` impl. Cycle-breaking is handled entirely by the
+// `LuaGcScope` registry sweep (see the module-level comment and `impl Drop for LuaGcScope`): every
+// non-template table/cell registers a `Weak` on creation, and the scope — declared BEFORE the
+// LuaState in `eval_compiled_script_inner`, so it drops AFTER — sweeps `[mark..]` and clears every
+// still-live registered object, breaking ALL cycles (local, upvalue, AND global-reachable). That is
+// a strict superset of the old per-eval `clear_table_recursive` walk of `self.globals`, which only
+// reached globals and skipped the shared templates: the ONLY two table constructors are
+// `LuaTable::new` (registers) and `new_shared_template` (never cleared by either mechanism), so the
+// sweep covers everything that walk did. The walk was therefore redundant work on every eval
+// (measured ~14% of the return-1 eval self-time in a live perf-record); non-cyclic tables are now
+// freed by the normal LuaState field drop, cyclic ones by the sweep. Guarded by
+// `lua_cyclic_scripts_do_not_leak_qqq17` (local cycles) and
+// `lua_global_reachable_cycle_reclaimed_by_sweep_bt` (a global-reachable cycle stored in KEYS).
 
 // ── Compiled chunk cache ────────────────────────────────────────────────
 
@@ -13937,6 +13872,34 @@ mod tests {
         assert_eq!(
             after, baseline,
             "Lua table inners leaked: {after} live vs baseline {baseline} (qqq17 cycle sweep regressed)"
+        );
+    }
+
+    #[test]
+    fn lua_global_reachable_cycle_reclaimed_by_sweep_bt() {
+        // Complements qqq17 (which exercises LOCAL cycles): a GLOBAL-reachable cycle — a
+        // self-referential table stored in KEYS, still referenced from LuaState.globals at teardown
+        // — must also be fully reclaimed. LuaState::Drop's `clear_table_recursive` walked globals
+        // precisely for this case; this test guards that the `LuaGcScope` registry sweep (which
+        // clears EVERY registered table, reachable or not, after the LuaState drops) keeps it
+        // reclaimed, so removing that redundant per-eval walk cannot leak.
+        let mut store = Store::new();
+        let baseline = lua_test_live_tables();
+        for _ in 0..200 {
+            let r = eval_script(
+                b"KEYS[1] = {}; KEYS[1].self = KEYS[1]; return type(KEYS[1].self)",
+                &[b"seed".to_vec()],
+                &[],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(r, RespFrame::BulkString(Some(b"table".to_vec())));
+        }
+        let after = lua_test_live_tables();
+        assert_eq!(
+            after, baseline,
+            "global-reachable cyclic table in KEYS leaked: {after} live vs baseline {baseline}"
         );
     }
 
