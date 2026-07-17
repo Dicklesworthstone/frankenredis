@@ -3075,7 +3075,12 @@ pub struct LuaState<'a> {
     /// We mirror that algorithm exactly so seeded math.random sequences
     /// match vendored output byte-for-byte.
     lua_random: RedisLrand48,
-    script_started_at: Instant,
+    // (BlackThrush) Lazy: only os.clock reads this, and the `os` table is NOT bound in the sandbox
+    // (see set_keys_argv), so os.clock is unreachable from real scripts. Reading the monotonic clock
+    // (Instant::now) eagerly in `new` cost a ~3.6% per-eval clock syscall for nothing; defer it to
+    // the first os.clock call. os.clock semantics are elapsed-since-first-observation either way
+    // (the handler only ever reports a monotonic delta), and the os_clock test only asserts that.
+    script_started_at: Option<Instant>,
     current_coroutine: Option<LuaCoroutine>,
     pending_yield: Option<Vec<LuaValue>>,
     /// Original LuaValue passed to `error()` when its type is not
@@ -3851,7 +3856,7 @@ impl<'a> LuaState<'a> {
             current_line: 1,
             rng_seed,
             lua_random,
-            script_started_at: Instant::now(),
+            script_started_at: None,
             current_coroutine: None,
             pending_yield: None,
             pending_error_value: None,
@@ -8569,9 +8574,14 @@ impl<'a> LuaState<'a> {
             // ── OS library ───────────────────────────────────────────────
             "os.clock" => {
                 // Redis exposes Lua's os.clock. Approximate CPU time with
-                // monotonic elapsed wall time for this script invocation.
+                // monotonic elapsed wall time for this script invocation. The start instant is
+                // captured lazily on first use (os is unbound, so this is rarely — if ever —
+                // reached), avoiding a clock read on every eval that never calls os.clock.
                 Ok(vec![LuaValue::Number(
-                    self.script_started_at.elapsed().as_secs_f64(),
+                    self.script_started_at
+                        .get_or_insert_with(Instant::now)
+                        .elapsed()
+                        .as_secs_f64(),
                 )])
             }
             // ── Coroutine library ──────────────────────────────────────
