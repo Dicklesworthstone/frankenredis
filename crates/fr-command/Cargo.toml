@@ -77,6 +77,12 @@ harness = false
 name = "lua_setkeysargv_coroutine"
 harness = false
 
+# (BlackThrush) profile/perf-stat bench for the redis.call in-loop marshalling path (50 GETs/eval):
+# Lua arg eval -> argv Vec build -> dispatch_argv -> resp_to_lua reply conversion.
+[[bench]]
+name = "lua_rediscall_loop"
+harness = false
+
 # A/B for the 5-byte command bucket: compute-packed-once + match vs the linear eq_ascii_command chain.
 [[bench]]
 name = "classify5_dispatch"
