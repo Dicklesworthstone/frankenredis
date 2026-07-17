@@ -12552,6 +12552,16 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
         };
     }
     const PRECISION: i32 = 14;
+    // (BlackThrush) Fast path for integer-valued numbers that %.14g renders as a plain decimal:
+    // |n| < 1e14 means ≤14 significant digits, so %g stays in fixed notation and the result is
+    // exactly the integer's decimal form. Formatting the i64 directly skips Rust's EXACT float
+    // formatter (the Dragon `format_exact` algorithm), which a live perf-record put at ~47% of
+    // cjson.encode of an integer table. Byte-identical to the fixed-notation + strip_trailing_zeros
+    // path below for this range (all integers < 1e14 are exactly representable — 1e14 < 2^53 — so
+    // `fract() == 0.0` is exact). Verified by lua_number_to_string_integer_fast_path_matches_slow.
+    if n.fract() == 0.0 && n.abs() < 1e14 {
+        return (n as i64).to_string();
+    }
     let abs = n.abs();
     let exponent = abs.log10().floor() as i32;
     // C's %g uses scientific when X < -4 or X >= precision, where
@@ -17615,6 +17625,61 @@ end
             lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())).expect("encode"),
             "\"\\b\\f\\u0001\""
         );
+    }
+
+    #[test]
+    fn lua_number_to_string_integer_fast_path_matches_slow() {
+        use super::{lua_number_to_string, strip_trailing_zeros};
+        // The integer fast path (fract()==0 && |n| < 1e14) must be byte-identical to the
+        // fixed-notation %.14g path it replaces. Reference = that path computed the old way.
+        fn slow_fixed(n: f64) -> String {
+            let exponent = n.abs().log10().floor() as i32;
+            let frac_digits = (14 - 1 - exponent).max(0) as usize;
+            strip_trailing_zeros(&format!("{:.*}", frac_digits, n))
+        }
+        let mut cases: Vec<i64> = vec![
+            1,
+            -1,
+            5,
+            -5,
+            9,
+            10,
+            99,
+            100,
+            120,
+            999,
+            1000,
+            12345,
+            -12345,
+            99_999_999_999_999, // 14 nines — largest integer < 1e14
+            10_000_000_000_000, // 1e13
+            99_999_999_999_998,
+            -99_999_999_999_999,
+        ];
+        for k in 0..14 {
+            cases.push(10i64.pow(k));
+            cases.push(-(10i64.pow(k)));
+        }
+        for i in -3000..3000 {
+            cases.push(i);
+        }
+        for &c in &cases {
+            if c == 0 {
+                continue; // 0/-0 handled before the fast path; slow_fixed's log10(0) is undefined
+            }
+            let n = c as f64;
+            assert!(n.abs() < 1e14, "case {c} must be in fast-path range");
+            assert_eq!(
+                lua_number_to_string(n),
+                slow_fixed(n),
+                "integer {c}: fast path must equal the fixed-notation %.14g path"
+            );
+        }
+        // Non-fast-path values must still behave (untouched slow path).
+        assert_eq!(lua_number_to_string(1.5), "1.5");
+        assert_eq!(lua_number_to_string(0.0), "0");
+        assert_eq!(lua_number_to_string(-0.0), "-0");
+        assert_eq!(lua_number_to_string(0.25), "0.25");
     }
 
     #[test]
