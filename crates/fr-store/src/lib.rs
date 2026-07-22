@@ -5587,7 +5587,7 @@ impl ValueType {
 /// Default number of databases (matches Redis default).
 pub const DEFAULT_NUM_DATABASES: usize = 16;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClientTrackingState {
     pub enabled: bool,
     pub redirect: Option<u64>,
@@ -5597,6 +5597,38 @@ pub struct ClientTrackingState {
     pub caching: Option<bool>,
     pub noloop: bool,
     pub prefixes: BTreeSet<Vec<u8>>,
+}
+
+impl Clone for ClientTrackingState {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            redirect: self.redirect,
+            bcast: self.bcast,
+            optin: self.optin,
+            optout: self.optout,
+            caching: self.caching,
+            noloop: self.noloop,
+            prefixes: self.prefixes.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.enabled = source.enabled;
+        self.redirect = source.redirect;
+        self.bcast = source.bcast;
+        self.optin = source.optin;
+        self.optout = source.optout;
+        self.caching = source.caching;
+        self.noloop = source.noloop;
+        if source.prefixes.is_empty() {
+            if !self.prefixes.is_empty() {
+                self.prefixes.clear();
+            }
+        } else {
+            self.prefixes.clone_from(&source.prefixes);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

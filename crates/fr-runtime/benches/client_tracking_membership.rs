@@ -26,6 +26,7 @@ enum Lever {
     Membership,
     SnapshotReuse,
     TransactionReuse,
+    TrackingReuse,
 }
 
 impl Lever {
@@ -34,6 +35,7 @@ impl Lever {
             Self::Membership => "membership",
             Self::SnapshotReuse => "snapshot-reuse",
             Self::TransactionReuse => "transaction-reuse",
+            Self::TrackingReuse => "tracking-reuse",
         }
     }
 
@@ -41,6 +43,7 @@ impl Lever {
         match env::var("FR_BENCH_LEVER").as_deref() {
             Ok("snapshot-reuse") => Ok(Self::SnapshotReuse),
             Ok("transaction-reuse") => Ok(Self::TransactionReuse),
+            Ok("tracking-reuse") => Ok(Self::TrackingReuse),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -52,6 +55,7 @@ impl Lever {
             "membership" => Ok(Self::Membership),
             "snapshot-reuse" => Ok(Self::SnapshotReuse),
             "transaction-reuse" => Ok(Self::TransactionReuse),
+            "tracking-reuse" => Ok(Self::TrackingReuse),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -93,6 +97,12 @@ impl Arm {
             (Lever::TransactionReuse, Self::Reference) => {
                 "<fr_runtime::TransactionState>::replace_from_clone_reference"
             }
+            (Lever::TrackingReuse, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::TrackingReuse, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_tracking_replace_reference"
+            }
         }
     }
 
@@ -107,6 +117,12 @@ impl Arm {
             (Lever::TransactionReuse, Self::Candidate) => "replace_from_clone_reference",
             (Lever::TransactionReuse, Self::Reference) => {
                 "<fr_runtime::TransactionState as core::clone::Clone>::clone_from"
+            }
+            (Lever::TrackingReuse, Self::Candidate) => {
+                "record_client_session_tracking_replace_reference"
+            }
+            (Lever::TrackingReuse, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
             }
         }
     }
@@ -124,6 +140,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::TransactionReuse, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::TransactionReuse, Arm::Reference) => {
             runtime.record_client_session_transaction_replace_reference(session);
+        }
+        (Lever::TrackingReuse, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::TrackingReuse, Arm::Reference) => {
+            runtime.record_client_session_tracking_replace_reference(session);
         }
     }
 }
@@ -212,6 +232,25 @@ fn transaction_snapshot(lever: Lever, arm: Arm) -> String {
         .expect("recorded transaction snapshot")
 }
 
+fn tracking_snapshot(lever: Lever, arm: Arm) -> String {
+    let mut runtime = Runtime::default_strict();
+    let session = runtime.new_session();
+    record(&mut runtime, &session, lever, arm);
+    let previous = runtime.swap_session(session);
+    assert_eq!(
+        runtime.execute_frame(
+            command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"hot:"]),
+            1,
+        ),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    let updated = runtime.swap_session(previous);
+    record(&mut runtime, &updated, lever, arm);
+    runtime
+        .recorded_tracking_state_debug(updated.client_id)
+        .expect("recorded tracking snapshot")
+}
+
 fn correctness_gate(lever: Lever) {
     let candidate = bcast_sequence(lever, Arm::Candidate);
     let reference = bcast_sequence(lever, Arm::Reference);
@@ -228,6 +267,12 @@ fn correctness_gate(lever: Lever) {
         assert_eq!(
             transaction_snapshot(lever, Arm::Candidate),
             transaction_snapshot(lever, Arm::Reference)
+        );
+    }
+    if matches!(lever, Lever::TrackingReuse) {
+        assert_eq!(
+            tracking_snapshot(lever, Arm::Candidate),
+            tracking_snapshot(lever, Arm::Reference)
         );
     }
     println!(

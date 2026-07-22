@@ -4,6 +4,51 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — skip empty CLIENT TRACKING prefix-set replacement; 11.512337% fewer instructions (frankenredis-cyrt3)
+
+NEGATIVE-LEDGER-FIRST + DISTINCT RESIDUAL: neither ledger contained a `ClientTrackingState`,
+tracking-prefix, or tracking-state `clone_from` attempt. The only related recent history was the
+older BCAST-client index (`74e15f010`), which changes lookup structure rather than snapshot
+cloning. The literal-current transaction-reuse profile on worker `vmi1227854`, binary sha256
+`01a1ba67a756b1adbd30281a18dbe9758a20be4cd6f3adfe0626269ae788ddea`, attributed
+**9.91% self-time** to destroying the empty BTree prefix set during the common tracking-disabled
+snapshot.
+
+ALIEN PRIMITIVE + ONE LEVER: section 6.1's incremental/no-op update applies again: manual
+`ClientTrackingState::clone_from` copies scalar flags, leaves an already-empty destination prefix
+set untouched when the source is empty, clears a nonempty destination when needed, and retains
+ordinary BTreeSet `clone_from` for nonempty sources. A bench-only runtime reference freezes full
+`source.client_tracking.clone()` replacement; all transaction and other session fields share one
+implementation.
+
+FOREGROUND SAME-BINARY A/A+A/B: one fail-closed RCH invocation on worker `vmi1227854`, executable
+sha256 `68ce1bf06b260af6a17bb15eea8f67b7ea60cc5e722178d04058f4a0481e64a5`. Exact
+candidate/reference runtime wrappers carried **9.43% / 35.79% self-time**, and the candidate's
+exact `ClientTrackingState::clone_from` carried **12.49%** (142/171 samples, zero lost). Nine
+position-balanced rounds measured candidate median **722,515,847** versus reference median
+**816,515,822** instructions, paired reference/candidate **1.130101038x**, or **11.512337% fewer
+instructions**. The A/A null median was `1.000000378`, p05..p95
+`[0.999998368, 1.000001019]`, null CV **0.000092%**, and effect CV **0.000079%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable proved a populated `CLIENT TRACKING ON
+BCAST PREFIX hot:` state identical between candidate and frozen reference, plus identical BCAST
+invalidation behavior and tracking-OFF silence. The rich-session unit proof also compares the full
+candidate snapshot with the tracking-replacement reference. This is an instruction result for the
+common tracking-disabled/empty-prefix snapshot, not whole-server throughput. Nonempty prefix
+semantics, command parsing, invalidations, replies, output, persistence, and replication are
+unchanged. Rollback restores derived `Clone` and removes the frozen reference.
+
+GATES: the strict-remote focused rich-session test passed. The complete strict-remote
+`fr-conformance` invocation exited 0 after 362.8 seconds on `ovh-a`: 194 library tests, 99 smoke
+tests, every auxiliary asserting suite, and live `core_transaction` 192/192. Scoped
+`fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with `-D warnings`;
+only pre-existing dependency warnings remained non-fatal under `--no-deps`. Fail-closed RCH
+continued to refuse `cargo fmt --check` as non-compilation (`RCH-E301`); direct Rust 2024 rustfmt
+passed the benchmark and reported only the same peer-owned source hunks outside this diff, while
+`git diff --check` passed. UBS ran with Cargo-backed categories disabled and remained baseline-red
+across the three monolithic files (692 critical / 13,678 warning / 3,050 info heuristics), with no
+finding specific to the changed production lines.
+
 ## 2026-07-22: SHIPPED — reuse transaction queue/watch allocations in session snapshots; 9.020600% fewer instructions (frankenredis-r62lu)
 
 NEGATIVE-LEDGER-FIRST + NEXT PROFILE RESIDUAL: exact searches of both ledgers found no

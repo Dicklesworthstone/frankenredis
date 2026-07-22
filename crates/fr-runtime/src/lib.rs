@@ -5066,6 +5066,11 @@ impl Clone for ClientSession {
 
 impl ClientSession {
     fn clone_non_transaction_fields_from(&mut self, source: &Self) {
+        self.client_tracking.clone_from(&source.client_tracking);
+        self.clone_non_transaction_or_tracking_fields_from(source);
+    }
+
+    fn clone_non_transaction_or_tracking_fields_from(&mut self, source: &Self) {
         self.cluster_state.clone_from(&source.cluster_state);
         self.authenticated_user
             .clone_from(&source.authenticated_user);
@@ -5077,7 +5082,6 @@ impl ClientSession {
         self.client_lib_ver.clone_from(&source.client_lib_ver);
         self.client_no_evict = source.client_no_evict;
         self.client_no_touch = source.client_no_touch;
-        self.client_tracking.clone_from(&source.client_tracking);
         self.client_reply.clone_from(&source.client_reply);
         self.peer_addr = source.peer_addr;
         self.socket_fd = source.socket_fd;
@@ -5095,6 +5099,13 @@ impl ClientSession {
         self.transaction_state
             .replace_from_clone_reference(&source.transaction_state);
         self.clone_non_transaction_fields_from(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_tracking_replace_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking = source.client_tracking.clone();
+        self.clone_non_transaction_or_tracking_fields_from(source);
     }
 }
 
@@ -6496,6 +6507,20 @@ impl Runtime {
         }
     }
 
+    /// Frozen derived-Clone tracking-state replacement for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_tracking_replace_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_tracking_replace_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
     #[cfg(any(test, feature = "bench-reference"))]
     #[doc(hidden)]
     pub fn recorded_transaction_state_debug(&self, client_id: u64) -> Option<String> {
@@ -6503,6 +6528,15 @@ impl Runtime {
             .client_sessions
             .get(&client_id)
             .map(|session| format!("{:?}", session.transaction_state))
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    pub fn recorded_tracking_state_debug(&self, client_id: u64) -> Option<String> {
+        self.server
+            .client_sessions
+            .get(&client_id)
+            .map(|session| format!("{:?}", session.client_tracking))
     }
 
     /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
@@ -52321,12 +52355,15 @@ mod tests {
         let mut candidate = Runtime::default_strict();
         let mut reference = Runtime::default_strict();
         let mut transaction_reference = Runtime::default_strict();
+        let mut tracking_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
+        tracking_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
+        tracking_reference.record_client_session_tracking_replace_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52343,6 +52380,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("transaction replacement reference snapshot");
+        let tracking_reference_snapshot = tracking_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("tracking replacement reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52350,6 +52392,10 @@ mod tests {
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{transaction_reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{tracking_reference_snapshot:?}")
         );
     }
 

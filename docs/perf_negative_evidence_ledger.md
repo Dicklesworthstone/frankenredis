@@ -8,6 +8,45 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — no-op empty CLIENT TRACKING prefix snapshots (`frankenredis-cyrt3`)
+
+- **Negative-ledger-first / distinct seam:** neither ledger contained a `ClientTrackingState`,
+  tracking-prefix, or tracking-state `clone_from` lever. The older BCAST-client index
+  (`74e15f010`) changes lookup structure, not session snapshot cloning.
+- **Profile-first attribution:** the literal-current transaction-reuse executable sha256
+  `01a1ba67a756b1adbd30281a18dbe9758a20be4cd6f3adfe0626269ae788ddea` on
+  `vmi1227854` attributed **9.91% self-time** to BTree prefix-set destruction on the common
+  tracking-disabled, empty-prefix snapshot.
+- **Alien mapping / one lever:** section 6.1's incremental/no-op update: fieldwise
+  `ClientTrackingState::clone_from` copies scalar flags and does nothing to an already-empty
+  destination prefix set when the source is empty; it clears a stale nonempty destination and
+  preserves ordinary BTreeSet clone behavior for nonempty sources. The same-binary reference
+  freezes full tracking-state replacement; every other session field path is shared.
+- **Same-worker same-binary A/A+A/B:** worker `vmi1227854`, executable sha256
+  `68ce1bf06b260af6a17bb15eea8f67b7ea60cc5e722178d04058f4a0481e64a5`, exact
+  candidate/reference wrappers **9.43% / 35.79% self-time**, exact candidate tracking
+  `clone_from` **12.49%** (142/171 samples, zero lost). Nine position-balanced rounds measured
+  candidate median **722,515,847** versus reference median **816,515,822** instructions: paired
+  **1.130101038x**, or **11.512337% fewer**. A/A null median **1.000000378**, p05..p95
+  **[0.999998368, 1.000001019]**, null CV **0.000092%**, effect CV **0.000079%**.
+- **Behavior / boundary:** the same executable proved populated `CLIENT TRACKING ON BCAST PREFIX
+  hot:` state identical before timing, alongside BCAST invalidation equivalence and tracking-OFF
+  silence. The focused rich-session test compares the complete candidate snapshot against the
+  frozen tracking replacement. This is an instruction result for common tracking-disabled empty
+  prefixes, not whole-server throughput. Nonempty-prefix semantics and all observable command,
+  invalidation, reply, output, persistence, and replication behavior remain unchanged. Rollback
+  restores derived `Clone` and removes the bench reference.
+- **Gates:** the strict-remote focused rich-session test passed, and the complete strict-remote
+  `fr-conformance` invocation exited 0 after 362.8 seconds on `ovh-a`: 194 library tests, 99 smoke
+  tests, every auxiliary asserting suite, and live `core_transaction` 192/192. Scoped
+  `fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with `-D warnings`;
+  only pre-existing dependency warnings remained non-fatal under `--no-deps`. Fail-closed RCH
+  continued to refuse `cargo fmt --check` as non-compilation (`RCH-E301`); direct Rust 2024
+  rustfmt passed the benchmark and reported only the same peer-owned source hunks outside this
+  diff, while `git diff --check` passed. UBS ran with Cargo-backed categories disabled and remained
+  baseline-red across the three monolithic files (692 critical / 13,678 warning / 3,050 info
+  heuristics), with no finding specific to the changed production lines.
+
 ## 2026-07-22 CreamPeak: SHIPPED — fieldwise `TransactionState::clone_from` in session snapshots (`frankenredis-r62lu`)
 
 - **Negative-ledger-first / fresh nested seam:** neither ledger contained a `TransactionState`,
