@@ -31,6 +31,7 @@ enum Lever {
     TransactionPristine,
     StableMetadata,
     ClientIdCopy,
+    StableScalarCopy,
 }
 
 impl Lever {
@@ -44,6 +45,7 @@ impl Lever {
             Self::TransactionPristine => "transaction-pristine",
             Self::StableMetadata => "stable-metadata",
             Self::ClientIdCopy => "client-id-copy",
+            Self::StableScalarCopy => "stable-scalar-copy",
         }
     }
 
@@ -56,6 +58,7 @@ impl Lever {
             Ok("transaction-pristine") => Ok(Self::TransactionPristine),
             Ok("stable-metadata") => Ok(Self::StableMetadata),
             Ok("client-id-copy") => Ok(Self::ClientIdCopy),
+            Ok("stable-scalar-copy") => Ok(Self::StableScalarCopy),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -72,6 +75,7 @@ impl Lever {
             "transaction-pristine" => Ok(Self::TransactionPristine),
             "stable-metadata" => Ok(Self::StableMetadata),
             "client-id-copy" => Ok(Self::ClientIdCopy),
+            "stable-scalar-copy" => Ok(Self::StableScalarCopy),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -143,6 +147,12 @@ impl Arm {
             (Lever::ClientIdCopy, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_client_id_copy_reference"
             }
+            (Lever::StableScalarCopy, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::StableScalarCopy, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_stable_scalar_copy_reference"
+            }
         }
     }
 
@@ -188,6 +198,12 @@ impl Arm {
             (Lever::ClientIdCopy, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
+            (Lever::StableScalarCopy, Self::Candidate) => {
+                "record_client_session_stable_scalar_copy_reference"
+            }
+            (Lever::StableScalarCopy, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
+            }
         }
     }
 }
@@ -224,6 +240,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::ClientIdCopy, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::ClientIdCopy, Arm::Reference) => {
             runtime.record_client_session_client_id_copy_reference(session);
+        }
+        (Lever::StableScalarCopy, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::StableScalarCopy, Arm::Reference) => {
+            runtime.record_client_session_stable_scalar_copy_reference(session);
         }
     }
 }
@@ -384,7 +404,10 @@ fn stable_metadata_snapshot(lever: Lever, arm: Arm) -> String {
         runtime.execute_frame(command(&[b"CLIENT", b"SETINFO", b"LIB-VER", b"7.2.4"]), 5,),
         RespFrame::SimpleString("OK".to_owned())
     );
-    let updated = runtime.swap_session(previous);
+    let mut updated = runtime.swap_session(previous);
+    updated.peer_addr = Some("127.0.0.1:6379".parse().expect("valid peer address"));
+    updated.socket_fd = Some(42);
+    updated.connected_at_ms = 7_200_004;
     record(&mut runtime, &updated, lever, arm);
     record(&mut runtime, &updated, lever, arm);
     runtime
@@ -426,7 +449,10 @@ fn correctness_gate(lever: Lever) {
             last_command_snapshot(lever, Arm::Reference, &[b"ECHO", b"value"])
         );
     }
-    if matches!(lever, Lever::StableMetadata | Lever::ClientIdCopy) {
+    if matches!(
+        lever,
+        Lever::StableMetadata | Lever::ClientIdCopy | Lever::StableScalarCopy
+    ) {
         assert_eq!(
             stable_metadata_snapshot(lever, Arm::Candidate),
             stable_metadata_snapshot(lever, Arm::Reference)

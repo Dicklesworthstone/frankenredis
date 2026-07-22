@@ -8,6 +8,42 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — separate scalar and allocation-bearing snapshot metadata (`frankenredis-k7raq`)
+
+- **Negative-ledger-first / profile-first:** exact searches found no prior scalar-versus-allocation
+  metadata split in either ledger or recent history. The immediately preceding literal-current
+  profile executable sha256 `e3d4ddb86165f2c8d56cb14e9daca9cc245ee1bd6991bd3f90245b65dbdb9e18`
+  attributed **13.08% self-time** to exact `ClientSession::stable_metadata_matches`, selecting its
+  all-field equality scan rather than an unmeasured sibling.
+- **Alien mapping / one lever:** the incremental-update representation now compares only the four
+  allocation-bearing stable fields (authenticated user, client name, library name, and library
+  version) before `clone_from`; scalar cluster/DB/protocol/flags/reply/address/fd/timestamp metadata
+  is overwritten directly. This removes equality checks that cannot save allocation work. The
+  client-ID registry specialization and every transaction/tracking/command/volatile path are shared;
+  the same-binary reference freezes the landed all-field stable-metadata gate.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `vmi1264463`, executable
+  sha256 `7ca9017adf1fc3c96fd0cdcface25587cee8f67926e864bfa5f1a3941b9774a8`.
+  Exact candidate/reference runtime wrappers carried **11.09% / 28.21% self-time**, and the exact
+  reduced allocation-metadata matcher carried **8.85%** (226/239 samples, zero lost). Nine
+  position-balanced rounds measured candidate median **484,516,904** versus reference median
+  **500,516,834** instructions: paired **1.033022158x**, or **3.196682% fewer**. A/A null median
+  **1.000000322**, p05..p95 **[0.999997395, 1.000002373]**, null CV **0.000155%**, effect CV
+  **0.000144%**.
+- **Behavior / boundary:** before timing, the same executable changed HELLO protocol, selected DB,
+  client/library names, peer address, socket FD, and connection timestamp, then proved the complete
+  recorded session identical on changed and unchanged copies. The focused rich-session proof also
+  covers cluster/auth/client flags/reply state, all volatile fields, transaction, tracking, command
+  metadata, and general `Clone::clone_from`. This is an instruction result for repeated
+  single-command registry snapshots, not connection insertion or whole-server throughput. Rollback
+  rejoins scalar and allocation-bearing fields under the frozen all-field gate.
+- **Gates:** strict-remote focused `client_session_in_place_snapshot_matches_full_clone` passed;
+  strict-remote full `fr-conformance` passed (**194/194** library, **99/99** smoke, all auxiliary
+  targets, and live `core_transaction` **192/192**). Strict-remote scoped `fr-runtime --all-targets
+  --features bench-reference --no-deps` Clippy passed with `-D warnings`. Direct Rust 2024 rustfmt
+  passed the owned benchmark and reported only peer-owned drift outside the source hunk;
+  `git diff --check` passed. Scoped UBS retained the monolithic-file baseline (**366 critical,
+  4,663 warnings, 947 info**) with no finding specific to the production change.
+
 ## 2026-07-22 CreamPeak: SHIPPED — elide registry snapshot client-id copy (`frankenredis-251h0`)
 
 - **Negative-ledger-first / profile-first:** exact searches found no registry-key/client-id copy

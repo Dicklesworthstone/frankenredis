@@ -5112,44 +5112,41 @@ impl ClientSession {
         &mut self,
         source: &Self,
     ) {
-        if !self.stable_metadata_matches::<COPY_CLIENT_ID>(source) {
-            self.clone_stable_metadata_from::<COPY_CLIENT_ID>(source);
+        if !self.allocation_metadata_matches(source) {
+            self.clone_allocation_metadata_from(source);
         }
+        self.clone_scalar_metadata_from::<COPY_CLIENT_ID>(source);
         self.clone_volatile_metadata_from(source);
     }
 
-    fn stable_metadata_matches<const COPY_CLIENT_ID: bool>(&self, source: &Self) -> bool {
-        self.cluster_state == source.cluster_state
-            && self.authenticated_user == source.authenticated_user
-            && self.selected_db == source.selected_db
-            && self.resp_protocol_version == source.resp_protocol_version
-            && (!COPY_CLIENT_ID || self.client_id == source.client_id)
+    fn allocation_metadata_matches(&self, source: &Self) -> bool {
+        self.authenticated_user == source.authenticated_user
             && self.client_name == source.client_name
             && self.client_lib_name == source.client_lib_name
             && self.client_lib_ver == source.client_lib_ver
-            && self.client_no_evict == source.client_no_evict
-            && self.client_no_touch == source.client_no_touch
-            && self.client_reply == source.client_reply
-            && self.peer_addr == source.peer_addr
-            && self.socket_fd == source.socket_fd
-            && self.connected_at_ms == source.connected_at_ms
     }
 
-    fn clone_stable_metadata_from<const COPY_CLIENT_ID: bool>(&mut self, source: &Self) {
-        self.cluster_state.clone_from(&source.cluster_state);
+    fn clone_allocation_metadata_from(&mut self, source: &Self) {
         self.authenticated_user
             .clone_from(&source.authenticated_user);
+        self.client_name.clone_from(&source.client_name);
+        self.client_lib_name.clone_from(&source.client_lib_name);
+        self.client_lib_ver.clone_from(&source.client_lib_ver);
+    }
+
+    fn clone_scalar_metadata_from<const COPY_CLIENT_ID: bool>(&mut self, source: &Self) {
+        self.cluster_state.mode = source.cluster_state.mode;
+        self.cluster_state.asking = source.cluster_state.asking;
         self.selected_db = source.selected_db;
         self.resp_protocol_version = source.resp_protocol_version;
         if COPY_CLIENT_ID {
             self.client_id = source.client_id;
         }
-        self.client_name.clone_from(&source.client_name);
-        self.client_lib_name.clone_from(&source.client_lib_name);
-        self.client_lib_ver.clone_from(&source.client_lib_ver);
         self.client_no_evict = source.client_no_evict;
         self.client_no_touch = source.client_no_touch;
-        self.client_reply.clone_from(&source.client_reply);
+        self.client_reply.off = source.client_reply.off;
+        self.client_reply.skip_next = source.client_reply.skip_next;
+        self.client_reply.suppress_current_response = source.client_reply.suppress_current_response;
         self.peer_addr = source.peer_addr;
         self.socket_fd = source.socket_fd;
         self.connected_at_ms = source.connected_at_ms;
@@ -5196,7 +5193,40 @@ impl ClientSession {
     fn clone_from_stable_metadata_reference(&mut self, source: &Self) {
         self.transaction_state.clone_from(&source.transaction_state);
         self.client_tracking.clone_from(&source.client_tracking);
-        self.clone_stable_metadata_from::<true>(source);
+        self.clone_allocation_metadata_from(source);
+        self.clone_scalar_metadata_from::<true>(source);
+        self.clone_volatile_metadata_from(source);
+        if self.last_command_name != source.last_command_name {
+            self.last_command_name.clone_from(&source.last_command_name);
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn stable_metadata_matches_reference<const COPY_CLIENT_ID: bool>(&self, source: &Self) -> bool {
+        self.cluster_state == source.cluster_state
+            && self.authenticated_user == source.authenticated_user
+            && self.selected_db == source.selected_db
+            && self.resp_protocol_version == source.resp_protocol_version
+            && (!COPY_CLIENT_ID || self.client_id == source.client_id)
+            && self.client_name == source.client_name
+            && self.client_lib_name == source.client_lib_name
+            && self.client_lib_ver == source.client_lib_ver
+            && self.client_no_evict == source.client_no_evict
+            && self.client_no_touch == source.client_no_touch
+            && self.client_reply == source.client_reply
+            && self.peer_addr == source.peer_addr
+            && self.socket_fd == source.socket_fd
+            && self.connected_at_ms == source.connected_at_ms
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_stable_scalar_copy_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking.clone_from(&source.client_tracking);
+        if !self.stable_metadata_matches_reference::<false>(source) {
+            self.clone_allocation_metadata_from(source);
+            self.clone_scalar_metadata_from::<false>(source);
+        }
         self.clone_volatile_metadata_from(source);
         if self.last_command_name != source.last_command_name {
             self.last_command_name.clone_from(&source.last_command_name);
@@ -6668,6 +6698,20 @@ impl Runtime {
     pub fn record_client_session_client_id_copy_reference(&mut self, session: &ClientSession) {
         if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
             snapshot.clone_from(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen all-field stable-metadata gate for scalar-copy benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_stable_scalar_copy_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_stable_scalar_copy_reference(session);
         } else {
             self.server
                 .client_sessions
@@ -52532,6 +52576,7 @@ mod tests {
         let mut transaction_pristine_reference = Runtime::default_strict();
         let mut stable_metadata_reference = Runtime::default_strict();
         let mut client_id_copy_reference = Runtime::default_strict();
+        let mut stable_scalar_copy_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
@@ -52540,6 +52585,7 @@ mod tests {
         transaction_pristine_reference.record_client_session(&seed);
         stable_metadata_reference.record_client_session(&seed);
         client_id_copy_reference.record_client_session(&seed);
+        stable_scalar_copy_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
@@ -52549,6 +52595,7 @@ mod tests {
             .record_client_session_transaction_pristine_reference(&updated);
         stable_metadata_reference.record_client_session_stable_metadata_reference(&updated);
         client_id_copy_reference.record_client_session_client_id_copy_reference(&updated);
+        stable_scalar_copy_reference.record_client_session_stable_scalar_copy_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52590,6 +52637,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("client-id copy reference snapshot");
+        let stable_scalar_copy_reference_snapshot = stable_scalar_copy_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("stable scalar copy reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52617,6 +52669,10 @@ mod tests {
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{client_id_copy_reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{stable_scalar_copy_reference_snapshot:?}")
         );
 
         let mut general_clone = updated.clone();
