@@ -5100,6 +5100,30 @@ impl ClientSession {
     }
 
     fn clone_fields_except_transaction_tracking_and_command_from(&mut self, source: &Self) {
+        if !self.stable_metadata_matches(source) {
+            self.clone_stable_metadata_from(source);
+        }
+        self.clone_volatile_metadata_from(source);
+    }
+
+    fn stable_metadata_matches(&self, source: &Self) -> bool {
+        self.cluster_state == source.cluster_state
+            && self.authenticated_user == source.authenticated_user
+            && self.selected_db == source.selected_db
+            && self.resp_protocol_version == source.resp_protocol_version
+            && self.client_id == source.client_id
+            && self.client_name == source.client_name
+            && self.client_lib_name == source.client_lib_name
+            && self.client_lib_ver == source.client_lib_ver
+            && self.client_no_evict == source.client_no_evict
+            && self.client_no_touch == source.client_no_touch
+            && self.client_reply == source.client_reply
+            && self.peer_addr == source.peer_addr
+            && self.socket_fd == source.socket_fd
+            && self.connected_at_ms == source.connected_at_ms
+    }
+
+    fn clone_stable_metadata_from(&mut self, source: &Self) {
         self.cluster_state.clone_from(&source.cluster_state);
         self.authenticated_user
             .clone_from(&source.authenticated_user);
@@ -5114,10 +5138,13 @@ impl ClientSession {
         self.client_reply.clone_from(&source.client_reply);
         self.peer_addr = source.peer_addr;
         self.socket_fd = source.socket_fd;
+        self.connected_at_ms = source.connected_at_ms;
+    }
+
+    fn clone_volatile_metadata_from(&mut self, source: &Self) {
         self.qbuf_bytes = source.qbuf_bytes;
         self.qbuf_free_bytes = source.qbuf_free_bytes;
         self.output_buffer_bytes = source.output_buffer_bytes;
-        self.connected_at_ms = source.connected_at_ms;
         self.last_interaction_ms = source.last_interaction_ms;
         self.last_argv_len_sum = source.last_argv_len_sum;
     }
@@ -5149,6 +5176,17 @@ impl ClientSession {
         self.transaction_state
             .clone_from_pristine_reference(&source.transaction_state);
         self.clone_non_transaction_fields_from(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_stable_metadata_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking.clone_from(&source.client_tracking);
+        self.clone_stable_metadata_from(source);
+        self.clone_volatile_metadata_from(source);
+        if self.last_command_name != source.last_command_name {
+            self.last_command_name.clone_from(&source.last_command_name);
+        }
     }
 }
 
@@ -6595,6 +6633,20 @@ impl Runtime {
         }
     }
 
+    /// Frozen unconditional stable-metadata copy for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_stable_metadata_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_stable_metadata_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
     #[cfg(any(test, feature = "bench-reference"))]
     #[doc(hidden)]
     pub fn recorded_transaction_state_debug(&self, client_id: u64) -> Option<String> {
@@ -6620,6 +6672,15 @@ impl Runtime {
             .client_sessions
             .get(&client_id)
             .map(|session| session.last_command_name.clone())
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    pub fn recorded_client_session_debug(&self, client_id: u64) -> Option<String> {
+        self.server
+            .client_sessions
+            .get(&client_id)
+            .map(|session| format!("{session:?}"))
     }
 
     /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
@@ -52441,12 +52502,14 @@ mod tests {
         let mut tracking_reference = Runtime::default_strict();
         let mut last_command_reference = Runtime::default_strict();
         let mut transaction_pristine_reference = Runtime::default_strict();
+        let mut stable_metadata_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
         tracking_reference.record_client_session(&seed);
         last_command_reference.record_client_session(&seed);
         transaction_pristine_reference.record_client_session(&seed);
+        stable_metadata_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
@@ -52454,6 +52517,7 @@ mod tests {
         last_command_reference.record_client_session_last_command_copy_reference(&updated);
         transaction_pristine_reference
             .record_client_session_transaction_pristine_reference(&updated);
+        stable_metadata_reference.record_client_session_stable_metadata_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52485,6 +52549,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("transaction pristine reference snapshot");
+        let stable_metadata_reference_snapshot = stable_metadata_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("stable metadata reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52504,6 +52573,10 @@ mod tests {
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{transaction_pristine_reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{stable_metadata_reference_snapshot:?}")
         );
     }
 

@@ -29,6 +29,7 @@ enum Lever {
     TrackingReuse,
     LastCommandReuse,
     TransactionPristine,
+    StableMetadata,
 }
 
 impl Lever {
@@ -40,6 +41,7 @@ impl Lever {
             Self::TrackingReuse => "tracking-reuse",
             Self::LastCommandReuse => "last-command-reuse",
             Self::TransactionPristine => "transaction-pristine",
+            Self::StableMetadata => "stable-metadata",
         }
     }
 
@@ -50,6 +52,7 @@ impl Lever {
             Ok("tracking-reuse") => Ok(Self::TrackingReuse),
             Ok("last-command-reuse") => Ok(Self::LastCommandReuse),
             Ok("transaction-pristine") => Ok(Self::TransactionPristine),
+            Ok("stable-metadata") => Ok(Self::StableMetadata),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -64,6 +67,7 @@ impl Lever {
             "tracking-reuse" => Ok(Self::TrackingReuse),
             "last-command-reuse" => Ok(Self::LastCommandReuse),
             "transaction-pristine" => Ok(Self::TransactionPristine),
+            "stable-metadata" => Ok(Self::StableMetadata),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -123,6 +127,12 @@ impl Arm {
             (Lever::TransactionPristine, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_transaction_pristine_reference"
             }
+            (Lever::StableMetadata, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::StableMetadata, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_stable_metadata_reference"
+            }
         }
     }
 
@@ -156,6 +166,12 @@ impl Arm {
             (Lever::TransactionPristine, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
+            (Lever::StableMetadata, Self::Candidate) => {
+                "record_client_session_stable_metadata_reference"
+            }
+            (Lever::StableMetadata, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
+            }
         }
     }
 }
@@ -184,6 +200,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::TransactionPristine, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::TransactionPristine, Arm::Reference) => {
             runtime.record_client_session_transaction_pristine_reference(session);
+        }
+        (Lever::StableMetadata, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::StableMetadata, Arm::Reference) => {
+            runtime.record_client_session_stable_metadata_reference(session);
         }
     }
 }
@@ -315,6 +335,43 @@ fn last_command_snapshot(lever: Lever, arm: Arm, parts: &[&[u8]]) -> String {
         .expect("recorded last command name")
 }
 
+fn stable_metadata_snapshot(lever: Lever, arm: Arm) -> String {
+    let mut runtime = Runtime::default_strict();
+    let mut session = runtime.new_session();
+    session.client_id = 42;
+    record(&mut runtime, &session, lever, arm);
+    let previous = runtime.swap_session(session);
+    assert!(matches!(
+        runtime.execute_frame(command(&[b"HELLO", b"3"]), 1),
+        RespFrame::Map(Some(_))
+    ));
+    assert_eq!(
+        runtime.execute_frame(command(&[b"SELECT", b"7"]), 2),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    assert_eq!(
+        runtime.execute_frame(command(&[b"CLIENT", b"SETNAME", b"metadata"]), 3),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    assert_eq!(
+        runtime.execute_frame(
+            command(&[b"CLIENT", b"SETINFO", b"LIB-NAME", b"fr-bench"]),
+            4,
+        ),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    assert_eq!(
+        runtime.execute_frame(command(&[b"CLIENT", b"SETINFO", b"LIB-VER", b"7.2.4"]), 5,),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    let updated = runtime.swap_session(previous);
+    record(&mut runtime, &updated, lever, arm);
+    record(&mut runtime, &updated, lever, arm);
+    runtime
+        .recorded_client_session_debug(updated.client_id)
+        .expect("recorded client session")
+}
+
 fn correctness_gate(lever: Lever) {
     let candidate = bcast_sequence(lever, Arm::Candidate);
     let reference = bcast_sequence(lever, Arm::Reference);
@@ -347,6 +404,12 @@ fn correctness_gate(lever: Lever) {
         assert_eq!(
             last_command_snapshot(lever, Arm::Candidate, &[b"ECHO", b"value"]),
             last_command_snapshot(lever, Arm::Reference, &[b"ECHO", b"value"])
+        );
+    }
+    if matches!(lever, Lever::StableMetadata) {
+        assert_eq!(
+            stable_metadata_snapshot(lever, Arm::Candidate),
+            stable_metadata_snapshot(lever, Arm::Reference)
         );
     }
     println!(

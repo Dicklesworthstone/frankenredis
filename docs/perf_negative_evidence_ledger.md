@@ -8,6 +8,42 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — no-op unchanged stable client metadata snapshots (`frankenredis-eq13j`)
+
+- **Negative-ledger-first / fresh residual:** neither ledger nor recent history contained a stable
+  client-metadata equality gate. In the literal-current pristine-transaction executable sha256
+  `5e8a70aa409c14327d6369ddb48a9f0d8326bb16588e7b48b7cf6a5809591a8e`, exact
+  `clone_fields_except_transaction_tracking_and_command_from` retained **34.73% self-time**.
+- **Alien mapping / one lever:** section 6.1's incremental/no-op update compares the stable
+  connection metadata group before copying it: cluster mode, identity/auth, selected DB, protocol,
+  names/library metadata, client flags/reply state, address/fd, and connection timestamp. Any
+  difference executes the exact old fieldwise copy. Volatile qbuf/output-buffer, last-interaction,
+  and argv accounting always copy; transaction, tracking, and command-name paths are shared. The
+  same-binary reference freezes the old unconditional stable copy.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `vmi1264463`, executable
+  sha256 `d10253bc9a00e2666dce717ddda9260286ad77c2d4b175f791592c4319ac15b1`.
+  Exact candidate/reference runtime wrappers carried **13.03% / 13.02% self-time**; candidate
+  residual metadata helper carried **10.90%**, while exact reference stable copy carried **35.65%**
+  (248/249 samples, zero lost). Nine position-balanced rounds measured candidate median
+  **524,516,807** versus reference median **552,516,750** instructions: paired **1.053382298x**, or
+  **5.067704% fewer**. A/A null median **0.999999594**, p05..p95
+  **[0.999998160, 1.000000498]**, null CV **0.000065%**, effect CV **0.000088%**.
+- **Behavior / boundary:** the same executable changed HELLO protocol, selected DB, client name,
+  library name, and library version, then proved the complete session Debug representation
+  identical between candidate and frozen reference on changed and unchanged copies. The rich
+  focused test additionally covers cluster ASKING, auth identity, client flags, reply state,
+  peer/fd, buffer counters, timestamps, transaction, tracking, and command metadata. This is an
+  instruction result for repeated single-command registry snapshots with stable connection
+  metadata, not connection-setup commands or whole-server throughput. Rollback removes
+  `stable_metadata_matches` and rejoins the stable and volatile copy helpers.
+- **Gates:** strict-remote focused `client_session_in_place_snapshot_matches_full_clone` passed;
+  strict-remote scoped `clippy -p fr-runtime --all-targets --features bench-reference --no-deps --
+  -D warnings` passed; strict-remote full `fr-conformance` passed (**194/194** library, **99/99**
+  smoke, all auxiliary targets, and live `core_transaction` **192/192**). Direct rustfmt passed for
+  the owned benchmark; the monolithic runtime check reported only pre-existing drift outside the
+  owned lines, and `git diff --check` passed. Scoped UBS reported the repository-wide file baseline
+  (**361 critical, 4,647 warnings, 939 info**) with no finding in the owned production hunk.
+
 ## 2026-07-22 CreamPeak: SHIPPED — no-op pristine transaction snapshots (`frankenredis-vi2j2`)
 
 - **Negative-ledger-first / distinct retry predicate:** the earlier `frankenredis-r62lu` KEEP
